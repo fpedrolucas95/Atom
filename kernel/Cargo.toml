@@ -1,0 +1,19 @@
+[package]
+name = "atom-kernel"
+version = "0.1.0"
+authors = ["Pedro Lucas <@fpedrolucas95>"]
+edition = "2021"
+description = "Um microkernel experimental baseado em capacidades escrito em Rust."
+repository = "https://github.com/fpedrolucas95/Atom"
+
+[lib]
+name = "atom"
+path = "src/kernel.rs"
+crate-type = ["staticlib"]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+spin = "0.9"
+x86_64 = "0.14"
