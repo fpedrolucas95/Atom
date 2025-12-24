@@ -1,7 +1,7 @@
 # Atom Kernel
 
-![Atom with UI loaded on QEMU](.images/ui.png)
-![Atom kernel showing terminal on QEMU](.images/qemu_screenshot.png)
+![Atom with UI loaded on QEMU](images/ui.png)
+![Atom kernel showing terminal on QEMU](images/qemu_screenshot.png)
 
 **Atom Kernel** is an experimental operating system kernel written in **Rust**, following a **capability-based microkernel design**.
 
