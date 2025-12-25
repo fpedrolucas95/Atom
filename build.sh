@@ -144,11 +144,24 @@ if [ "$CLEAN" = true ]; then
     step "Limpando arquivos de build..."
     rm -rf build/* 2>/dev/null || true
     cargo clean 2>/dev/null || true
+    rm -rf userspace/drivers/ui_shell/target
     success "Arquivos limpos"
 fi
 
 # Cria diretório build se não existir
-mkdir -p build
+mkdir -p build/bin
+
+# ============================================================================
+# BUILD USERSPACE APPLICATIONS
+# ============================================================================
+
+step "Compilando aplicações userspace..."
+(cd userspace/drivers/ui_shell && cargo build --target x86_64-unknown-none --release 2>&1 | tee ../../../build/userspace.log)
+success "Aplicações userspace compiladas com sucesso"
+
+# Copia os binários para a pasta de build
+mkdir -p build/bin
+cp userspace/drivers/ui_shell/target/x86_64-unknown-none/release/ui_shell build/bin/ui_shell.elf
 
 # ============================================================================
 # BUILD RUST KERNEL
@@ -285,14 +298,10 @@ echo ""
 if [ "$RUN" = true ]; then
     step "Iniciando QEMU..."
 
-    OVMF_PATH="/usr/share/OVMF/OVMF_CODE.fd"
-    if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
-    fi
+    OVMF_PATH="ovmf/OVMF.fd"
 
     if [ ! -f "$OVMF_PATH" ]; then
-        warning "OVMF.fd não encontrado"
-        warning "Para executar no QEMU, instale: sudo apt install ovmf qemu-system-x86"
+        warning "OVMF.fd não encontrado em $OVMF_PATH"
         exit 0
     fi
 

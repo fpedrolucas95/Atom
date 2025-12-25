@@ -5,9 +5,6 @@ edition = "2021"
 
 [dependencies]
 
-[lib]
-crate-type = ["staticlib"]
-
 [[bin]]
 name = "ui_shell"
 path = "src/main.rs"
