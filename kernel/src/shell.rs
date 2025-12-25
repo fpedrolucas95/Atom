@@ -62,10 +62,7 @@ pub extern "C" fn shell_entry() -> ! {
     // Mouse packet state
     let mut mouse_cycle = 0u8;
     let mut mouse_packet = [0u8; 3];
-    
-    // Debug: counter for visual feedback
-    let mut debug_color: u32 = 0;
-    
+
     loop {
         // Poll keyboard
         loop {
@@ -82,26 +79,17 @@ pub extern "C" fn shell_entry() -> ! {
         let mut total_dx: i32 = 0;
         let mut total_dy: i32 = 0;
         let mut mouse_moved = false;
-        
-        // Count of bytes received this iteration (for debug)
-        let mut bytes_received = 0u32;
 
         loop {
             let byte_result = unsafe { syscall0(SYS_MOUSE_POLL) };
             if byte_result == EWOULDBLOCK { break; }
 
-            // Debug: show a green pixel for each byte received
-            bytes_received += 1;
-            let debug_x = 50 + bytes_received * 4;
-            if debug_x < width - 10 {
-                fill_rect(fb_addr, stride, bpp, debug_x, 8, 3, 8, 0x0000FF00);
-            }
-
             let byte = byte_result as u8;
-            
-            // Process PS/2 mouse packet
+
+            // Process PS/2 mouse packet (OSDev wiki format)
             match mouse_cycle {
                 0 => {
+                    // First byte: bit 3 should always be 1 (alignment check)
                     if byte & 0x08 != 0 {
                         mouse_packet[0] = byte;
                         mouse_cycle = 1;
@@ -115,21 +103,35 @@ pub extern "C" fn shell_entry() -> ! {
                 2 => {
                     mouse_packet[2] = byte;
                     mouse_cycle = 0;
-                    
-                    // Decode packet - accumulate deltas
+
+                    // Decode packet per OSDev wiki:
+                    // byte 0: flags (overflow, sign bits, buttons)
+                    // byte 1: delta X (left is negative)
+                    // byte 2: delta Y (down toward user is negative)
                     let flags = mouse_packet[0];
-                    if flags & 0xC0 == 0 { // No overflow
-                        // Sign-extend X and Y (bits 4 and 5 of flags indicate negative)
-                        let mut dx = mouse_packet[1] as i32;
-                        let mut dy = mouse_packet[2] as i32;
-                        
-                        if flags & 0x10 != 0 { dx -= 256; } // X sign bit
-                        if flags & 0x20 != 0 { dy -= 256; } // Y sign bit
-                        
-                        total_dx += dx;
-                        total_dy += dy;
-                        mouse_moved = true;
+
+                    // Check for overflow (discard if set)
+                    if flags & 0xC0 != 0 {
+                        continue;
                     }
+
+                    // Delta X with sign extension
+                    // Bit 4 of flags = X sign bit
+                    let mut dx = mouse_packet[1] as i32;
+                    if flags & 0x10 != 0 {
+                        dx |= !0xFF; // Sign extend: dx = dx - 256
+                    }
+
+                    // Delta Y with sign extension
+                    // Bit 5 of flags = Y sign bit
+                    let mut dy = mouse_packet[2] as i32;
+                    if flags & 0x20 != 0 {
+                        dy |= !0xFF; // Sign extend: dy = dy - 256
+                    }
+
+                    total_dx += dx;
+                    total_dy += dy;
+                    mouse_moved = true;
                 }
                 _ => mouse_cycle = 0,
             }
@@ -137,17 +139,17 @@ pub extern "C" fn shell_entry() -> ! {
         
         // Update cursor only once after processing all pending packets
         if mouse_moved {
-            // Debug: draw a growing bar at top of screen to show mouse activity
-            debug_color = debug_color.wrapping_add(1);
-            let bar_width = (debug_color as u32 % 200) + 10;
-            fill_rect(fb_addr, stride, bpp, 200, 8, bar_width, 8, 0x00FF0000);
-
             // Restore saved region at old cursor position
             restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
 
-            // Apply accumulated movement (Y is inverted in PS/2)
-            let new_x = ((cursor_x as i32 + total_dx).max(0) as u32).min(width.saturating_sub(CURSOR_WIDTH));
-            let new_y = ((cursor_y as i32 - total_dy).max(0) as u32).min(height.saturating_sub(CURSOR_HEIGHT));
+            // Apply movement per OSDev wiki PS/2 mouse format:
+            // - Delta X: positive = right, negative = left
+            // - Delta Y: positive = up (away from user), negative = down (toward user)
+            // Screen coordinates: X increases right, Y increases downward
+            //
+            // Note: Some emulators/VMs report inverted X values, so we negate dx
+            let new_x = (cursor_x as i32 - total_dx).clamp(0, (width - CURSOR_WIDTH) as i32) as u32;
+            let new_y = (cursor_y as i32 - total_dy).clamp(0, (height - CURSOR_HEIGHT) as i32) as u32;
 
             cursor_x = new_x;
             cursor_y = new_y;
