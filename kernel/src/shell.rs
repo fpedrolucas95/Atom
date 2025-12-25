@@ -47,8 +47,16 @@ pub extern "C" fn shell_entry() -> ! {
     // Cursor state
     let mut cursor_x = width / 2;
     let mut cursor_y = height / 2;
-    
-    // Draw initial cursor
+
+    // Saved region under cursor (12x16 pixels = 192 pixels max)
+    const CURSOR_WIDTH: u32 = 12;
+    const CURSOR_HEIGHT: u32 = 16;
+    let mut saved_region: [u32; 192] = [0; 192];
+    let mut saved_x = cursor_x;
+    let mut saved_y = cursor_y;
+
+    // Save initial region and draw cursor
+    save_cursor_region(fb_addr, stride, bpp, cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT, &mut saved_region);
     draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
 
     // Mouse packet state
@@ -134,22 +142,74 @@ pub extern "C" fn shell_entry() -> ! {
             let bar_width = (debug_color as u32 % 200) + 10;
             fill_rect(fb_addr, stride, bpp, 200, 8, bar_width, 8, 0x00FF0000);
 
-            // Restore old position (clear cursor) - use saved position
-            fill_rect(fb_addr, stride, bpp, cursor_x, cursor_y, 12, 16, 0x002E3440);
+            // Restore saved region at old cursor position
+            restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
 
             // Apply accumulated movement (Y is inverted in PS/2)
-            let new_x = ((cursor_x as i32 + total_dx).max(0) as u32).min(width - 1);
-            let new_y = ((cursor_y as i32 - total_dy).max(0) as u32).min(height - 1);
+            let new_x = ((cursor_x as i32 + total_dx).max(0) as u32).min(width.saturating_sub(CURSOR_WIDTH));
+            let new_y = ((cursor_y as i32 - total_dy).max(0) as u32).min(height.saturating_sub(CURSOR_HEIGHT));
 
             cursor_x = new_x;
             cursor_y = new_y;
 
-            // Draw cursor at new position
+            // Save new region and draw cursor
+            save_cursor_region(fb_addr, stride, bpp, cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT, &mut saved_region);
+            saved_x = cursor_x;
+            saved_y = cursor_y;
+
             draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
         }
         
         // Yield
         unsafe { syscall0(SYS_THREAD_YIELD); }
+    }
+}
+
+fn save_cursor_region(
+    fb: usize,
+    stride: u32,
+    bpp: usize,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    buffer: &mut [u32; 192],
+) {
+    for row in 0..h {
+        for col in 0..w {
+            let offset = ((y + row) * stride + (x + col)) as usize * bpp;
+            let idx = (row * w + col) as usize;
+            if idx < 192 {
+                unsafe {
+                    let ptr = (fb + offset) as *const u32;
+                    buffer[idx] = ptr.read_volatile();
+                }
+            }
+        }
+    }
+}
+
+fn restore_cursor_region(
+    fb: usize,
+    stride: u32,
+    bpp: usize,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    buffer: &[u32; 192],
+) {
+    for row in 0..h {
+        for col in 0..w {
+            let offset = ((y + row) * stride + (x + col)) as usize * bpp;
+            let idx = (row * w + col) as usize;
+            if idx < 192 {
+                unsafe {
+                    let ptr = (fb + offset) as *mut u32;
+                    ptr.write_volatile(buffer[idx]);
+                }
+            }
+        }
     }
 }
 
