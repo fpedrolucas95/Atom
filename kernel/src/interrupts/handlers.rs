@@ -51,8 +51,7 @@
 
 use crate::arch::{gdt, halt};
 use crate::ipc;
-use crate::keyboard;
-use crate::mouse;
+use crate::input;
 use crate::mm;
 use crate::sched;
 #[allow(unused_imports)]
@@ -372,12 +371,29 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    keyboard::handle_interrupt();
+    // Buffer raw keyboard data for userspace driver
+    input::on_keyboard_irq();
+
+    // Notify userspace handler if registered
+    if crate::syscall::has_userspace_irq_handler(1) {
+        crate::syscall::notify_irq_handler(1);
+    }
+
     super::apic::send_eoi();
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    mouse::handle_interrupt();
+    // Debug: Log every IRQ12
+    crate::serial_println!("[IRQ12] handler called");
+    
+    // Buffer raw mouse data for userspace driver
+    input::on_mouse_irq();
+
+    // Notify userspace handler if registered
+    if crate::syscall::has_userspace_irq_handler(12) {
+        crate::syscall::notify_irq_handler(12);
+    }
+
     super::apic::send_eoi();
 }
 

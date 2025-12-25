@@ -185,6 +185,12 @@ impl CpuContext {
         }
     }
 
+    /// Create a kernel-mode (Ring 0) context
+    pub fn new_kernel(entry_point: u64, kernel_stack: u64) -> Self {
+        use crate::arch::read_cr3;
+        Self::new(entry_point, kernel_stack, read_cr3())
+    }
+
     pub fn new_user(entry_point: u64, user_stack: u64, page_table: u64) -> Self {
         Self {
             rax: 0,

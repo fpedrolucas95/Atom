@@ -83,10 +83,10 @@ syscall_entry:
     mov     r10, [rel temp_user_rsp]
     mov     rsp, r10
 
-    push    qword 0x23
-    push    r10
-    push    r11
-    push    qword 0x2B
-    push    rcx
+    push    qword 0x23       ; SS = User Data Selector (0x20 | RPL=3)
+    push    r10              ; RSP
+    push    r11              ; RFLAGS
+    push    qword 0x1B       ; CS = User Code Selector (0x18 | RPL=3)
+    push    rcx              ; RIP
 
     iretq

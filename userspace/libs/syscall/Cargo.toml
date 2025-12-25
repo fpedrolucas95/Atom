@@ -1,0 +1,16 @@
+[package]
+name = "atom_syscall"
+version = "0.1.0"
+edition = "2021"
+description = "System call wrappers for Atom OS userspace programs"
+authors = ["Atom OS Contributors"]
+
+[lib]
+name = "atom_syscall"
+path = "src/lib.rs"
+
+[dependencies]
+# No dependencies - this is a minimal no_std library
+
+[features]
+default = []

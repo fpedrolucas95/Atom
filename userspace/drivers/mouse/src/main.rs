@@ -3,6 +3,10 @@
 // Complete implementation of PS/2 mouse protocol based on OSDev Wiki reference.
 // Provides 1:1 mouse movement with no acceleration (linear scaling).
 //
+// This driver runs entirely in Ring 3 (userspace) and communicates with
+// the kernel via the atom_syscall library. It is a TRUE userspace binary,
+// not code that runs inside the kernel.
+//
 // References:
 // - https://wiki.osdev.org/Mouse_Input
 // - https://wiki.osdev.org/PS/2_Mouse
@@ -19,15 +23,10 @@
 
 use core::panic::PanicInfo;
 
-// ============================================================================
-// Syscall Numbers
-// ============================================================================
-
-const SYS_THREAD_YIELD: u64 = 0;
-const SYS_THREAD_EXIT: u64 = 1;
-const SYS_IO_PORT_READ: u64 = 34;
-const SYS_IO_PORT_WRITE: u64 = 35;
-const SYS_DEBUG_LOG: u64 = 39;
+// Use the atom_syscall library for all kernel interactions
+use atom_syscall::io::{port_read_u8, port_write_u8, ps2};
+use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::debug::log;
 
 // ============================================================================
 // PS/2 Controller Constants
@@ -96,7 +95,7 @@ impl MouseDriver {
 
     /// Initialize the PS/2 mouse with 1:1 scaling
     fn init(&mut self) -> bool {
-        debug_log("Mouse: Starting PS/2 mouse initialization");
+        log("Mouse: Starting PS/2 mouse initialization");
 
         // Drain any pending data
         self.drain_buffer();
@@ -107,7 +106,7 @@ impl MouseDriver {
         // Read and modify controller config to enable IRQ12
         self.send_controller_command(CMD_READ_CONFIG);
         if !self.wait_for_output() {
-            debug_log("Mouse: Failed to read controller config");
+            log("Mouse: Failed to read controller config");
             return false;
         }
         let config = self.read_data();
@@ -121,49 +120,49 @@ impl MouseDriver {
 
         // Set defaults
         if !self.mouse_command(MOUSE_SET_DEFAULTS) {
-            debug_log("Mouse: SET_DEFAULTS failed");
+            log("Mouse: SET_DEFAULTS failed");
             return false;
         }
-        debug_log("Mouse: SET_DEFAULTS OK");
+        log("Mouse: SET_DEFAULTS OK");
 
         // Set 1:1 scaling (linear, no acceleration)
         if !self.mouse_command(MOUSE_SET_SCALING_1_1) {
-            debug_log("Mouse: SET_SCALING_1_1 failed");
+            log("Mouse: SET_SCALING_1_1 failed");
             return false;
         }
-        debug_log("Mouse: SET_SCALING_1_1 OK");
+        log("Mouse: SET_SCALING_1_1 OK");
 
         // Set resolution to 4 count/mm (value 0x02)
         if !self.mouse_command(MOUSE_SET_RESOLUTION) {
-            debug_log("Mouse: SET_RESOLUTION command failed");
+            log("Mouse: SET_RESOLUTION command failed");
             return false;
         }
         if !self.mouse_write_data(0x02) {
-            debug_log("Mouse: SET_RESOLUTION data failed");
+            log("Mouse: SET_RESOLUTION data failed");
             return false;
         }
-        debug_log("Mouse: Resolution set to 4 count/mm");
+        log("Mouse: Resolution set to 4 count/mm");
 
         // Set sample rate to 100 samples/sec
         if !self.mouse_command(MOUSE_SET_SAMPLE_RATE) {
-            debug_log("Mouse: SET_SAMPLE_RATE command failed");
+            log("Mouse: SET_SAMPLE_RATE command failed");
             return false;
         }
         if !self.mouse_write_data(100) {
-            debug_log("Mouse: SET_SAMPLE_RATE data failed");
+            log("Mouse: SET_SAMPLE_RATE data failed");
             return false;
         }
-        debug_log("Mouse: Sample rate set to 100/sec");
+        log("Mouse: Sample rate set to 100/sec");
 
         // Enable streaming mode
         if !self.mouse_command(MOUSE_ENABLE_STREAMING) {
-            debug_log("Mouse: ENABLE_STREAMING failed");
+            log("Mouse: ENABLE_STREAMING failed");
             return false;
         }
-        debug_log("Mouse: Streaming enabled");
+        log("Mouse: Streaming enabled");
 
         self.initialized = true;
-        debug_log("Mouse: PS/2 mouse initialization complete (1:1 scaling)");
+        log("Mouse: PS/2 mouse initialization complete (1:1 scaling)");
         true
     }
 
@@ -327,86 +326,24 @@ impl MouseDriver {
 }
 
 // ============================================================================
-// IO Port Access via Syscalls
+// IO Port Access via atom_syscall library
 // ============================================================================
 
 fn port_read(port: u16) -> u8 {
-    let result = unsafe { syscall2(SYS_IO_PORT_READ, port as u64, 1) };
-    result as u8
+    port_read_u8(port).unwrap_or(0)
 }
 
 fn port_write(port: u16, value: u8) {
-    unsafe { syscall2(SYS_IO_PORT_WRITE, port as u64, value as u64) };
+    let _ = port_write_u8(port, value);
 }
 
 fn spin_loop() {
     for _ in 0..100 {
-        unsafe { core::arch::asm!("pause"); }
+        core::hint::spin_loop();
     }
 }
 
-// ============================================================================
-// Syscall Interface
-// ============================================================================
-
-#[inline(always)]
-unsafe fn syscall0(num: u64) -> u64 {
-    let ret: u64;
-    core::arch::asm!(
-        "syscall",
-        inout("rax") num => ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack, preserves_flags)
-    );
-    ret
-}
-
-#[inline(always)]
-unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
-    let ret: u64;
-    core::arch::asm!(
-        "syscall",
-        inout("rax") num => ret,
-        in("rdi") arg0,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack, preserves_flags)
-    );
-    ret
-}
-
-#[inline(always)]
-unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
-    let ret: u64;
-    core::arch::asm!(
-        "syscall",
-        inout("rax") num => ret,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack, preserves_flags)
-    );
-    ret
-}
-
-fn thread_yield() {
-    unsafe { syscall0(SYS_THREAD_YIELD); }
-}
-
-fn thread_exit(code: u64) -> ! {
-    unsafe { 
-        syscall1(SYS_THREAD_EXIT, code);
-        loop { core::arch::asm!("hlt"); }
-    }
-}
-
-fn debug_log(msg: &str) {
-    unsafe {
-        syscall2(SYS_DEBUG_LOG, msg.as_ptr() as u64, msg.len() as u64);
-    }
-}
+// Syscall wrappers are now provided by atom_syscall library
 
 // ============================================================================
 // Static Driver Instance
@@ -456,17 +393,17 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    debug_log("Mouse Driver: Starting PS/2 mouse driver");
+    log("Mouse Driver: Starting PS/2 mouse driver");
 
     // Initialize the mouse
     unsafe {
         if !MOUSE_DRIVER.init() {
-            debug_log("Mouse Driver: Initialization failed!");
-            thread_exit(1);
+            log("Mouse Driver: Initialization failed!");
+            exit(1);
         }
     }
 
-    debug_log("Mouse Driver: Entering poll loop");
+    log("Mouse Driver: Entering poll loop");
 
     // Main driver loop - poll for mouse data
     loop {
@@ -475,12 +412,12 @@ fn main() -> ! {
             // In a full implementation, this would send IPC messages
         }
 
-        thread_yield();
+        yield_now();
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    debug_log("Mouse Driver: PANIC!");
-    thread_exit(0xFF)
+    log("Mouse Driver: PANIC!");
+    exit(0xFF);
 }

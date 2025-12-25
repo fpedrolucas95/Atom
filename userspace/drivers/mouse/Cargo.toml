@@ -3,8 +3,8 @@ name = "mouse_driver"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-crate-type = ["staticlib"]
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
 
 [[bin]]
 name = "mouse_driver"

@@ -107,6 +107,9 @@ pub const SYS_KEYBOARD_POLL: u64 = 36;
 pub const SYS_GET_FRAMEBUFFER: u64 = 37;
 pub const SYS_GET_TICKS: u64 = 38;
 pub const SYS_DEBUG_LOG: u64 = 39;
+pub const SYS_REGISTER_IRQ_HANDLER: u64 = 40;
+pub const SYS_MAP_FRAMEBUFFER: u64 = 41;
+pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
 
 pub const ESUCCESS: u64 = 0;
 pub const EINVAL: u64 = u64::MAX - 1;
@@ -249,6 +252,9 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0 as *mut u64),
         SYS_GET_TICKS => sys_get_ticks(),
         SYS_DEBUG_LOG => sys_debug_log(arg0 as *const u8, arg1 as usize),
+        SYS_REGISTER_IRQ_HANDLER => sys_register_irq_handler(arg0 as u8, arg1),
+        SYS_MAP_FRAMEBUFFER => sys_map_framebuffer_to_user(arg0),
+        SYS_UNREGISTER_IRQ_HANDLER => sys_unregister_irq_handler(arg0 as u8),
 
         _ => {
             log_warn!(
@@ -262,12 +268,12 @@ extern "C" fn rust_syscall_dispatcher(
 }
 
 fn sys_mouse_poll() -> u64 {
-    if let Some((dx, dy)) = crate::mouse::drain_delta() {
-        let dx_u = dx as u32 as u64;
-        let dy_u = dy as u32 as u64;
-        return (dx_u << 32) | dy_u;
+    // Return next raw mouse byte for userspace driver to process
+    if let Some(byte) = crate::input::poll_mouse_byte() {
+        // Debug: Log bytes being returned to userspace
+        crate::serial_println!("[MOUSE_POLL] returning byte: 0x{:02X}", byte);
+        return byte as u64;
     }
-
     EWOULDBLOCK
 }
 
@@ -315,9 +321,9 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
     ESUCCESS
 }
 
-/// Poll keyboard buffer for input
+/// Poll keyboard buffer for input (raw scancode)
 fn sys_keyboard_poll() -> u64 {
-    if let Some(scancode) = crate::keyboard::poll_scancode() {
+    if let Some(scancode) = crate::input::poll_keyboard_byte() {
         return scancode as u64;
     }
     EWOULDBLOCK
@@ -2527,4 +2533,180 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
             }
         }
     }
+}
+
+// ============================================================================
+// IRQ Handler Registration for Userspace Drivers
+// ============================================================================
+
+use spin::Mutex;
+use alloc::collections::BTreeMap;
+
+/// Registered IRQ handlers - maps IRQ number to (ThreadId, port for notification)
+static IRQ_HANDLERS: Mutex<BTreeMap<u8, (crate::thread::ThreadId, u64)>> = Mutex::new(BTreeMap::new());
+
+/// Allowed IRQs for userspace drivers
+const ALLOWED_IRQS: [u8; 2] = [1, 12]; // Keyboard (IRQ1), Mouse (IRQ12)
+
+/// Register an IRQ handler for userspace
+fn sys_register_irq_handler(irq: u8, notification_port: u64) -> u64 {
+    if !ALLOWED_IRQS.contains(&irq) {
+        log_warn!(
+            "syscall",
+            "Attempt to register handler for disallowed IRQ {}",
+            irq
+        );
+        return EPERM;
+    }
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let mut handlers = IRQ_HANDLERS.lock();
+
+    if handlers.contains_key(&irq) {
+        log_warn!(
+            "syscall",
+            "IRQ {} already has registered handler",
+            irq
+        );
+        return EBUSY;
+    }
+
+    handlers.insert(irq, (caller, notification_port));
+
+    log_info!(
+        "syscall",
+        "Thread {} registered as handler for IRQ {} (port {})",
+        caller,
+        irq,
+        notification_port
+    );
+
+    ESUCCESS
+}
+
+/// Unregister an IRQ handler
+fn sys_unregister_irq_handler(irq: u8) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let mut handlers = IRQ_HANDLERS.lock();
+
+    if let Some((owner, _)) = handlers.get(&irq) {
+        if *owner != caller {
+            return EPERM;
+        }
+        handlers.remove(&irq);
+        log_info!(
+            "syscall",
+            "Thread {} unregistered handler for IRQ {}",
+            caller,
+            irq
+        );
+        ESUCCESS
+    } else {
+        EINVAL
+    }
+}
+
+/// Called from interrupt handlers to notify userspace of IRQ
+pub fn notify_irq_handler(irq: u8) {
+    let handlers = IRQ_HANDLERS.lock();
+
+    if let Some((_tid, port)) = handlers.get(&irq) {
+        // Send notification via IPC port
+        let port_id = crate::ipc::PortId::from_raw(*port);
+
+        // Create a simple IRQ notification message
+        let msg = crate::ipc::Message::new(
+            crate::thread::ThreadId::from_raw(0), // Kernel sender
+            irq as u32, // Message type is IRQ number
+            alloc::vec![irq], // Payload is the IRQ number
+        );
+
+        // Non-blocking send - we're in interrupt context
+        if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
+            log_debug!(
+                "syscall",
+                "Failed to notify IRQ {} handler: {:?}",
+                irq,
+                e
+            );
+        }
+    }
+}
+
+/// Check if an IRQ has a userspace handler registered
+pub fn has_userspace_irq_handler(irq: u8) -> bool {
+    let handlers = IRQ_HANDLERS.lock();
+    handlers.contains_key(&irq)
+}
+
+// ============================================================================
+// Framebuffer Mapping for Userspace
+// ============================================================================
+
+/// Map framebuffer to userspace address
+fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
+    use crate::graphics;
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    // Get framebuffer info
+    let fb_info = match graphics::with_framebuffer(|fb| {
+        (
+            fb.address() as usize,
+            fb.width(),
+            fb.height(),
+            fb.stride(),
+            fb.bytes_per_pixel(),
+        )
+    }) {
+        Some(info) => info,
+        None => return EINVAL,
+    };
+
+    let (address, width, height, stride, bpp) = fb_info;
+
+    // Calculate framebuffer size
+    let fb_size = (stride as usize) * (height as usize) * bpp;
+
+    // The framebuffer is already mapped in kernel space
+    // For userspace access, we need to remap with USER flag
+    // For now, just return the info - the framebuffer is identity-mapped
+
+    // Write info to user buffer if provided
+    if user_buffer != 0 {
+        let info_ptr = user_buffer as *mut u64;
+        unsafe {
+            core::ptr::write_volatile(info_ptr, address as u64);
+            core::ptr::write_volatile(info_ptr.add(1), width as u64);
+            core::ptr::write_volatile(info_ptr.add(2), height as u64);
+            core::ptr::write_volatile(info_ptr.add(3), stride as u64);
+            core::ptr::write_volatile(info_ptr.add(4), bpp as u64);
+            core::ptr::write_volatile(info_ptr.add(5), fb_size as u64);
+        }
+    }
+
+    log_info!(
+        "syscall",
+        "Thread {} mapped framebuffer: addr={:#X} {}x{} stride={} bpp={} size={}",
+        caller,
+        address,
+        width,
+        height,
+        stride,
+        bpp,
+        fb_size
+    );
+
+    ESUCCESS
 }

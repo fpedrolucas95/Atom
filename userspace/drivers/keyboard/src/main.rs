@@ -3,6 +3,10 @@
 // Complete implementation of PS/2 keyboard handling in userspace.
 // Uses scan code set 1 for compatibility.
 //
+// This driver runs entirely in Ring 3 (userspace) and communicates with
+// the kernel via the atom_syscall library. It is a TRUE userspace binary,
+// not code that runs inside the kernel.
+//
 // Key features:
 // - Scancode to ASCII translation
 // - Modifier key tracking (Shift, Ctrl, Alt, Caps Lock)
@@ -14,16 +18,10 @@
 
 use core::panic::PanicInfo;
 
-// ============================================================================
-// Syscall Numbers
-// ============================================================================
-
-const SYS_THREAD_YIELD: u64 = 0;
-const SYS_THREAD_EXIT: u64 = 1;
-const SYS_KEYBOARD_POLL: u64 = 36;
-const SYS_DEBUG_LOG: u64 = 39;
-
-const EWOULDBLOCK: u64 = u64::MAX - 8;
+// Use the atom_syscall library for all kernel interactions
+use atom_syscall::input::keyboard_poll;
+use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::debug::log;
 
 // ============================================================================
 // Keyboard State
@@ -226,77 +224,7 @@ fn letter(base: u8, shift: bool, caps_lock: bool) -> u8 {
     }
 }
 
-// ============================================================================
-// Syscall Interface
-// ============================================================================
-
-#[inline(always)]
-unsafe fn syscall0(num: u64) -> u64 {
-    let ret: u64;
-    core::arch::asm!(
-        "syscall",
-        inout("rax") num => ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack, preserves_flags)
-    );
-    ret
-}
-
-#[inline(always)]
-unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
-    let ret: u64;
-    core::arch::asm!(
-        "syscall",
-        inout("rax") num => ret,
-        in("rdi") arg0,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack, preserves_flags)
-    );
-    ret
-}
-
-#[inline(always)]
-unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
-    let ret: u64;
-    core::arch::asm!(
-        "syscall",
-        inout("rax") num => ret,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack, preserves_flags)
-    );
-    ret
-}
-
-fn thread_yield() {
-    unsafe { syscall0(SYS_THREAD_YIELD); }
-}
-
-fn thread_exit(code: u64) -> ! {
-    unsafe { 
-        syscall1(SYS_THREAD_EXIT, code);
-        loop { core::arch::asm!("hlt"); }
-    }
-}
-
-fn keyboard_poll() -> Option<u8> {
-    let result = unsafe { syscall0(SYS_KEYBOARD_POLL) };
-    if result == EWOULDBLOCK {
-        None
-    } else {
-        Some(result as u8)
-    }
-}
-
-fn debug_log(msg: &str) {
-    unsafe {
-        syscall2(SYS_DEBUG_LOG, msg.as_ptr() as u64, msg.len() as u64);
-    }
-}
+// Syscall wrappers are now provided by atom_syscall library
 
 // ============================================================================
 // Static Driver Instance
@@ -323,7 +251,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    debug_log("Keyboard Driver: Starting PS/2 keyboard driver");
+    log("Keyboard Driver: Starting PS/2 keyboard driver");
 
     // Main driver loop
     loop {
@@ -340,17 +268,17 @@ fn main() -> ! {
                 // In a full implementation, send via IPC to interested processes
                 // For now, just log significant keypresses
                 if event.ascii == 0x1B {
-                    debug_log("Keyboard: Escape pressed");
+                    log("Keyboard: Escape pressed");
                 }
             }
         }
 
-        thread_yield();
+        yield_now();
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    debug_log("Keyboard Driver: PANIC!");
-    thread_exit(0xFF)
+    log("Keyboard Driver: PANIC!");
+    exit(0xFF);
 }

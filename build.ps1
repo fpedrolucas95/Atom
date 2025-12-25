@@ -1,24 +1,35 @@
 # build.ps1
 # Script de build para o kernel Atom no Windows
 # Uso:
-#   .\build.ps1
-#   .\build.ps1 --clean
-#   .\build.ps1 --run
-#   .\build.ps1 --clean --run
+#   .\build.ps1              # Build completo (kernel + userspace)
+#   .\build.ps1 --clean      # Limpar e rebuildar
+#   .\build.ps1 --run        # Build e executar no QEMU
+#   .\build.ps1 --userspace  # Build apenas drivers userspace
+#   .\build.ps1 --kernel     # Build apenas kernel
 
 param(
     [switch]$Run,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$Userspace,
+    [switch]$Kernel
 )
 
 # -------------------------------------------------------------------------
-# Configurações específicas da máquina
+# Configurações
 # -------------------------------------------------------------------------
 
 $NASM_PATH  = "C:\Program Files\NASM\nasm.exe"
-$REPO_PATH  = "C:\Users\amand\source\repos\Atom"
+$REPO_PATH  = $PSScriptRoot
 $RUST_LLD   = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
 $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
+
+# Userspace drivers list
+$USERSPACE_DRIVERS = @(
+    "keyboard",
+    "mouse", 
+    "display",
+    "ui_shell"
+)
 
 # -------------------------------------------------------------------------
 # Funções auxiliares
@@ -26,17 +37,22 @@ $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
 function Write-Step {
     param([string]$Message)
-    Write-Host '[✗] $Message' -ForegroundColor Cyan
+    Write-Host "[*] $Message" -ForegroundColor Cyan
 }
 
 function Write-Success {
     param([string]$Message)
-    Write-Host '[✓] $Message' -ForegroundColor Green
+    Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
 function Write-ErrorMsg {
     param([string]$Message)
-    Write-Host '[✗] $Message' -ForegroundColor Red
+    Write-Host "[X] $Message" -ForegroundColor Red
+}
+
+function Write-Warning {
+    param([string]$Message)
+    Write-Host "[!] $Message" -ForegroundColor Yellow
 }
 
 # -------------------------------------------------------------------------
@@ -62,65 +78,137 @@ if ($Clean) {
 }
 
 # -------------------------------------------------------------------------
-# Preparar diretório build
+# Preparar diretórios
 # -------------------------------------------------------------------------
 
 if (-not (Test-Path "build")) {
     New-Item -ItemType Directory -Path "build" | Out-Null
 }
 
+if (-not (Test-Path "build\userspace")) {
+    New-Item -ItemType Directory -Path "build\userspace" | Out-Null
+}
+
+if (-not (Test-Path "efi\EFI\BOOT")) {
+    New-Item -ItemType Directory -Path "efi\EFI\BOOT" -Force | Out-Null
+}
+
+if (-not (Test-Path "efi\drivers")) {
+    New-Item -ItemType Directory -Path "efi\drivers" -Force | Out-Null
+}
+
+# =========================================================================
+# BUILD USERSPACE DRIVERS (Library only - drivers are embedded in kernel)
+# =========================================================================
+
+if (-not $Kernel) {
+    Write-Host ""
+    Write-Host "========== USERSPACE LIBRARIES ==========" -ForegroundColor Magenta
+    Write-Host ""
+
+    # Compilar biblioteca syscall (usada pelo shell embutido no kernel)
+    Write-Step "Compilando biblioteca atom_syscall..."
+    
+    # A biblioteca syscall é compilada automaticamente como dependência
+    # quando o kernel é compilado. Aqui apenas verificamos se compila.
+    cargo check -p atom_syscall 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorMsg "Falha ao verificar atom_syscall"
+        exit 1
+    }
+    Write-Success "atom_syscall verificada"
+
+    # Nota: Os drivers userspace (keyboard, mouse, display, ui_shell) são
+    # compilados como crates separadas que eventualmente serao carregadas
+    # como binarios ATXF. Por enquanto, o kernel usa um shell embutido
+    # (shell.rs) que roda em Ring 3.
+    
+    Write-Step "Verificando drivers userspace..."
+    foreach ($driver in $USERSPACE_DRIVERS) {
+        $driverPath = "userspace\drivers\$driver"
+        
+        if (-not (Test-Path "$driverPath\Cargo.toml")) {
+            Write-Warning "Driver $driver nao encontrado"
+            continue
+        }
+
+        # Verificar sintaxe diretamente no diretorio do driver
+        # (drivers estao excluidos do workspace principal)
+        Push-Location $driverPath
+        cargo check 2>&1 | Out-Null
+        $checkResult = $LASTEXITCODE
+        Pop-Location
+        
+        if ($checkResult -eq 0) {
+            Write-Success "$driver driver verificado"
+        } else {
+            Write-Warning "$driver driver tem erros de sintaxe"
+        }
+    }
+
+    Write-Success "Verificacao de userspace concluida"
+}
+
+# Se --userspace only, parar aqui
+if ($Userspace) {
+    Write-Host ""
+    Write-Success "Verificacao userspace concluida!"
+    Write-Host ""
+    Write-Host "Nota: Os drivers userspace sao verificados apenas." -ForegroundColor Yellow
+    Write-Host "O kernel usa um shell embutido (shell.rs) que roda em Ring 3." -ForegroundColor Yellow
+    exit 0
+}
+
+# =========================================================================
+# BUILD KERNEL
+# =========================================================================
+
+Write-Host ""
+Write-Host "========== KERNEL BUILD ==========" -ForegroundColor Magenta
+Write-Host ""
+
 # -------------------------------------------------------------------------
 # Passo 1: Montar arquivos assembly
 # -------------------------------------------------------------------------
 
-Write-Step "Montando boot.asm com NASM..."
+Write-Step "Montando arquivos assembly..."
 
 if (-not (Test-Path $NASM_PATH)) {
     Write-ErrorMsg "NASM não encontrado em: $NASM_PATH"
+    Write-Warning "Instale NASM de: https://www.nasm.us/"
     exit 1
 }
 
-& $NASM_PATH -f win64 arch\x86_64\boot.asm -o build\boot.obj
+# boot.asm
+& $NASM_PATH -f win64 arch\x86_64\boot.asm -o build\boot.obj 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-ErrorMsg "Falha ao montar boot.asm"
     exit 1
 }
 
-Write-Success "boot.obj criado"
-
-Write-Step "Montando handlers.asm com NASM..."
-
-if (Test-Path "build\handlers.obj") {
-    Remove-Item -Force "build\handlers.obj"
-}
-
-& $NASM_PATH -f win64 kernel\src\interrupts\handlers.asm -o build\handlers.obj
+# handlers.asm
+if (Test-Path "build\handlers.obj") { Remove-Item -Force "build\handlers.obj" }
+& $NASM_PATH -f win64 kernel\src\interrupts\handlers.asm -o build\handlers.obj 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-ErrorMsg "Falha ao montar handlers.asm"
     exit 1
 }
 
-Write-Success "handlers.obj criado"
-
-Write-Step "Montando switch.asm com NASM..."
-
-& $NASM_PATH -f win64 kernel\src\interrupts\switch.asm -o build\switch.obj
+# switch.asm
+& $NASM_PATH -f win64 kernel\src\interrupts\switch.asm -o build\switch.obj 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-ErrorMsg "Falha ao montar switch.asm"
     exit 1
 }
 
-Write-Success "switch.obj criado"
-
-Write-Step "Montando syscall handler.asm com NASM..."
-
-& $NASM_PATH -f win64 kernel\src\syscall\handler.asm -o build\syscall_handler.obj
+# syscall handler.asm
+& $NASM_PATH -f win64 kernel\src\syscall\handler.asm -o build\syscall_handler.obj 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao montar handler.asm"
+    Write-ErrorMsg "Falha ao montar syscall/handler.asm"
     exit 1
 }
 
-Write-Success "syscall_handler.obj criado"
+Write-Success "Arquivos assembly montados"
 
 # -------------------------------------------------------------------------
 # Passo 2: Compilar kernel Rust
@@ -128,7 +216,7 @@ Write-Success "syscall_handler.obj criado"
 
 Write-Step "Compilando kernel Rust..."
 
-cargo build -p atom-kernel --release
+cargo build -p atom-kernel --release 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-ErrorMsg "Falha ao compilar o kernel"
     exit 1
@@ -167,53 +255,85 @@ if ($LASTEXITCODE -ne 0) {
 Write-Success "Atom.efi criado"
 
 # -------------------------------------------------------------------------
-# Passo 4: Copiar para EFI/BOOT
+# Passo 4: Preparar imagem EFI para QEMU
 # -------------------------------------------------------------------------
 
-Write-Step "Atualizando BOOTX64.EFI..."
-
-if (-not (Test-Path "efi\EFI\BOOT")) {
-    New-Item -ItemType Directory -Path "efi\EFI\BOOT" -Force | Out-Null
-}
+Write-Step "Preparando imagem EFI..."
 
 Copy-Item build\Atom.efi efi\EFI\BOOT\BOOTX64.EFI -Force
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao copiar BOOTX64.EFI"
-    exit 1
-}
 
 Write-Success "BOOTX64.EFI atualizado"
 
+# =========================================================================
+# SUMÁRIO DO BUILD
+# =========================================================================
+
 Write-Host ""
-Write-Success "Build concluído com sucesso!"
+Write-Host "========== BUILD COMPLETO ==========" -ForegroundColor Green
 Write-Host ""
+Write-Host "Kernel:     build\Atom.efi" -ForegroundColor White
+Write-Host "EFI Image:  efi\EFI\BOOT\BOOTX64.EFI" -ForegroundColor White
+Write-Host "Drivers:    efi\drivers\" -ForegroundColor White
+Write-Host ""
+
+# Lista de drivers compilados
+if (Test-Path "efi\drivers") {
+    $drivers = Get-ChildItem "efi\drivers\*.bin" -ErrorAction SilentlyContinue
+    if ($drivers) {
+        Write-Host "Drivers userspace:" -ForegroundColor Cyan
+        foreach ($d in $drivers) {
+            Write-Host "  - $($d.Name)" -ForegroundColor White
+        }
+        Write-Host ""
+    }
+}
 
 # -------------------------------------------------------------------------
 # Executar QEMU (opcional)
 # -------------------------------------------------------------------------
 
 if ($Run) {
-    Write-Step "Iniciando QEMU..."
-
+    Write-Host "========== QEMU ==========" -ForegroundColor Magenta
+    Write-Host ""
+    
     if (-not (Test-Path $OVMF_PATH)) {
         Write-ErrorMsg "OVMF.fd não encontrado em: $OVMF_PATH"
+        Write-Warning "Baixe OVMF de: https://github.com/tianocore/edk2"
         exit 1
     }
 
-    Write-Host "Pressione Ctrl+C para encerrar o QEMU" -ForegroundColor Yellow
+    # Verificar se QEMU está instalado
+    $qemu = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
+    if (-not $qemu) {
+        Write-ErrorMsg "QEMU não encontrado no PATH"
+        Write-Warning "Instale QEMU de: https://www.qemu.org/download/"
+        exit 1
+    }
+
+    Write-Step "Iniciando QEMU..."
+    Write-Host "Pressione Ctrl+C para encerrar" -ForegroundColor Yellow
     Write-Host ""
 
+    # Executar QEMU com suporte a mouse PS/2
     qemu-system-x86_64 `
         -machine q35 `
         -cpu qemu64 `
         -m 512M `
         -bios "$OVMF_PATH" `
         -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
+        -device VGA `
+        -usb `
+        -device usb-mouse `
         -serial stdio `
-        -debugcon stdio `
+        -debugcon file:serial_log.txt `
         -global isa-debugcon.iobase=0xE9
 }
 else {
-    Write-Host "Para testar no QEMU, execute:" -ForegroundColor Yellow
-    Write-Host '  .\build.ps1 --run' -ForegroundColor Yellow
+    Write-Host "Para testar no QEMU:" -ForegroundColor Yellow
+    Write-Host "  .\build.ps1 --run" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Outras opções:" -ForegroundColor Yellow  
+    Write-Host "  .\build.ps1 --clean      # Limpar e rebuildar" -ForegroundColor Yellow
+    Write-Host "  .\build.ps1 --userspace  # Apenas drivers userspace" -ForegroundColor Yellow
+    Write-Host "  .\build.ps1 --kernel     # Apenas kernel" -ForegroundColor Yellow
 }

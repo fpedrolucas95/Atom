@@ -56,8 +56,7 @@ mod mm;
 mod serial;
 mod build_info;
 mod interrupts;
-mod keyboard;
-mod mouse;
+mod input;  // Minimal input buffer for userspace drivers
 mod log;
 mod graphics;
 mod thread;
@@ -70,8 +69,11 @@ mod system;
 mod executable;
 mod init_process;
 mod service_manager;
-mod ui;
 mod util;
+mod shell;  // Embedded userspace shell (runs in Ring 3)
+
+// Userspace drivers run in Ring 3 using the atom_syscall library.
+// See userspace/drivers/ for the actual driver implementations.
 
 #[cfg(target_arch = "x86_64")]
 #[path = "../../arch/x86_64/uefi.rs"]
@@ -141,8 +143,9 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     log_info!(LOG_APIC, "Enabling interrupts...");
     interrupts::enable();
 
-    keyboard::init();
-    mouse::init();
+    // Initialize input subsystem (minimal kernel-side buffer for userspace drivers)
+    input::init();
+    input::init_ps2_mouse_full(); // Use full initialization with 1:1 scaling
 
     syscall::init();
     ipc::init();
@@ -162,25 +165,37 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
         }
     }
     
-    extern "C" fn ui_thread_entry() -> ! {
-        ui::run_userspace_shell()
+    // Create userspace UI thread running in ring 3
+    let ui_result = create_userspace_ui_thread();
+    match ui_result {
+        Ok(tid) => {
+            log_info!(LOG_KERNEL_INIT, "Userspace UI thread created (tid={})", tid);
+        }
+        Err(e) => {
+            log_error!(LOG_KERNEL_INIT, "Failed to create userspace UI thread: {}", e);
+            // Fallback to embedded shell (runs in Ring 3)
+            extern "C" fn ui_thread_entry() -> ! {
+                shell::shell_entry()
+            }
+
+            let ui_stack = mm::pmm::alloc_pages(8).expect("Failed to allocate UI stack");
+            let ui_stack_top = ui_stack + (8 * mm::pmm::PAGE_SIZE);
+            let cr3 = read_cr3();
+            let entry_u64 = (ui_thread_entry as *const () as usize) as u64;
+
+            let ui_thread = thread::Thread::new(
+                entry_u64,
+                ui_stack_top as u64,
+                8 * mm::pmm::PAGE_SIZE,
+                cr3,
+                thread::ThreadPriority::High,
+                "ui",
+            );
+
+            sched::add_thread(ui_thread);
+        }
     }
 
-    let ui_stack = mm::pmm::alloc_pages(8).expect("Failed to allocate UI stack");
-    let ui_stack_top = ui_stack + (8 * mm::pmm::PAGE_SIZE);
-    let cr3 = read_cr3();
-    let entry_u64 = (ui_thread_entry as *const () as usize) as u64;
-
-    let ui_thread = thread::Thread::new(
-        entry_u64,
-        ui_stack_top as u64,
-        8 * mm::pmm::PAGE_SIZE,
-        cr3,
-        thread::ThreadPriority::High,
-        "ui",
-    );
-
-    let _ui_tid = sched::add_thread(ui_thread);
     log_info!(LOG_KERNEL_INIT, "Handing over to scheduler.");
     start_scheduling();
 
@@ -224,6 +239,130 @@ fn start_scheduling() -> ! {
     loop {
         halt();
     }
+}
+
+/// Create a userspace UI thread that runs in ring 3
+/// 
+/// This properly sets up the UI shell to run in userspace by:
+/// 1. Remapping shell code pages as USER-accessible (in-place, no copy)
+/// 2. Allocating a USER stack
+/// 3. Creating a Ring 3 context with proper selectors
+///
+/// Note: We remap the kernel code pages containing shell_entry as USER
+/// because the code was compiled with absolute addresses. Copying to a
+/// new address would break all relative and absolute references.
+fn create_userspace_ui_thread() -> Result<thread::ThreadId, &'static str> {
+    use mm::pmm::PAGE_SIZE;
+    use mm::vm::{self, PageFlags};
+
+    const KERNEL_STACK_PAGES: usize = 8;
+    const USER_STACK_PAGES: usize = 4;
+    const CODE_PAGES: usize = 256; // Pages to remap as USER (1MB to cover shell + all dependencies)
+    const CODE_PAGES_BEFORE: usize = 16; // Pages BEFORE entry to cover auxiliary functions
+    
+    // Virtual address for user stack (allocated fresh)
+    const USER_STACK_TOP: usize = 0x90000000; // 2.25GB
+    
+    let cr3 = read_cr3();
+
+    // --- 1. Get shell entry point and remap surrounding pages as USER ---
+    let shell_entry_addr = shell::shell_entry as *const () as usize;
+    let shell_page_base = mm::pmm::align_down(shell_entry_addr);
+    
+    // Start mapping BEFORE the entry point to cover auxiliary functions
+    // (linker may place helper functions like draw_cursor before shell_entry)
+    let remap_start = shell_page_base.saturating_sub(CODE_PAGES_BEFORE * PAGE_SIZE);
+    let total_pages = CODE_PAGES + CODE_PAGES_BEFORE;
+    
+    log_info!(
+        LOG_KERNEL_INIT,
+        "UI shell entry at {:#X}, remapping {} pages as USER starting at {:#X}",
+        shell_entry_addr,
+        total_pages,
+        remap_start
+    );
+    
+    // Remap shell code pages with USER flag
+    // This allows Ring 3 to execute the kernel code at its original address
+    for i in 0..total_pages {
+        let virt = remap_start + i * PAGE_SIZE;
+        if let Err(e) = vm::remap_page_user(virt) {
+            log_info!(LOG_KERNEL_INIT, "Remap page {:#X} result: {:?}", virt, e);
+            // Continue - some pages might not be mapped
+        }
+    }
+    
+    log_info!(
+        LOG_KERNEL_INIT,
+        "UI shell code remapped: virt={:#X}-{:#X}",
+        remap_start,
+        remap_start + total_pages * PAGE_SIZE
+    );
+
+    // --- 2. Allocate USER stack ---
+    let stack_phys = mm::pmm::alloc_pages_zeroed(USER_STACK_PAGES)
+        .ok_or("Failed to allocate user stack")?;
+    
+    let stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
+    
+    for i in 0..USER_STACK_PAGES {
+        let virt = stack_base + i * PAGE_SIZE;
+        let phys = stack_phys + i * PAGE_SIZE;
+        
+        let _ = vm::unmap_page(virt);
+        
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE)
+            .map_err(|_| "Failed to map stack page")?;
+    }
+    
+    log_info!(
+        LOG_KERNEL_INIT,
+        "UI shell stack mapped: virt={:#X}-{:#X}",
+        stack_base,
+        USER_STACK_TOP
+    );
+
+    // --- 3. Allocate kernel stack for syscall handling ---
+    let kernel_stack_phys = mm::pmm::alloc_pages(KERNEL_STACK_PAGES)
+        .ok_or("Failed to allocate kernel stack")?;
+    let kernel_stack_top = (kernel_stack_phys + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+
+    // --- 4. Create Ring 3 context ---
+    // Entry point is the original shell_entry address (now USER-accessible)
+    let user_entry = shell_entry_addr as u64;
+    let user_stack = USER_STACK_TOP as u64;
+    
+    log_info!(
+        LOG_KERNEL_INIT,
+        "Creating userspace UI thread: entry={:#X} stack={:#X} CR3={:#X}",
+        user_entry,
+        user_stack,
+        cr3
+    );
+
+    let tid = thread::ThreadId::new();
+    let ui_thread = thread::Thread {
+        id: tid,
+        state: thread::ThreadState::Ready,
+        context: thread::CpuContext::new_user(user_entry, user_stack, cr3),
+        kernel_stack: kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
+        address_space: cr3,
+        priority: thread::ThreadPriority::High,
+        name: "ui_shell",
+        capability_table: cap::create_capability_table(tid),
+    };
+
+    // Use sched::add_thread to properly register the thread with its priority
+    sched::add_thread(ui_thread);
+
+    log_info!(
+        LOG_KERNEL_INIT,
+        "Userspace UI thread created (tid={}) in Ring 3",
+        tid
+    );
+
+    Ok(tid)
 }
 
 fn display_uefi_memory_map(memory_map: &MemoryMap) {
