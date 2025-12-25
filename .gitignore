@@ -19,3 +19,17 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+Cargo.lock
+qemu_debug.log
+serial_log.txt
+.idea/Atom.iml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/workspace.xml
+.vs/VSWorkspaceState.json
+.vs/Atom.slnx/v18/.wsuo
+.vs/Atom.slnx/v18/DocumentLayout.json
+build/Atom.efi
+efi/NvVars
+efi/EFI/BOOT/BOOTX64.EFI
+userspace/build/ui_shell.atxf

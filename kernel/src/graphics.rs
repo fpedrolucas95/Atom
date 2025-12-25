@@ -343,6 +343,21 @@ pub fn get_dimensions() -> Option<(u32, u32)> {
     })
 }
 
+/// Get the raw framebuffer address for userspace drivers
+pub fn get_framebuffer_address() -> Option<usize> {
+    with_framebuffer(|fb| fb.address() as usize)
+}
+
+/// Get the framebuffer stride (pixels per scanline)
+pub fn get_stride() -> u32 {
+    with_framebuffer(|fb| fb.stride()).unwrap_or(0)
+}
+
+/// Get bytes per pixel
+pub fn get_bytes_per_pixel() -> usize {
+    with_framebuffer(|fb| fb.bytes_per_pixel()).unwrap_or(4)
+}
+
 use alloc::vec::Vec;
 use alloc::string::String;
 use spin::mutex::Mutex;

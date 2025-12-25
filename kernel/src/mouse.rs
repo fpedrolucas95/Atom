@@ -1,16 +1,15 @@
-// Temporary PS/2 mouse driver
+// PS/2 Mouse Driver (Kernel-Space IRQ Handler with 1:1 Movement)
 //
-// This module implements a minimal kernel-space PS/2 mouse driver based on
-// well-established OSDev reference implementations. It provides basic mouse
-// movement tracking with a simple and deterministic design, suitable for
-// early kernel development and diagnostics.
+// This module implements a kernel-space PS/2 mouse driver that handles IRQ12
+// and forwards mouse data to userspace via syscalls. It provides 1:1 mouse
+// movement with no acceleration, matching host machine movement directly.
 //
 // Key responsibilities:
-// - Initialize the PS/2 auxiliary (mouse) device
+// - Initialize the PS/2 auxiliary (mouse) device with 1:1 scaling
 // - Enable IRQ12 and packet streaming mode
 // - Receive and assemble 3-byte PS/2 mouse packets
-// - Decode relative X/Y movement deltas
-// - Expose movement data for consumption by higher-level subsystems
+// - Decode relative X/Y movement deltas without any scaling
+// - Expose movement data for consumption via SYS_MOUSE_POLL syscall
 //
 // Design and implementation:
 // - Follows the standard 3-byte PS/2 mouse packet format
@@ -69,6 +68,7 @@ const CMD_ENABLE_AUX: u8 = 0xA8;
 const AUX_PREFIX: u8 = 0xD4;
 const AUX_ENABLE_PACKET_STREAM: u8 = 0xF4;
 const AUX_SET_DEFAULTS: u8 = 0xF6;
+const AUX_SET_SCALING_1_1: u8 = 0xE6; // 1:1 linear scaling (no acceleration)
 const WAIT_INPUT_EMPTY_SPINS: u32 = 50_000;
 const WAIT_ANY_OUTPUT_SPINS: u32 = 50_000;
 #[allow(dead_code)]
@@ -253,6 +253,7 @@ fn enable_interrupts_in_controller() {
 }
 
 fn set_defaults_and_enable() -> bool {
+    // Set defaults first
     mouse_write(AUX_SET_DEFAULTS);
     let ack = mouse_read();
     if ack != 0xFA {
@@ -261,6 +262,17 @@ fn set_defaults_and_enable() -> bool {
     }
     log_info!("mouse", "SET_DEFAULTS acknowledged");
 
+    // Enable 1:1 scaling (linear, no acceleration) for 1:1 movement with host
+    mouse_write(AUX_SET_SCALING_1_1);
+    let ack = mouse_read();
+    if ack != 0xFA {
+        log_warn!("mouse", "SET_SCALING_1_1 failed: got {:#04X}, expected 0xFA", ack);
+        // Non-fatal, continue with defaults
+    } else {
+        log_info!("mouse", "SET_SCALING_1_1 acknowledged (1:1 movement enabled)");
+    }
+
+    // Enable streaming mode
     mouse_write(AUX_ENABLE_PACKET_STREAM);
     let ack = mouse_read();
     if ack != 0xFA {

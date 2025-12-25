@@ -1,0 +1,13 @@
+[package]
+name = "ui_shell"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[lib]
+crate-type = ["staticlib"]
+
+[[bin]]
+name = "ui_shell"
+path = "src/main.rs"

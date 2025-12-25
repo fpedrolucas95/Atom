@@ -101,6 +101,12 @@ pub const SYS_UNMAP_REGION: u64 = 30;
 pub const SYS_REMAP_REGION: u64 = 31;
 pub const SYS_REGISTER_FAULT_HANDLER: u64 = 32;
 pub const SYS_MOUSE_POLL: u64 = 33;
+pub const SYS_IO_PORT_READ: u64 = 34;
+pub const SYS_IO_PORT_WRITE: u64 = 35;
+pub const SYS_KEYBOARD_POLL: u64 = 36;
+pub const SYS_GET_FRAMEBUFFER: u64 = 37;
+pub const SYS_GET_TICKS: u64 = 38;
+pub const SYS_DEBUG_LOG: u64 = 39;
 
 pub const ESUCCESS: u64 = 0;
 pub const EINVAL: u64 = u64::MAX - 1;
@@ -237,6 +243,12 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_REMAP_REGION => sys_remap_region(arg0, arg1, arg2, arg3),
         SYS_REGISTER_FAULT_HANDLER => sys_register_fault_handler(arg0),
         SYS_MOUSE_POLL => sys_mouse_poll(),
+        SYS_IO_PORT_READ => sys_io_port_read(arg0 as u16, arg1 as u8),
+        SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u8),
+        SYS_KEYBOARD_POLL => sys_keyboard_poll(),
+        SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0 as *mut u64),
+        SYS_GET_TICKS => sys_get_ticks(),
+        SYS_DEBUG_LOG => sys_debug_log(arg0 as *const u8, arg1 as usize),
 
         _ => {
             log_warn!(
@@ -257,6 +269,102 @@ fn sys_mouse_poll() -> u64 {
     }
 
     EWOULDBLOCK
+}
+
+/// Read a byte from an IO port (privileged operation for drivers)
+fn sys_io_port_read(port: u16, _size: u8) -> u64 {
+    // Allow specific PS/2 controller ports for usermode drivers
+    let allowed_ports = [0x60, 0x64]; // PS/2 data and status/command ports
+    
+    if !allowed_ports.contains(&port) {
+        return EPERM;
+    }
+    
+    let value: u8 = unsafe {
+        let mut val: u8;
+        core::arch::asm!(
+            "in al, dx",
+            out("al") val,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags)
+        );
+        val
+    };
+    
+    value as u64
+}
+
+/// Write a byte to an IO port (privileged operation for drivers)
+fn sys_io_port_write(port: u16, value: u8) -> u64 {
+    // Allow specific PS/2 controller ports for usermode drivers
+    let allowed_ports = [0x60, 0x64]; // PS/2 data and status/command ports
+    
+    if !allowed_ports.contains(&port) {
+        return EPERM;
+    }
+    
+    unsafe {
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") port,
+            in("al") value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    
+    ESUCCESS
+}
+
+/// Poll keyboard buffer for input
+fn sys_keyboard_poll() -> u64 {
+    if let Some(scancode) = crate::keyboard::poll_scancode() {
+        return scancode as u64;
+    }
+    EWOULDBLOCK
+}
+
+/// Get framebuffer information for userspace graphics
+fn sys_get_framebuffer(info_ptr: *mut u64) -> u64 {
+    if info_ptr.is_null() {
+        return EINVAL;
+    }
+    
+    if let Some((width, height)) = crate::graphics::get_dimensions() {
+        if let Some(addr) = crate::graphics::get_framebuffer_address() {
+            unsafe {
+                // Write: [address, width, height, stride, bytes_per_pixel]
+                *info_ptr = addr as u64;
+                *info_ptr.add(1) = width as u64;
+                *info_ptr.add(2) = height as u64;
+                *info_ptr.add(3) = crate::graphics::get_stride() as u64;
+                *info_ptr.add(4) = crate::graphics::get_bytes_per_pixel() as u64;
+            }
+            return ESUCCESS;
+        }
+    }
+    EINVAL
+}
+
+/// Get current system ticks
+fn sys_get_ticks() -> u64 {
+    crate::interrupts::get_ticks()
+}
+
+/// Debug log from userspace
+fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
+    if msg_ptr.is_null() || len > 256 {
+        return EINVAL;
+    }
+    
+    let msg = unsafe {
+        core::slice::from_raw_parts(msg_ptr, len)
+    };
+    
+    if let Ok(s) = core::str::from_utf8(msg) {
+        log_info!("userspace", "{}", s);
+    }
+    
+    ESUCCESS
 }
 
 #[allow(dead_code)]

@@ -84,10 +84,39 @@ impl KeyboardState {
 
 static KEYBOARD: Mutex<KeyboardState> = Mutex::new(KeyboardState::new());
 
+// Raw scancode buffer for userspace polling
+static SCANCODE_BUFFER: Mutex<([u8; 64], usize, usize)> = Mutex::new(([0; 64], 0, 0));
+
 pub fn init() {
     let mut state = KEYBOARD.lock();
     *state = KeyboardState::new();
     log_info!("keyboard", "Keyboard driver ready (PS/2 set 1)");
+}
+
+/// Push a raw scancode to the buffer for userspace consumption
+pub fn push_raw_scancode(scancode: u8) {
+    let mut buf = SCANCODE_BUFFER.lock();
+    let head = buf.1;
+    let tail = buf.2;
+    let next_head = (head + 1) % 64;
+    if next_head != tail {
+        buf.0[head] = scancode;
+        buf.1 = next_head;
+    }
+}
+
+/// Poll for a raw scancode from userspace
+pub fn poll_scancode() -> Option<u8> {
+    let mut buf = SCANCODE_BUFFER.lock();
+    let head = buf.1;
+    let tail = buf.2;
+    if head != tail {
+        let scancode = buf.0[tail];
+        buf.2 = (tail + 1) % 64;
+        Some(scancode)
+    } else {
+        None
+    }
 }
 
 pub fn handle_interrupt() {
@@ -99,6 +128,11 @@ fn process_pending_scancodes() {
     let mut state = KEYBOARD.lock();
 
     while let Some(scancode) = read_scancode() {
+        // Push raw scancode to buffer for userspace
+        drop(state); // Release lock before pushing
+        push_raw_scancode(scancode);
+        state = KEYBOARD.lock();
+        
         process_scancode(scancode, &mut state);
     }
 }
