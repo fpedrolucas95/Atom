@@ -75,10 +75,20 @@ pub extern "C" fn shell_entry() -> ! {
         let mut total_dy: i32 = 0;
         let mut mouse_moved = false;
         
+        // Count of bytes received this iteration (for debug)
+        let mut bytes_received = 0u32;
+
         loop {
             let byte_result = unsafe { syscall0(SYS_MOUSE_POLL) };
             if byte_result == EWOULDBLOCK { break; }
-            
+
+            // Debug: show a green pixel for each byte received
+            bytes_received += 1;
+            let debug_x = 50 + bytes_received * 4;
+            if debug_x < width - 10 {
+                fill_rect(fb_addr, stride, bpp, debug_x, 8, 3, 8, 0x0000FF00);
+            }
+
             let byte = byte_result as u8;
             
             // Process PS/2 mouse packet
@@ -119,21 +129,21 @@ pub extern "C" fn shell_entry() -> ! {
         
         // Update cursor only once after processing all pending packets
         if mouse_moved {
-            // Debug: draw a pixel in top-left corner to show we're processing mouse
-            debug_color = debug_color.wrapping_add(0x10);
-            let debug_offset = (100 * stride + 100) as usize * bpp;
-            unsafe {
-                let ptr = (fb_addr + debug_offset) as *mut u32;
-                ptr.write_volatile(0x00FF0000 | debug_color); // Red with varying intensity
-            }
-            
-            // Restore old position (clear cursor)
+            // Debug: draw a growing bar at top of screen to show mouse activity
+            debug_color = debug_color.wrapping_add(1);
+            let bar_width = (debug_color as u32 % 200) + 10;
+            fill_rect(fb_addr, stride, bpp, 200, 8, bar_width, 8, 0x00FF0000);
+
+            // Restore old position (clear cursor) - use saved position
             fill_rect(fb_addr, stride, bpp, cursor_x, cursor_y, 12, 16, 0x002E3440);
-            
+
             // Apply accumulated movement (Y is inverted in PS/2)
-            cursor_x = ((cursor_x as i32 + total_dx).max(0) as u32).min(width - 1);
-            cursor_y = ((cursor_y as i32 - total_dy).max(0) as u32).min(height - 1);
-            
+            let new_x = ((cursor_x as i32 + total_dx).max(0) as u32).min(width - 1);
+            let new_y = ((cursor_y as i32 - total_dy).max(0) as u32).min(height - 1);
+
+            cursor_x = new_x;
+            cursor_y = new_y;
+
             // Draw cursor at new position
             draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
         }
