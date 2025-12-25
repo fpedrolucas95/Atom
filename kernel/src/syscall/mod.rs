@@ -2726,14 +2726,24 @@ fn sys_register_irq_handler(irq_num: u64, port_id_raw: u64) -> u64 {
 
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
 
-    // TODO: Store IRQ -> Port mapping for forwarding interrupts to user space
-    // For now, just log success
-    log_info!(
-        LOG_ORIGIN,
-        "register_irq_handler: IRQ {} will forward to port {}",
-        irq_num,
-        port_id
-    );
-
-    ESUCCESS
+    // Register IRQ forwarding
+    match crate::irq_forward::register_handler(irq_num as u8, port_id) {
+        Ok(_) => {
+            log_info!(
+                LOG_ORIGIN,
+                "register_irq_handler: IRQ {} registered to forward to port {}",
+                irq_num,
+                port_id
+            );
+            ESUCCESS
+        }
+        Err(_) => {
+            log_error!(
+                LOG_ORIGIN,
+                "register_irq_handler: failed to register IRQ {}",
+                irq_num
+            );
+            EINVAL
+        }
+    }
 }

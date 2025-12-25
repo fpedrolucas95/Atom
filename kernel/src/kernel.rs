@@ -58,6 +58,7 @@ mod build_info;
 mod interrupts;
 // mod keyboard;  // Moved to user space
 // mod mouse;     // Moved to user space
+mod irq_forward;
 mod log;
 mod graphics;
 mod thread;

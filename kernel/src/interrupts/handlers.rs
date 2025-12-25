@@ -372,14 +372,14 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    // Keyboard driver moved to user space
-    // TODO: Forward IRQ to user space driver via IPC
+    // Keyboard driver moved to user space - forward IRQ via IPC
+    crate::irq_forward::forward_irq(1); // IRQ1 = keyboard
     super::apic::send_eoi();
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    // Mouse driver moved to user space
-    // TODO: Forward IRQ to user space driver via IPC
+    // Mouse driver moved to user space - forward IRQ via IPC
+    crate::irq_forward::forward_irq(12); // IRQ12 = mouse
     super::apic::send_eoi();
 }
 
