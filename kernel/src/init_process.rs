@@ -388,30 +388,14 @@ fn bootstrap_manifest_services() {
 }
 
 fn launch_ui_service() {
-    let ui_spec = ServiceSpec {
-        name: "ui_shell".to_string(),
-        binary: "/init/ui_shell.elf".to_string(),
-        capabilities: vec!["FrameBufferCap".to_string(), "PointerCap".to_string()],
-        depends_on: Vec::new(),
-    };
-
-    match spawn_service_thread(&ui_spec) {
-        Ok(tid) => {
-            log_info!(
-                LOG_ORIGIN,
-                "Userspace UI scheduled as service '{}' (tid={})",
-                ui_spec.name,
-                tid
-            );
-        }
-        Err(err) => {
-            log_error!(
-                LOG_ORIGIN,
-                "Failed to schedule userspace UI shell: {:?}",
-                err
-            );
-        }
-    }
+    // UI shell is now launched directly as a kernel thread in kernel.rs
+    // via create_userspace_ui_thread(), not via the service manager.
+    // This avoids the complexity of context switching between user and kernel
+    // threads until we have proper Ring 3 isolation.
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell service skipped - using kernel thread from kernel.rs"
+    );
 }
 
 fn spawn_service_thread(spec: &ServiceSpec) -> Result<ThreadId, ExecError> {
@@ -494,13 +478,10 @@ extern "C" fn service_worker() {
             );
         }
 
-        // ✅ ADICIONAR MAIS LOGS
-        if ctx.name == "ui_shell" {
-            log_info!(LOG_ORIGIN, "Launching UI shell for '{}'", ctx.name);
-            crate::ui::run_userspace_shell();
-        } else {
-            log_info!(LOG_ORIGIN, "Service '{}' is NOT ui_shell, yielding", ctx.name);
-        }
+        // Log service ready status
+        // NOTE: The ui_shell is now launched directly in kernel.rs via create_userspace_ui_thread,
+        // not via the service manager. This code path handles other services only.
+        log_info!(LOG_ORIGIN, "Service '{}' ready, entering service loop", ctx.name);
 
         loop {
             sched::drive_cooperative_tick();

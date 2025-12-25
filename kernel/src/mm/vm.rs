@@ -527,27 +527,49 @@ pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> 
 }
 
 /// Remap an existing page to be accessible from userspace (ring 3)
-/// This adds the USER bit to the page table entry
+/// This adds the USER bit to ALL levels of the page table hierarchy
 pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
     if !pmm::is_page_aligned(virt) {
         return Err(VmError::Unaligned);
     }
 
-    let (entry, _) = walk_to_entry(virt, false)?;
-    if !entry.is_present() {
-        return Err(VmError::NotMapped);
+    let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
+    if pml4_phys == 0 {
+        return Err(VmError::NotInitialized);
     }
 
-    // Get current entry value and add USER flag
-    let raw = entry.0;
-    let phys = (raw & ADDR_MASK) as usize;
-    let current_flags = PageFlags(raw & !ADDR_MASK);
+    // Get indices for all levels
+    let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
 
-    // Add USER flag
-    let new_flags = PageFlags(current_flags.bits() | PageFlags::USER.bits());
+    // Walk through each level and add USER bit
+    let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+    let pml4e = &mut pml4.entries[pml4_idx];
+    if !pml4e.is_present() {
+        return Err(VmError::NotMapped);
+    }
+    pml4e.0 |= PageFlags::USER.bits();
 
-    // Update entry with new flags
-    entry.set(phys, new_flags);
+    let pdpt = unsafe { &mut *(pml4e.addr() as *mut PageTable) };
+    let pdpte = &mut pdpt.entries[pdpt_idx];
+    if !pdpte.is_present() {
+        return Err(VmError::NotMapped);
+    }
+    pdpte.0 |= PageFlags::USER.bits();
+
+    let pd = unsafe { &mut *(pdpte.addr() as *mut PageTable) };
+    let pde = &mut pd.entries[pd_idx];
+    if !pde.is_present() {
+        return Err(VmError::NotMapped);
+    }
+    pde.0 |= PageFlags::USER.bits();
+
+    let pt = unsafe { &mut *(pde.addr() as *mut PageTable) };
+    let pte = &mut pt.entries[pt_idx];
+    if !pte.is_present() {
+        return Err(VmError::NotMapped);
+    }
+    pte.0 |= PageFlags::USER.bits();
+
     invalidate_page(virt);
 
     Ok(())

@@ -323,6 +323,22 @@ pub fn get_base_priority(id: ThreadId) -> ThreadPriority {
     SCHEDULER.get_base_priority(id)
 }
 
+/// Yield the current thread, allowing other threads to run
+pub fn yield_current() {
+    // Get current thread
+    let current = match current_thread() {
+        Some(id) => id,
+        None => return, // No current thread, nothing to yield
+    };
+    
+    // Schedule next thread
+    if let Some(next) = schedule() {
+        if next != current {
+            perform_context_switch(current, next);
+        }
+    }
+}
+
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     without_interrupts(|| {
         let target_kernel_stack = thread::kernel_stack_top(to_id);

@@ -268,12 +268,12 @@ extern "C" fn rust_syscall_dispatcher(
 }
 
 fn sys_mouse_poll() -> u64 {
-    if let Some((dx, dy)) = crate::mouse::drain_delta() {
-        let dx_u = dx as u32 as u64;
-        let dy_u = dy as u32 as u64;
-        return (dx_u << 32) | dy_u;
+    // Return next raw mouse byte for userspace driver to process
+    if let Some(byte) = crate::input::poll_mouse_byte() {
+        // Debug: Log bytes being returned to userspace
+        crate::serial_println!("[MOUSE_POLL] returning byte: 0x{:02X}", byte);
+        return byte as u64;
     }
-
     EWOULDBLOCK
 }
 
@@ -321,9 +321,9 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
     ESUCCESS
 }
 
-/// Poll keyboard buffer for input
+/// Poll keyboard buffer for input (raw scancode)
 fn sys_keyboard_poll() -> u64 {
-    if let Some(scancode) = crate::keyboard::poll_scancode() {
+    if let Some(scancode) = crate::input::poll_keyboard_byte() {
         return scancode as u64;
     }
     EWOULDBLOCK

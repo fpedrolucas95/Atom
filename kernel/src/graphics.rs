@@ -348,6 +348,19 @@ pub fn get_framebuffer_address() -> Option<usize> {
     with_framebuffer(|fb| fb.address() as usize)
 }
 
+/// Get complete framebuffer info: (address, width, height, stride, bytes_per_pixel)
+pub fn get_framebuffer_info() -> Option<(usize, u32, u32, u32, usize)> {
+    with_framebuffer(|fb| {
+        (
+            fb.address() as usize,
+            fb.width(),
+            fb.height(),
+            fb.stride(),
+            fb.bytes_per_pixel(),
+        )
+    })
+}
+
 /// Get the framebuffer stride (pixels per scanline)
 pub fn get_stride() -> u32 {
     with_framebuffer(|fb| fb.stride()).unwrap_or(0)
