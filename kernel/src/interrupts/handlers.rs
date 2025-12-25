@@ -372,12 +372,26 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
+    // Always process keyboard data in kernel to buffer it
     keyboard::handle_interrupt();
+
+    // Notify userspace handler if registered
+    if crate::syscall::has_userspace_irq_handler(1) {
+        crate::syscall::notify_irq_handler(1);
+    }
+
     super::apic::send_eoi();
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
+    // Always process mouse data in kernel to buffer it
     mouse::handle_interrupt();
+
+    // Notify userspace handler if registered
+    if crate::syscall::has_userspace_irq_handler(12) {
+        crate::syscall::notify_irq_handler(12);
+    }
+
     super::apic::send_eoi();
 }
 

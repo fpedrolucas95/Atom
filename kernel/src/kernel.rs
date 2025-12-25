@@ -72,6 +72,8 @@ mod init_process;
 mod service_manager;
 mod ui;
 mod util;
+mod userspace_api;
+mod userspace_drivers;
 
 #[cfg(target_arch = "x86_64")]
 #[path = "../../arch/x86_64/uefi.rs"]
@@ -162,25 +164,37 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
         }
     }
     
-    extern "C" fn ui_thread_entry() -> ! {
-        ui::run_userspace_shell()
+    // Create userspace UI thread running in ring 3
+    let ui_result = create_userspace_ui_thread();
+    match ui_result {
+        Ok(tid) => {
+            log_info!(LOG_KERNEL_INIT, "Userspace UI thread created (tid={})", tid);
+        }
+        Err(e) => {
+            log_error!(LOG_KERNEL_INIT, "Failed to create userspace UI thread: {}", e);
+            // Fallback to kernel-mode UI
+            extern "C" fn ui_thread_entry() -> ! {
+                ui::run_userspace_shell()
+            }
+
+            let ui_stack = mm::pmm::alloc_pages(8).expect("Failed to allocate UI stack");
+            let ui_stack_top = ui_stack + (8 * mm::pmm::PAGE_SIZE);
+            let cr3 = read_cr3();
+            let entry_u64 = (ui_thread_entry as *const () as usize) as u64;
+
+            let ui_thread = thread::Thread::new(
+                entry_u64,
+                ui_stack_top as u64,
+                8 * mm::pmm::PAGE_SIZE,
+                cr3,
+                thread::ThreadPriority::High,
+                "ui",
+            );
+
+            sched::add_thread(ui_thread);
+        }
     }
 
-    let ui_stack = mm::pmm::alloc_pages(8).expect("Failed to allocate UI stack");
-    let ui_stack_top = ui_stack + (8 * mm::pmm::PAGE_SIZE);
-    let cr3 = read_cr3();
-    let entry_u64 = (ui_thread_entry as *const () as usize) as u64;
-
-    let ui_thread = thread::Thread::new(
-        entry_u64,
-        ui_stack_top as u64,
-        8 * mm::pmm::PAGE_SIZE,
-        cr3,
-        thread::ThreadPriority::High,
-        "ui",
-    );
-
-    let _ui_tid = sched::add_thread(ui_thread);
     log_info!(LOG_KERNEL_INIT, "Handing over to scheduler.");
     start_scheduling();
 
@@ -224,6 +238,92 @@ fn start_scheduling() -> ! {
     loop {
         halt();
     }
+}
+
+/// Create a userspace UI thread that runs in ring 3
+fn create_userspace_ui_thread() -> Result<thread::ThreadId, &'static str> {
+    use mm::vm::PageFlags;
+    use mm::pmm::PAGE_SIZE;
+
+    const USER_STACK_PAGES: usize = 8;
+    const KERNEL_STACK_PAGES: usize = 8;
+    const USER_CODE_BASE: usize = 0x0000_0040_0000; // 4MB mark
+
+    // Allocate user stack
+    let user_stack_phys = mm::pmm::alloc_pages_zeroed(USER_STACK_PAGES)
+        .ok_or("Failed to allocate user stack")?;
+    let user_stack_virt = 0x0000_7FFF_0000usize; // Below user code
+
+    // Map user stack with USER flag
+    for i in 0..USER_STACK_PAGES {
+        let virt = user_stack_virt + i * PAGE_SIZE;
+        let phys = user_stack_phys + i * PAGE_SIZE;
+        mm::vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE)
+            .map_err(|_| "Failed to map user stack")?;
+    }
+
+    let user_stack_top = user_stack_virt + USER_STACK_PAGES * PAGE_SIZE;
+
+    // Allocate kernel stack for syscalls/interrupts
+    let kernel_stack_phys = mm::pmm::alloc_pages(KERNEL_STACK_PAGES)
+        .ok_or("Failed to allocate kernel stack")?;
+    let kernel_stack_top = (kernel_stack_phys + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+
+    // Get entry point for userspace shell
+    // The function is in kernel memory, but we'll map it as user-accessible
+    let entry_fn = userspace_drivers::userspace_shell_entry as *const () as usize;
+
+    // Calculate which pages contain the entry function
+    // Map a range of kernel code as user-accessible (read-only, executable)
+    let code_page_start = entry_fn & !0xFFF;
+    let code_pages = 4; // Map 4 pages to ensure we cover the function
+
+    for i in 0..code_pages {
+        let page = code_page_start + i * PAGE_SIZE;
+        // Remap existing kernel pages with USER flag
+        // Note: This is a security trade-off for simplicity - in production
+        // you'd want separate user/kernel address spaces
+        let _ = mm::vm::remap_page_user(page);
+    }
+
+    // Also need to map the syscall table and related kernel code
+    // For now, we rely on the framebuffer and syscall entry being accessible
+
+    let cr3 = read_cr3();
+
+    // Create CPU context for ring 3
+    let context = thread::CpuContext::new_user(
+        entry_fn as u64,
+        user_stack_top as u64,
+        cr3,
+    );
+
+    log_info!(
+        LOG_KERNEL_INIT,
+        "Creating userspace UI thread: entry={:#X} stack={:#X} CR3={:#X}",
+        entry_fn,
+        user_stack_top,
+        cr3
+    );
+
+    // Create the thread
+    let tid = thread::ThreadId::new();
+    let ui_thread = thread::Thread {
+        id: tid,
+        state: thread::ThreadState::Ready,
+        context,
+        kernel_stack: kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
+        address_space: cr3,
+        priority: thread::ThreadPriority::High,
+        name: "ui_userspace",
+        capability_table: cap::create_capability_table(tid),
+    };
+
+    thread::add_thread(ui_thread);
+    sched::mark_thread_ready(tid);
+
+    Ok(tid)
 }
 
 fn display_uefi_memory_map(memory_map: &MemoryMap) {

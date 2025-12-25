@@ -334,9 +334,11 @@ pub fn init(memory_map: &MemoryMap) {
 pub fn map_framebuffer(fb_addr: u64, fb_size: usize) -> bool {
     log_info!(LOG_ORIGIN, "Mapping framebuffer at 0x{:X}, size {} bytes...", fb_addr, fb_size);
 
+    // Include USER flag so userspace drivers can access the framebuffer
     let fb_flags = PageFlags(
         PageFlags::PRESENT.bits() |
         PageFlags::WRITABLE.bits() |
+        PageFlags::USER.bits() |       // Allow userspace access
         PageFlags::CACHE_DISABLE.bits() |
         PageFlags::GLOBAL.bits() |
         PageFlags::NO_EXECUTE.bits()
@@ -521,6 +523,57 @@ pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> 
 
     entry.clear();
     MAPPED_PAGES.fetch_sub(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Remap an existing page to be accessible from userspace (ring 3)
+/// This adds the USER bit to the page table entry
+pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
+    if !pmm::is_page_aligned(virt) {
+        return Err(VmError::Unaligned);
+    }
+
+    let (entry, _) = walk_to_entry(virt, false)?;
+    if !entry.is_present() {
+        return Err(VmError::NotMapped);
+    }
+
+    // Get current entry value and add USER flag
+    let raw = entry.0;
+    let phys = (raw & ADDR_MASK) as usize;
+    let current_flags = PageFlags(raw & !ADDR_MASK);
+
+    // Add USER flag
+    let new_flags = PageFlags(current_flags.bits() | PageFlags::USER.bits());
+
+    // Update entry with new flags
+    entry.set(phys, new_flags);
+    invalidate_page(virt);
+
+    Ok(())
+}
+
+/// Remap an existing page to add specific flags
+pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), VmError> {
+    if !pmm::is_page_aligned(virt) {
+        return Err(VmError::Unaligned);
+    }
+
+    let (entry, _) = walk_to_entry(virt, false)?;
+    if !entry.is_present() {
+        return Err(VmError::NotMapped);
+    }
+
+    // Get current entry value and add new flags
+    let raw = entry.0;
+    let phys = (raw & ADDR_MASK) as usize;
+    let current_flags = PageFlags(raw & !ADDR_MASK);
+
+    let new_flags = PageFlags(current_flags.bits() | additional_flags.bits());
+
+    entry.set(phys, new_flags);
+    invalidate_page(virt);
+
     Ok(())
 }
 
