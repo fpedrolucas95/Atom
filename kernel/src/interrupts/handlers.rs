@@ -30,9 +30,8 @@
 // - Always signals EOI via `apic::send_eoi()` to re-arm the interrupt line.
 //
 // Keyboard handling:
-// - `keyboard_interrupt_handler` delegates to `keyboard::handle_interrupt()`
-//   and then signals EOI.
-// - Keeping this short reduces time spent in IRQ context and avoids latency.
+// - Keyboard driver moved to user space
+// - IRQs will be forwarded to user space driver via IPC
 //
 // Debug/testing hooks:
 // - `dummy_interrupt_handler_0x69` provides a minimal handler for a specific
@@ -51,8 +50,9 @@
 
 use crate::arch::{gdt, halt};
 use crate::ipc;
-use crate::keyboard;
-use crate::mouse;
+// Keyboard and mouse drivers moved to user space
+// use crate::keyboard;
+// use crate::mouse;
 use crate::mm;
 use crate::sched;
 #[allow(unused_imports)]
@@ -372,12 +372,14 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    keyboard::handle_interrupt();
+    // Keyboard driver moved to user space
+    // TODO: Forward IRQ to user space driver via IPC
     super::apic::send_eoi();
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    mouse::handle_interrupt();
+    // Mouse driver moved to user space
+    // TODO: Forward IRQ to user space driver via IPC
     super::apic::send_eoi();
 }
 

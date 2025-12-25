@@ -56,8 +56,8 @@ mod mm;
 mod serial;
 mod build_info;
 mod interrupts;
-mod keyboard;
-mod mouse;
+// mod keyboard;  // Moved to user space
+// mod mouse;     // Moved to user space
 mod log;
 mod graphics;
 mod thread;
@@ -141,8 +141,9 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     log_info!(LOG_APIC, "Enabling interrupts...");
     interrupts::enable();
 
-    keyboard::init();
-    mouse::init();
+    // Keyboard and mouse drivers moved to user space
+    // keyboard::init();
+    // mouse::init();
 
     syscall::init();
     ipc::init();

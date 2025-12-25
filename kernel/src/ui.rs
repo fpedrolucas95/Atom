@@ -80,7 +80,9 @@ static CURSOR_SAVED_REGION: Mutex<([u8; CURSOR_BUFFER_SIZE], bool, u32, u32)> =
 
 #[inline(always)]
 fn mouse_poll_delta() -> Option<(i32, i32)> {
-    crate::mouse::drain_delta()
+    // Mouse driver moved to user space
+    // TODO: Get mouse delta from user space driver via IPC
+    None
 }
 
 fn save_cursor_region(x: u32, y: u32) {

@@ -101,6 +101,12 @@ pub const SYS_UNMAP_REGION: u64 = 30;
 pub const SYS_REMAP_REGION: u64 = 31;
 pub const SYS_REGISTER_FAULT_HANDLER: u64 = 32;
 pub const SYS_MOUSE_POLL: u64 = 33;
+pub const SYS_MAP_FRAMEBUFFER: u64 = 34;
+pub const SYS_IO_OUTB: u64 = 35;
+pub const SYS_IO_INB: u64 = 36;
+pub const SYS_IO_OUTW: u64 = 37;
+pub const SYS_IO_INW: u64 = 38;
+pub const SYS_REGISTER_IRQ_HANDLER: u64 = 39;
 
 pub const ESUCCESS: u64 = 0;
 pub const EINVAL: u64 = u64::MAX - 1;
@@ -237,6 +243,12 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_REMAP_REGION => sys_remap_region(arg0, arg1, arg2, arg3),
         SYS_REGISTER_FAULT_HANDLER => sys_register_fault_handler(arg0),
         SYS_MOUSE_POLL => sys_mouse_poll(),
+        SYS_MAP_FRAMEBUFFER => sys_map_framebuffer(arg0, arg1),
+        SYS_IO_OUTB => sys_io_outb(arg0, arg1),
+        SYS_IO_INB => sys_io_inb(arg0),
+        SYS_IO_OUTW => sys_io_outw(arg0, arg1),
+        SYS_IO_INW => sys_io_inw(arg0),
+        SYS_REGISTER_IRQ_HANDLER => sys_register_irq_handler(arg0, arg1),
 
         _ => {
             log_warn!(
@@ -250,12 +262,8 @@ extern "C" fn rust_syscall_dispatcher(
 }
 
 fn sys_mouse_poll() -> u64 {
-    if let Some((dx, dy)) = crate::mouse::drain_delta() {
-        let dx_u = dx as u32 as u64;
-        let dy_u = dy as u32 as u64;
-        return (dx_u << 32) | dy_u;
-    }
-
+    // Mouse driver moved to user space
+    // TODO: Get mouse delta from user space driver via IPC
     EWOULDBLOCK
 }
 
@@ -2419,4 +2427,313 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
             }
         }
     }
+}
+
+fn sys_map_framebuffer(virt_addr: u64, as_id_raw: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_info!(
+        LOG_ORIGIN,
+        "map_framebuffer(virt=0x{:X}, as={})",
+        virt_addr,
+        as_id_raw
+    );
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => {
+            log_error!(LOG_ORIGIN, "map_framebuffer: no current thread");
+            return EINVAL;
+        }
+    };
+
+    // Get framebuffer info from graphics module
+    let (fb_addr, fb_size) = match crate::graphics::with_framebuffer(|fb| {
+        (fb.address() as usize, (fb.stride() * fb.height()) as usize * fb.bytes_per_pixel())
+    }) {
+        Some(info) => info,
+        None => {
+            log_error!(LOG_ORIGIN, "map_framebuffer: framebuffer not initialized");
+            return EINVAL;
+        }
+    };
+
+    if as_id_raw == 0 {
+        log_error!(LOG_ORIGIN, "map_framebuffer: address space ID required");
+        return EINVAL;
+    }
+
+    let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
+
+    // Map framebuffer with read/write permissions
+    let flags = crate::mm::vm::PageFlags::PRESENT
+        | crate::mm::vm::PageFlags::USER
+        | crate::mm::vm::PageFlags::WRITABLE;
+
+    match crate::mm::addrspace::map_region(
+        as_id,
+        caller,
+        virt_addr as usize,
+        fb_addr,
+        fb_size,
+        flags,
+    ) {
+        Ok(()) => {
+            log_info!(
+                LOG_ORIGIN,
+                "map_framebuffer: mapped 0x{:X} bytes at virt=0x{:X}",
+                fb_size,
+                virt_addr
+            );
+            ESUCCESS
+        }
+        Err(e) => {
+            log_error!(LOG_ORIGIN, "map_framebuffer: failed - {:?}", e);
+            match e {
+                crate::mm::addrspace::AddressSpaceError::OutOfMemory => ENOMEM,
+                crate::mm::addrspace::AddressSpaceError::PermissionDenied => EPERM,
+                _ => EINVAL,
+            }
+        }
+    }
+}
+
+fn sys_io_outb(port: u64, value: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_debug!(
+        LOG_ORIGIN,
+        "io_outb(port=0x{:X}, value=0x{:X})",
+        port,
+        value
+    );
+
+    if port > 0xFFFF {
+        log_warn!(LOG_ORIGIN, "io_outb: invalid port 0x{:X}", port);
+        return EINVAL;
+    }
+
+    // Check if caller has I/O permission capability
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let has_permission = crate::thread::validate_thread_capability_by_type(
+        caller,
+        crate::cap::CapPermissions::WRITE,
+        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port_num, .. } if *port_num == port as u16),
+    );
+
+    if !has_permission {
+        log_warn!(
+            LOG_ORIGIN,
+            "io_outb: permission denied (port=0x{:X}, caller={})",
+            port,
+            caller
+        );
+        return EPERM;
+    }
+
+    unsafe {
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") port as u16,
+            in("al") value as u8,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    ESUCCESS
+}
+
+fn sys_io_inb(port: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_debug!(LOG_ORIGIN, "io_inb(port=0x{:X})", port);
+
+    if port > 0xFFFF {
+        log_warn!(LOG_ORIGIN, "io_inb: invalid port 0x{:X}", port);
+        return EINVAL;
+    }
+
+    // Check if caller has I/O permission capability
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let has_permission = crate::thread::validate_thread_capability_by_type(
+        caller,
+        crate::cap::CapPermissions::READ,
+        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port_num, .. } if *port_num == port as u16),
+    );
+
+    if !has_permission {
+        log_warn!(
+            LOG_ORIGIN,
+            "io_inb: permission denied (port=0x{:X}, caller={})",
+            port,
+            caller
+        );
+        return EPERM;
+    }
+
+    let value: u8;
+    unsafe {
+        core::arch::asm!(
+            "in al, dx",
+            out("al") value,
+            in("dx") port as u16,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    value as u64
+}
+
+fn sys_io_outw(port: u64, value: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_debug!(
+        LOG_ORIGIN,
+        "io_outw(port=0x{:X}, value=0x{:X})",
+        port,
+        value
+    );
+
+    if port > 0xFFFF {
+        log_warn!(LOG_ORIGIN, "io_outw: invalid port 0x{:X}", port);
+        return EINVAL;
+    }
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let has_permission = crate::thread::validate_thread_capability_by_type(
+        caller,
+        crate::cap::CapPermissions::WRITE,
+        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port_num, .. } if *port_num == port as u16),
+    );
+
+    if !has_permission {
+        log_warn!(
+            LOG_ORIGIN,
+            "io_outw: permission denied (port=0x{:X}, caller={})",
+            port,
+            caller
+        );
+        return EPERM;
+    }
+
+    unsafe {
+        core::arch::asm!(
+            "out dx, ax",
+            in("dx") port as u16,
+            in("ax") value as u16,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    ESUCCESS
+}
+
+fn sys_io_inw(port: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_debug!(LOG_ORIGIN, "io_inw(port=0x{:X})", port);
+
+    if port > 0xFFFF {
+        log_warn!(LOG_ORIGIN, "io_inw: invalid port 0x{:X}", port);
+        return EINVAL;
+    }
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let has_permission = crate::thread::validate_thread_capability_by_type(
+        caller,
+        crate::cap::CapPermissions::READ,
+        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port_num, .. } if *port_num == port as u16),
+    );
+
+    if !has_permission {
+        log_warn!(
+            LOG_ORIGIN,
+            "io_inw: permission denied (port=0x{:X}, caller={})",
+            port,
+            caller
+        );
+        return EPERM;
+    }
+
+    let value: u16;
+    unsafe {
+        core::arch::asm!(
+            "in ax, dx",
+            out("ax") value,
+            in("dx") port as u16,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    value as u64
+}
+
+fn sys_register_irq_handler(irq_num: u64, port_id_raw: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_info!(
+        LOG_ORIGIN,
+        "register_irq_handler(irq={}, port={})",
+        irq_num,
+        port_id_raw
+    );
+
+    if irq_num > 255 {
+        log_warn!(LOG_ORIGIN, "register_irq_handler: invalid IRQ {}", irq_num);
+        return EINVAL;
+    }
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => {
+            log_error!(LOG_ORIGIN, "register_irq_handler: no current thread");
+            return EINVAL;
+        }
+    };
+
+    // Check if caller has IRQ capability
+    let has_permission = crate::thread::validate_thread_capability_by_type(
+        caller,
+        crate::cap::CapPermissions::WRITE,
+        |resource| matches!(resource, crate::cap::ResourceType::Irq { irq_num: num } if *num == irq_num as u8),
+    );
+
+    if !has_permission {
+        log_warn!(
+            LOG_ORIGIN,
+            "register_irq_handler: permission denied (irq={}, caller={})",
+            irq_num,
+            caller
+        );
+        return EPERM;
+    }
+
+    let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+
+    // TODO: Store IRQ -> Port mapping for forwarding interrupts to user space
+    // For now, just log success
+    log_info!(
+        LOG_ORIGIN,
+        "register_irq_handler: IRQ {} will forward to port {}",
+        irq_num,
+        port_id
+    );
+
+    ESUCCESS
 }

@@ -191,6 +191,9 @@ pub enum ResourceType {
     Irq {
         irq_num: u8,
     },
+    IoPort {
+        port_num: u16,
+    },
     Device {
         bdf: u16,
     },
@@ -436,7 +439,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 7];
+        let mut by_type = [0usize; 8];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -444,6 +447,7 @@ impl CapabilityManager {
                 ResourceType::MemoryRegion { .. } => 1,
                 ResourceType::IpcPort { .. } => 2,
                 ResourceType::Irq { .. } => 3,
+                ResourceType::IoPort { .. } => 7,
                 ResourceType::Device { .. } => 4,
                 ResourceType::DmaBuffer { .. } => 5,
                 ResourceType::SharedMemoryRegion { .. } => 6,
