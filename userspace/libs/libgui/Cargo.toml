@@ -1,0 +1,14 @@
+[package]
+name = "libgui"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "libgui"
+
+[dependencies]
+atom_syscall = { path = "../syscall" }
+libipc = { path = "../libipc" }
+
+[features]
+default = []

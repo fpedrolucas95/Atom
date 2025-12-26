@@ -110,6 +110,8 @@ pub const SYS_DEBUG_LOG: u64 = 39;
 pub const SYS_REGISTER_IRQ_HANDLER: u64 = 40;
 pub const SYS_MAP_FRAMEBUFFER: u64 = 41;
 pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
+pub const SYS_CLEAR_KEYBOARD_BUFFER: u64 = 43;
+pub const SYS_CLEAR_MOUSE_BUFFER: u64 = 44;
 
 pub const ESUCCESS: u64 = 0;
 pub const EINVAL: u64 = u64::MAX - 1;
@@ -255,6 +257,8 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_REGISTER_IRQ_HANDLER => sys_register_irq_handler(arg0 as u8, arg1),
         SYS_MAP_FRAMEBUFFER => sys_map_framebuffer_to_user(arg0),
         SYS_UNREGISTER_IRQ_HANDLER => sys_unregister_irq_handler(arg0 as u8),
+        SYS_CLEAR_KEYBOARD_BUFFER => sys_clear_keyboard_buffer(),
+        SYS_CLEAR_MOUSE_BUFFER => sys_clear_mouse_buffer(),
 
         _ => {
             log_warn!(
@@ -361,15 +365,31 @@ fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
     if msg_ptr.is_null() || len > 256 {
         return EINVAL;
     }
-    
+
     let msg = unsafe {
         core::slice::from_raw_parts(msg_ptr, len)
     };
-    
+
     if let Ok(s) = core::str::from_utf8(msg) {
         log_info!("userspace", "{}", s);
     }
-    
+
+    ESUCCESS
+}
+
+/// Clear the keyboard input buffer
+///
+/// Used by userspace drivers during initialization to discard stale data.
+fn sys_clear_keyboard_buffer() -> u64 {
+    crate::input::clear_keyboard_buffer();
+    ESUCCESS
+}
+
+/// Clear the mouse input buffer
+///
+/// Used by userspace drivers during initialization to discard stale data.
+fn sys_clear_mouse_buffer() -> u64 {
+    crate::input::clear_mouse_buffer();
     ESUCCESS
 }
 

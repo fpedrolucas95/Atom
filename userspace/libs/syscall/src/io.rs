@@ -111,3 +111,15 @@ pub fn ps2_write_command(cmd: u8) -> SyscallResult<()> {
     ps2_wait_input()?;
     port_write_u8(ps2::COMMAND_PORT, cmd)
 }
+
+/// Read PS/2 status register
+pub fn ps2_read_status() -> SyscallResult<u8> {
+    port_read_u8(ps2::STATUS_PORT)
+}
+
+/// Send command to auxiliary device (mouse)
+/// This writes 0xD4 to command port, then the command to data port
+pub fn ps2_write_aux_command(cmd: u8) -> SyscallResult<()> {
+    ps2_write_command(0xD4)?; // Next byte goes to aux device
+    ps2_write_data(cmd)
+}

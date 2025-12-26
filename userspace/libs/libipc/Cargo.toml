@@ -1,0 +1,13 @@
+[package]
+name = "libipc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "libipc"
+
+[dependencies]
+atom_syscall = { path = "../syscall" }
+
+[features]
+default = []

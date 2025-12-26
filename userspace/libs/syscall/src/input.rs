@@ -1,4 +1,12 @@
 // Input device syscalls (keyboard, mouse)
+//
+// This module provides userspace access to keyboard and mouse input.
+// The kernel only provides minimal IRQ buffering; all device initialization
+// and event interpretation is done in userspace.
+//
+// For device initialization, use the io module's port_read/port_write functions
+// to directly control the PS/2 controller. The kernel allows access to ports
+// 0x60 (data) and 0x64 (status/command) for PS/2 devices.
 
 use crate::error::EWOULDBLOCK;
 use crate::raw::{syscall0, numbers::*};
@@ -247,4 +255,26 @@ pub mod scancodes {
 
     // Extended prefix
     pub const EXTENDED_PREFIX: u8 = 0xE0;
+}
+
+// ============================================================================
+// Buffer Management
+// ============================================================================
+
+/// Clear the keyboard input buffer
+///
+/// Discards any pending keyboard scancodes. Useful during driver initialization
+/// to ensure a clean state.
+#[inline]
+pub fn clear_keyboard_buffer() {
+    unsafe { syscall0(SYS_CLEAR_KEYBOARD_BUFFER) };
+}
+
+/// Clear the mouse input buffer
+///
+/// Discards any pending mouse bytes. Useful during driver initialization
+/// to ensure a clean state and proper packet alignment.
+#[inline]
+pub fn clear_mouse_buffer() {
+    unsafe { syscall0(SYS_CLEAR_MOUSE_BUFFER) };
 }

@@ -2,10 +2,11 @@
 members = [
     "kernel",
     "userspace/libs/syscall",
+    "userspace/libs/libipc",
+    "userspace/libs/libgui",
 ]
 # Os drivers userspace serao compilados separadamente como binarios ATXF
 # quando o loader de executaveis estiver pronto.
-# Por enquanto, o kernel usa um shell embutido (shell.rs).
 exclude = [
     "userspace/drivers/keyboard",
     "userspace/drivers/mouse",
