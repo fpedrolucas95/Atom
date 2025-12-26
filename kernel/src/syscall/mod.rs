@@ -336,22 +336,36 @@ fn sys_keyboard_poll() -> u64 {
 /// Get framebuffer information for userspace graphics
 fn sys_get_framebuffer(info_ptr: *mut u64) -> u64 {
     if info_ptr.is_null() {
+        log_warn!(LOG_ORIGIN, "sys_get_framebuffer: null pointer");
         return EINVAL;
     }
-    
+
     if let Some((width, height)) = crate::graphics::get_dimensions() {
         if let Some(addr) = crate::graphics::get_framebuffer_address() {
+            let stride = crate::graphics::get_stride();
+            let bpp = crate::graphics::get_bytes_per_pixel();
+
+            log_info!(
+                LOG_ORIGIN,
+                "sys_get_framebuffer: writing to user ptr 0x{:X}: addr=0x{:X} {}x{} stride={} bpp={}",
+                info_ptr as usize, addr, width, height, stride, bpp
+            );
+
             unsafe {
                 // Write: [address, width, height, stride, bytes_per_pixel]
-                *info_ptr = addr as u64;
-                *info_ptr.add(1) = width as u64;
-                *info_ptr.add(2) = height as u64;
-                *info_ptr.add(3) = crate::graphics::get_stride() as u64;
-                *info_ptr.add(4) = crate::graphics::get_bytes_per_pixel() as u64;
+                // Use write_volatile to ensure writes aren't optimized away
+                core::ptr::write_volatile(info_ptr, addr as u64);
+                core::ptr::write_volatile(info_ptr.add(1), width as u64);
+                core::ptr::write_volatile(info_ptr.add(2), height as u64);
+                core::ptr::write_volatile(info_ptr.add(3), stride as u64);
+                core::ptr::write_volatile(info_ptr.add(4), bpp as u64);
             }
+
+            log_info!(LOG_ORIGIN, "sys_get_framebuffer: write complete, returning success");
             return ESUCCESS;
         }
     }
+    log_warn!(LOG_ORIGIN, "sys_get_framebuffer: framebuffer not available");
     EINVAL
 }
 
