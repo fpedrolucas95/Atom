@@ -734,8 +734,12 @@ fn main() -> ! {
     init_ps2_controller();
 
     // Get framebuffer
+    log("Desktop: Requesting framebuffer...");
     let fb = match Framebuffer::new() {
-        Some(fb) => fb,
+        Some(fb) => {
+            log("Desktop: Got framebuffer, checking address...");
+            fb
+        }
         None => {
             log("Desktop: Failed to get framebuffer");
             exit(1);
