@@ -1,61 +1,83 @@
-// Embedded Userspace Shell
+// Atom Desktop Environment
 //
-// This module provides a minimal embedded shell that runs in Ring 3 (userspace).
-// It uses syscalls to communicate with the kernel for:
+// Minimal, modern desktop environment running in Ring 3 (userspace).
+// Design: Top panel + Desktop area + Bottom dock
+//
+// Uses syscalls to communicate with the kernel for:
 // - Getting framebuffer information
 // - Polling keyboard and mouse input
 // - Yielding to other threads
-//
-// The shell is copied to user-accessible pages at runtime and executed
-// with a proper Ring 3 context (CS=0x1B, SS=0x23).
-//
-// Future: This will be replaced by loading ui_shell.atxf from userspace/drivers/
 
 use crate::syscall::{
     ESUCCESS, EWOULDBLOCK,
     SYS_THREAD_YIELD, SYS_GET_FRAMEBUFFER, SYS_KEYBOARD_POLL, SYS_MOUSE_POLL,
 };
 
-/// Entry point for the embedded userspace shell (Ring 3)
-/// This function is designed to run in Ring 3 using syscalls
+// ============================================================================
+// Theme Colors (Nord-inspired)
+// ============================================================================
+const COLOR_BG_DARK: u32 = 0x002E3440;      // Desktop background
+const COLOR_PANEL: u32 = 0x00242933;         // Panel/Dock background
+const COLOR_ACCENT: u32 = 0x0088C0D0;        // Accent (cyan)
+const COLOR_TEXT: u32 = 0x00ECEFF4;          // Primary text
+const COLOR_TEXT_DIM: u32 = 0x004C566A;      // Dimmed text
+const COLOR_DOCK_ICON: u32 = 0x003B4252;     // Dock icon background
+const COLOR_DOCK_HOVER: u32 = 0x00434C5E;    // Dock icon hover
+
+// ============================================================================
+// Layout Constants
+// ============================================================================
+const PANEL_HEIGHT: u32 = 24;
+const DOCK_HEIGHT: u32 = 48;
+const DOCK_ICON_SIZE: u32 = 40;
+const DOCK_ICON_MARGIN: u32 = 4;
+
+/// Entry point for the Atom Desktop Environment (Ring 3)
 pub extern "C" fn shell_entry() -> ! {
     // Get framebuffer via syscall
     let mut fb_info = [0u64; 5];
     let fb_result = unsafe { syscall1(SYS_GET_FRAMEBUFFER, fb_info.as_mut_ptr() as u64) };
-    
+
     if fb_result != ESUCCESS {
         loop { unsafe { syscall0(SYS_THREAD_YIELD); } }
     }
-    
+
     let fb_addr = fb_info[0] as usize;
     let width = fb_info[1] as u32;
     let height = fb_info[2] as u32;
     let stride = fb_info[3] as u32;
     let bpp = fb_info[4] as usize;
-    
-    // Clear screen to dark background
-    fill_rect(fb_addr, stride, bpp, 0, 0, width, height, 0x002E3440);
-    
-    // Draw title bar
-    fill_rect(fb_addr, stride, bpp, 0, 0, width, 32, 0x00242933);
-    draw_string(fb_addr, stride, bpp, 16, 8, "Atom OS - Userspace Shell", 0x0088C0D0);
-    
-    // Draw status
-    draw_string(fb_addr, stride, bpp, 16, 50, "Running in Ring 3 (User Mode)", 0x00A3BE8C);
-    draw_string(fb_addr, stride, bpp, 16, 70, "Drivers loaded from userspace", 0x00ECEFF4);
-    
-    // Cursor state
+
+    // Calculate layout
+    let desktop_y = PANEL_HEIGHT;
+    let desktop_height = height - PANEL_HEIGHT - DOCK_HEIGHT;
+    let dock_y = height - DOCK_HEIGHT;
+
+    // ========================================================================
+    // Draw initial UI
+    // ========================================================================
+
+    // Desktop background
+    fill_rect(fb_addr, stride, bpp, 0, desktop_y, width, desktop_height, COLOR_BG_DARK);
+
+    // Top Panel
+    draw_panel(fb_addr, stride, bpp, width);
+
+    // Bottom Dock
+    draw_dock(fb_addr, stride, bpp, width, dock_y);
+
+    // ========================================================================
+    // Cursor State
+    // ========================================================================
     let mut cursor_x = width / 2;
     let mut cursor_y = height / 2;
 
-    // Saved region under cursor (12x16 pixels = 192 pixels max)
     const CURSOR_WIDTH: u32 = 12;
     const CURSOR_HEIGHT: u32 = 16;
     let mut saved_region: [u32; 192] = [0; 192];
     let mut saved_x = cursor_x;
     let mut saved_y = cursor_y;
 
-    // Save initial region and draw cursor
     save_cursor_region(fb_addr, stride, bpp, cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT, &mut saved_region);
     draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
 
@@ -63,24 +85,40 @@ pub extern "C" fn shell_entry() -> ! {
     let mut mouse_cycle = 0u8;
     let mut mouse_packet = [0u8; 3];
 
+    // Simple tick counter for clock updates
+    let mut tick_counter: u32 = 0;
+    let mut last_clock_update: u32 = 0;
+
+    // ========================================================================
+    // Main Event Loop
+    // ========================================================================
     loop {
+        tick_counter = tick_counter.wrapping_add(1);
+
+        // Update clock every ~1000 ticks (rough approximation)
+        if tick_counter.wrapping_sub(last_clock_update) > 1000 {
+            last_clock_update = tick_counter;
+            // Clock area refresh - just redraw time placeholder
+            fill_rect(fb_addr, stride, bpp, width - 60, 0, 60, PANEL_HEIGHT, COLOR_PANEL);
+            draw_string(fb_addr, stride, bpp, width - 52, 8, "12:34", COLOR_TEXT);
+        }
+
         // Poll keyboard
         loop {
             let scancode = unsafe { syscall0(SYS_KEYBOARD_POLL) };
             if scancode == EWOULDBLOCK { break; }
-            
-            // ESC to halt
-            if scancode == 0x01 {
+
+            if scancode == 0x01 { // ESC
                 loop { unsafe { syscall0(SYS_THREAD_YIELD); } }
             }
         }
-        
-        // Poll mouse (raw bytes) - accumulate all deltas first, then update cursor once
+
+        // Poll mouse
         let mut total_dx: i32 = 0;
         let mut total_dy: i32 = 0;
         let mut mouse_moved = false;
 
-        // Debug counter for visual feedback
+        // Debug counter for framebuffer sync (required for rendering)
         static mut DEBUG_BYTE_X: u32 = 0;
 
         loop {
@@ -89,112 +127,121 @@ pub extern "C" fn shell_entry() -> ! {
 
             let byte = byte_result as u8;
 
-            // DEBUG: Green pixel for each byte received from syscall
+            // Framebuffer sync pulse (discreet, in panel area)
             unsafe {
-                DEBUG_BYTE_X = (DEBUG_BYTE_X + 2) % 200;
-                fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 2, 2, 2, 0x0000FF00);
+                DEBUG_BYTE_X = (DEBUG_BYTE_X + 1) % 100;
+                fill_rect(fb_addr, stride, bpp, DEBUG_BYTE_X, 0, 1, 1, COLOR_PANEL);
             }
 
-            // Process PS/2 mouse packet (OSDev wiki format)
             match mouse_cycle {
                 0 => {
-                    // First byte: bit 3 should always be 1 (alignment check)
                     if byte & 0x08 != 0 {
                         mouse_packet[0] = byte;
                         mouse_cycle = 1;
-                        // DEBUG: Cyan pixel for byte 0 accepted
-                        unsafe {
-                            fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 6, 2, 2, 0x0000FFFF);
-                        }
                     }
-                    // else: discard byte (sync error)
                 }
                 1 => {
                     mouse_packet[1] = byte;
                     mouse_cycle = 2;
-                    // DEBUG: Yellow pixel for byte 1
-                    unsafe {
-                        fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 10, 2, 2, 0x00FFFF00);
-                    }
                 }
                 2 => {
                     mouse_packet[2] = byte;
                     mouse_cycle = 0;
 
-                    // DEBUG: Magenta pixel for byte 2
-                    unsafe {
-                        fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 14, 2, 2, 0x00FF00FF);
-                    }
-
-                    // Decode packet per OSDev wiki:
-                    // byte 0: flags (overflow, sign bits, buttons)
-                    // byte 1: delta X (left is negative)
-                    // byte 2: delta Y (down toward user is negative)
                     let flags = mouse_packet[0];
+                    if flags & 0xC0 != 0 { continue; }
 
-                    // Check for overflow (discard if set)
-                    if flags & 0xC0 != 0 {
-                        continue;
-                    }
-
-                    // Delta X with sign extension (bit 4 of flags)
                     let mut dx = mouse_packet[1] as i32;
-                    if flags & 0x10 != 0 {
-                        dx -= 256;
-                    }
+                    if flags & 0x10 != 0 { dx -= 256; }
 
-                    // Delta Y with sign extension (bit 5 of flags)
                     let mut dy = mouse_packet[2] as i32;
-                    if flags & 0x20 != 0 {
-                        dy -= 256;
-                    }
+                    if flags & 0x20 != 0 { dy -= 256; }
 
                     total_dx += dx;
                     total_dy += dy;
                     mouse_moved = true;
-
-                    // DEBUG: White pixel for complete packet processed
-                    unsafe {
-                        fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 18, 2, 2, 0x00FFFFFF);
-                    }
                 }
                 _ => mouse_cycle = 0,
             }
         }
-        
-        // Update cursor only once after processing all pending packets
+
         if mouse_moved {
-            // DEBUG: Draw red bar to show mouse_moved is true
-            static mut DEBUG_X: u32 = 0;
+            // Sync pulse
+            static mut SYNC_X: u32 = 0;
             unsafe {
-                DEBUG_X = (DEBUG_X + 5) % 400;
-                fill_rect(fb_addr, stride, bpp, 100 + DEBUG_X, 4, 5, 4, 0x00FF0000);
+                SYNC_X = (SYNC_X + 1) % 50;
+                fill_rect(fb_addr, stride, bpp, 100 + SYNC_X, 0, 1, 1, COLOR_PANEL);
             }
 
-            // Restore saved region at old cursor position
             restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
 
-            // Apply movement:
-            // PS/2: Delta X positive = right, Delta Y positive = up
-            // Screen: X increases right, Y increases downward
-            // So: cursor_x += dx, cursor_y -= dy
             let new_x = (cursor_x as i32 + total_dx).clamp(0, (width - CURSOR_WIDTH) as i32) as u32;
             let new_y = (cursor_y as i32 - total_dy).clamp(0, (height - CURSOR_HEIGHT) as i32) as u32;
 
             cursor_x = new_x;
             cursor_y = new_y;
 
-            // Save new region and draw cursor
             save_cursor_region(fb_addr, stride, bpp, cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT, &mut saved_region);
             saved_x = cursor_x;
             saved_y = cursor_y;
 
             draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
         }
-        
-        // Yield
+
         unsafe { syscall0(SYS_THREAD_YIELD); }
     }
+}
+
+// ============================================================================
+// UI Drawing Functions
+// ============================================================================
+
+fn draw_panel(fb: usize, stride: u32, bpp: usize, width: u32) {
+    // Panel background
+    fill_rect(fb, stride, bpp, 0, 0, width, PANEL_HEIGHT, COLOR_PANEL);
+
+    // Logo/Brand
+    draw_string(fb, stride, bpp, 8, 8, "Atom", COLOR_ACCENT);
+
+    // Clock (right side)
+    draw_string(fb, stride, bpp, width - 52, 8, "12:34", COLOR_TEXT);
+}
+
+fn draw_dock(fb: usize, stride: u32, bpp: usize, width: u32, y: u32) {
+    // Dock background
+    fill_rect(fb, stride, bpp, 0, y, width, DOCK_HEIGHT, COLOR_PANEL);
+
+    // Dock separator line
+    fill_rect(fb, stride, bpp, 0, y, width, 1, COLOR_TEXT_DIM);
+
+    // Center the dock icons
+    let num_icons = 3;
+    let dock_width = num_icons * (DOCK_ICON_SIZE + DOCK_ICON_MARGIN) - DOCK_ICON_MARGIN;
+    let dock_start_x = (width - dock_width) / 2;
+    let icon_y = y + (DOCK_HEIGHT - DOCK_ICON_SIZE) / 2;
+
+    // Draw dock icons
+    for i in 0..num_icons {
+        let icon_x = dock_start_x + i * (DOCK_ICON_SIZE + DOCK_ICON_MARGIN);
+        draw_dock_icon(fb, stride, bpp, icon_x, icon_y, i);
+    }
+}
+
+fn draw_dock_icon(fb: usize, stride: u32, bpp: usize, x: u32, y: u32, icon_type: u32) {
+    // Icon background (rounded appearance with solid rect for now)
+    fill_rect(fb, stride, bpp, x, y, DOCK_ICON_SIZE, DOCK_ICON_SIZE, COLOR_DOCK_ICON);
+
+    // Icon symbol (centered)
+    let symbol = match icon_type {
+        0 => "H",   // Home
+        1 => "F",   // Files
+        2 => "S",   // Settings
+        _ => "?",
+    };
+
+    let text_x = x + (DOCK_ICON_SIZE - 8) / 2;
+    let text_y = y + (DOCK_ICON_SIZE - 8) / 2;
+    draw_string(fb, stride, bpp, text_x, text_y, symbol, COLOR_ACCENT);
 }
 
 fn save_cursor_region(
@@ -366,6 +413,13 @@ fn get_glyph(ch: u8) -> [u8; 8] {
         b'1' => [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00],
         b'2' => [0x3C, 0x66, 0x06, 0x1C, 0x30, 0x60, 0x7E, 0x00],
         b'3' => [0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00],
+        b'4' => [0x0C, 0x1C, 0x3C, 0x6C, 0x7E, 0x0C, 0x0C, 0x00],
+        b'5' => [0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00],
+        b'6' => [0x3C, 0x60, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00],
+        b'7' => [0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00],
+        b'8' => [0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00],
+        b'9' => [0x3C, 0x66, 0x66, 0x3E, 0x06, 0x06, 0x3C, 0x00],
+        b':' => [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00],
         _ => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     }
 }
