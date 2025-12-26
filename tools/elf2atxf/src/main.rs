@@ -50,14 +50,10 @@ fn main() {
 
     // Get entry point
     let entry = obj.entry();
-    let text_base = 0x400000u64; // USER_EXEC_LOAD_BASE
-    let entry_offset = (entry - text_base) as u32;
 
-    println!("Entry point: 0x{:x}", entry);
-    println!("Entry offset: 0x{:x}", entry_offset);
-
-    // Collect section data
+    // Collect section data and find text base address
     let mut text_data = Vec::new();
+    let mut text_vaddr = 0u64;
     let mut data_data = Vec::new();
     let mut bss_size = 0usize;
 
@@ -67,9 +63,10 @@ fn main() {
 
         match name {
             ".text" => {
+                text_vaddr = section.address();
                 if let Ok(section_data) = section.data() {
                     text_data.extend_from_slice(section_data);
-                    println!(".text: {} bytes", section_data.len());
+                    println!(".text: {} bytes at vaddr 0x{:x}", section_data.len(), text_vaddr);
                 }
             }
             ".rodata" | ".got" | ".data" => {
@@ -85,6 +82,13 @@ fn main() {
             _ => {}
         }
     }
+
+    // Calculate entry offset from actual text base
+    let entry_offset = (entry - text_vaddr) as u32;
+
+    println!("Entry point: 0x{:x}", entry);
+    println!("Text base: 0x{:x}", text_vaddr);
+    println!("Entry offset: 0x{:x}", entry_offset);
 
     // Calculate offsets (page-aligned)
     let text_offset = PAGE_SIZE; // Header takes first page

@@ -401,6 +401,7 @@ fn launch_ui_service() {
 
 /// Create and launch the UI shell as a true userspace process
 fn create_ui_shell_process() -> Result<ThreadId, ExecError> {
+    const UI_SHELL_LOAD_BASE: usize = 0x0050_0000;  // Different from init (0x400000)
     const UI_SHELL_STACK_TOP: usize = 0x9000_0000;  // Different from init stack
     const UI_SHELL_STACK_PAGES: usize = 8;  // 32KB stack
     const UI_SHELL_STACK_SIZE: usize = UI_SHELL_STACK_PAGES * PAGE_SIZE;
@@ -421,10 +422,8 @@ fn create_ui_shell_process() -> Result<ThreadId, ExecError> {
         sections.entry_offset
     );
 
-    // Since init only uses 0x400000-0x402000, and ui_shell uses the same base,
-    // we'll load ui_shell at the same base. The init process is just a yield loop
-    // that we can effectively replace.
-    let text_base = executable::USER_EXEC_LOAD_BASE;
+    // Load ui_shell at a SEPARATE address from init to avoid memory conflicts
+    let text_base = UI_SHELL_LOAD_BASE;
     let text_size = align_up(sections.text.len().max(1));
     let text_pages = text_size / PAGE_SIZE;
 

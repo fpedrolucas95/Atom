@@ -5,8 +5,8 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* Load at userspace base address */
-    . = 0x400000;
+    /* Load at userspace base address (separate from init at 0x400000) */
+    . = 0x500000;
 
     .text : ALIGN(4096)
     {
