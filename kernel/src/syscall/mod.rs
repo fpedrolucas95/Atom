@@ -67,6 +67,8 @@ const MSR_STAR: u32 = 0xC000_0081;
 const MSR_LSTAR: u32 = 0xC000_0082;
 const MSR_SFMASK: u32 = 0xC000_0084;
 
+const LOG_ORIGIN: &str = "syscall";
+
 pub const SYS_THREAD_YIELD: u64 = 0;
 pub const SYS_THREAD_EXIT: u64 = 1;
 pub const SYS_THREAD_SLEEP: u64 = 2;
