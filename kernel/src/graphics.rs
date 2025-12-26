@@ -285,6 +285,34 @@ pub fn draw_pixel(x: u32, y: u32, color: Color) {
     });
 }
 
+/// Read a pixel value from the framebuffer (for cursor save/restore)
+pub fn read_pixel(x: u32, y: u32) -> u32 {
+    with_framebuffer(|fb| {
+        if x < fb.width && y < fb.height {
+            let offset = (y * fb.stride + x) as usize * fb.bytes_per_pixel;
+            unsafe {
+                let ptr = fb.address.add(offset) as *const u32;
+                ptr.read_volatile()
+            }
+        } else {
+            0
+        }
+    }).unwrap_or(0)
+}
+
+/// Write a raw pixel value to the framebuffer (for cursor save/restore)
+pub fn write_pixel(x: u32, y: u32, value: u32) {
+    with_framebuffer(|fb| {
+        if x < fb.width && y < fb.height {
+            let offset = (y * fb.stride + x) as usize * fb.bytes_per_pixel;
+            unsafe {
+                let ptr = fb.address.add(offset) as *mut u32;
+                ptr.write_volatile(value);
+            }
+        }
+    });
+}
+
 /// Fill a rectangle with the given color
 pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, color: Color) {
     with_framebuffer(|fb| {

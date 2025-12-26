@@ -8,8 +8,7 @@
 // runnable user thread living in its own address space.
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
-use alloc::vec;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::boot::BootInfo;
@@ -524,69 +523,18 @@ fn run_desktop_environment() {
 
     log_info!(LOG_ORIGIN, "Desktop environment starting...");
 
-    // Nord color theme
-    let bg_color = Color::new(46, 52, 64);       // nord0 - background
-    let panel_color = Color::new(59, 66, 82);    // nord1 - panel
-    let accent_color = Color::new(136, 192, 208); // nord8 - accent/cursor
-    let text_color = Color::new(236, 239, 244);  // nord6 - text
-    let window_bg = Color::new(67, 76, 94);      // nord2 - window background
-    let title_bg = Color::new(76, 86, 106);      // nord3 - title bar
-
     // Get screen dimensions
     let (width, height) = graphics::get_dimensions().unwrap_or((800, 600));
     log_info!(LOG_ORIGIN, "Screen: {}x{}", width, height);
 
-    // Clear screen with background color
-    graphics::clear_screen(bg_color);
+    // Initialize the compositor
+    let mut compositor = Compositor::new(width, height);
 
-    // Draw top panel (32 pixels high)
-    let panel_height = 32u32;
-    graphics::fill_rect(0, 0, width, panel_height, panel_color);
+    // Create initial windows
+    let terminal_id = compositor.create_window(50, 60, 400, 300, "Terminal");
 
-    // Draw "Atom" branding on left side of panel
-    graphics::draw_string(12, 10, "Atom", accent_color, panel_color);
-
-    // Draw status text on right side
-    let status_text = "Microkernel v0.1";
-    let status_x = width.saturating_sub((status_text.len() as u32) * 8 + 12);
-    graphics::draw_string(status_x, 10, status_text, text_color, panel_color);
-
-    // Draw a demo window
-    let win_x = 50u32;
-    let win_y = 60u32;
-    let win_width = 400u32;
-    let win_height = 300u32;
-    let title_height = 24u32;
-
-    // Window shadow (subtle)
-    graphics::fill_rect(win_x + 4, win_y + 4, win_width, win_height, Color::new(30, 34, 42));
-
-    // Window background
-    graphics::fill_rect(win_x, win_y, win_width, win_height, window_bg);
-
-    // Title bar
-    graphics::fill_rect(win_x, win_y, win_width, title_height, title_bg);
-    graphics::draw_string(win_x + 8, win_y + 6, "Terminal", text_color, title_bg);
-
-    // Window close button
-    let close_x = win_x + win_width - 20;
-    graphics::fill_rect(close_x, win_y + 4, 16, 16, Color::new(191, 97, 106)); // nord11 - red
-    graphics::draw_string(close_x + 4, win_y + 6, "x", text_color, Color::new(191, 97, 106));
-
-    // Terminal content area
-    let content_y = win_y + title_height;
-    let content_height = win_height - title_height;
-    graphics::fill_rect(win_x, content_y, win_width, content_height, Color::new(46, 52, 64));
-
-    // Terminal prompt
-    graphics::draw_string(win_x + 8, content_y + 8, "atom@kernel $ _", Color::new(163, 190, 140), Color::new(46, 52, 64));
-
-    // Initialize mouse cursor state
-    let mut cursor_x: i32 = (width / 2) as i32;
-    let mut cursor_y: i32 = (height / 2) as i32;
-
-    // Draw initial cursor
-    draw_cursor(cursor_x as u32, cursor_y as u32, accent_color);
+    // Initial render
+    compositor.render_all();
 
     log_info!(LOG_ORIGIN, "Desktop ready, entering event loop");
 
@@ -595,42 +543,45 @@ fn run_desktop_environment() {
 
     // Main event loop
     loop {
-        let mut had_events = false;
+        let mut needs_redraw = false;
 
         // Process mouse events
         while let Some(event) = input::poll_mouse_event() {
-            had_events = true;
+            compositor.handle_mouse_move(event.delta_x, event.delta_y);
 
-            // Erase old cursor by redrawing background
-            redraw_cursor_area(cursor_x as u32, cursor_y as u32, bg_color, panel_color, panel_height);
+            if event.left_button {
+                compositor.handle_mouse_click();
+            }
 
-            // Update cursor position
-            cursor_x = (cursor_x + event.delta_x as i32).clamp(0, width as i32 - 1);
-            cursor_y = (cursor_y + event.delta_y as i32).clamp(0, height as i32 - 1);
-
-            // Draw new cursor
-            draw_cursor(cursor_x as u32, cursor_y as u32, accent_color);
+            needs_redraw = true;
         }
 
         // Process keyboard events
         while let Some(event) = input::poll_key_event() {
-            had_events = true;
             if event.pressed {
                 log_info!(LOG_ORIGIN, "Key pressed: scancode={:#X}", event.scancode);
+                // Send to focused window
+                compositor.handle_key(event.scancode);
+                needs_redraw = true;
             }
+        }
+
+        // Redraw if needed
+        if needs_redraw {
+            compositor.render_cursor();
         }
 
         frame_count += 1;
 
-        // Log status periodically (every ~1M iterations)
+        // Log status periodically
         if frame_count % 1_000_000 == 0 {
+            let (cx, cy) = compositor.cursor_position();
             log_info!(LOG_ORIGIN, "Event loop running, frame={}, cursor=({},{})",
-                frame_count / 1_000_000, cursor_x, cursor_y);
+                frame_count / 1_000_000, cx, cy);
         }
 
-        // Small delay to avoid busy-spinning too hard
-        // This is a simple spin-wait, not a proper sleep
-        if !had_events {
+        // Small delay when no events
+        if !needs_redraw {
             for _ in 0..1000 {
                 core::hint::spin_loop();
             }
@@ -638,40 +589,263 @@ fn run_desktop_environment() {
     }
 }
 
-/// Draw a simple arrow cursor at the given position
-fn draw_cursor(x: u32, y: u32, color: crate::graphics::Color) {
-    use crate::graphics;
+// ============================================================================
+// Compositor - Window Management and Rendering
+// ============================================================================
 
-    // Simple 8x12 arrow cursor
-    let cursor_data: [u8; 12] = [
-        0b10000000,
-        0b11000000,
-        0b11100000,
-        0b11110000,
-        0b11111000,
-        0b11111100,
-        0b11111110,
-        0b11111000,
-        0b11011000,
-        0b10001100,
-        0b00001100,
-        0b00000110,
-    ];
+use crate::graphics::{self, Color};
 
-    for (row, &bits) in cursor_data.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (0x80 >> col) != 0 {
-                graphics::draw_pixel(x + col, y + row as u32, color);
+/// Window structure
+struct Window {
+    id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    title: String,
+    content_lines: Vec<String>,
+    visible: bool,
+}
+
+/// Compositor manages all windows and rendering
+struct Compositor {
+    screen_width: u32,
+    screen_height: u32,
+    windows: Vec<Window>,
+    next_window_id: u32,
+    cursor_x: i32,
+    cursor_y: i32,
+    cursor_saved: [u32; 12 * 16], // Save area under cursor (16x12 pixels)
+    cursor_saved_x: u32,
+    cursor_saved_y: u32,
+    focused_window: Option<u32>,
+}
+
+impl Compositor {
+    fn new(width: u32, height: u32) -> Self {
+        // Draw initial desktop background and panel
+        let bg_color = Color::new(46, 52, 64);       // nord0
+        let panel_color = Color::new(59, 66, 82);    // nord1
+        let accent_color = Color::new(136, 192, 208); // nord8
+        let text_color = Color::new(236, 239, 244);  // nord6
+
+        // Clear screen
+        graphics::clear_screen(bg_color);
+
+        // Draw top panel
+        graphics::fill_rect(0, 0, width, 32, panel_color);
+        graphics::draw_string(12, 10, "Atom", accent_color, panel_color);
+
+        let status = "Microkernel v0.1";
+        let status_x = width.saturating_sub((status.len() as u32) * 8 + 12);
+        graphics::draw_string(status_x, 10, status, text_color, panel_color);
+
+        Self {
+            screen_width: width,
+            screen_height: height,
+            windows: Vec::new(),
+            next_window_id: 1,
+            cursor_x: (width / 2) as i32,
+            cursor_y: (height / 2) as i32,
+            cursor_saved: [0; 12 * 16],
+            cursor_saved_x: width / 2,
+            cursor_saved_y: height / 2,
+            focused_window: None,
+        }
+    }
+
+    fn create_window(&mut self, x: u32, y: u32, width: u32, height: u32, title: &str) -> u32 {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+
+        let mut content = Vec::new();
+        content.push(String::from("atom@kernel $ _"));
+
+        let window = Window {
+            id,
+            x,
+            y,
+            width,
+            height,
+            title: String::from(title),
+            content_lines: content,
+            visible: true,
+        };
+
+        self.windows.push(window);
+        self.focused_window = Some(id);
+        id
+    }
+
+    fn render_all(&mut self) {
+        // Render all windows (back to front)
+        for window in &self.windows {
+            if window.visible {
+                self.render_window(window);
+            }
+        }
+
+        // Save area under cursor and draw cursor
+        self.save_cursor_area();
+        self.draw_cursor();
+    }
+
+    fn render_window(&self, window: &Window) {
+        let window_bg = Color::new(67, 76, 94);      // nord2
+        let title_bg = Color::new(76, 86, 106);      // nord3
+        let text_color = Color::new(236, 239, 244);  // nord6
+        let content_bg = Color::new(46, 52, 64);     // nord0
+        let prompt_color = Color::new(163, 190, 140); // nord14 - green
+
+        let title_height = 24u32;
+
+        // Window shadow
+        graphics::fill_rect(
+            window.x + 4,
+            window.y + 4,
+            window.width,
+            window.height,
+            Color::new(30, 34, 42),
+        );
+
+        // Window background
+        graphics::fill_rect(window.x, window.y, window.width, window.height, window_bg);
+
+        // Title bar
+        graphics::fill_rect(window.x, window.y, window.width, title_height, title_bg);
+        graphics::draw_string(window.x + 8, window.y + 6, &window.title, text_color, title_bg);
+
+        // Close button
+        let close_x = window.x + window.width - 20;
+        let close_color = Color::new(191, 97, 106); // nord11 - red
+        graphics::fill_rect(close_x, window.y + 4, 16, 16, close_color);
+        graphics::draw_string(close_x + 4, window.y + 6, "x", text_color, close_color);
+
+        // Content area
+        let content_y = window.y + title_height;
+        let content_height = window.height - title_height;
+        graphics::fill_rect(window.x, content_y, window.width, content_height, content_bg);
+
+        // Render content lines
+        let mut line_y = content_y + 8;
+        for line in &window.content_lines {
+            if line_y + 8 < window.y + window.height - 8 {
+                graphics::draw_string(window.x + 8, line_y, line, prompt_color, content_bg);
+                line_y += 12;
             }
         }
     }
-}
 
-/// Redraw the area where the cursor was (simplified version)
-fn redraw_cursor_area(x: u32, y: u32, bg_color: crate::graphics::Color, panel_color: crate::graphics::Color, panel_height: u32) {
-    use crate::graphics;
+    fn save_cursor_area(&mut self) {
+        let x = self.cursor_x.max(0) as u32;
+        let y = self.cursor_y.max(0) as u32;
 
-    // Simple clear of cursor area - just fill with background
-    let color = if y < panel_height { panel_color } else { bg_color };
-    graphics::fill_rect(x, y, 8, 12, color);
+        self.cursor_saved_x = x;
+        self.cursor_saved_y = y;
+
+        // Read pixels from framebuffer
+        for row in 0..12u32 {
+            for col in 0..16u32 {
+                let px = x + col;
+                let py = y + row;
+                if px < self.screen_width && py < self.screen_height {
+                    let pixel = graphics::read_pixel(px, py);
+                    self.cursor_saved[(row * 16 + col) as usize] = pixel;
+                }
+            }
+        }
+    }
+
+    fn restore_cursor_area(&self) {
+        let x = self.cursor_saved_x;
+        let y = self.cursor_saved_y;
+
+        // Write saved pixels back
+        for row in 0..12u32 {
+            for col in 0..16u32 {
+                let px = x + col;
+                let py = y + row;
+                if px < self.screen_width && py < self.screen_height {
+                    let pixel = self.cursor_saved[(row * 16 + col) as usize];
+                    graphics::write_pixel(px, py, pixel);
+                }
+            }
+        }
+    }
+
+    fn draw_cursor(&self) {
+        let accent_color = Color::new(136, 192, 208); // nord8
+        let x = self.cursor_x.max(0) as u32;
+        let y = self.cursor_y.max(0) as u32;
+
+        // Arrow cursor bitmap
+        let cursor_data: [u16; 12] = [
+            0b1000000000000000,
+            0b1100000000000000,
+            0b1110000000000000,
+            0b1111000000000000,
+            0b1111100000000000,
+            0b1111110000000000,
+            0b1111111000000000,
+            0b1111100000000000,
+            0b1101100000000000,
+            0b1000110000000000,
+            0b0000110000000000,
+            0b0000011000000000,
+        ];
+
+        for (row, &bits) in cursor_data.iter().enumerate() {
+            for col in 0..16 {
+                if bits & (0x8000 >> col) != 0 {
+                    let px = x + col;
+                    let py = y + row as u32;
+                    if px < self.screen_width && py < self.screen_height {
+                        graphics::draw_pixel(px, py, accent_color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_cursor(&mut self) {
+        // Restore old area
+        self.restore_cursor_area();
+
+        // Save new area
+        self.save_cursor_area();
+
+        // Draw cursor at new position
+        self.draw_cursor();
+    }
+
+    fn handle_mouse_move(&mut self, dx: i16, dy: i16) {
+        self.cursor_x = (self.cursor_x + dx as i32).clamp(0, self.screen_width as i32 - 1);
+        self.cursor_y = (self.cursor_y + dy as i32).clamp(0, self.screen_height as i32 - 1);
+    }
+
+    fn handle_mouse_click(&mut self) {
+        // Check if clicking on a window to focus it
+        let cx = self.cursor_x as u32;
+        let cy = self.cursor_y as u32;
+
+        for window in self.windows.iter().rev() {
+            if window.visible
+                && cx >= window.x
+                && cx < window.x + window.width
+                && cy >= window.y
+                && cy < window.y + window.height
+            {
+                self.focused_window = Some(window.id);
+                break;
+            }
+        }
+    }
+
+    fn handle_key(&mut self, _scancode: u8) {
+        // TODO: Send to focused window's input buffer
+    }
+
+    fn cursor_position(&self) -> (i32, i32) {
+        (self.cursor_x, self.cursor_y)
+    }
 }
