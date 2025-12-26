@@ -590,12 +590,18 @@ fn run_desktop_environment() {
 
     log_info!(LOG_ORIGIN, "Desktop ready, entering event loop");
 
+    // Frame counter for periodic status
+    let mut frame_count = 0u64;
+
     // Main event loop
     loop {
+        let mut had_events = false;
+
         // Process mouse events
         while let Some(event) = input::poll_mouse_event() {
+            had_events = true;
+
             // Erase old cursor by redrawing background
-            // (simplified - just draw a small rect)
             redraw_cursor_area(cursor_x as u32, cursor_y as u32, bg_color, panel_color, panel_height);
 
             // Update cursor position
@@ -608,14 +614,27 @@ fn run_desktop_environment() {
 
         // Process keyboard events
         while let Some(event) = input::poll_key_event() {
+            had_events = true;
             if event.pressed {
-                // Could handle keyboard input here
-                log_info!(LOG_ORIGIN, "Key: scancode={}", event.scancode);
+                log_info!(LOG_ORIGIN, "Key pressed: scancode={:#X}", event.scancode);
             }
         }
 
-        // Yield to other threads
-        sched::drive_cooperative_tick();
+        frame_count += 1;
+
+        // Log status periodically (every ~1M iterations)
+        if frame_count % 1_000_000 == 0 {
+            log_info!(LOG_ORIGIN, "Event loop running, frame={}, cursor=({},{})",
+                frame_count / 1_000_000, cursor_x, cursor_y);
+        }
+
+        // Small delay to avoid busy-spinning too hard
+        // This is a simple spin-wait, not a proper sleep
+        if !had_events {
+            for _ in 0..1000 {
+                core::hint::spin_loop();
+            }
+        }
     }
 }
 

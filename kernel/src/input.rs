@@ -305,11 +305,30 @@ pub fn poll_key_event() -> Option<KeyEvent> {
 /// Poll for next mouse event
 /// Parses raw PS/2 bytes into MouseEvent structures
 pub fn poll_mouse_event() -> Option<MouseEvent> {
-    let mut state = MOUSE_PACKET_STATE.lock();
+    // First, drain bytes from buffer into a local array to avoid holding lock too long
+    let mut local_bytes = [0u8; 16];
+    let count = {
+        let mut buf = MOUSE_BUFFER.lock();
+        let mut i = 0;
+        while i < local_bytes.len() {
+            if let Some(byte) = buf.pop() {
+                local_bytes[i] = byte;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        i
+    };
 
-    // Try to complete a packet
-    while let Some(byte) = MOUSE_BUFFER.lock().pop() {
-        if let Some(event) = state.add_byte(byte) {
+    if count == 0 {
+        return None;
+    }
+
+    // Now process bytes without holding the buffer lock
+    let mut state = MOUSE_PACKET_STATE.lock();
+    for i in 0..count {
+        if let Some(event) = state.add_byte(local_bytes[i]) {
             return Some(event);
         }
     }
