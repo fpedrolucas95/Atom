@@ -133,8 +133,11 @@ pub extern "C" fn shell_entry() -> ! {
 
             draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
 
-            // Memory fence to ensure framebuffer writes are visible
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+            // Force framebuffer sync with invisible 1px write at top-left corner
+            unsafe {
+                let ptr = fb_addr as *mut u32;
+                ptr.write_volatile(ptr.read_volatile());
+            }
         }
         
         // Yield
