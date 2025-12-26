@@ -115,18 +115,16 @@ pub extern "C" fn shell_entry() -> ! {
                         continue;
                     }
 
-                    // Delta X with sign extension
-                    // Bit 4 of flags = X sign bit
+                    // Delta X with sign extension (bit 4 of flags)
                     let mut dx = mouse_packet[1] as i32;
                     if flags & 0x10 != 0 {
-                        dx |= !0xFF; // Sign extend: dx = dx - 256
+                        dx -= 256;
                     }
 
-                    // Delta Y with sign extension
-                    // Bit 5 of flags = Y sign bit
+                    // Delta Y with sign extension (bit 5 of flags)
                     let mut dy = mouse_packet[2] as i32;
                     if flags & 0x20 != 0 {
-                        dy |= !0xFF; // Sign extend: dy = dy - 256
+                        dy -= 256;
                     }
 
                     total_dx += dx;
@@ -142,13 +140,11 @@ pub extern "C" fn shell_entry() -> ! {
             // Restore saved region at old cursor position
             restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
 
-            // Apply movement per OSDev wiki PS/2 mouse format:
-            // - Delta X: positive = right, negative = left
-            // - Delta Y: positive = up (away from user), negative = down (toward user)
-            // Screen coordinates: X increases right, Y increases downward
-            //
-            // Note: Some emulators/VMs report inverted X values, so we negate dx
-            let new_x = (cursor_x as i32 - total_dx).clamp(0, (width - CURSOR_WIDTH) as i32) as u32;
+            // Apply movement:
+            // PS/2: Delta X positive = right, Delta Y positive = up
+            // Screen: X increases right, Y increases downward
+            // So: cursor_x += dx, cursor_y -= dy
+            let new_x = (cursor_x as i32 + total_dx).clamp(0, (width - CURSOR_WIDTH) as i32) as u32;
             let new_y = (cursor_y as i32 - total_dy).clamp(0, (height - CURSOR_HEIGHT) as i32) as u32;
 
             cursor_x = new_x;
