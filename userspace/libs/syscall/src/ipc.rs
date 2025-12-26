@@ -98,3 +98,34 @@ pub fn send_async(port: PortId, data: &[u8]) -> SyscallResult<()> {
         Err(SyscallError::InvalidArgument)
     }
 }
+
+/// Wait for any of multiple ports to have data
+///
+/// Blocks until one of the ports has a message available.
+/// Returns the index of the port with data.
+pub fn wait_any(ports: &[PortId], timeout_ms: u64) -> SyscallResult<usize> {
+    use crate::raw::numbers::SYS_IPC_WAIT_ANY;
+
+    if ports.is_empty() || ports.len() > 64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let result = unsafe {
+        crate::raw::syscall3(
+            SYS_IPC_WAIT_ANY,
+            ports.as_ptr() as u64,
+            ports.len() as u64,
+            timeout_ms,
+        )
+    };
+
+    if result < ports.len() as u64 {
+        Ok(result as usize)
+    } else if result == EWOULDBLOCK {
+        Err(SyscallError::WouldBlock)
+    } else if result == crate::error::ETIMEDOUT {
+        Err(SyscallError::TimedOut)
+    } else {
+        Err(SyscallError::InvalidArgument)
+    }
+}

@@ -1,11 +1,15 @@
 [package]
-name = "ui_shell"
+name = "atom_desktop"
 version = "0.1.0"
 edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Atom Desktop Environment - Compositor and Window Manager"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+libgui = { path = "../../libs/libgui" }
 
 [[bin]]
-name = "ui_shell"
+name = "atom_desktop"
 path = "src/main.rs"

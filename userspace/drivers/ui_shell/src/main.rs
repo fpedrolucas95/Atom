@@ -1,76 +1,210 @@
-// Userspace UI Shell Driver
-//
-// This is a complete userspace driver that handles:
-// - PS/2 mouse input with 1:1 movement (no acceleration)
-// - PS/2 keyboard input
-// - Framebuffer-based graphics rendering
-// - Cursor rendering and movement
-//
-// This driver runs entirely in Ring 3 (userspace) and communicates with
-// the kernel via the atom_syscall library. It is a TRUE userspace binary,
-// not code that runs inside the kernel.
+//! Atom Desktop Environment
+//!
+//! This is the userspace compositor and window manager for Atom OS.
+//! It is the sole authority on UI policy, responsible for:
+//! - Window management and composition
+//! - Focus management
+//! - Input routing from drivers to applications
+//! - Application launching
+//!
+//! # Architecture
+//!
+//! The desktop environment receives input events from userspace drivers
+//! (keyboard and mouse) via IPC, routes them to the focused application,
+//! and composites window surfaces to the framebuffer.
+//!
+//! ```text
+//! +----------------+     +----------------+
+//! | Keyboard       |---->|                |
+//! | Driver         |     |                |
+//! +----------------+     |    Desktop     |---> Framebuffer
+//!                        |  Environment   |
+//! +----------------+     |                |
+//! | Mouse          |---->|                |
+//! | Driver         |     +-------+--------+
+//! +----------------+             |
+//!                                v
+//!                    +----------------------+
+//!                    | Applications (IPC)   |
+//!                    +----------------------+
+//! ```
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-// Use the atom_syscall library for all kernel interactions
 use atom_syscall::graphics::{Color, Framebuffer};
 use atom_syscall::input::{keyboard_poll, MouseDriver};
+use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
+use libipc::messages::{MessageType, WindowId};
+use libipc::ports::well_known;
+
 // ============================================================================
-// Theme Colors
+// Theme Colors (Nord-inspired)
 // ============================================================================
 
-struct Theme;
-impl Theme {
-    const DESKTOP_BG: Color = Color::new(46, 52, 64);
-    const BAR_BG: Color = Color::new(36, 41, 51);
-    const ACCENT: Color = Color::new(136, 192, 208);
-    const TEXT_MAIN: Color = Color::new(236, 239, 244);
-    const WINDOW_BG: Color = Color::WHITE;
-    const WINDOW_HEADER: Color = Color::new(216, 222, 233);
-    const DOCK_BG: Color = Color::new(36, 41, 51);
-    const CURSOR_FILL: Color = Color::WHITE;
-    const CURSOR_OUTLINE: Color = Color::BLACK;
+mod theme {
+    use atom_syscall::graphics::Color;
+
+    pub const DESKTOP_BG: Color = Color::new(46, 52, 64);
+    pub const PANEL_BG: Color = Color::new(36, 41, 51);
+    pub const PANEL_TEXT: Color = Color::new(236, 239, 244);
+    pub const ACCENT: Color = Color::new(136, 192, 208);
+    pub const WINDOW_BG: Color = Color::new(46, 52, 64);
+    pub const WINDOW_HEADER: Color = Color::new(59, 66, 82);
+    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(76, 86, 106);
+    pub const WINDOW_BORDER: Color = Color::new(67, 76, 94);
+    pub const DOCK_BG: Color = Color::new(36, 41, 51);
+    pub const CURSOR_FILL: Color = Color::WHITE;
+    pub const CURSOR_OUTLINE: Color = Color::BLACK;
 }
 
 // ============================================================================
-// Cursor State (using atom_syscall Framebuffer)
+// Window Management
+// ============================================================================
+
+/// Window state in the compositor
+#[derive(Clone)]
+struct Window {
+    id: WindowId,
+    title: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    visible: bool,
+    focused: bool,
+    /// IPC port for sending events to the owning application
+    event_port: Option<PortId>,
+}
+
+impl Window {
+    fn new(id: WindowId, title: &str, x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            id,
+            title: String::from(title),
+            x,
+            y,
+            width,
+            height,
+            visible: true,
+            focused: false,
+            event_port: None,
+        }
+    }
+
+    fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x && py >= self.y
+            && px < self.x + self.width as i32
+            && py < self.y + self.height as i32
+    }
+
+    fn header_contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x && py >= self.y
+            && px < self.x + self.width as i32
+            && py < self.y + 24 // Header height
+    }
+}
+
+/// Window manager state
+struct WindowManager {
+    windows: Vec<Window>,
+    next_id: WindowId,
+    focused_id: Option<WindowId>,
+}
+
+impl WindowManager {
+    fn new() -> Self {
+        Self {
+            windows: Vec::new(),
+            next_id: 1,
+            focused_id: None,
+        }
+    }
+
+    fn create_window(&mut self, title: &str, x: i32, y: i32, width: u32, height: u32) -> WindowId {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let window = Window::new(id, title, x, y, width, height);
+        self.windows.push(window);
+        self.focus_window(id);
+        id
+    }
+
+    fn focus_window(&mut self, id: WindowId) {
+        // Unfocus previous
+        if let Some(prev_id) = self.focused_id {
+            if let Some(w) = self.windows.iter_mut().find(|w| w.id == prev_id) {
+                w.focused = false;
+            }
+        }
+
+        // Focus new and move to top
+        if let Some(pos) = self.windows.iter().position(|w| w.id == id) {
+            let mut window = self.windows.remove(pos);
+            window.focused = true;
+            self.windows.push(window);
+            self.focused_id = Some(id);
+        }
+    }
+
+    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+        // Check from top to bottom (reverse order)
+        for window in self.windows.iter().rev() {
+            if window.visible && window.contains(x, y) {
+                return Some(window.id);
+            }
+        }
+        None
+    }
+
+    fn close_window(&mut self, id: WindowId) {
+        self.windows.retain(|w| w.id != id);
+        if self.focused_id == Some(id) {
+            self.focused_id = self.windows.last().map(|w| w.id);
+        }
+    }
+}
+
+// ============================================================================
+// Cursor State
 // ============================================================================
 
 struct CursorState {
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
     saved_region: [u32; 16 * 16],
-    saved_x: u32,
-    saved_y: u32,
+    saved_x: i32,
+    saved_y: i32,
     has_saved: bool,
+    visible: bool,
 }
 
 impl CursorState {
     fn new(width: u32, height: u32) -> Self {
         Self {
-            x: width / 2,
-            y: height / 2,
+            x: (width / 2) as i32,
+            y: (height / 2) as i32,
             saved_region: [0; 16 * 16],
             saved_x: 0,
             saved_y: 0,
             has_saved: false,
+            visible: true,
         }
     }
 
-    /// Apply mouse delta with 1:1 movement (no acceleration)
     fn apply_delta(&mut self, dx: i32, dy: i32, width: u32, height: u32) {
-        // Direct 1:1 mapping - no scaling, no acceleration
-        let new_x = (self.x as i32).saturating_add(dx);
-        let new_y = (self.y as i32).saturating_sub(dy); // Y is inverted in PS/2
-
-        self.x = new_x.clamp(0, (width - 1) as i32) as u32;
-        self.y = new_y.clamp(0, (height - 1) as i32) as u32;
+        self.x = (self.x + dx).clamp(0, (width - 1) as i32);
+        self.y = (self.y - dy).clamp(0, (height - 1) as i32); // Y inverted in PS/2
     }
 
     fn save_region(&mut self, fb: &Framebuffer) {
@@ -84,13 +218,13 @@ impl CursorState {
 
         for row in 0..16u32 {
             for col in 0..16u32 {
-                let px = self.x + col;
-                let py = self.y + row;
+                let px = (self.x as u32).wrapping_add(col);
+                let py = (self.y as u32).wrapping_add(row);
 
                 if px < fb.width() && py < fb.height() {
-                    let pixel_offset = (py * stride + px) as usize * bpp;
-                    let pixel_ptr = (fb_addr + pixel_offset) as *const u32;
-                    self.saved_region[(row * 16 + col) as usize] = unsafe { pixel_ptr.read_volatile() };
+                    let offset = (py * stride + px) as usize * bpp;
+                    let ptr = (fb_addr + offset) as *const u32;
+                    self.saved_region[(row * 16 + col) as usize] = unsafe { ptr.read_volatile() };
                 }
             }
         }
@@ -107,14 +241,14 @@ impl CursorState {
 
         for row in 0..16u32 {
             for col in 0..16u32 {
-                let px = self.saved_x + col;
-                let py = self.saved_y + row;
+                let px = (self.saved_x as u32).wrapping_add(col);
+                let py = (self.saved_y as u32).wrapping_add(row);
 
                 if px < fb.width() && py < fb.height() {
-                    let pixel_offset = (py * stride + px) as usize * bpp;
-                    let pixel_ptr = (fb_addr + pixel_offset) as *mut u32;
+                    let offset = (py * stride + px) as usize * bpp;
+                    let ptr = (fb_addr + offset) as *mut u32;
                     unsafe {
-                        pixel_ptr.write_volatile(self.saved_region[(row * 16 + col) as usize]);
+                        ptr.write_volatile(self.saved_region[(row * 16 + col) as usize]);
                     }
                 }
             }
@@ -123,244 +257,256 @@ impl CursorState {
 }
 
 // ============================================================================
-// Drawing Functions
+// Compositor
 // ============================================================================
 
-const TOP_BAR_HEIGHT: u32 = 32;
-const DOCK_HEIGHT: u32 = 48;
-const DOCK_WIDTH: u32 = 400;
-const DOCK_ICON_SIZE: u32 = 32;
-const DOCK_ICON_PADDING: u32 = 16;
-
-// Dock icon types
-#[derive(Clone, Copy, PartialEq)]
-enum DockIcon {
-    Files,
-    Settings,
-    Browser,
-    Terminal,
+struct Compositor {
+    fb: Framebuffer,
+    wm: WindowManager,
+    cursor: CursorState,
+    mouse: MouseDriver,
+    event_port: PortId,
+    dirty: bool,
 }
 
-impl DockIcon {
-    fn color(&self) -> Color {
-        match self {
-            DockIcon::Files => Color::new(191, 97, 106),
-            DockIcon::Settings => Color::new(163, 190, 140),
-            DockIcon::Browser => Color::new(94, 129, 172),
-            DockIcon::Terminal => Color::new(46, 46, 46), // Dark terminal color
+impl Compositor {
+    fn new(fb: Framebuffer) -> Self {
+        let width = fb.width();
+        let height = fb.height();
+
+        // Create IPC port for receiving events
+        let event_port = create_port().expect("Failed to create event port");
+
+        Self {
+            fb,
+            wm: WindowManager::new(),
+            cursor: CursorState::new(width, height),
+            mouse: MouseDriver::new(),
+            event_port,
+            dirty: true,
         }
     }
-}
 
-const DOCK_ICONS: [DockIcon; 4] = [
-    DockIcon::Files,
-    DockIcon::Settings,
-    DockIcon::Browser,
-    DockIcon::Terminal,
-];
+    fn run(&mut self) -> ! {
+        log("Desktop: Starting compositor");
 
-// Dock position calculation helpers
-fn get_dock_bounds(width: u32, height: u32) -> (u32, u32, u32, u32) {
-    let x_start = (width / 2).saturating_sub(DOCK_WIDTH / 2);
-    let y_start = height.saturating_sub(DOCK_HEIGHT + 10);
-    (x_start, y_start, DOCK_WIDTH, DOCK_HEIGHT)
-}
+        // Create initial windows
+        self.wm.create_window("Welcome to Atom", 100, 100, 400, 300);
+        self.wm.create_window("Terminal", 150, 150, 500, 350);
 
-fn get_icon_bounds(dock_x: u32, dock_y: u32, icon_index: usize) -> (u32, u32, u32, u32) {
-    let ix = dock_x + DOCK_ICON_PADDING + (icon_index as u32 * (DOCK_ICON_SIZE + DOCK_ICON_PADDING));
-    let iy = dock_y + ((DOCK_HEIGHT - DOCK_ICON_SIZE) / 2);
-    (ix, iy, DOCK_ICON_SIZE, DOCK_ICON_SIZE)
-}
+        // Initial draw
+        self.draw_all();
 
-fn draw_scene(fb: &Framebuffer) {
-    let width = fb.width();
-    let height = fb.height();
+        log("Desktop: Entering event loop");
 
-    // Desktop background
-    fb.fill_rect(0, 0, width, height, Theme::DESKTOP_BG);
+        let mut prev_left = false;
 
-    // Top bar
-    fb.fill_rect(0, 0, width, TOP_BAR_HEIGHT, Theme::BAR_BG);
-    fb.draw_string(16, 8, "Atom", Theme::ACCENT, Theme::BAR_BG);
-    fb.draw_string(80, 8, "|  Userspace Shell", Theme::TEXT_MAIN, Theme::BAR_BG);
+        loop {
+            // Process mouse events
+            while let Some(event) = self.mouse.poll_event() {
+                self.cursor.restore_region(&self.fb);
+                self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
 
-    // Clock
-    let clock_x = width.saturating_sub(100);
-    fb.draw_string(clock_x, 8, "12:00 PM", Theme::TEXT_MAIN, Theme::BAR_BG);
+                // Handle click
+                if event.left_button && !prev_left {
+                    self.handle_click(self.cursor.x, self.cursor.y);
+                }
+                prev_left = event.left_button;
 
-    // Window
-    draw_window(fb, 100, 100, 400, 300, "Welcome to Atom");
-
-    // Dock
-    draw_dock(fb, width, height);
-}
-
-fn draw_window(fb: &Framebuffer, x: u32, y: u32, w: u32, h: u32, title: &str) {
-    // Shadow
-    fb.fill_rect(x + 4, y + 4, w, h, Color::new(20, 20, 20));
-    
-    // Window body
-    fb.fill_rect(x, y, w, h, Theme::WINDOW_BG);
-
-    // Header
-    let header_h = 24;
-    fb.fill_rect(x, y, w, header_h, Theme::WINDOW_HEADER);
-    fb.draw_string(x + 8, y + 6, title, Color::BLACK, Theme::WINDOW_HEADER);
-
-    // Close button
-    fb.fill_rect(x + w - 20, y + 6, 12, 12, Color::new(255, 90, 90));
-}
-
-fn draw_dock(fb: &Framebuffer, width: u32, height: u32) {
-    let (x_start, y_start, dock_w, dock_h) = get_dock_bounds(width, height);
-
-    fb.fill_rect(x_start, y_start, dock_w, dock_h, Theme::DOCK_BG);
-
-    for (i, icon) in DOCK_ICONS.iter().enumerate() {
-        let (ix, iy, icon_size, _) = get_icon_bounds(x_start, y_start, i);
-
-        // Draw icon background
-        fb.fill_rect(ix, iy, icon_size, icon_size, icon.color());
-
-        // Draw special terminal icon with ">" prompt
-        if *icon == DockIcon::Terminal {
-            // Draw a simple terminal prompt ">" on the icon
-            let prompt_color = Color::new(0, 255, 0); // Green terminal color
-            // Draw a simple ">" character manually
-            let px = ix + 8;
-            let py = iy + 10;
-            // Draw ">" shape
-            for i in 0..6u32 {
-                fb.draw_pixel(px + i, py + i, prompt_color);
-                fb.draw_pixel(px + i, py + 12 - i, prompt_color);
+                self.cursor.save_region(&self.fb);
+                self.draw_cursor();
             }
-            // Draw underscore cursor
-            for i in 0..8u32 {
-                fb.draw_pixel(px + 10 + i, py + 10, prompt_color);
+
+            // Process keyboard events
+            while let Some(scancode) = keyboard_poll() {
+                self.handle_key(scancode);
+            }
+
+            // Redraw if needed
+            if self.dirty {
+                self.draw_all();
+                self.dirty = false;
+            }
+
+            yield_now();
+        }
+    }
+
+    fn handle_click(&mut self, x: i32, y: i32) {
+        // Check if clicking on a window
+        if let Some(id) = self.wm.window_at(x, y) {
+            if self.wm.focused_id != Some(id) {
+                self.wm.focus_window(id);
+                self.dirty = true;
+            }
+
+            // Check for close button click
+            if let Some(w) = self.wm.windows.iter().find(|w| w.id == id) {
+                let close_x = w.x + w.width as i32 - 20;
+                let close_y = w.y + 6;
+                if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
+                    self.wm.close_window(id);
+                    self.dirty = true;
+                }
             }
         }
     }
-}
 
-/// Check if a click at (x, y) hits a dock icon
-fn check_dock_click(x: u32, y: u32, screen_width: u32, screen_height: u32) -> Option<DockIcon> {
-    let (dock_x, dock_y, _, _) = get_dock_bounds(screen_width, screen_height);
+    fn handle_key(&mut self, scancode: u8) {
+        // Handle escape to quit
+        if scancode == 0x01 {
+            log("Desktop: Escape pressed, exiting");
+            exit(0);
+        }
 
-    for (i, icon) in DOCK_ICONS.iter().enumerate() {
-        let (ix, iy, icon_w, icon_h) = get_icon_bounds(dock_x, dock_y, i);
+        // Route to focused window (TODO: IPC to application)
+    }
 
-        if x >= ix && x < ix + icon_w && y >= iy && y < iy + icon_h {
-            return Some(*icon);
+    fn draw_all(&mut self) {
+        self.cursor.restore_region(&self.fb);
+
+        // Desktop background
+        self.fb.fill_rect(0, 0, self.fb.width(), self.fb.height(), theme::DESKTOP_BG);
+
+        // Top panel
+        self.draw_panel();
+
+        // Windows (bottom to top)
+        for window in self.wm.windows.iter() {
+            if window.visible {
+                self.draw_window(window);
+            }
+        }
+
+        // Bottom dock
+        self.draw_dock();
+
+        // Cursor
+        self.cursor.save_region(&self.fb);
+        self.draw_cursor();
+    }
+
+    fn draw_panel(&self) {
+        let width = self.fb.width();
+
+        // Panel background
+        self.fb.fill_rect(0, 0, width, 28, theme::PANEL_BG);
+
+        // Logo
+        self.fb.draw_string(12, 6, "Atom", theme::ACCENT, theme::PANEL_BG);
+
+        // Status
+        self.fb.draw_string(70, 6, "|  Desktop Environment", theme::PANEL_TEXT, theme::PANEL_BG);
+
+        // Clock (right side)
+        let clock_x = width.saturating_sub(80);
+        self.fb.draw_string(clock_x, 6, "12:00", theme::PANEL_TEXT, theme::PANEL_BG);
+    }
+
+    fn draw_window(&self, window: &Window) {
+        let x = window.x as u32;
+        let y = window.y as u32;
+        let w = window.width;
+        let h = window.height;
+
+        // Shadow
+        self.fb.fill_rect(x + 3, y + 3, w, h, Color::new(20, 20, 30));
+
+        // Border
+        self.fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
+
+        // Window content
+        self.fb.fill_rect(x + 1, y + 1, w - 2, h - 2, theme::WINDOW_BG);
+
+        // Header
+        let header_color = if window.focused {
+            theme::WINDOW_HEADER_FOCUSED
+        } else {
+            theme::WINDOW_HEADER
+        };
+        self.fb.fill_rect(x + 1, y + 1, w - 2, 22, header_color);
+
+        // Title
+        self.fb.draw_string(x + 8, y + 5, &window.title, theme::PANEL_TEXT, header_color);
+
+        // Window controls
+        let btn_x = x + w - 18;
+        let btn_y = y + 6;
+        self.fb.fill_rect(btn_x, btn_y, 10, 10, Color::new(255, 95, 86)); // Close
+        self.fb.fill_rect(btn_x - 14, btn_y, 10, 10, Color::new(255, 189, 46)); // Minimize
+        self.fb.fill_rect(btn_x - 28, btn_y, 10, 10, Color::new(39, 201, 63)); // Maximize
+    }
+
+    fn draw_dock(&self) {
+        let width = self.fb.width();
+        let height = self.fb.height();
+
+        let dock_w = 300u32;
+        let dock_h = 48u32;
+        let dock_x = (width / 2).saturating_sub(dock_w / 2);
+        let dock_y = height.saturating_sub(dock_h + 10);
+
+        // Dock background with rounded appearance
+        self.fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
+
+        // Dock icons
+        let icons = [
+            (Color::new(191, 97, 106), "F"),  // Files
+            (Color::new(163, 190, 140), "S"),  // Settings
+            (Color::new(94, 129, 172), "B"),   // Browser
+            (Color::new(80, 80, 80), ">_"),    // Terminal
+        ];
+
+        let icon_size = 32u32;
+        let padding = 16u32;
+        let start_x = dock_x + padding;
+        let icon_y = dock_y + (dock_h - icon_size) / 2;
+
+        for (i, (color, label)) in icons.iter().enumerate() {
+            let ix = start_x + (i as u32 * (icon_size + padding));
+            self.fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
+            self.fb.draw_string(ix + 8, icon_y + 10, label, Color::WHITE, *color);
         }
     }
 
-    None
-}
+    fn draw_cursor(&self) {
+        let cursor_shape = [
+            [1,0,0,0,0,0,0,0,0,0],
+            [1,1,0,0,0,0,0,0,0,0],
+            [1,2,1,0,0,0,0,0,0,0],
+            [1,2,2,1,0,0,0,0,0,0],
+            [1,2,2,2,1,0,0,0,0,0],
+            [1,2,2,2,2,1,0,0,0,0],
+            [1,2,2,2,2,2,1,0,0,0],
+            [1,2,2,2,2,2,2,1,0,0],
+            [1,2,2,2,2,2,2,2,1,0],
+            [1,2,2,2,2,2,2,2,2,1],
+            [1,2,2,2,2,1,1,1,1,1],
+            [1,2,1,2,1,0,0,0,0,0],
+            [1,1,0,1,2,1,0,0,0,0],
+            [0,0,0,1,2,1,0,0,0,0],
+            [0,0,0,0,1,2,1,0,0,0],
+            [0,0,0,0,1,1,0,0,0,0],
+        ];
 
-// ============================================================================
-// Terminal Window
-// ============================================================================
-
-struct TerminalTheme;
-impl TerminalTheme {
-    const WINDOW_BG: Color = Color::new(30, 30, 30);
-    const TITLE_BAR: Color = Color::new(45, 45, 45);
-    const TITLE_TEXT: Color = Color::new(200, 200, 200);
-    const TEXT: Color = Color::new(220, 220, 220);
-    const PROMPT: Color = Color::new(136, 192, 208);
-    const PATH: Color = Color::new(163, 190, 140);
-    const CURSOR: Color = Color::new(200, 200, 200);
-}
-
-/// Launch and draw a terminal window
-fn launch_terminal(fb: &Framebuffer) {
-    let x = 120;
-    let y = 80;
-    let w = 560;
-    let h = 360;
-    let title_h = 24;
-
-    // Drop shadow
-    fb.fill_rect(x + 4, y + 4, w, h, Color::new(0, 0, 0));
-
-    // Window border
-    fb.fill_rect(x, y, w, h, Color::new(60, 60, 60));
-
-    // Title bar
-    fb.fill_rect(x + 1, y + 1, w - 2, title_h - 1, TerminalTheme::TITLE_BAR);
-    fb.draw_string(x + 10, y + 6, "Terminal", TerminalTheme::TITLE_TEXT, TerminalTheme::TITLE_BAR);
-
-    // Window control buttons
-    let btn_y = y + 6;
-    let btn_x = x + w - 18;
-    fb.fill_rect(btn_x, btn_y, 12, 12, Color::new(255, 95, 86));      // Close (red)
-    fb.fill_rect(btn_x - 18, btn_y, 12, 12, Color::new(255, 189, 46)); // Minimize (yellow)
-    fb.fill_rect(btn_x - 36, btn_y, 12, 12, Color::new(39, 201, 63));  // Maximize (green)
-
-    // Terminal content area
-    fb.fill_rect(x + 1, y + title_h, w - 2, h - title_h - 1, TerminalTheme::WINDOW_BG);
-
-    // Draw terminal content
-    let content_x = x + 10;
-    let content_y = y + title_h + 10;
-    let line_h = 16;
-
-    // Welcome message
-    fb.draw_string(content_x, content_y, "Atom Terminal v1.0", TerminalTheme::TEXT, TerminalTheme::WINDOW_BG);
-    fb.draw_string(content_x, content_y + line_h, "Type 'help' for available commands.", Color::new(128, 128, 128), TerminalTheme::WINDOW_BG);
-
-    // Empty line
-    let prompt_y = content_y + line_h * 3;
-
-    // Prompt: user@atom:~$
-    fb.draw_string(content_x, prompt_y, "user", TerminalTheme::PROMPT, TerminalTheme::WINDOW_BG);
-    fb.draw_string(content_x + 32, prompt_y, "@", TerminalTheme::TEXT, TerminalTheme::WINDOW_BG);
-    fb.draw_string(content_x + 40, prompt_y, "atom", TerminalTheme::PROMPT, TerminalTheme::WINDOW_BG);
-    fb.draw_string(content_x + 72, prompt_y, ":", TerminalTheme::TEXT, TerminalTheme::WINDOW_BG);
-    fb.draw_string(content_x + 80, prompt_y, "~", TerminalTheme::PATH, TerminalTheme::WINDOW_BG);
-    fb.draw_string(content_x + 88, prompt_y, "$", Color::new(180, 142, 173), TerminalTheme::WINDOW_BG);
-
-    // Cursor (block cursor after prompt)
-    fb.fill_rect(content_x + 104, prompt_y, 8, 14, TerminalTheme::CURSOR);
-}
-
-fn draw_cursor(fb: &Framebuffer, x: u32, y: u32) {
-    let cursor_map = [
-        [1,0,0,0,0,0,0,0,0,0],
-        [1,1,0,0,0,0,0,0,0,0],
-        [1,2,1,0,0,0,0,0,0,0],
-        [1,2,2,1,0,0,0,0,0,0],
-        [1,2,2,2,1,0,0,0,0,0],
-        [1,2,2,2,2,1,0,0,0,0],
-        [1,2,2,2,2,2,1,0,0,0],
-        [1,2,2,2,2,2,2,1,0,0],
-        [1,2,2,2,2,2,2,2,1,0],
-        [1,2,2,2,2,2,2,2,2,1],
-        [1,2,2,2,2,1,1,1,1,1],
-        [1,2,1,2,1,0,0,0,0,0],
-        [1,1,0,1,2,1,0,0,0,0],
-        [0,0,0,1,2,1,0,0,0,0],
-        [0,0,0,0,1,2,1,0,0,0],
-        [0,0,0,0,1,1,0,0,0,0],
-    ];
-
-    for (row, cols) in cursor_map.iter().enumerate() {
-        for (col, &px) in cols.iter().enumerate() {
-            let cx = x + col as u32;
-            let cy = y + row as u32;
-            match px {
-                1 => fb.draw_pixel(cx, cy, Theme::CURSOR_OUTLINE),
-                2 => fb.draw_pixel(cx, cy, Theme::CURSOR_FILL),
-                _ => {}
+        for (row, cols) in cursor_shape.iter().enumerate() {
+            for (col, &pixel) in cols.iter().enumerate() {
+                let px = self.cursor.x as u32 + col as u32;
+                let py = self.cursor.y as u32 + row as u32;
+                if px < self.fb.width() && py < self.fb.height() {
+                    match pixel {
+                        1 => self.fb.draw_pixel(px, py, theme::CURSOR_OUTLINE),
+                        2 => self.fb.draw_pixel(px, py, theme::CURSOR_FILL),
+                        _ => {}
+                    }
+                }
             }
         }
     }
 }
 
-// Font is now provided by the atom_syscall graphics library
-
 // ============================================================================
-// Main Entry Point
+// Entry Points
 // ============================================================================
 
 #[no_mangle]
@@ -368,94 +514,38 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
-/// UEFI entry point (required by x86_64-unknown-uefi target)
 #[no_mangle]
-pub extern "efiapi" fn efi_main(_image_handle: *const core::ffi::c_void, _system_table: *const core::ffi::c_void) -> usize {
+pub extern "efiapi" fn efi_main(
+    _image_handle: *const core::ffi::c_void,
+    _system_table: *const core::ffi::c_void,
+) -> usize {
     main()
 }
 
 fn main() -> ! {
-    log("UI Shell: Starting userspace shell driver");
+    log("Atom Desktop Environment v1.0");
+    log("Microkernel architecture - all UI in userspace");
 
-    // Get framebuffer from atom_syscall library
     let fb = match Framebuffer::new() {
         Some(fb) => fb,
         None => {
-            log("UI Shell: Failed to get framebuffer");
+            log("Desktop: Failed to acquire framebuffer");
             exit(1);
         }
     };
 
-    log("UI Shell: Framebuffer acquired");
+    log("Desktop: Framebuffer acquired");
 
-    let mut cursor = CursorState::new(fb.width(), fb.height());
-    let mut mouse_driver = MouseDriver::new();
-    let mut prev_left_button = false;
-    let mut terminal_launched = false;
-
-    // Draw initial scene
-    draw_scene(&fb);
-    
-    // Save initial cursor region and draw cursor
-    cursor.save_region(&fb);
-    draw_cursor(&fb, cursor.x, cursor.y);
-
-    log("UI Shell: Entering main loop");
-
-    let mut iteration: u64 = 0;
-
-    loop {
-        iteration = iteration.wrapping_add(1);
-
-        // Poll for mouse input with button states
-        while let Some(event) = mouse_driver.poll_event() {
-            // Restore old cursor region
-            cursor.restore_region(&fb);
-
-            // Apply delta with 1:1 movement
-            cursor.apply_delta(event.dx, event.dy, fb.width(), fb.height());
-
-            // Check for left button click (rising edge)
-            if event.left_button && !prev_left_button {
-                // Check if clicked on a dock icon
-                if let Some(icon) = check_dock_click(cursor.x, cursor.y, fb.width(), fb.height()) {
-                    match icon {
-                        DockIcon::Terminal => {
-                            if !terminal_launched {
-                                log("UI Shell: Terminal icon clicked - launching terminal");
-                                launch_terminal(&fb);
-                                terminal_launched = true;
-                            }
-                        }
-                        _ => {
-                            log("UI Shell: Dock icon clicked");
-                        }
-                    }
-                }
-            }
-            prev_left_button = event.left_button;
-
-            // Save new region and draw cursor
-            cursor.save_region(&fb);
-            draw_cursor(&fb, cursor.x, cursor.y);
-        }
-
-        // Poll for keyboard input
-        while let Some(scancode) = keyboard_poll() {
-            // Handle Escape key to exit (scancode 0x01)
-            if scancode == 0x01 {
-                log("UI Shell: Escape pressed, exiting");
-                exit(0);
-            }
-        }
-
-        // Yield to scheduler
-        yield_now();
-    }
+    let mut compositor = Compositor::new(fb);
+    compositor.run()
 }
+
+// ============================================================================
+// Panic Handler
+// ============================================================================
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    log("UI Shell: PANIC!");
+    log("Desktop: PANIC!");
     exit(0xFF);
 }

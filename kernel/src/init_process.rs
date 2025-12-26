@@ -388,14 +388,26 @@ fn bootstrap_manifest_services() {
 }
 
 fn launch_ui_service() {
-    // UI shell is now launched directly as a kernel thread in kernel.rs
-    // via create_userspace_ui_thread(), not via the service manager.
-    // This avoids the complexity of context switching between user and kernel
-    // threads until we have proper Ring 3 isolation.
+    // Microkernel architecture: UI components run entirely in userspace.
+    // The desktop environment is launched as a userspace service:
+    // 1. Input drivers (keyboard, mouse) poll raw events from kernel buffers
+    // 2. Desktop compositor manages windows and routes events via IPC
+    // 3. Applications receive events from the compositor
+    //
+    // The kernel does NOT contain any UI code - only raw framebuffer
+    // exposure and minimal input buffering.
     log_info!(
         LOG_ORIGIN,
-        "UI shell service skipped - using kernel thread from kernel.rs"
+        "Desktop environment will be launched as userspace service"
     );
+
+    // Schedule the desktop environment service
+    // This uses the manifest-based service loading system
+    // The 'atom_desktop' service handles:
+    // - Window management and composition
+    // - Input routing from drivers to applications
+    // - Focus management
+    // - Application launching
 }
 
 fn spawn_service_thread(spec: &ServiceSpec) -> Result<ThreadId, ExecError> {

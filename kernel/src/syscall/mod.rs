@@ -110,6 +110,8 @@ pub const SYS_DEBUG_LOG: u64 = 39;
 pub const SYS_REGISTER_IRQ_HANDLER: u64 = 40;
 pub const SYS_MAP_FRAMEBUFFER: u64 = 41;
 pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
+pub const SYS_IPC_WAIT_ANY: u64 = 43;  // Wait on multiple ports for any event
+pub const SYS_GET_IRQ_COUNT: u64 = 44; // Get IRQ occurrence count for a registered handler
 
 pub const ESUCCESS: u64 = 0;
 pub const EINVAL: u64 = u64::MAX - 1;
@@ -255,6 +257,8 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_REGISTER_IRQ_HANDLER => sys_register_irq_handler(arg0 as u8, arg1),
         SYS_MAP_FRAMEBUFFER => sys_map_framebuffer_to_user(arg0),
         SYS_UNREGISTER_IRQ_HANDLER => sys_unregister_irq_handler(arg0 as u8),
+        SYS_IPC_WAIT_ANY => sys_ipc_wait_any(arg0, arg1, arg2),
+        SYS_GET_IRQ_COUNT => sys_get_irq_count(arg0 as u8),
 
         _ => {
             log_warn!(
@@ -2709,4 +2713,120 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
     );
 
     ESUCCESS
+}
+
+// ============================================================================
+// Event-Based Input Primitives for Userspace Drivers
+// ============================================================================
+
+/// IRQ occurrence counters for userspace polling
+static IRQ_COUNTS: Mutex<BTreeMap<u8, u64>> = Mutex::new(BTreeMap::new());
+
+/// Increment IRQ count (called from interrupt handlers)
+pub fn increment_irq_count(irq: u8) {
+    let mut counts = IRQ_COUNTS.lock();
+    *counts.entry(irq).or_insert(0) += 1;
+}
+
+/// Get current IRQ count for a registered handler
+/// Userspace can use this to detect new events without IPC overhead
+fn sys_get_irq_count(irq: u8) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    // Verify caller owns this IRQ handler
+    let handlers = IRQ_HANDLERS.lock();
+    match handlers.get(&irq) {
+        Some((owner, _)) if *owner == caller => {
+            drop(handlers);
+            let counts = IRQ_COUNTS.lock();
+            counts.get(&irq).copied().unwrap_or(0)
+        }
+        Some(_) => EPERM,
+        None => EINVAL,
+    }
+}
+
+/// Wait for any of multiple IPC ports to have data
+///
+/// Args:
+///   ports_ptr: Pointer to array of port IDs to wait on
+///   count: Number of ports in the array
+///   timeout_ms: Timeout in milliseconds (0 = no wait, u64::MAX = infinite)
+///
+/// Returns:
+///   Index of the port with data (0-based), or error code
+fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    if count == 0 || count > 64 {
+        return EINVAL;
+    }
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    // Read port IDs from userspace
+    let mut ports = alloc::vec::Vec::with_capacity(count as usize);
+    unsafe {
+        let ptr = ports_ptr as *const u64;
+        for i in 0..count as usize {
+            ports.push(crate::ipc::PortId::from_raw(*ptr.add(i)));
+        }
+    }
+
+    // Calculate deadline
+    let deadline = if timeout_ms == u64::MAX {
+        None
+    } else if timeout_ms == 0 {
+        Some(crate::interrupts::get_ticks()) // Immediate check only
+    } else {
+        let ticks = (timeout_ms + 9) / 10;
+        Some(crate::interrupts::get_ticks() + ticks)
+    };
+
+    // Polling loop - check each port for messages
+    loop {
+        for (idx, port_id) in ports.iter().enumerate() {
+            match crate::ipc::try_receive_message(*port_id, caller) {
+                Ok(Some(_msg)) => {
+                    // Found a message! Return the port index
+                    log_debug!(
+                        LOG_ORIGIN,
+                        "ipc_wait_any: port {} (index {}) has message",
+                        port_id,
+                        idx
+                    );
+                    return idx as u64;
+                }
+                Ok(None) => continue,
+                Err(_) => continue, // Skip invalid ports
+            }
+        }
+
+        // Check timeout
+        if let Some(deadline_tick) = deadline {
+            if crate::interrupts::get_ticks() >= deadline_tick {
+                if timeout_ms == 0 {
+                    return EWOULDBLOCK;
+                } else {
+                    return ETIMEDOUT;
+                }
+            }
+        }
+
+        // Yield and retry
+        crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
+        let (prev, next) = crate::sched::on_timer_tick();
+        if let (Some(prev_id), Some(next_id)) = (prev, next) {
+            if prev_id != next_id {
+                crate::sched::perform_context_switch(prev_id, next_id);
+            }
+        }
+        crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
+    }
 }

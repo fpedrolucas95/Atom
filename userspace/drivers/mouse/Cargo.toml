@@ -2,9 +2,12 @@
 name = "mouse_driver"
 version = "0.1.0"
 edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "PS/2 Mouse Driver - Dispatches events via IPC"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
 
 [[bin]]
 name = "mouse_driver"

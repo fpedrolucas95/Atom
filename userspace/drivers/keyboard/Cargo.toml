@@ -2,9 +2,12 @@
 name = "keyboard_driver"
 version = "0.1.0"
 edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "PS/2 Keyboard Driver - Dispatches events via IPC"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
 
 [[bin]]
 name = "keyboard_driver"

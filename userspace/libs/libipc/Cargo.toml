@@ -1,0 +1,12 @@
+[package]
+name = "libipc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Standardized IPC message protocols for Atom OS userspace"
+
+[dependencies]
+atom_syscall = { path = "../syscall" }
+
+[lib]
+crate-type = ["rlib"]
