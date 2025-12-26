@@ -187,11 +187,15 @@ pub fn init() {
         } else {
             log_info!(LOG_ORIGIN, "IRQ12 NÃO mascarado (bit16=0), vetor={}", redtbl_low & 0xFF);
         }
-        
+
+        crate::serial_println!("[TRACE] About to mask IRQ10 via ioapic_write(0x14)...");
         ioapic_write(0x14, 0x0001_0000);
+        crate::serial_println!("[TRACE] ioapic_write(0x14) done");
         ioapic_write(0x15, 0x0000_0000);
+        crate::serial_println!("[TRACE] ioapic_write(0x15) done");
     }
 
+    crate::serial_println!("[TRACE] About to call disable_legacy_pic()...");
     unsafe { disable_legacy_pic(); }
 
     log_info!(LOG_ORIGIN, "APIC subsystem initialized (PIC disabled)");
@@ -216,29 +220,35 @@ unsafe fn enable_imcr_ioapic_routing() {
 unsafe fn disable_legacy_pic() {
     const LOG_ORIGIN: &str = "apic";
 
+    crate::serial_println!("[TRACE] disable_legacy_pic: step 1 - ICW1");
     outb(PIC1_CMD, ICW1_INIT | ICW1_ICW4);
     io_wait();
     outb(PIC2_CMD, ICW1_INIT | ICW1_ICW4);
     io_wait();
 
+    crate::serial_println!("[TRACE] disable_legacy_pic: step 2 - ICW2 (remap)");
     outb(PIC1_DATA, 0x20);
     io_wait();
     outb(PIC2_DATA, 0x28);
     io_wait();
 
+    crate::serial_println!("[TRACE] disable_legacy_pic: step 3 - ICW3 (cascade)");
     outb(PIC1_DATA, 4);
     io_wait();
     outb(PIC2_DATA, 2);
     io_wait();
 
+    crate::serial_println!("[TRACE] disable_legacy_pic: step 4 - ICW4");
     outb(PIC1_DATA, ICW4_8086);
     io_wait();
     outb(PIC2_DATA, ICW4_8086);
     io_wait();
 
+    crate::serial_println!("[TRACE] disable_legacy_pic: step 5 - mask all");
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
 
+    crate::serial_println!("[TRACE] disable_legacy_pic: done");
     PIC_ACTIVE = false;
 
     log_info!(
