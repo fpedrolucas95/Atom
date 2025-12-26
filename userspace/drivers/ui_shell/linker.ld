@@ -25,7 +25,9 @@ SECTIONS
         *(.got.plt)
     }
 
-    .data : ALIGN(4096)
+    /* Data must follow .got contiguously (no page alignment)
+       because elf2atxf concatenates rodata+got+data into one blob */
+    .data : ALIGN(8)
     {
         *(.data .data.*)
     }
