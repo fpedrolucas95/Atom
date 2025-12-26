@@ -705,33 +705,10 @@ fn init_ps2_controller() {
     log("Desktop: Initializing PS/2 controller...");
 
     // Clear any stale data from kernel buffers
+    // The kernel already initializes PS/2 hardware during boot,
+    // so we just need to clear any buffered input
     clear_keyboard_buffer();
     clear_mouse_buffer();
-
-    // Flush output buffer with timeout (max 16 bytes to avoid infinite loop)
-    for _ in 0..16 {
-        if io::ps2_read_status().unwrap_or(0) & 0x01 == 0 {
-            break;
-        }
-        let _ = io::ps2_read_data();
-    }
-
-    // Enable auxiliary device (mouse) - kernel may have already done this
-    let _ = io::ps2_write_command(0xA8);
-
-    // Enable keyboard
-    let _ = io::ps2_write_command(0xAE);
-
-    // Enable mouse data reporting
-    let _ = io::ps2_write_aux_command(0xF4);
-    // Brief wait for ACK (non-blocking)
-    for _ in 0..100 {
-        if io::ps2_read_status().unwrap_or(0) & 0x01 != 0 {
-            let _ = io::ps2_read_data(); // consume ACK
-            break;
-        }
-        core::hint::spin_loop();
-    }
 
     log("Desktop: PS/2 controller initialized");
 }
