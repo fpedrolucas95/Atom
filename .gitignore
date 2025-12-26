@@ -37,3 +37,4 @@ efi/NvVars
 efi/EFI/BOOT/BOOTX64.EFI
 userspace/build/ui_shell.atxf
 userspace/libs/syscall/build.log
+userspace/drivers/ui_shell/ui_shell.atxf
