@@ -338,15 +338,6 @@ fn bootstrap_manifest_services() {
             let mut launched = 0usize;
 
             for name in manager.startup_plan() {
-                if name == "ui_shell" {
-                    log_info!(
-                        LOG_ORIGIN,
-                        "Skipping manifest entry '{}' because UI shell is launched directly",
-                        name
-                    );
-                    continue;
-                }
-
                 if let Some(spec) = manager.manifest().service(name) {
                     match spawn_service_thread(spec) {
                         Ok(tid) => {
@@ -479,8 +470,6 @@ extern "C" fn service_worker() {
             ctx.capabilities
         );
 
-        log_info!(LOG_ORIGIN, "Checking if service '{}' is ui_shell", ctx.name);
-
         if let Err(err) = service_manager::manager().mark_ready(&ctx.name) {
             log_error!(
                 LOG_ORIGIN,
@@ -490,9 +479,15 @@ extern "C" fn service_worker() {
             );
         }
 
-        // Log service ready status
-        // NOTE: The ui_shell is now launched directly in kernel.rs via create_userspace_ui_thread,
-        // not via the service manager. This code path handles other services only.
+        // Check if this is the UI shell service
+        if ctx.name == "ui_shell" {
+            log_info!(LOG_ORIGIN, "Starting desktop environment (ui_shell)");
+            run_desktop_environment();
+            // Desktop runs forever, shouldn't return
+            return;
+        }
+
+        // Other services enter a generic service loop
         log_info!(LOG_ORIGIN, "Service '{}' ready, entering service loop", ctx.name);
 
         loop {
@@ -506,4 +501,147 @@ extern "C" fn service_worker() {
         );
         sched::drive_cooperative_tick();
     }
+}
+
+/// Desktop environment entry point
+/// Runs the compositor with window management, input handling, and rendering
+fn run_desktop_environment() {
+    use crate::graphics::{self, Color};
+    use crate::input;
+
+    const LOG_ORIGIN: &str = "desktop";
+
+    log_info!(LOG_ORIGIN, "Desktop environment starting...");
+
+    // Nord color theme
+    let bg_color = Color::new(46, 52, 64);       // nord0 - background
+    let panel_color = Color::new(59, 66, 82);    // nord1 - panel
+    let accent_color = Color::new(136, 192, 208); // nord8 - accent/cursor
+    let text_color = Color::new(236, 239, 244);  // nord6 - text
+    let window_bg = Color::new(67, 76, 94);      // nord2 - window background
+    let title_bg = Color::new(76, 86, 106);      // nord3 - title bar
+
+    // Get screen dimensions
+    let (width, height) = graphics::get_dimensions().unwrap_or((800, 600));
+    log_info!(LOG_ORIGIN, "Screen: {}x{}", width, height);
+
+    // Clear screen with background color
+    graphics::clear_screen(bg_color);
+
+    // Draw top panel (32 pixels high)
+    let panel_height = 32u32;
+    graphics::fill_rect(0, 0, width, panel_height, panel_color);
+
+    // Draw "Atom" branding on left side of panel
+    graphics::draw_string(12, 10, "Atom", accent_color, panel_color);
+
+    // Draw status text on right side
+    let status_text = "Microkernel v0.1";
+    let status_x = width.saturating_sub((status_text.len() as u32) * 8 + 12);
+    graphics::draw_string(status_x, 10, status_text, text_color, panel_color);
+
+    // Draw a demo window
+    let win_x = 50u32;
+    let win_y = 60u32;
+    let win_width = 400u32;
+    let win_height = 300u32;
+    let title_height = 24u32;
+
+    // Window shadow (subtle)
+    graphics::fill_rect(win_x + 4, win_y + 4, win_width, win_height, Color::new(30, 34, 42));
+
+    // Window background
+    graphics::fill_rect(win_x, win_y, win_width, win_height, window_bg);
+
+    // Title bar
+    graphics::fill_rect(win_x, win_y, win_width, title_height, title_bg);
+    graphics::draw_string(win_x + 8, win_y + 6, "Terminal", text_color, title_bg);
+
+    // Window close button
+    let close_x = win_x + win_width - 20;
+    graphics::fill_rect(close_x, win_y + 4, 16, 16, Color::new(191, 97, 106)); // nord11 - red
+    graphics::draw_string(close_x + 4, win_y + 6, "x", text_color, Color::new(191, 97, 106));
+
+    // Terminal content area
+    let content_y = win_y + title_height;
+    let content_height = win_height - title_height;
+    graphics::fill_rect(win_x, content_y, win_width, content_height, Color::new(46, 52, 64));
+
+    // Terminal prompt
+    graphics::draw_string(win_x + 8, content_y + 8, "atom@kernel $ _", Color::new(163, 190, 140), Color::new(46, 52, 64));
+
+    // Initialize mouse cursor state
+    let mut cursor_x: i32 = (width / 2) as i32;
+    let mut cursor_y: i32 = (height / 2) as i32;
+
+    // Draw initial cursor
+    draw_cursor(cursor_x as u32, cursor_y as u32, accent_color);
+
+    log_info!(LOG_ORIGIN, "Desktop ready, entering event loop");
+
+    // Main event loop
+    loop {
+        // Process mouse events
+        while let Some(event) = input::poll_mouse_event() {
+            // Erase old cursor by redrawing background
+            // (simplified - just draw a small rect)
+            redraw_cursor_area(cursor_x as u32, cursor_y as u32, bg_color, panel_color, panel_height);
+
+            // Update cursor position
+            cursor_x = (cursor_x + event.delta_x as i32).clamp(0, width as i32 - 1);
+            cursor_y = (cursor_y + event.delta_y as i32).clamp(0, height as i32 - 1);
+
+            // Draw new cursor
+            draw_cursor(cursor_x as u32, cursor_y as u32, accent_color);
+        }
+
+        // Process keyboard events
+        while let Some(event) = input::poll_key_event() {
+            if event.pressed {
+                // Could handle keyboard input here
+                log_info!(LOG_ORIGIN, "Key: scancode={}", event.scancode);
+            }
+        }
+
+        // Yield to other threads
+        sched::drive_cooperative_tick();
+    }
+}
+
+/// Draw a simple arrow cursor at the given position
+fn draw_cursor(x: u32, y: u32, color: crate::graphics::Color) {
+    use crate::graphics;
+
+    // Simple 8x12 arrow cursor
+    let cursor_data: [u8; 12] = [
+        0b10000000,
+        0b11000000,
+        0b11100000,
+        0b11110000,
+        0b11111000,
+        0b11111100,
+        0b11111110,
+        0b11111000,
+        0b11011000,
+        0b10001100,
+        0b00001100,
+        0b00000110,
+    ];
+
+    for (row, &bits) in cursor_data.iter().enumerate() {
+        for col in 0..8 {
+            if bits & (0x80 >> col) != 0 {
+                graphics::draw_pixel(x + col, y + row as u32, color);
+            }
+        }
+    }
+}
+
+/// Redraw the area where the cursor was (simplified version)
+fn redraw_cursor_area(x: u32, y: u32, bg_color: crate::graphics::Color, panel_color: crate::graphics::Color, panel_height: u32) {
+    use crate::graphics;
+
+    // Simple clear of cursor area - just fill with background
+    let color = if y < panel_height { panel_color } else { bg_color };
+    graphics::fill_rect(x, y, 8, 12, color);
 }

@@ -187,6 +187,136 @@ pub fn poll_mouse_byte() -> Option<u8> {
     MOUSE_BUFFER.lock().pop()
 }
 
+// ============================================================================
+// Structured Event Types for Desktop Environment
+// ============================================================================
+
+/// Keyboard event with scancode and press/release state
+#[derive(Debug, Clone, Copy)]
+pub struct KeyEvent {
+    pub scancode: u8,
+    pub pressed: bool,
+}
+
+/// Mouse event with movement deltas and button state
+#[derive(Debug, Clone, Copy)]
+pub struct MouseEvent {
+    pub delta_x: i16,
+    pub delta_y: i16,
+    pub left_button: bool,
+    pub right_button: bool,
+    pub middle_button: bool,
+}
+
+// Static state for mouse packet assembly
+static MOUSE_PACKET_STATE: Mutex<MousePacketState> = Mutex::new(MousePacketState::new());
+
+struct MousePacketState {
+    bytes: [u8; 3],
+    index: usize,
+}
+
+impl MousePacketState {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 3],
+            index: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.index = 0;
+    }
+
+    fn add_byte(&mut self, byte: u8) -> Option<MouseEvent> {
+        // First byte must have bit 3 set (always 1 in standard PS/2 mouse)
+        if self.index == 0 && (byte & 0x08) == 0 {
+            // Invalid first byte, skip it
+            return None;
+        }
+
+        self.bytes[self.index] = byte;
+        self.index += 1;
+
+        if self.index >= 3 {
+            // Complete packet
+            let packet = self.bytes;
+            self.index = 0;
+
+            // Parse the packet
+            let flags = packet[0];
+            let dx_raw = packet[1] as i16;
+            let dy_raw = packet[2] as i16;
+
+            // Apply sign extension if needed
+            let delta_x = if flags & 0x10 != 0 {
+                dx_raw - 256
+            } else {
+                dx_raw
+            };
+
+            let delta_y = if flags & 0x20 != 0 {
+                dy_raw - 256
+            } else {
+                dy_raw
+            };
+
+            // PS/2 Y axis is inverted (positive = up), negate for screen coords
+            Some(MouseEvent {
+                delta_x,
+                delta_y: -delta_y,
+                left_button: flags & 0x01 != 0,
+                right_button: flags & 0x02 != 0,
+                middle_button: flags & 0x04 != 0,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Poll for next keyboard event
+/// Parses raw scancodes into KeyEvent structures
+pub fn poll_key_event() -> Option<KeyEvent> {
+    let byte = poll_keyboard_byte()?;
+
+    // Check for break code (key release) - 0xF0 prefix for set 2, or high bit for set 1
+    if byte == 0xF0 {
+        // Scancode set 2 release prefix - get next byte
+        if let Some(scancode) = poll_keyboard_byte() {
+            return Some(KeyEvent {
+                scancode,
+                pressed: false,
+            });
+        }
+        return None;
+    }
+
+    // Scancode set 1: high bit indicates release
+    let pressed = byte & 0x80 == 0;
+    let scancode = byte & 0x7F;
+
+    Some(KeyEvent {
+        scancode,
+        pressed,
+    })
+}
+
+/// Poll for next mouse event
+/// Parses raw PS/2 bytes into MouseEvent structures
+pub fn poll_mouse_event() -> Option<MouseEvent> {
+    let mut state = MOUSE_PACKET_STATE.lock();
+
+    // Try to complete a packet
+    while let Some(byte) = MOUSE_BUFFER.lock().pop() {
+        if let Some(event) = state.add_byte(byte) {
+            return Some(event);
+        }
+    }
+
+    None
+}
+
 /// Initialize PS/2 controller for mouse support
 /// This is minimal initialization - full driver logic is in userspace
 pub fn init_ps2_mouse() {
