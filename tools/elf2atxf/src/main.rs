@@ -52,18 +52,35 @@ fn main() {
     let entry = obj.entry();
 
     // Collect section data and find text base address
+    // We need to preserve inter-section padding based on virtual addresses
     let mut text_data = Vec::new();
     let mut text_vaddr = 0u64;
     let mut data_data = Vec::new();
+    let mut data_base_vaddr = 0u64;  // Virtual address of first data section
     let mut bss_size = 0usize;
 
+    // First pass: find the base virtual address of the data region
+    for section in obj.sections() {
+        let name = section.name().unwrap_or("");
+        match name {
+            ".rodata" | ".got" | ".data" => {
+                if data_base_vaddr == 0 {
+                    data_base_vaddr = section.address();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Second pass: collect sections with proper padding
     for section in obj.sections() {
         let name = section.name().unwrap_or("");
         let size = section.size() as usize;
+        let vaddr = section.address();
 
         match name {
             ".text" => {
-                text_vaddr = section.address();
+                text_vaddr = vaddr;
                 if let Ok(section_data) = section.data() {
                     text_data.extend_from_slice(section_data);
                     println!(".text: {} bytes at vaddr 0x{:x}", section_data.len(), text_vaddr);
@@ -71,8 +88,21 @@ fn main() {
             }
             ".rodata" | ".got" | ".data" => {
                 if let Ok(section_data) = section.data() {
+                    // Calculate expected offset from data base
+                    let expected_offset = (vaddr - data_base_vaddr) as usize;
+                    let current_offset = data_data.len();
+
+                    // Add padding if needed to match virtual address alignment
+                    if expected_offset > current_offset {
+                        let padding = expected_offset - current_offset;
+                        data_data.extend(std::iter::repeat(0u8).take(padding));
+                        println!("{}: {} bytes at vaddr 0x{:x} (added {} padding bytes)",
+                                 name, section_data.len(), vaddr, padding);
+                    } else {
+                        println!("{}: {} bytes at vaddr 0x{:x}", name, section_data.len(), vaddr);
+                    }
+
                     data_data.extend_from_slice(section_data);
-                    println!("{}: {} bytes", name, section_data.len());
                 }
             }
             ".bss" => {
