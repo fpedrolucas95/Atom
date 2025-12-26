@@ -80,97 +80,45 @@ pub extern "C" fn shell_entry() -> ! {
         let mut total_dy: i32 = 0;
         let mut mouse_moved = false;
 
-        // Debug counter for visual feedback
-        static mut DEBUG_BYTE_X: u32 = 0;
-
         loop {
             let byte_result = unsafe { syscall0(SYS_MOUSE_POLL) };
             if byte_result == EWOULDBLOCK { break; }
 
             let byte = byte_result as u8;
 
-            // DEBUG: Green pixel for each byte received from syscall
-            unsafe {
-                DEBUG_BYTE_X = (DEBUG_BYTE_X + 2) % 200;
-                fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 2, 2, 2, 0x0000FF00);
-            }
-
-            // Process PS/2 mouse packet (OSDev wiki format)
             match mouse_cycle {
                 0 => {
-                    // First byte: bit 3 should always be 1 (alignment check)
                     if byte & 0x08 != 0 {
                         mouse_packet[0] = byte;
                         mouse_cycle = 1;
-                        // DEBUG: Cyan pixel for byte 0 accepted
-                        unsafe {
-                            fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 6, 2, 2, 0x0000FFFF);
-                        }
                     }
-                    // else: discard byte (sync error)
                 }
                 1 => {
                     mouse_packet[1] = byte;
                     mouse_cycle = 2;
-                    // DEBUG: Yellow pixel for byte 1
-                    unsafe {
-                        fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 10, 2, 2, 0x00FFFF00);
-                    }
                 }
                 2 => {
                     mouse_packet[2] = byte;
                     mouse_cycle = 0;
 
-                    // DEBUG: Magenta pixel for byte 2
-                    unsafe {
-                        fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 14, 2, 2, 0x00FF00FF);
-                    }
-
-                    // Decode packet per OSDev wiki:
-                    // byte 0: flags (overflow, sign bits, buttons)
-                    // byte 1: delta X (left is negative)
-                    // byte 2: delta Y (down toward user is negative)
                     let flags = mouse_packet[0];
+                    if flags & 0xC0 != 0 { continue; }
 
-                    // Check for overflow (discard if set)
-                    if flags & 0xC0 != 0 {
-                        continue;
-                    }
-
-                    // Delta X with sign extension (bit 4 of flags)
                     let mut dx = mouse_packet[1] as i32;
-                    if flags & 0x10 != 0 {
-                        dx -= 256;
-                    }
+                    if flags & 0x10 != 0 { dx -= 256; }
 
-                    // Delta Y with sign extension (bit 5 of flags)
                     let mut dy = mouse_packet[2] as i32;
-                    if flags & 0x20 != 0 {
-                        dy -= 256;
-                    }
+                    if flags & 0x20 != 0 { dy -= 256; }
 
                     total_dx += dx;
                     total_dy += dy;
                     mouse_moved = true;
-
-                    // DEBUG: White pixel for complete packet processed
-                    unsafe {
-                        fill_rect(fb_addr, stride, bpp, 10 + DEBUG_BYTE_X, 18, 2, 2, 0x00FFFFFF);
-                    }
                 }
                 _ => mouse_cycle = 0,
             }
         }
-        
-        // Update cursor only once after processing all pending packets
-        if mouse_moved {
-            // DEBUG: Draw red bar to show mouse_moved is true
-            static mut DEBUG_X: u32 = 0;
-            unsafe {
-                DEBUG_X = (DEBUG_X + 5) % 400;
-                fill_rect(fb_addr, stride, bpp, 100 + DEBUG_X, 4, 5, 4, 0x00FF0000);
-            }
 
+        if mouse_moved {
             // Restore saved region at old cursor position
             restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
 
