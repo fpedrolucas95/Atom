@@ -30,6 +30,10 @@ serial_log.txt
 .vs/Atom.slnx/v18/.wsuo
 .vs/Atom.slnx/v18/DocumentLayout.json
 build/Atom.efi
+build/*.obj
+build/*.log
+build/ui_shell.atxf
 efi/NvVars
 efi/EFI/BOOT/BOOTX64.EFI
 userspace/build/ui_shell.atxf
+userspace/libs/syscall/build.log
