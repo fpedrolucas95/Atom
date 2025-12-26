@@ -1,27 +1,32 @@
-// Userspace PS/2 Keyboard Driver
-//
-// Complete implementation of PS/2 keyboard handling in userspace.
-// Uses scan code set 1 for compatibility.
-//
-// This driver runs entirely in Ring 3 (userspace) and communicates with
-// the kernel via the atom_syscall library. It is a TRUE userspace binary,
-// not code that runs inside the kernel.
-//
-// Key features:
-// - Scancode to ASCII translation
-// - Modifier key tracking (Shift, Ctrl, Alt, Caps Lock)
-// - Key buffer with overflow protection
-// - US keyboard layout
+//! Userspace PS/2 Keyboard Driver
+//!
+//! This driver runs entirely in Ring 3 (userspace) and:
+//! - Polls raw scancodes from kernel input buffer
+//! - Translates scancodes to ASCII (US layout)
+//! - Tracks modifier keys (Shift, Ctrl, Alt, Caps Lock)
+//! - Dispatches key events to the desktop environment via IPC
+//!
+//! # Architecture
+//!
+//! ```text
+//! Kernel IRQ Buffer ──> Keyboard Driver ──> Desktop Environment
+//!    (raw bytes)         (translation)       (IPC messages)
+//! ```
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
-// Use the atom_syscall library for all kernel interactions
 use atom_syscall::input::keyboard_poll;
+use atom_syscall::ipc::{create_port, send_async, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
+
+use libipc::messages::{KeyEvent, KeyModifiers, MessageType, MessageHeader};
+use libipc::protocol::send_message_async;
 
 // ============================================================================
 // Keyboard State
@@ -29,25 +34,12 @@ use atom_syscall::debug::log;
 
 const BUFFER_SIZE: usize = 64;
 
-#[derive(Clone, Copy)]
-pub struct KeyEvent {
-    pub scancode: u8,
-    pub ascii: u8,
-    pub pressed: bool,
-    pub shift: bool,
-    pub ctrl: bool,
-    pub alt: bool,
-}
-
 struct KeyboardState {
     shift: bool,
     ctrl: bool,
     alt: bool,
     caps_lock: bool,
     extended: bool,
-    buffer: [KeyEvent; BUFFER_SIZE],
-    head: usize,
-    tail: usize,
 }
 
 impl KeyboardState {
@@ -58,42 +50,23 @@ impl KeyboardState {
             alt: false,
             caps_lock: false,
             extended: false,
-            buffer: [KeyEvent {
-                scancode: 0,
-                ascii: 0,
-                pressed: false,
-                shift: false,
-                ctrl: false,
-                alt: false,
-            }; BUFFER_SIZE],
-            head: 0,
-            tail: 0,
         }
     }
 
-    fn push(&mut self, event: KeyEvent) {
-        let next_head = (self.head + 1) % BUFFER_SIZE;
-        if next_head != self.tail {
-            self.buffer[self.head] = event;
-            self.head = next_head;
+    fn modifiers(&self) -> KeyModifiers {
+        KeyModifiers {
+            shift: self.shift,
+            ctrl: self.ctrl,
+            alt: self.alt,
+            caps_lock: self.caps_lock,
         }
     }
 
-    fn pop(&mut self) -> Option<KeyEvent> {
-        if self.head == self.tail {
-            None
-        } else {
-            let event = self.buffer[self.tail];
-            self.tail = (self.tail + 1) % BUFFER_SIZE;
-            Some(event)
-        }
-    }
-
-    fn process_scancode(&mut self, scancode: u8) {
+    fn process_scancode(&mut self, scancode: u8) -> Option<(u8, u8, bool)> {
         // Handle extended prefix
         if scancode == 0xE0 {
             self.extended = true;
-            return;
+            return None;
         }
 
         let extended = self.extended;
@@ -105,26 +78,22 @@ impl KeyboardState {
         // Handle modifier keys
         match code {
             0x2A | 0x36 => {
-                // Left/Right Shift
                 self.shift = !is_release;
-                return;
+                return None;
             }
             0x1D => {
-                // Ctrl
                 self.ctrl = !is_release;
-                return;
+                return None;
             }
             0x38 => {
-                // Alt
                 self.alt = !is_release;
-                return;
+                return None;
             }
             0x3A => {
-                // Caps Lock (toggle on press only)
                 if !is_release {
                     self.caps_lock = !self.caps_lock;
                 }
-                return;
+                return None;
             }
             _ => {}
         }
@@ -136,16 +105,7 @@ impl KeyboardState {
             translate_scancode(code, self.shift, self.caps_lock, extended)
         };
 
-        let event = KeyEvent {
-            scancode,
-            ascii,
-            pressed: !is_release,
-            shift: self.shift,
-            ctrl: self.ctrl,
-            alt: self.alt,
-        };
-
-        self.push(event);
+        Some((scancode, ascii, !is_release))
     }
 }
 
@@ -164,14 +124,14 @@ fn translate_scancode(code: u8, shift: bool, caps_lock: bool, _extended: bool) -
         0x0B => if shift { b')' } else { b'0' },
         0x0C => if shift { b'_' } else { b'-' },
         0x0D => if shift { b'+' } else { b'=' },
-        
+
         // Special keys
-        0x0E => 0x08, // Backspace
+        0x0E => 0x08,  // Backspace
         0x0F => b'\t', // Tab
         0x1C => b'\n', // Enter
         0x39 => b' ',  // Space
         0x01 => 0x1B,  // Escape
-        
+
         // Punctuation
         0x1A => if shift { b'{' } else { b'[' },
         0x1B => if shift { b'}' } else { b']' },
@@ -182,7 +142,7 @@ fn translate_scancode(code: u8, shift: bool, caps_lock: bool, _extended: bool) -
         0x33 => if shift { b'<' } else { b',' },
         0x34 => if shift { b'>' } else { b'.' },
         0x35 => if shift { b'?' } else { b'/' },
-        
+
         // Letters
         0x10 => letter(b'q', shift, caps_lock),
         0x11 => letter(b'w', shift, caps_lock),
@@ -210,7 +170,7 @@ fn translate_scancode(code: u8, shift: bool, caps_lock: bool, _extended: bool) -
         0x30 => letter(b'b', shift, caps_lock),
         0x31 => letter(b'n', shift, caps_lock),
         0x32 => letter(b'm', shift, caps_lock),
-        
+
         _ => 0,
     }
 }
@@ -224,25 +184,70 @@ fn letter(base: u8, shift: bool, caps_lock: bool) -> u8 {
     }
 }
 
-// Syscall wrappers are now provided by atom_syscall library
-
 // ============================================================================
-// Static Driver Instance
+// Keyboard Driver
 // ============================================================================
 
-static mut KEYBOARD: KeyboardState = KeyboardState::new();
+struct KeyboardDriver {
+    state: KeyboardState,
+    desktop_port: Option<PortId>,
+    event_count: u64,
+}
 
-// ============================================================================
-// Public API
-// ============================================================================
+impl KeyboardDriver {
+    fn new() -> Self {
+        Self {
+            state: KeyboardState::new(),
+            desktop_port: None,
+            event_count: 0,
+        }
+    }
 
-/// Get the next key event from the buffer
-pub fn get_key_event() -> Option<KeyEvent> {
-    unsafe { KEYBOARD.pop() }
+    fn run(&mut self) -> ! {
+        log("Keyboard Driver: Starting PS/2 keyboard driver");
+
+        // Create our own IPC port for receiving commands
+        let _our_port = create_port().ok();
+
+        // TODO: Discover desktop port via service registry
+        // For now, the desktop environment will poll directly from kernel buffer
+
+        log("Keyboard Driver: Entering main loop");
+
+        loop {
+            // Poll for raw scancodes from kernel
+            while let Some(scancode) = keyboard_poll() {
+                if let Some((sc, ascii, pressed)) = self.state.process_scancode(scancode) {
+                    self.event_count += 1;
+
+                    // Create key event
+                    let event = KeyEvent {
+                        scancode: sc,
+                        character: ascii,
+                        modifiers: self.state.modifiers(),
+                    };
+
+                    // Send to desktop environment if connected
+                    if let Some(port) = self.desktop_port {
+                        let msg_type = if pressed {
+                            MessageType::KeyDown
+                        } else {
+                            MessageType::KeyUp
+                        };
+
+                        let payload = event.to_bytes();
+                        let _ = send_message_async(port, msg_type, &payload);
+                    }
+                }
+            }
+
+            yield_now();
+        }
+    }
 }
 
 // ============================================================================
-// Entry Point
+// Entry Points
 // ============================================================================
 
 #[no_mangle]
@@ -251,30 +256,8 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    log("Keyboard Driver: Starting PS/2 keyboard driver");
-
-    // Main driver loop
-    loop {
-        // Poll for keyboard scancodes from kernel
-        while let Some(scancode) = keyboard_poll() {
-            unsafe {
-                KEYBOARD.process_scancode(scancode);
-            }
-        }
-
-        // Check for events to process
-        while let Some(event) = unsafe { KEYBOARD.pop() } {
-            if event.pressed && event.ascii != 0 {
-                // In a full implementation, send via IPC to interested processes
-                // For now, just log significant keypresses
-                if event.ascii == 0x1B {
-                    log("Keyboard: Escape pressed");
-                }
-            }
-        }
-
-        yield_now();
-    }
+    let mut driver = KeyboardDriver::new();
+    driver.run()
 }
 
 #[panic_handler]

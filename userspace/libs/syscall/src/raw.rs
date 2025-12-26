@@ -50,6 +50,8 @@ pub mod numbers {
     pub const SYS_REGISTER_IRQ_HANDLER: u64 = 40;
     pub const SYS_MAP_FRAMEBUFFER: u64 = 41;
     pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
+    pub const SYS_IPC_WAIT_ANY: u64 = 43;
+    pub const SYS_GET_IRQ_COUNT: u64 = 44;
 }
 
 /// Raw syscall with no arguments

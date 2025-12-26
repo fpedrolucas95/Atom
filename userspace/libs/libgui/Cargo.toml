@@ -1,0 +1,13 @@
+[package]
+name = "libgui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "GUI library for Atom OS userspace applications"
+
+[dependencies]
+atom_syscall = { path = "../syscall" }
+libipc = { path = "../libipc" }
+
+[lib]
+crate-type = ["rlib"]
