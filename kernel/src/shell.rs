@@ -119,13 +119,8 @@ pub extern "C" fn shell_entry() -> ! {
         }
 
         if mouse_moved {
-            // Discreet 1px sync pulse in title bar (same color as title bar background)
-            static mut SYNC_X: u32 = 0;
-            unsafe {
-                SYNC_X = (SYNC_X + 1) % 8;
-                let ptr = (fb_addr + (SYNC_X as usize * bpp)) as *mut u32;
-                ptr.write_volatile(0x00252934); // Nearly identical to title bar color
-            }
+            // Discreet 1x1 sync using fill_rect (required for framebuffer update)
+            fill_rect(fb_addr, stride, bpp, 0, 0, 1, 1, 0x00242933);
 
             // Restore saved region at old cursor position
             restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
