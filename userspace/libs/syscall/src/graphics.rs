@@ -39,21 +39,39 @@ impl FramebufferInfo {
 /// Returns Some(FramebufferInfo) on success, None if framebuffer is not available
 /// or the process doesn't have permission to access it.
 pub fn get_framebuffer() -> Option<FramebufferInfo> {
+    crate::debug::log("[FB] get_framebuffer: start");
+
     let mut info = [0u64; 6];
+    crate::debug::log("[FB] get_framebuffer: calling syscall");
+
     let result = unsafe {
         syscall1(SYS_GET_FRAMEBUFFER, info.as_mut_ptr() as u64)
     };
 
+    crate::debug::log("[FB] get_framebuffer: syscall returned");
+
     if result == ESUCCESS {
-        Some(FramebufferInfo {
-            address: info[0] as usize,
-            width: info[1] as u32,
-            height: info[2] as u32,
-            stride: info[3] as u32,
-            bytes_per_pixel: info[4] as u32,
-            size: (info[3] as usize) * (info[2] as usize) * (info[4] as usize),
-        })
+        crate::debug::log("[FB] get_framebuffer: reading info array");
+        let addr = info[0] as usize;
+        let w = info[1] as u32;
+        let h = info[2] as u32;
+        let s = info[3] as u32;
+        let bpp = info[4] as u32;
+
+        crate::debug::log("[FB] get_framebuffer: constructing FramebufferInfo");
+        let fb_info = FramebufferInfo {
+            address: addr,
+            width: w,
+            height: h,
+            stride: s,
+            bytes_per_pixel: bpp,
+            size: (s as usize) * (h as usize) * (bpp as usize),
+        };
+
+        crate::debug::log("[FB] get_framebuffer: returning Some");
+        Some(fb_info)
     } else {
+        crate::debug::log("[FB] get_framebuffer: returning None");
         None
     }
 }

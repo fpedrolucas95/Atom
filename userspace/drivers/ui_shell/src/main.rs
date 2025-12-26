@@ -735,8 +735,14 @@ fn main() -> ! {
 
     // Get framebuffer
     log("Desktop: Requesting framebuffer...");
-    let fb = match Framebuffer::new() {
+    log("[TRACE] About to call Framebuffer::new()");
+
+    let fb_opt = Framebuffer::new();
+    log("[TRACE] Framebuffer::new() returned");
+
+    let fb = match fb_opt {
         Some(fb) => {
+            log("[TRACE] Match arm: Some(fb) entered");
             log("Desktop: Got framebuffer, checking address...");
             fb
         }
@@ -746,10 +752,13 @@ fn main() -> ! {
         }
     };
 
+    log("[TRACE] Match complete, fb assigned");
     log("Desktop Environment: Framebuffer acquired");
 
+    log("[TRACE] About to create Desktop::new(fb)");
     // Create desktop environment
     let mut desktop = Desktop::new(fb);
+    log("[TRACE] Desktop created");
 
     log("Desktop Environment: Entering main loop");
 
