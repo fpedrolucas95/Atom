@@ -160,6 +160,42 @@ if ($Userspace) {
 }
 
 # =========================================================================
+# BUILD UI_SHELL AS ATXF BINARY
+# =========================================================================
+
+Write-Host ""
+Write-Host "========== UI_SHELL BUILD ==========" -ForegroundColor Magenta
+Write-Host ""
+
+Write-Step "Compilando ui_shell..."
+Push-Location userspace\drivers\ui_shell
+cargo build --release 2>&1 | Out-File -FilePath ..\..\..\build\ui_shell_cargo.log
+$uiResult = $LASTEXITCODE
+Pop-Location
+
+if ($uiResult -ne 0) {
+    Write-ErrorMsg "Falha ao compilar ui_shell"
+    exit 1
+}
+Write-Success "ui_shell compilado"
+
+Write-Step "Gerando binário ATXF..."
+python tools\build_atxf.py `
+    userspace\drivers\ui_shell\target\x86_64-unknown-none\release\ui_shell `
+    build\ui_shell.atxf 2>&1 | Out-File -FilePath build\atxf.log
+
+if ($LASTEXITCODE -ne 0) {
+    Write-ErrorMsg "Falha ao gerar ATXF"
+    Get-Content build\atxf.log
+    exit 1
+}
+Write-Success "ui_shell.atxf gerado"
+
+Write-Step "Copiando ui_shell.atxf para kernel/src/..."
+Copy-Item build\ui_shell.atxf kernel\src\ui_shell.atxf -Force
+Write-Success "ui_shell.atxf pronto para embedding"
+
+# =========================================================================
 # BUILD KERNEL
 # =========================================================================
 

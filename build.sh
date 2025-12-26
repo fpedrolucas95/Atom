@@ -228,6 +228,37 @@ if [ "$USERSPACE_ONLY" = true ]; then
 fi
 
 # =========================================================================
+# BUILD UI_SHELL AS ATXF BINARY
+# =========================================================================
+
+header "UI_SHELL BUILD"
+
+step "Compilando ui_shell..."
+pushd userspace/drivers/ui_shell > /dev/null
+if cargo build --release 2>&1 | tee ../../../build/ui_shell_cargo.log; then
+    success "ui_shell compilado"
+else
+    error "Falha ao compilar ui_shell"
+    exit 1
+fi
+popd > /dev/null
+
+step "Gerando binário ATXF..."
+if python3 tools/build_atxf.py \
+    userspace/drivers/ui_shell/target/x86_64-unknown-none/release/ui_shell \
+    build/ui_shell.atxf 2>&1 | tee build/atxf.log; then
+    success "ui_shell.atxf gerado"
+else
+    error "Falha ao gerar ATXF"
+    cat build/atxf.log
+    exit 1
+fi
+
+step "Copiando ui_shell.atxf para kernel/src/..."
+cp build/ui_shell.atxf kernel/src/ui_shell.atxf
+success "ui_shell.atxf pronto para embedding"
+
+# =========================================================================
 # BUILD KERNEL RUST
 # =========================================================================
 

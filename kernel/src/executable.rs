@@ -255,6 +255,13 @@ pub fn embedded_init_image() -> &'static [u8] {
     &*image
 }
 
+/// Returns the embedded UI shell binary (desktop environment)
+/// This is loaded and executed in userspace as the primary UI
+pub fn embedded_ui_shell_image() -> &'static [u8] {
+    static UI_SHELL: &[u8] = include_bytes!("ui_shell.atxf");
+    UI_SHELL
+}
+
 fn build_embedded_image() -> [u8; EMBEDDED_IMAGE_SIZE] {
     let mut image = [0u8; EMBEDDED_IMAGE_SIZE];
 

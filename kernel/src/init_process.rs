@@ -388,14 +388,178 @@ fn bootstrap_manifest_services() {
 }
 
 fn launch_ui_service() {
-    // UI shell is now launched directly as a kernel thread in kernel.rs
-    // via create_userspace_ui_thread(), not via the service manager.
-    // This avoids the complexity of context switching between user and kernel
-    // threads until we have proper Ring 3 isolation.
+    log_info!(LOG_ORIGIN, "Launching UI shell from embedded binary...");
+
+    match create_ui_shell_process() {
+        Ok(tid) => {
+            log_info!(LOG_ORIGIN, "UI shell launched as userspace process (tid={})", tid);
+        }
+        Err(e) => {
+            log_error!(LOG_ORIGIN, "Failed to launch UI shell: {:?}", e);
+        }
+    }
+}
+
+/// Create and launch the UI shell as a true userspace process
+fn create_ui_shell_process() -> Result<ThreadId, ExecError> {
+    const UI_SHELL_STACK_TOP: usize = 0x9000_0000;  // Different from init stack
+    const UI_SHELL_STACK_PAGES: usize = 8;  // 32KB stack
+    const UI_SHELL_STACK_SIZE: usize = UI_SHELL_STACK_PAGES * PAGE_SIZE;
+
+    let kernel_cr3 = crate::arch::read_cr3() as usize;
+    let tid = ThreadId::new();
+
+    // Load the embedded ui_shell binary
+    let image = executable::embedded_ui_shell_image();
+    let sections = executable::parse_image(image)?;
+
     log_info!(
         LOG_ORIGIN,
-        "UI shell service skipped - using kernel thread from kernel.rs"
+        "UI shell binary: text={} bytes, data={} bytes, bss={} bytes, entry_offset=0x{:X}",
+        sections.text.len(),
+        sections.data.len(),
+        sections.bss_size,
+        sections.entry_offset
     );
+
+    // Since init only uses 0x400000-0x402000, and ui_shell uses the same base,
+    // we'll load ui_shell at the same base. The init process is just a yield loop
+    // that we can effectively replace.
+    let text_base = executable::USER_EXEC_LOAD_BASE;
+    let text_size = align_up(sections.text.len().max(1));
+    let text_pages = text_size / PAGE_SIZE;
+
+    // Allocate and map text section
+    let text_phys = pmm::alloc_pages_zeroed(text_pages)
+        .ok_or(ExecError::OutOfMemory)?;
+
+    log_info!(LOG_ORIGIN, "UI shell text at phys 0x{:X}", text_phys);
+
+    // Copy text section
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            sections.text.as_ptr(),
+            text_phys as *mut u8,
+            sections.text.len(),
+        );
+    }
+
+    // Unmap and remap text pages as USER
+    for i in 0..text_pages {
+        let virt = text_base + i * PAGE_SIZE;
+        let _ = vm::unmap_page(virt);
+    }
+
+    for i in 0..text_pages {
+        let virt = text_base + i * PAGE_SIZE;
+        let phys = text_phys + i * PAGE_SIZE;
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER)
+            .map_err(|_| ExecError::OutOfMemory)?;
+    }
+
+    // Map data section (rodata + got)
+    if !sections.data.is_empty() {
+        let data_base = align_up(text_base + text_size);
+        let data_size = align_up(sections.data.len().max(1));
+        let data_pages = data_size / PAGE_SIZE;
+
+        let data_phys = pmm::alloc_pages_zeroed(data_pages)
+            .ok_or(ExecError::OutOfMemory)?;
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                sections.data.as_ptr(),
+                data_phys as *mut u8,
+                sections.data.len(),
+            );
+        }
+
+        for i in 0..data_pages {
+            let virt = data_base + i * PAGE_SIZE;
+            let phys = data_phys + i * PAGE_SIZE;
+            let _ = vm::unmap_page(virt);
+            vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER)
+                .map_err(|_| ExecError::OutOfMemory)?;
+        }
+
+        log_info!(LOG_ORIGIN, "UI shell data mapped at 0x{:X}", data_base);
+    }
+
+    // Map BSS section
+    let bss_base = align_up(text_base + text_size + align_up(sections.data.len()));
+    let bss_size = sections.bss_size.max(1);
+    let bss_pages = align_up(bss_size) / PAGE_SIZE;
+
+    let bss_phys = pmm::alloc_pages_zeroed(bss_pages)
+        .ok_or(ExecError::OutOfMemory)?;
+
+    for i in 0..bss_pages {
+        let virt = bss_base + i * PAGE_SIZE;
+        let phys = bss_phys + i * PAGE_SIZE;
+        let _ = vm::unmap_page(virt);
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE)
+            .map_err(|_| ExecError::OutOfMemory)?;
+    }
+
+    log_info!(LOG_ORIGIN, "UI shell BSS mapped at 0x{:X} ({} pages)", bss_base, bss_pages);
+
+    // Map user stack
+    let stack_base = UI_SHELL_STACK_TOP - UI_SHELL_STACK_SIZE;
+    let stack_phys = pmm::alloc_pages_zeroed(UI_SHELL_STACK_PAGES)
+        .ok_or(ExecError::OutOfMemory)?;
+
+    for i in 0..UI_SHELL_STACK_PAGES {
+        let virt = stack_base + i * PAGE_SIZE;
+        let phys = stack_phys + i * PAGE_SIZE;
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE)
+            .map_err(|_| ExecError::OutOfMemory)?;
+    }
+
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell stack mapped: 0x{:X}-0x{:X}",
+        stack_base,
+        UI_SHELL_STACK_TOP
+    );
+
+    // Allocate kernel stack for syscall handling
+    let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
+        .ok_or(ExecError::OutOfMemory)?;
+    let kernel_stack_top = (kernel_stack_phys + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+
+    // Create userspace context
+    let entry_point = text_base + sections.entry_offset;
+    let context = CpuContext::new_user(
+        entry_point as u64,
+        UI_SHELL_STACK_TOP as u64,
+        kernel_cr3 as u64,
+    );
+
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell context: entry=0x{:X} stack=0x{:X} cr3=0x{:X}",
+        entry_point,
+        UI_SHELL_STACK_TOP,
+        kernel_cr3
+    );
+
+    // Create thread
+    let thread = Thread {
+        id: tid,
+        state: ThreadState::Ready,
+        context,
+        kernel_stack: kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
+        address_space: kernel_cr3 as u64,
+        priority: ThreadPriority::High,  // UI gets priority
+        name: "ui_shell",
+        capability_table: crate::cap::create_capability_table(tid),
+    };
+
+    thread::add_thread(thread);
+    sched::mark_thread_ready(tid);
+
+    Ok(tid)
 }
 
 fn spawn_service_thread(spec: &ServiceSpec) -> Result<ThreadId, ExecError> {
