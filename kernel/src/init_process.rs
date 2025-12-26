@@ -338,6 +338,17 @@ fn bootstrap_manifest_services() {
             let mut launched = 0usize;
 
             for name in manager.startup_plan() {
+                // Only launch ui_shell for now - other services are placeholders
+                // that cause context corruption. TODO: investigate thread 4 crash
+                if name != "ui_shell" {
+                    log_info!(
+                        LOG_ORIGIN,
+                        "Skipping service '{}' (placeholder, not implemented)",
+                        name
+                    );
+                    continue;
+                }
+
                 if let Some(spec) = manager.manifest().service(name) {
                     match spawn_service_thread(spec) {
                         Ok(tid) => {
