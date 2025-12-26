@@ -63,7 +63,7 @@ pub unsafe fn syscall0(num: u64) -> u64 {
         inlateout("rax") num => result,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
@@ -78,7 +78,7 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
         in("rdi") arg0,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
@@ -94,7 +94,7 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
         in("rsi") arg1,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
@@ -111,7 +111,7 @@ pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
         in("rdx") arg2,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
@@ -129,7 +129,7 @@ pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> 
         in("r10") arg3,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
@@ -148,7 +148,7 @@ pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
         in("r8") arg4,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
@@ -168,7 +168,7 @@ pub unsafe fn syscall6(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
         in("r9") arg5,
         out("rcx") _,
         out("r11") _,
-        options(nostack, preserves_flags)
+        options(nostack)
     );
     result
 }
