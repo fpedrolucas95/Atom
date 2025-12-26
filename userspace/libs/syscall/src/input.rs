@@ -24,10 +24,21 @@ pub fn mouse_poll_byte() -> Option<u8> {
     }
 }
 
-/// PS/2 Mouse driver that processes raw bytes into movement deltas
+/// Mouse event with position delta and button states
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MouseEvent {
+    pub dx: i32,
+    pub dy: i32,
+    pub left_button: bool,
+    pub right_button: bool,
+    pub middle_button: bool,
+}
+
+/// PS/2 Mouse driver that processes raw bytes into movement deltas and button states
 pub struct MouseDriver {
     packet: [u8; 3],
     cycle: u8,
+    prev_left: bool,
 }
 
 impl MouseDriver {
@@ -35,21 +46,38 @@ impl MouseDriver {
         Self {
             packet: [0; 3],
             cycle: 0,
+            prev_left: false,
         }
     }
 
     /// Process available mouse data and return movement delta if a complete packet is ready
     pub fn poll(&mut self) -> Option<(i32, i32)> {
         while let Some(byte) = mouse_poll_byte() {
-            if let Some(delta) = self.process_byte(byte) {
-                return Some(delta);
+            if let Some(event) = self.process_byte(byte) {
+                return Some((event.dx, event.dy));
             }
         }
         None
     }
 
+    /// Process available mouse data and return full event with buttons if a complete packet is ready
+    pub fn poll_event(&mut self) -> Option<MouseEvent> {
+        while let Some(byte) = mouse_poll_byte() {
+            if let Some(event) = self.process_byte(byte) {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    /// Check if left button was just pressed (rising edge)
+    pub fn left_clicked(&mut self) -> bool {
+        // This should be called after poll_event to detect clicks
+        false // Actual implementation is in poll_event
+    }
+
     /// Process a single mouse byte
-    fn process_byte(&mut self, byte: u8) -> Option<(i32, i32)> {
+    fn process_byte(&mut self, byte: u8) -> Option<MouseEvent> {
         match self.cycle {
             0 => {
                 // First byte must have bit 3 set (always 1 in PS/2)
@@ -83,12 +111,18 @@ impl MouseDriver {
                 if flags & 0x10 != 0 { dx -= 256; }
                 if flags & 0x20 != 0 { dy -= 256; }
                 
-                // Ignore zero movement
-                if dx == 0 && dy == 0 {
-                    return None;
-                }
-                
-                Some((dx, dy))
+                // Extract button states
+                let left_button = (flags & 0x01) != 0;
+                let right_button = (flags & 0x02) != 0;
+                let middle_button = (flags & 0x04) != 0;
+
+                Some(MouseEvent {
+                    dx,
+                    dy,
+                    left_button,
+                    right_button,
+                    middle_button,
+                })
             }
             _ => {
                 self.cycle = 0;

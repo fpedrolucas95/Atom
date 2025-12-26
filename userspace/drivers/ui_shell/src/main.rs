@@ -16,9 +16,9 @@
 use core::panic::PanicInfo;
 
 // Use the atom_syscall library for all kernel interactions
-use atom_syscall::graphics::{Color, Framebuffer, get_framebuffer};
-use atom_syscall::input::{mouse_poll, keyboard_poll};
-use atom_syscall::thread::{yield_now, exit, get_ticks};
+use atom_syscall::graphics::{Color, Framebuffer};
+use atom_syscall::input::{keyboard_poll, MouseDriver};
+use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
 // ============================================================================
@@ -127,6 +127,50 @@ impl CursorState {
 // ============================================================================
 
 const TOP_BAR_HEIGHT: u32 = 32;
+const DOCK_HEIGHT: u32 = 48;
+const DOCK_WIDTH: u32 = 400;
+const DOCK_ICON_SIZE: u32 = 32;
+const DOCK_ICON_PADDING: u32 = 16;
+
+// Dock icon types
+#[derive(Clone, Copy, PartialEq)]
+enum DockIcon {
+    Files,
+    Settings,
+    Browser,
+    Terminal,
+}
+
+impl DockIcon {
+    fn color(&self) -> Color {
+        match self {
+            DockIcon::Files => Color::new(191, 97, 106),
+            DockIcon::Settings => Color::new(163, 190, 140),
+            DockIcon::Browser => Color::new(94, 129, 172),
+            DockIcon::Terminal => Color::new(46, 46, 46), // Dark terminal color
+        }
+    }
+}
+
+const DOCK_ICONS: [DockIcon; 4] = [
+    DockIcon::Files,
+    DockIcon::Settings,
+    DockIcon::Browser,
+    DockIcon::Terminal,
+];
+
+// Dock position calculation helpers
+fn get_dock_bounds(width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let x_start = (width / 2).saturating_sub(DOCK_WIDTH / 2);
+    let y_start = height.saturating_sub(DOCK_HEIGHT + 10);
+    (x_start, y_start, DOCK_WIDTH, DOCK_HEIGHT)
+}
+
+fn get_icon_bounds(dock_x: u32, dock_y: u32, icon_index: usize) -> (u32, u32, u32, u32) {
+    let ix = dock_x + DOCK_ICON_PADDING + (icon_index as u32 * (DOCK_ICON_SIZE + DOCK_ICON_PADDING));
+    let iy = dock_y + ((DOCK_HEIGHT - DOCK_ICON_SIZE) / 2);
+    (ix, iy, DOCK_ICON_SIZE, DOCK_ICON_SIZE)
+}
 
 fn draw_scene(fb: &Framebuffer) {
     let width = fb.width();
@@ -168,27 +212,116 @@ fn draw_window(fb: &Framebuffer, x: u32, y: u32, w: u32, h: u32, title: &str) {
 }
 
 fn draw_dock(fb: &Framebuffer, width: u32, height: u32) {
-    let dock_h = 48;
-    let dock_w = 400;
-    let x_start = (width / 2).saturating_sub(dock_w / 2);
-    let y_start = height.saturating_sub(dock_h + 10);
+    let (x_start, y_start, dock_w, dock_h) = get_dock_bounds(width, height);
 
     fb.fill_rect(x_start, y_start, dock_w, dock_h, Theme::DOCK_BG);
 
-    let colors = [
-        Color::new(191, 97, 106),
-        Color::new(163, 190, 140),
-        Color::new(94, 129, 172),
-        Theme::ACCENT,
-    ];
+    for (i, icon) in DOCK_ICONS.iter().enumerate() {
+        let (ix, iy, icon_size, _) = get_icon_bounds(x_start, y_start, i);
 
-    for (i, color) in colors.iter().enumerate() {
-        let icon_size = 32;
-        let padding = 16;
-        let ix = x_start + padding + (i as u32 * (icon_size + padding));
-        let iy = y_start + ((dock_h - icon_size) / 2);
-        fb.fill_rect(ix, iy, icon_size, icon_size, *color);
+        // Draw icon background
+        fb.fill_rect(ix, iy, icon_size, icon_size, icon.color());
+
+        // Draw special terminal icon with ">" prompt
+        if *icon == DockIcon::Terminal {
+            // Draw a simple terminal prompt ">" on the icon
+            let prompt_color = Color::new(0, 255, 0); // Green terminal color
+            // Draw a simple ">" character manually
+            let px = ix + 8;
+            let py = iy + 10;
+            // Draw ">" shape
+            for i in 0..6u32 {
+                fb.draw_pixel(px + i, py + i, prompt_color);
+                fb.draw_pixel(px + i, py + 12 - i, prompt_color);
+            }
+            // Draw underscore cursor
+            for i in 0..8u32 {
+                fb.draw_pixel(px + 10 + i, py + 10, prompt_color);
+            }
+        }
     }
+}
+
+/// Check if a click at (x, y) hits a dock icon
+fn check_dock_click(x: u32, y: u32, screen_width: u32, screen_height: u32) -> Option<DockIcon> {
+    let (dock_x, dock_y, _, _) = get_dock_bounds(screen_width, screen_height);
+
+    for (i, icon) in DOCK_ICONS.iter().enumerate() {
+        let (ix, iy, icon_w, icon_h) = get_icon_bounds(dock_x, dock_y, i);
+
+        if x >= ix && x < ix + icon_w && y >= iy && y < iy + icon_h {
+            return Some(*icon);
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// Terminal Window
+// ============================================================================
+
+struct TerminalTheme;
+impl TerminalTheme {
+    const WINDOW_BG: Color = Color::new(30, 30, 30);
+    const TITLE_BAR: Color = Color::new(45, 45, 45);
+    const TITLE_TEXT: Color = Color::new(200, 200, 200);
+    const TEXT: Color = Color::new(220, 220, 220);
+    const PROMPT: Color = Color::new(136, 192, 208);
+    const PATH: Color = Color::new(163, 190, 140);
+    const CURSOR: Color = Color::new(200, 200, 200);
+}
+
+/// Launch and draw a terminal window
+fn launch_terminal(fb: &Framebuffer) {
+    let x = 120;
+    let y = 80;
+    let w = 560;
+    let h = 360;
+    let title_h = 24;
+
+    // Drop shadow
+    fb.fill_rect(x + 4, y + 4, w, h, Color::new(0, 0, 0));
+
+    // Window border
+    fb.fill_rect(x, y, w, h, Color::new(60, 60, 60));
+
+    // Title bar
+    fb.fill_rect(x + 1, y + 1, w - 2, title_h - 1, TerminalTheme::TITLE_BAR);
+    fb.draw_string(x + 10, y + 6, "Terminal", TerminalTheme::TITLE_TEXT, TerminalTheme::TITLE_BAR);
+
+    // Window control buttons
+    let btn_y = y + 6;
+    let btn_x = x + w - 18;
+    fb.fill_rect(btn_x, btn_y, 12, 12, Color::new(255, 95, 86));      // Close (red)
+    fb.fill_rect(btn_x - 18, btn_y, 12, 12, Color::new(255, 189, 46)); // Minimize (yellow)
+    fb.fill_rect(btn_x - 36, btn_y, 12, 12, Color::new(39, 201, 63));  // Maximize (green)
+
+    // Terminal content area
+    fb.fill_rect(x + 1, y + title_h, w - 2, h - title_h - 1, TerminalTheme::WINDOW_BG);
+
+    // Draw terminal content
+    let content_x = x + 10;
+    let content_y = y + title_h + 10;
+    let line_h = 16;
+
+    // Welcome message
+    fb.draw_string(content_x, content_y, "Atom Terminal v1.0", TerminalTheme::TEXT, TerminalTheme::WINDOW_BG);
+    fb.draw_string(content_x, content_y + line_h, "Type 'help' for available commands.", Color::new(128, 128, 128), TerminalTheme::WINDOW_BG);
+
+    // Empty line
+    let prompt_y = content_y + line_h * 3;
+
+    // Prompt: user@atom:~$
+    fb.draw_string(content_x, prompt_y, "user", TerminalTheme::PROMPT, TerminalTheme::WINDOW_BG);
+    fb.draw_string(content_x + 32, prompt_y, "@", TerminalTheme::TEXT, TerminalTheme::WINDOW_BG);
+    fb.draw_string(content_x + 40, prompt_y, "atom", TerminalTheme::PROMPT, TerminalTheme::WINDOW_BG);
+    fb.draw_string(content_x + 72, prompt_y, ":", TerminalTheme::TEXT, TerminalTheme::WINDOW_BG);
+    fb.draw_string(content_x + 80, prompt_y, "~", TerminalTheme::PATH, TerminalTheme::WINDOW_BG);
+    fb.draw_string(content_x + 88, prompt_y, "$", Color::new(180, 142, 173), TerminalTheme::WINDOW_BG);
+
+    // Cursor (block cursor after prompt)
+    fb.fill_rect(content_x + 104, prompt_y, 8, 14, TerminalTheme::CURSOR);
 }
 
 fn draw_cursor(fb: &Framebuffer, x: u32, y: u32) {
@@ -235,6 +368,12 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
+/// UEFI entry point (required by x86_64-unknown-uefi target)
+#[no_mangle]
+pub extern "efiapi" fn efi_main(_image_handle: *const core::ffi::c_void, _system_table: *const core::ffi::c_void) -> usize {
+    main()
+}
+
 fn main() -> ! {
     log("UI Shell: Starting userspace shell driver");
 
@@ -250,6 +389,9 @@ fn main() -> ! {
     log("UI Shell: Framebuffer acquired");
 
     let mut cursor = CursorState::new(fb.width(), fb.height());
+    let mut mouse_driver = MouseDriver::new();
+    let mut prev_left_button = false;
+    let mut terminal_launched = false;
 
     // Draw initial scene
     draw_scene(&fb);
@@ -265,13 +407,33 @@ fn main() -> ! {
     loop {
         iteration = iteration.wrapping_add(1);
 
-        // Poll for mouse input
-        if let Some((dx, dy)) = mouse_poll() {
+        // Poll for mouse input with button states
+        while let Some(event) = mouse_driver.poll_event() {
             // Restore old cursor region
             cursor.restore_region(&fb);
 
             // Apply delta with 1:1 movement
-            cursor.apply_delta(dx, dy, fb.width(), fb.height());
+            cursor.apply_delta(event.dx, event.dy, fb.width(), fb.height());
+
+            // Check for left button click (rising edge)
+            if event.left_button && !prev_left_button {
+                // Check if clicked on a dock icon
+                if let Some(icon) = check_dock_click(cursor.x, cursor.y, fb.width(), fb.height()) {
+                    match icon {
+                        DockIcon::Terminal => {
+                            if !terminal_launched {
+                                log("UI Shell: Terminal icon clicked - launching terminal");
+                                launch_terminal(&fb);
+                                terminal_launched = true;
+                            }
+                        }
+                        _ => {
+                            log("UI Shell: Dock icon clicked");
+                        }
+                    }
+                }
+            }
+            prev_left_button = event.left_button;
 
             // Save new region and draw cursor
             cursor.save_region(&fb);

@@ -1,0 +1,12 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+edition = "2021"
+description = "Atom OS userspace terminal emulator"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"

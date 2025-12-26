@@ -23,6 +23,11 @@ const COLOR_TEXT: u32 = 0x00ECEFF4;          // Primary text
 const COLOR_TEXT_DIM: u32 = 0x004C566A;      // Dimmed text
 const COLOR_DOCK_ICON: u32 = 0x003B4252;     // Dock icon background
 const COLOR_DOCK_HOVER: u32 = 0x00434C5E;    // Dock icon hover
+const COLOR_TERMINAL_BG: u32 = 0x001E1E1E;   // Terminal window background
+const COLOR_TERMINAL_BAR: u32 = 0x002D2D2D;  // Terminal title bar
+const COLOR_TERMINAL_TEXT: u32 = 0x00DCDCDC; // Terminal text
+const COLOR_TERMINAL_PROMPT: u32 = 0x0088C0D0; // Terminal prompt color
+const COLOR_TERMINAL_GREEN: u32 = 0x0000FF00; // Terminal icon green
 
 // ============================================================================
 // Layout Constants
@@ -84,10 +89,19 @@ pub extern "C" fn shell_entry() -> ! {
     // Mouse packet state
     let mut mouse_cycle = 0u8;
     let mut mouse_packet = [0u8; 3];
+    let mut prev_left_button = false;
+    let mut terminal_open = false;
 
     // Simple tick counter for clock updates
     let mut tick_counter: u32 = 0;
     let mut last_clock_update: u32 = 0;
+
+    // Dock layout info for click detection
+    let num_icons = 4u32;
+    let dock_icon_width = DOCK_ICON_SIZE + DOCK_ICON_MARGIN;
+    let dock_total_width = num_icons * dock_icon_width - DOCK_ICON_MARGIN;
+    let dock_start_x = (width - dock_total_width) / 2;
+    let dock_icon_y = dock_y + (DOCK_HEIGHT - DOCK_ICON_SIZE) / 2;
 
     // ========================================================================
     // Main Event Loop
@@ -117,6 +131,7 @@ pub extern "C" fn shell_entry() -> ! {
         let mut total_dx: i32 = 0;
         let mut total_dy: i32 = 0;
         let mut mouse_moved = false;
+        let mut left_button_pressed = false;
 
         // Debug counter for framebuffer sync (required for rendering)
         static mut DEBUG_BYTE_X: u32 = 0;
@@ -160,10 +175,41 @@ pub extern "C" fn shell_entry() -> ! {
                     total_dx += dx;
                     total_dy += dy;
                     mouse_moved = true;
+
+                    // Check left button state
+                    left_button_pressed = (flags & 0x01) != 0;
                 }
                 _ => mouse_cycle = 0,
             }
         }
+
+        // Detect left button click (rising edge)
+        if left_button_pressed && !prev_left_button {
+            // Check if click is on terminal icon (icon index 3)
+            let icon_idx = 3u32;
+            let icon_x = dock_start_x + icon_idx * dock_icon_width;
+            let icon_end_x = icon_x + DOCK_ICON_SIZE;
+            let icon_end_y = dock_icon_y + DOCK_ICON_SIZE;
+
+            if cursor_x >= icon_x && cursor_x < icon_end_x &&
+               cursor_y >= dock_icon_y && cursor_y < icon_end_y {
+                if !terminal_open {
+                    // Restore cursor before drawing terminal
+                    restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
+
+                    // Draw terminal window
+                    draw_terminal_window(fb_addr, stride, bpp, width, height);
+                    terminal_open = true;
+
+                    // Save and redraw cursor
+                    save_cursor_region(fb_addr, stride, bpp, cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT, &mut saved_region);
+                    saved_x = cursor_x;
+                    saved_y = cursor_y;
+                    draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
+                }
+            }
+        }
+        prev_left_button = left_button_pressed;
 
         if mouse_moved {
             // Sync pulse
@@ -196,6 +242,56 @@ pub extern "C" fn shell_entry() -> ! {
 // UI Drawing Functions
 // ============================================================================
 
+fn draw_terminal_window(fb: usize, stride: u32, bpp: usize, screen_width: u32, screen_height: u32) {
+    // Window dimensions and position (centered)
+    let win_w = 500;
+    let win_h = 320;
+    let win_x = (screen_width - win_w) / 2;
+    let win_y = (screen_height - win_h) / 2 - 20;
+    let title_h = 28;
+
+    // Drop shadow
+    fill_rect(fb, stride, bpp, win_x + 4, win_y + 4, win_w, win_h, 0x00000000);
+
+    // Window border
+    fill_rect(fb, stride, bpp, win_x, win_y, win_w, win_h, 0x00404040);
+
+    // Title bar
+    fill_rect(fb, stride, bpp, win_x + 1, win_y + 1, win_w - 2, title_h - 1, COLOR_TERMINAL_BAR);
+    draw_string(fb, stride, bpp, win_x + 12, win_y + 9, "Terminal", COLOR_TERMINAL_TEXT);
+
+    // Window control buttons
+    let btn_y = win_y + 8;
+    let btn_x = win_x + win_w - 20;
+    fill_rect(fb, stride, bpp, btn_x, btn_y, 12, 12, 0x00FF5F56);      // Close (red)
+    fill_rect(fb, stride, bpp, btn_x - 18, btn_y, 12, 12, 0x00FFBD2E); // Minimize (yellow)
+    fill_rect(fb, stride, bpp, btn_x - 36, btn_y, 12, 12, 0x0027C93F); // Maximize (green)
+
+    // Terminal content area
+    fill_rect(fb, stride, bpp, win_x + 1, win_y + title_h, win_w - 2, win_h - title_h - 1, COLOR_TERMINAL_BG);
+
+    // Terminal content
+    let content_x = win_x + 12;
+    let content_y = win_y + title_h + 12;
+    let line_h = 16;
+
+    // Welcome message
+    draw_string(fb, stride, bpp, content_x, content_y, "Atom Terminal v1.0", COLOR_TERMINAL_TEXT);
+    draw_string(fb, stride, bpp, content_x, content_y + line_h, "Type 'help' for available commands.", 0x00808080);
+
+    // Prompt line
+    let prompt_y = content_y + line_h * 3;
+    draw_string(fb, stride, bpp, content_x, prompt_y, "user", COLOR_TERMINAL_PROMPT);
+    draw_string(fb, stride, bpp, content_x + 32, prompt_y, "@", COLOR_TERMINAL_TEXT);
+    draw_string(fb, stride, bpp, content_x + 40, prompt_y, "atom", COLOR_TERMINAL_PROMPT);
+    draw_string(fb, stride, bpp, content_x + 72, prompt_y, ":", COLOR_TERMINAL_TEXT);
+    draw_string(fb, stride, bpp, content_x + 80, prompt_y, "~", 0x00A3BE8C);
+    draw_string(fb, stride, bpp, content_x + 88, prompt_y, "$", 0x00B48EAD);
+
+    // Cursor block
+    fill_rect(fb, stride, bpp, content_x + 104, prompt_y, 8, 14, COLOR_TERMINAL_TEXT);
+}
+
 fn draw_panel(fb: usize, stride: u32, bpp: usize, width: u32) {
     // Panel background
     fill_rect(fb, stride, bpp, 0, 0, width, PANEL_HEIGHT, COLOR_PANEL);
@@ -215,7 +311,7 @@ fn draw_dock(fb: usize, stride: u32, bpp: usize, width: u32, y: u32) {
     fill_rect(fb, stride, bpp, 0, y, width, 1, COLOR_TEXT_DIM);
 
     // Center the dock icons
-    let num_icons = 3;
+    let num_icons = 4;  // H, F, S, T (Terminal)
     let dock_width = num_icons * (DOCK_ICON_SIZE + DOCK_ICON_MARGIN) - DOCK_ICON_MARGIN;
     let dock_start_x = (width - dock_width) / 2;
     let icon_y = y + (DOCK_HEIGHT - DOCK_ICON_SIZE) / 2;
@@ -232,16 +328,22 @@ fn draw_dock_icon(fb: usize, stride: u32, bpp: usize, x: u32, y: u32, icon_type:
     fill_rect(fb, stride, bpp, x, y, DOCK_ICON_SIZE, DOCK_ICON_SIZE, COLOR_DOCK_ICON);
 
     // Icon symbol (centered)
-    let symbol = match icon_type {
-        0 => "H",   // Home
-        1 => "F",   // Files
-        2 => "S",   // Settings
-        _ => "?",
+    let (symbol, color) = match icon_type {
+        0 => ("H", COLOR_ACCENT),   // Home
+        1 => ("F", COLOR_ACCENT),   // Files
+        2 => ("S", COLOR_ACCENT),   // Settings
+        3 => (">", COLOR_TERMINAL_GREEN),  // Terminal (green prompt)
+        _ => ("?", COLOR_ACCENT),
     };
 
     let text_x = x + (DOCK_ICON_SIZE - 8) / 2;
     let text_y = y + (DOCK_ICON_SIZE - 8) / 2;
-    draw_string(fb, stride, bpp, text_x, text_y, symbol, COLOR_ACCENT);
+    draw_string(fb, stride, bpp, text_x, text_y, symbol, color);
+
+    // Draw underscore cursor for terminal icon
+    if icon_type == 3 {
+        fill_rect(fb, stride, bpp, text_x + 8, text_y + 6, 6, 2, COLOR_TERMINAL_GREEN);
+    }
 }
 
 fn save_cursor_region(
