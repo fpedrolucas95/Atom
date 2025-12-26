@@ -167,11 +167,15 @@ Write-Host ""
 Write-Host "========== UI_SHELL BUILD ==========" -ForegroundColor Magenta
 Write-Host ""
 
-# Build elf2atxf tool first (uses stable toolchain to avoid build-std conflicts)
+# Build elf2atxf tool first
+# Use stable toolchain and explicit native target to avoid inheriting kernel's build-std settings
 Write-Step "Compilando ferramenta elf2atxf..."
 Push-Location tools\elf2atxf
-cargo +stable build --release 2>&1 | Out-Null
+$nativeTarget = "x86_64-pc-windows-msvc"
+$env:CARGO_BUILD_TARGET = $nativeTarget
+cargo +stable build --release --target $nativeTarget 2>&1 | Out-Null
 $toolResult = $LASTEXITCODE
+$env:CARGO_BUILD_TARGET = $null
 Pop-Location
 
 if ($toolResult -ne 0) {

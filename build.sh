@@ -233,10 +233,13 @@ fi
 
 header "UI_SHELL BUILD"
 
-# Build elf2atxf tool first (uses stable toolchain to avoid build-std conflicts)
+# Build elf2atxf tool first
+# Use stable toolchain and explicit native target to avoid inheriting kernel's build-std settings
 step "Compilando ferramenta elf2atxf..."
 pushd tools/elf2atxf > /dev/null
-if cargo +stable build --release 2>/dev/null; then
+# Detect native target
+NATIVE_TARGET=$(rustc -vV | grep host | awk '{print $2}')
+if CARGO_BUILD_TARGET="$NATIVE_TARGET" cargo +stable build --release --target "$NATIVE_TARGET" 2>/dev/null; then
     success "elf2atxf compilado"
 else
     error "Falha ao compilar elf2atxf"
@@ -255,7 +258,8 @@ fi
 popd > /dev/null
 
 step "Gerando binário ATXF..."
-if tools/elf2atxf/target/x86_64-unknown-linux-gnu/release/elf2atxf \
+NATIVE_TARGET=$(rustc -vV | grep host | awk '{print $2}')
+if tools/elf2atxf/target/${NATIVE_TARGET}/release/elf2atxf \
     userspace/drivers/ui_shell/target/x86_64-unknown-none/release/ui_shell \
     build/ui_shell.atxf 2>&1 | tee build/atxf.log; then
     success "ui_shell.atxf gerado"
