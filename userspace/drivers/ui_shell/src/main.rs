@@ -779,6 +779,22 @@ impl Compositor {
         self.fb.fill_rect(btn_x, btn_y, 10, 10, Color::new(255, 95, 86)); // Close
         self.fb.fill_rect(btn_x - 14, btn_y, 10, 10, Color::new(255, 189, 46)); // Minimize
         self.fb.fill_rect(btn_x - 28, btn_y, 10, 10, Color::new(39, 201, 63)); // Maximize
+
+        // Draw content for terminal windows
+        if window.app_type == AppType::Terminal {
+            // Draw a simple terminal-like content area
+            let content_x = x + 8;
+            let content_y = y + 30;
+            
+            // Terminal background (darker)
+            self.fb.fill_rect(content_x, content_y, w - 16, h - 38, Color::new(30, 30, 30));
+            
+            // Draw placeholder text indicating terminal is ready
+            if window.focused {
+                self.fb.draw_string(content_x + 8, content_y + 8, "Terminal Ready - Type to interact", Color::new(136, 192, 208), Color::new(30, 30, 30));
+                self.fb.draw_string(content_x + 8, content_y + 24, "Note: Terminal process should render here", Color::new(100, 100, 100), Color::new(30, 30, 30));
+            }
+        }
     }
 
     fn draw_dock(&mut self) {
