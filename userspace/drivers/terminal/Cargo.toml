@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Atom OS userspace terminal emulator"
 
+[workspace]
+
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
 

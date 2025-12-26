@@ -44,8 +44,58 @@ use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
-use libipc::messages::{MessageType, WindowId};
-use libipc::ports::well_known;
+use libipc::messages::WindowId;
+
+// ============================================================================
+// Simple Bump Allocator for userspace
+// ============================================================================
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; 1024 * 1024]>, // 1MB heap
+    next: UnsafeCell<usize>,
+}
+
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            heap: UnsafeCell::new([0; 1024 * 1024]),
+            next: UnsafeCell::new(0),
+        }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let next = self.next.get();
+        let heap = self.heap.get();
+        
+        let align = layout.align();
+        let size = layout.size();
+        
+        // Align the next pointer
+        let offset = (*next + align - 1) & !(align - 1);
+        let new_next = offset + size;
+        
+        if new_next > (*heap).len() {
+            return core::ptr::null_mut();
+        }
+        
+        *next = new_next;
+        (*heap).as_mut_ptr().add(offset)
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Bump allocator doesn't support deallocation
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
 
 // ============================================================================
 // Theme Colors (Nord-inspired)
@@ -71,6 +121,13 @@ mod theme {
 // Window Management
 // ============================================================================
 
+/// Application type for tracking running processes
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppType {
+    Static,      // Static window (like Welcome)
+    Terminal,    // Terminal application
+}
+
 /// Window state in the compositor
 #[derive(Clone)]
 struct Window {
@@ -84,6 +141,8 @@ struct Window {
     focused: bool,
     /// IPC port for sending events to the owning application
     event_port: Option<PortId>,
+    /// Application type for lifecycle management
+    app_type: AppType,
 }
 
 impl Window {
@@ -98,6 +157,22 @@ impl Window {
             visible: true,
             focused: false,
             event_port: None,
+            app_type: AppType::Static,
+        }
+    }
+
+    fn new_with_type(id: WindowId, title: &str, x: i32, y: i32, width: u32, height: u32, app_type: AppType) -> Self {
+        Self {
+            id,
+            title: String::from(title),
+            x,
+            y,
+            width,
+            height,
+            visible: true,
+            focused: false,
+            event_port: None,
+            app_type,
         }
     }
 
@@ -119,6 +194,8 @@ struct WindowManager {
     windows: Vec<Window>,
     next_id: WindowId,
     focused_id: Option<WindowId>,
+    /// Track if terminal is running
+    terminal_window_id: Option<WindowId>,
 }
 
 impl WindowManager {
@@ -127,6 +204,7 @@ impl WindowManager {
             windows: Vec::new(),
             next_id: 1,
             focused_id: None,
+            terminal_window_id: None,
         }
     }
 
@@ -137,6 +215,21 @@ impl WindowManager {
         let window = Window::new(id, title, x, y, width, height);
         self.windows.push(window);
         self.focus_window(id);
+        id
+    }
+
+    fn create_window_with_type(&mut self, title: &str, x: i32, y: i32, width: u32, height: u32, app_type: AppType) -> WindowId {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let window = Window::new_with_type(id, title, x, y, width, height, app_type);
+        self.windows.push(window);
+        self.focus_window(id);
+        
+        if app_type == AppType::Terminal {
+            self.terminal_window_id = Some(id);
+        }
+        
         id
     }
 
@@ -168,16 +261,57 @@ impl WindowManager {
     }
 
     fn close_window(&mut self, id: WindowId) {
+        // If closing terminal, clear terminal window tracking
+        if self.terminal_window_id == Some(id) {
+            self.terminal_window_id = None;
+        }
+        
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
             self.focused_id = self.windows.last().map(|w| w.id);
         }
+    }
+
+    fn is_terminal_running(&self) -> bool {
+        self.terminal_window_id.is_some()
+    }
+
+    fn get_terminal_window_id(&self) -> Option<WindowId> {
+        self.terminal_window_id
     }
 }
 
 // ============================================================================
 // Cursor State
 // ============================================================================
+
+/// Dock icon identifier
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DockIcon {
+    Files,
+    Settings,
+    Browser,
+    Terminal,
+}
+
+/// Dock icon position and metadata
+struct DockIconInfo {
+    icon: DockIcon,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: Color,
+    label: &'static str,
+}
+
+impl DockIconInfo {
+    fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x as i32 && py >= self.y as i32
+            && px < (self.x + self.width) as i32
+            && py < (self.y + self.height) as i32
+    }
+}
 
 struct CursorState {
     x: i32,
@@ -267,6 +401,7 @@ struct Compositor {
     mouse: MouseDriver,
     event_port: PortId,
     dirty: bool,
+    dock_icons: Vec<DockIconInfo>,
 }
 
 impl Compositor {
@@ -284,15 +419,18 @@ impl Compositor {
             mouse: MouseDriver::new(),
             event_port,
             dirty: true,
+            dock_icons: Vec::new(),
         }
     }
 
     fn run(&mut self) -> ! {
         log("Desktop: Starting compositor");
 
-        // Create initial windows
+        // Create initial windows - only Welcome, not Terminal (it will be launched from dock)
         self.wm.create_window("Welcome to Atom", 100, 100, 400, 300);
-        self.wm.create_window("Terminal", 150, 150, 500, 350);
+
+        // Initialize dock icons
+        self.init_dock_icons();
 
         // Initial draw
         self.draw_all();
@@ -333,6 +471,14 @@ impl Compositor {
     }
 
     fn handle_click(&mut self, x: i32, y: i32) {
+        // Check if clicking on dock icon
+        for icon_info in &self.dock_icons {
+            if icon_info.contains(x, y) {
+                self.handle_dock_click(icon_info.icon);
+                return;
+            }
+        }
+
         // Check if clicking on a window
         if let Some(id) = self.wm.window_at(x, y) {
             if self.wm.focused_id != Some(id) {
@@ -345,11 +491,56 @@ impl Compositor {
                 let close_x = w.x + w.width as i32 - 20;
                 let close_y = w.y + 6;
                 if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
-                    self.wm.close_window(id);
+                    self.handle_window_close(id);
                     self.dirty = true;
                 }
             }
         }
+    }
+
+    fn handle_dock_click(&mut self, icon: DockIcon) {
+        match icon {
+            DockIcon::Terminal => {
+                if self.wm.is_terminal_running() {
+                    // Terminal already running - focus it
+                    if let Some(id) = self.wm.get_terminal_window_id() {
+                        log("Desktop: Focusing existing terminal window");
+                        self.wm.focus_window(id);
+                        self.dirty = true;
+                    }
+                } else {
+                    // Launch terminal
+                    log("Desktop: Launching terminal");
+                    self.launch_terminal();
+                }
+            }
+            DockIcon::Files => {
+                log("Desktop: Files app not yet implemented");
+            }
+            DockIcon::Settings => {
+                log("Desktop: Settings app not yet implemented");
+            }
+            DockIcon::Browser => {
+                log("Desktop: Browser app not yet implemented");
+            }
+        }
+    }
+
+    fn handle_window_close(&mut self, id: WindowId) {
+        log("Desktop: Closing window");
+        // TODO: Send close event to application via IPC
+        // For now, just remove the window
+        self.wm.close_window(id);
+    }
+
+    fn launch_terminal(&mut self) {
+        // Create a window for the terminal
+        let _id = self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
+        log("Desktop: Terminal window created");
+        self.dirty = true;
+        
+        // TODO: Actually spawn the terminal process via service manager
+        // For now, we just create the window placeholder
     }
 
     fn handle_key(&mut self, scancode: u8) {
@@ -359,7 +550,17 @@ impl Compositor {
             exit(0);
         }
 
-        // Route to focused window (TODO: IPC to application)
+        // Route to focused window
+        if let Some(focused_id) = self.wm.focused_id {
+            // Send keyboard event to focused window
+            // TODO: Implement IPC message sending to application
+            // For now, just log
+            if let Some(window) = self.wm.windows.iter().find(|w| w.id == focused_id) {
+                if window.app_type == AppType::Terminal {
+                    // TODO: Send scancode to terminal via IPC
+                }
+            }
+        }
     }
 
     fn draw_all(&mut self) {
@@ -437,7 +638,7 @@ impl Compositor {
         self.fb.fill_rect(btn_x - 28, btn_y, 10, 10, Color::new(39, 201, 63)); // Maximize
     }
 
-    fn draw_dock(&self) {
+    fn draw_dock(&mut self) {
         let width = self.fb.width();
         let height = self.fb.height();
 
@@ -446,26 +647,58 @@ impl Compositor {
         let dock_x = (width / 2).saturating_sub(dock_w / 2);
         let dock_y = height.saturating_sub(dock_h + 10);
 
-        // Dock background with rounded appearance
+        // Dock background with semi-transparency effect (solid for now)
         self.fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
 
-        // Dock icons
-        let icons = [
-            (Color::new(191, 97, 106), "F"),  // Files
-            (Color::new(163, 190, 140), "S"),  // Settings
-            (Color::new(94, 129, 172), "B"),   // Browser
-            (Color::new(80, 80, 80), ">_"),    // Terminal
-        ];
+        // Calculate and store dock icon positions if not already initialized
+        if self.dock_icons.is_empty() {
+            self.init_dock_icons();
+        }
+
+        // Draw dock icons
+        for icon_info in &self.dock_icons {
+            self.fb.fill_rect(icon_info.x, icon_info.y, icon_info.width, icon_info.height, icon_info.color);
+            
+            // Calculate label position to center it
+            let label_x = icon_info.x + 8;
+            let label_y = icon_info.y + 10;
+            self.fb.draw_string(label_x, label_y, icon_info.label, Color::WHITE, icon_info.color);
+        }
+    }
+
+    fn init_dock_icons(&mut self) {
+        let width = self.fb.width();
+        let height = self.fb.height();
+
+        let dock_w = 300u32;
+        let dock_h = 48u32;
+        let dock_x = (width / 2).saturating_sub(dock_w / 2);
+        let dock_y = height.saturating_sub(dock_h + 10);
 
         let icon_size = 32u32;
         let padding = 16u32;
         let start_x = dock_x + padding;
         let icon_y = dock_y + (dock_h - icon_size) / 2;
 
-        for (i, (color, label)) in icons.iter().enumerate() {
+        let icons = [
+            (DockIcon::Files, Color::new(191, 97, 106), "F"),
+            (DockIcon::Settings, Color::new(163, 190, 140), "S"),
+            (DockIcon::Browser, Color::new(94, 129, 172), "B"),
+            (DockIcon::Terminal, Color::new(80, 80, 80), ">_"),
+        ];
+
+        self.dock_icons.clear();
+        for (i, (icon, color, label)) in icons.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + padding));
-            self.fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
-            self.fb.draw_string(ix + 8, icon_y + 10, label, Color::WHITE, *color);
+            self.dock_icons.push(DockIconInfo {
+                icon: *icon,
+                x: ix,
+                y: icon_y,
+                width: icon_size,
+                height: icon_size,
+                color: *color,
+                label,
+            });
         }
     }
 
