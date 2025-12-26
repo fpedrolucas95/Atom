@@ -167,6 +167,19 @@ Write-Host ""
 Write-Host "========== UI_SHELL BUILD ==========" -ForegroundColor Magenta
 Write-Host ""
 
+# Build elf2atxf tool first (uses stable toolchain to avoid build-std conflicts)
+Write-Step "Compilando ferramenta elf2atxf..."
+Push-Location tools\elf2atxf
+cargo +stable build --release 2>&1 | Out-Null
+$toolResult = $LASTEXITCODE
+Pop-Location
+
+if ($toolResult -ne 0) {
+    Write-ErrorMsg "Falha ao compilar elf2atxf"
+    exit 1
+}
+Write-Success "elf2atxf compilado"
+
 Write-Step "Compilando ui_shell..."
 Push-Location userspace\drivers\ui_shell
 cargo build --release 2>&1 | Out-File -FilePath ..\..\..\build\ui_shell_cargo.log
@@ -180,7 +193,7 @@ if ($uiResult -ne 0) {
 Write-Success "ui_shell compilado"
 
 Write-Step "Gerando binário ATXF..."
-python tools\build_atxf.py `
+& tools\elf2atxf\target\x86_64-pc-windows-msvc\release\elf2atxf.exe `
     userspace\drivers\ui_shell\target\x86_64-unknown-none\release\ui_shell `
     build\ui_shell.atxf 2>&1 | Out-File -FilePath build\atxf.log
 

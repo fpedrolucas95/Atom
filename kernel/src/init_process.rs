@@ -8,8 +8,7 @@
 // runnable user thread living in its own address space.
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
-use alloc::vec;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::boot::BootInfo;

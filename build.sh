@@ -233,6 +233,17 @@ fi
 
 header "UI_SHELL BUILD"
 
+# Build elf2atxf tool first (uses stable toolchain to avoid build-std conflicts)
+step "Compilando ferramenta elf2atxf..."
+pushd tools/elf2atxf > /dev/null
+if cargo +stable build --release 2>/dev/null; then
+    success "elf2atxf compilado"
+else
+    error "Falha ao compilar elf2atxf"
+    exit 1
+fi
+popd > /dev/null
+
 step "Compilando ui_shell..."
 pushd userspace/drivers/ui_shell > /dev/null
 if cargo build --release 2>&1 | tee ../../../build/ui_shell_cargo.log; then
@@ -244,7 +255,7 @@ fi
 popd > /dev/null
 
 step "Gerando binário ATXF..."
-if python3 tools/build_atxf.py \
+if tools/elf2atxf/target/x86_64-unknown-linux-gnu/release/elf2atxf \
     userspace/drivers/ui_shell/target/x86_64-unknown-none/release/ui_shell \
     build/ui_shell.atxf 2>&1 | tee build/atxf.log; then
     success "ui_shell.atxf gerado"

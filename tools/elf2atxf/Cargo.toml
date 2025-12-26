@@ -1,0 +1,9 @@
+[package]
+name = "elf2atxf"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+object = "0.32"
