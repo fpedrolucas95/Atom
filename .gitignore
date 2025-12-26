@@ -33,3 +33,8 @@ build/Atom.efi
 efi/NvVars
 efi/EFI/BOOT/BOOTX64.EFI
 userspace/build/ui_shell.atxf
+
+# Build artifacts
+build/*.obj
+build/*.log
+userspace/libs/syscall/build.log
