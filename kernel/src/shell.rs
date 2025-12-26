@@ -119,25 +119,33 @@ pub extern "C" fn shell_entry() -> ! {
         }
 
         if mouse_moved {
+            // Discreet 1px sync pulse in title bar (same color as title bar background)
+            static mut SYNC_X: u32 = 0;
+            unsafe {
+                SYNC_X = (SYNC_X + 1) % 8;
+                let ptr = (fb_addr + (SYNC_X as usize * bpp)) as *mut u32;
+                ptr.write_volatile(0x00252934); // Nearly identical to title bar color
+            }
+
+            // Restore saved region at old cursor position
             restore_cursor_region(fb_addr, stride, bpp, saved_x, saved_y, CURSOR_WIDTH, CURSOR_HEIGHT, &saved_region);
 
+            // Apply movement:
+            // PS/2: Delta X positive = right, Delta Y positive = up
+            // Screen: X increases right, Y increases downward
+            // So: cursor_x += dx, cursor_y -= dy
             let new_x = (cursor_x as i32 + total_dx).clamp(0, (width - CURSOR_WIDTH) as i32) as u32;
             let new_y = (cursor_y as i32 - total_dy).clamp(0, (height - CURSOR_HEIGHT) as i32) as u32;
 
             cursor_x = new_x;
             cursor_y = new_y;
 
+            // Save new region and draw cursor
             save_cursor_region(fb_addr, stride, bpp, cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT, &mut saved_region);
             saved_x = cursor_x;
             saved_y = cursor_y;
 
             draw_cursor(fb_addr, stride, bpp, cursor_x, cursor_y);
-
-            // Force framebuffer sync with invisible 1px write at top-left corner
-            unsafe {
-                let ptr = fb_addr as *mut u32;
-                ptr.write_volatile(ptr.read_volatile());
-            }
         }
         
         // Yield
