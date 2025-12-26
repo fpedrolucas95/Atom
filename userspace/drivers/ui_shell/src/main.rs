@@ -708,34 +708,30 @@ fn init_ps2_controller() {
     clear_keyboard_buffer();
     clear_mouse_buffer();
 
-    // Disable devices during setup
-    let _ = io::ps2_write_command(0xAD); // Disable keyboard
-    let _ = io::ps2_write_command(0xA7); // Disable mouse
-
-    // Flush output buffer
-    while io::ps2_read_status().unwrap_or(0) & 0x01 != 0 {
+    // Flush output buffer with timeout (max 16 bytes to avoid infinite loop)
+    for _ in 0..16 {
+        if io::ps2_read_status().unwrap_or(0) & 0x01 == 0 {
+            break;
+        }
         let _ = io::ps2_read_data();
     }
 
-    // Enable auxiliary device (mouse)
+    // Enable auxiliary device (mouse) - kernel may have already done this
     let _ = io::ps2_write_command(0xA8);
-
-    // Set controller configuration
-    let _ = io::ps2_write_command(0x20); // Read config
-    let _ = io::ps2_wait_output();
-    let mut config = io::ps2_read_data().unwrap_or(0);
-    config |= 0x02;  // Enable auxiliary interrupt
-    config &= !0x20; // Enable auxiliary clock
-    let _ = io::ps2_write_command(0x60); // Write config
-    let _ = io::ps2_write_data(config);
-
-    // Enable mouse
-    let _ = io::ps2_write_aux_command(0xF4);
-    let _ = io::ps2_wait_output();
-    let _ = io::ps2_read_data(); // ACK
 
     // Enable keyboard
     let _ = io::ps2_write_command(0xAE);
+
+    // Enable mouse data reporting
+    let _ = io::ps2_write_aux_command(0xF4);
+    // Brief wait for ACK (non-blocking)
+    for _ in 0..100 {
+        if io::ps2_read_status().unwrap_or(0) & 0x01 != 0 {
+            let _ = io::ps2_read_data(); // consume ACK
+            break;
+        }
+        core::hint::spin_loop();
+    }
 
     log("Desktop: PS/2 controller initialized");
 }
