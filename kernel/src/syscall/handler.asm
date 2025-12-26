@@ -44,10 +44,14 @@ syscall_entry:
     push    r14
     push    r15
 
-    mov     rcx, rax
-    mov     rdx, rdi
-    mov     r8,  rsi
-    mov     r9,  rdx
+    ; Prepare arguments for rust_syscall_dispatcher (Windows x64 ABI)
+    ; User syscall convention: rax=num, rdi=arg0, rsi=arg1, rdx=arg2, r10=arg3
+    ; Windows x64 convention: rcx=arg0, rdx=arg1, r8=arg2, r9=arg3, stack for rest
+    mov     rcx, rax        ; rcx = syscall number
+    mov     rax, rdx        ; save arg2 (rdx) before it's overwritten
+    mov     rdx, rdi        ; rdx = arg0
+    mov     r8,  rsi        ; r8 = arg1
+    mov     r9,  rax        ; r9 = arg2 (from saved value)
 
     sub     rsp, 56
 
