@@ -18,6 +18,13 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
+    /* Global Offset Table - needs to be at a known location */
+    .got : ALIGN(8)
+    {
+        *(.got)
+        *(.got.plt)
+    }
+
     .data : ALIGN(4096)
     {
         *(.data .data.*)
