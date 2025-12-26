@@ -41,6 +41,61 @@
 #![no_main]
 
 
+extern crate alloc;
+
+
+// ============================================================================
+// Simple Bump Allocator for userspace
+// ============================================================================
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; 1024 * 1024]>, // 1MB heap
+    next: UnsafeCell<usize>,
+}
+
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            heap: UnsafeCell::new([0; 1024 * 1024]),
+            next: UnsafeCell::new(0),
+        }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let next = self.next.get();
+        let heap = self.heap.get();
+        
+        let align = layout.align();
+        let size = layout.size();
+        
+        // Align the next pointer
+        let offset = (*next + align - 1) & !(align - 1);
+        let new_next = offset + size;
+        
+        if new_next > (*heap).len() {
+            return core::ptr::null_mut();
+        }
+        
+        *next = new_next;
+        (*heap).as_mut_ptr().add(offset)
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Bump allocator doesn't support deallocation
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+
 
 mod buffer;
 
@@ -104,6 +159,9 @@ struct Terminal {
 
     prompt_col: usize,
 
+    /// IPC port for receiving keyboard events from compositor
+    event_port: Option<atom_syscall::ipc::PortId>,
+
 }
 
 
@@ -132,6 +190,8 @@ impl Terminal {
 
             prompt_col: 0,
 
+            event_port: None,
+
         }
 
     }
@@ -146,6 +206,17 @@ impl Terminal {
 
         self.ipc.init();
 
+
+        // Create IPC port for receiving events from compositor
+        match atom_syscall::ipc::create_port() {
+            Ok(port) => {
+                self.event_port = Some(port);
+                log("Terminal: Created IPC event port");
+            }
+            Err(_) => {
+                log("Terminal: Failed to create IPC event port");
+            }
+        }
 
 
         // Set display dimensions from window config
@@ -649,7 +720,26 @@ impl Terminal {
             let mut needs_render = false;
 
 
+            // First try to receive IPC keyboard events from compositor
+            if let Some(port) = self.event_port {
+                let mut buffer = [0u8; 64];
+                while let Ok(Some(size)) = atom_syscall::ipc::try_recv(port, &mut buffer) {
+                    if size >= 15 {
+                        // Parse IPC message (header + key event)
+                        let scancode = buffer[12];
+                        let _character = buffer[13];
+                        let _modifiers = buffer[14];
+                        
+                        // Process scancode through input handler
+                        if let Some(event) = self.input_handler.process_scancode(scancode) {
+                            self.handle_key(event);
+                            needs_render = true;
+                        }
+                    }
+                }
+            }
 
+            // Fallback: also poll keyboard directly (for standalone mode)
             while let Some(event) = self.input_handler.poll() {
 
                 self.handle_key(event);
@@ -694,6 +784,14 @@ pub extern "C" fn _start() -> ! {
 
     main()
 
+}
+
+#[no_mangle]
+pub extern "efiapi" fn efi_main(
+    _image_handle: *const core::ffi::c_void,
+    _system_table: *const core::ffi::c_void,
+) -> usize {
+    main()
 }
 
 

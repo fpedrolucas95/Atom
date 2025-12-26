@@ -56,7 +56,7 @@ impl<'a> ParsedCommand<'a> {
     }
 
     /// Get all non-flag arguments (arguments not starting with '-')
-    pub fn positional_args(&self) -> impl Iterator<Item = &'a str> {
+    pub fn positional_args(&'a self) -> impl Iterator<Item = &'a str> {
         self.args[..self.arg_count]
             .iter()
             .filter(|a| !a.starts_with('-'))

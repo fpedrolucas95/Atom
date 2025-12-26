@@ -40,11 +40,11 @@ use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{Color, Framebuffer};
 use atom_syscall::input::{keyboard_poll, MouseDriver};
-use atom_syscall::ipc::{create_port, PortId};
+use atom_syscall::ipc::{create_port, send, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
-use libipc::messages::WindowId;
+use libipc::messages::{WindowId, KeyEvent as IpcKeyEvent, KeyModifiers, MessageType, MessageHeader};
 
 // ============================================================================
 // Simple Bump Allocator for userspace
@@ -402,6 +402,12 @@ struct Compositor {
     event_port: PortId,
     dirty: bool,
     dock_icons: Vec<DockIconInfo>,
+    // Keyboard state for modifier tracking
+    shift_left: bool,
+    shift_right: bool,
+    ctrl: bool,
+    alt: bool,
+    caps_lock: bool,
 }
 
 impl Compositor {
@@ -420,6 +426,11 @@ impl Compositor {
             event_port,
             dirty: true,
             dock_icons: Vec::new(),
+            shift_left: false,
+            shift_right: false,
+            ctrl: false,
+            alt: false,
+            caps_lock: false,
         }
     }
 
@@ -534,32 +545,164 @@ impl Compositor {
     }
 
     fn launch_terminal(&mut self) {
-        // Create a window for the terminal
-        let _id = self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
-        log("Desktop: Terminal window created");
-        self.dirty = true;
-        
-        // TODO: Actually spawn the terminal process via service manager
-        // For now, we just create the window placeholder
+        // Create an IPC port for the terminal
+        match create_port() {
+            Ok(port) => {
+                // Create a window for the terminal
+                let id = self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
+                
+                // Set the IPC port for the terminal window
+                if let Some(window) = self.wm.windows.iter_mut().find(|w| w.id == id) {
+                    window.event_port = Some(port);
+                }
+                
+                log("Desktop: Terminal window created with IPC port");
+                self.dirty = true;
+                
+                // TODO: Actually spawn the terminal process and give it the port ID
+                // For now, we just create the window placeholder
+            }
+            Err(_) => {
+                log("Desktop: Failed to create IPC port for terminal");
+            }
+        }
     }
 
     fn handle_key(&mut self, scancode: u8) {
         // Handle escape to quit
-        if scancode == 0x01 {
+        if scancode == 0x01 && (scancode & 0x80) == 0 {
             log("Desktop: Escape pressed, exiting");
             exit(0);
         }
 
+        // Track modifier state
+        let is_release = (scancode & 0x80) != 0;
+        let code = scancode & 0x7F;
+        
+        match code {
+            0x2A => { // Left Shift
+                self.shift_left = !is_release;
+                return;
+            }
+            0x36 => { // Right Shift
+                self.shift_right = !is_release;
+                return;
+            }
+            0x1D => { // Ctrl
+                self.ctrl = !is_release;
+                return;
+            }
+            0x38 => { // Alt
+                self.alt = !is_release;
+                return;
+            }
+            0x3A => { // Caps Lock (toggle on press)
+                if !is_release {
+                    self.caps_lock = !self.caps_lock;
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Only send key press events to applications (not releases)
+        if is_release {
+            return;
+        }
+
         // Route to focused window
         if let Some(focused_id) = self.wm.focused_id {
-            // Send keyboard event to focused window
-            // TODO: Implement IPC message sending to application
-            // For now, just log
             if let Some(window) = self.wm.windows.iter().find(|w| w.id == focused_id) {
                 if window.app_type == AppType::Terminal {
-                    // TODO: Send scancode to terminal via IPC
+                    if let Some(port) = window.event_port {
+                        self.send_key_event(port, scancode);
+                    }
                 }
             }
+        }
+    }
+
+    fn send_key_event(&self, port: PortId, scancode: u8) {
+        // Create keyboard event
+        let modifiers = KeyModifiers {
+            shift: self.shift_left || self.shift_right,
+            ctrl: self.ctrl,
+            alt: self.alt,
+            caps_lock: self.caps_lock,
+        };
+
+        // Simple scancode to character translation (only for testing)
+        // The terminal will do proper translation
+        let character = self.translate_scancode(scancode);
+
+        let key_event = IpcKeyEvent {
+            scancode,
+            character,
+            modifiers,
+        };
+
+        // Build IPC message
+        let header = MessageHeader::new(MessageType::KeyPress, 3);
+        let mut message = [0u8; 16];
+        message[0..12].copy_from_slice(&header.to_bytes());
+        message[12..15].copy_from_slice(&key_event.to_bytes());
+
+        // Send to application
+        let _ = send(port, &message[..15]);
+    }
+
+    fn translate_scancode(&self, code: u8) -> u8 {
+        let shift = self.shift_left || self.shift_right;
+        
+        // Basic scancode to character mapping (US keyboard layout)
+        match code {
+            // Letters
+            0x10 => if shift ^ self.caps_lock { b'Q' } else { b'q' },
+            0x11 => if shift ^ self.caps_lock { b'W' } else { b'w' },
+            0x12 => if shift ^ self.caps_lock { b'E' } else { b'e' },
+            0x13 => if shift ^ self.caps_lock { b'R' } else { b'r' },
+            0x14 => if shift ^ self.caps_lock { b'T' } else { b't' },
+            0x15 => if shift ^ self.caps_lock { b'Y' } else { b'y' },
+            0x16 => if shift ^ self.caps_lock { b'U' } else { b'u' },
+            0x17 => if shift ^ self.caps_lock { b'I' } else { b'i' },
+            0x18 => if shift ^ self.caps_lock { b'O' } else { b'o' },
+            0x19 => if shift ^ self.caps_lock { b'P' } else { b'p' },
+            0x1E => if shift ^ self.caps_lock { b'A' } else { b'a' },
+            0x1F => if shift ^ self.caps_lock { b'S' } else { b's' },
+            0x20 => if shift ^ self.caps_lock { b'D' } else { b'd' },
+            0x21 => if shift ^ self.caps_lock { b'F' } else { b'f' },
+            0x22 => if shift ^ self.caps_lock { b'G' } else { b'g' },
+            0x23 => if shift ^ self.caps_lock { b'H' } else { b'h' },
+            0x24 => if shift ^ self.caps_lock { b'J' } else { b'j' },
+            0x25 => if shift ^ self.caps_lock { b'K' } else { b'k' },
+            0x26 => if shift ^ self.caps_lock { b'L' } else { b'l' },
+            0x2C => if shift ^ self.caps_lock { b'Z' } else { b'z' },
+            0x2D => if shift ^ self.caps_lock { b'X' } else { b'x' },
+            0x2E => if shift ^ self.caps_lock { b'C' } else { b'c' },
+            0x2F => if shift ^ self.caps_lock { b'V' } else { b'v' },
+            0x30 => if shift ^ self.caps_lock { b'B' } else { b'b' },
+            0x31 => if shift ^ self.caps_lock { b'N' } else { b'n' },
+            0x32 => if shift ^ self.caps_lock { b'M' } else { b'm' },
+            
+            // Numbers
+            0x02 => if shift { b'!' } else { b'1' },
+            0x03 => if shift { b'@' } else { b'2' },
+            0x04 => if shift { b'#' } else { b'3' },
+            0x05 => if shift { b'$' } else { b'4' },
+            0x06 => if shift { b'%' } else { b'5' },
+            0x07 => if shift { b'^' } else { b'6' },
+            0x08 => if shift { b'&' } else { b'7' },
+            0x09 => if shift { b'*' } else { b'8' },
+            0x0A => if shift { b'(' } else { b'9' },
+            0x0B => if shift { b')' } else { b'0' },
+            
+            // Special keys
+            0x39 => b' ',  // Space
+            0x1C => b'\n', // Enter
+            0x0E => 0x08,  // Backspace
+            0x0F => b'\t', // Tab
+            
+            _ => 0, // Unknown/non-printable
         }
     }
 

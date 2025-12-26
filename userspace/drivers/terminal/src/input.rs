@@ -96,7 +96,7 @@ impl InputHandler {
     }
 
     /// Process a raw scancode and potentially produce a key event
-    fn process_scancode(&mut self, scancode: u8) -> Option<KeyEvent> {
+    pub fn process_scancode(&mut self, scancode: u8) -> Option<KeyEvent> {
         // Handle extended prefix (0xE0)
         if scancode == scancodes::EXTENDED_PREFIX {
             self.extended = true;
