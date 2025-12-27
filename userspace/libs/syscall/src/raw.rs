@@ -55,6 +55,9 @@ pub mod numbers {
 }
 
 /// Raw syscall with no arguments
+///
+/// Note: The kernel's syscall handler clobbers all caller-saved registers,
+/// not just rcx and r11. We must declare all of them as clobbered.
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> u64 {
     let result: u64;
@@ -63,6 +66,12 @@ pub unsafe fn syscall0(num: u64) -> u64 {
         inlateout("rax") num => result,
         out("rcx") _,
         out("r11") _,
+        lateout("rdi") _,
+        lateout("rsi") _,
+        lateout("rdx") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
         options(nostack, preserves_flags)
     );
     result
@@ -75,9 +84,14 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
-        in("rdi") arg0,
+        inlateout("rdi") arg0 => _,
         out("rcx") _,
         out("r11") _,
+        lateout("rsi") _,
+        lateout("rdx") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
         options(nostack, preserves_flags)
     );
     result
@@ -90,10 +104,14 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
-        in("rdi") arg0,
-        in("rsi") arg1,
+        inlateout("rdi") arg0 => _,
+        inlateout("rsi") arg1 => _,
         out("rcx") _,
         out("r11") _,
+        lateout("rdx") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
         options(nostack, preserves_flags)
     );
     result
@@ -106,11 +124,14 @@ pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        in("rdx") arg2,
+        inlateout("rdi") arg0 => _,
+        inlateout("rsi") arg1 => _,
+        inlateout("rdx") arg2 => _,
         out("rcx") _,
         out("r11") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
         options(nostack, preserves_flags)
     );
     result
@@ -123,12 +144,14 @@ pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> 
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        in("rdx") arg2,
-        in("r10") arg3,
+        inlateout("rdi") arg0 => _,
+        inlateout("rsi") arg1 => _,
+        inlateout("rdx") arg2 => _,
+        inlateout("r10") arg3 => _,
         out("rcx") _,
         out("r11") _,
+        lateout("r8") _,
+        lateout("r9") _,
         options(nostack, preserves_flags)
     );
     result
@@ -141,13 +164,14 @@ pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        in("rdx") arg2,
-        in("r10") arg3,
-        in("r8") arg4,
+        inlateout("rdi") arg0 => _,
+        inlateout("rsi") arg1 => _,
+        inlateout("rdx") arg2 => _,
+        inlateout("r10") arg3 => _,
+        inlateout("r8") arg4 => _,
         out("rcx") _,
         out("r11") _,
+        lateout("r9") _,
         options(nostack, preserves_flags)
     );
     result
@@ -160,12 +184,12 @@ pub unsafe fn syscall6(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        in("rdx") arg2,
-        in("r10") arg3,
-        in("r8") arg4,
-        in("r9") arg5,
+        inlateout("rdi") arg0 => _,
+        inlateout("rsi") arg1 => _,
+        inlateout("rdx") arg2 => _,
+        inlateout("r10") arg3 => _,
+        inlateout("r8") arg4 => _,
+        inlateout("r9") arg5 => _,
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags)
