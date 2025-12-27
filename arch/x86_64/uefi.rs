@@ -470,24 +470,19 @@ fn load_init_payload(
         return None;
     }
 
-    // Build path: "\\EFI\\BOOT\\init.atxf"
-    let mut path_buf = [0u16; 64];
-    str_to_utf16("\\EFI\\BOOT\\init.atxf", &mut path_buf);
+    // Try multiple paths for init.atxf
+    let paths = [
+        "\\EFI\\BOOT\\init.atxf",
+        "\\init.atxf",
+        "\\drivers\\ui_shell.atxf",  // Fallback: use ui_shell from drivers
+    ];
 
-    // Open the file
+    let mut path_buf = [0u16; 64];
     let mut file: *mut EfiFileProtocol = ptr::null_mut();
     let root_ref = unsafe { &mut *root };
-    let status = (root_ref.open)(
-        root,
-        &mut file,
-        path_buf.as_ptr(),
-        EFI_FILE_MODE_READ,
-        0,
-    );
 
-    if status != EFI_SUCCESS || file.is_null() {
-        // Try alternate path without EFI prefix
-        str_to_utf16("\\init.atxf", &mut path_buf);
+    for path in paths.iter() {
+        str_to_utf16(path, &mut path_buf);
         let status = (root_ref.open)(
             root,
             &mut file,
@@ -496,10 +491,15 @@ fn load_init_payload(
             0,
         );
 
-        if status != EFI_SUCCESS || file.is_null() {
-            let _ = (root_ref.close)(root);
-            return None;
+        if status == EFI_SUCCESS && !file.is_null() {
+            break;
         }
+        file = ptr::null_mut();
+    }
+
+    if file.is_null() {
+        let _ = (root_ref.close)(root);
+        return None;
     }
 
     let file_ref = unsafe { &mut *file };
