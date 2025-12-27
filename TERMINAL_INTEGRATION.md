@@ -244,3 +244,30 @@ The initial implementation incorrectly made the terminal "window-aware" by addin
 🚧 Framebuffer coordination (both can access, need boundaries)
 🚧 Input routing to apps (terminal polls directly for now)
 
+
+## Final Architecture Correction (Latest)
+
+### Critical Issue Fixed
+The system was creating fake/placeholder terminal windows when the dock icon was clicked, even though no real terminal process was running. This violated the principle that the compositor must never simulate or fake applications.
+
+### Current Correct Behavior
+- **Boot**: System shows only desktop background and Welcome window
+- **Dock**: Terminal icon is visible but inactive  
+- **Click Terminal icon**: Logs "Terminal spawning not yet implemented" - NO window created
+- **No fake terminals**: System will never show a terminal unless the real terminal process is running
+
+### Why This Is Correct
+1. **No Simulation**: Compositor never fakes or simulates application content
+2. **Real Process Only**: Windows exist ONLY for real running processes
+3. **Clear Separation**: Window management completely separate from application execution
+4. **Future-Ready**: When process spawning is implemented, flow will be: spawn process → create window → app renders content
+
+### Implementation Status
+✅ Dock with Terminal icon (visual only, no action)
+✅ Window management infrastructure (ready for real processes)
+✅ NO fake windows or placeholder content
+✅ Clean architecture separation
+
+🚧 Process spawning (required to actually launch terminal)
+🚧 Window-to-process association (when spawning available)
+
