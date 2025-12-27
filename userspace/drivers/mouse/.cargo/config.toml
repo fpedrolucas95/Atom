@@ -8,4 +8,4 @@ build-std-features = ["compiler-builtins-mem"]
 
 # Use custom linker script to place code at 0x400000
 [target.x86_64-unknown-none]
-rustflags = ["-C", "link-arg=-T../../userspace.ld", "-C", "relocation-model=static", "-C", "code-model=small"]
+rustflags = ["-C", "link-arg=-T../../userspace.ld", "-C", "relocation-model=static", "-C", "code-model=small", "-C", "link-arg=--no-pie"]
