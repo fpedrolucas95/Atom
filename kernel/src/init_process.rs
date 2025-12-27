@@ -32,7 +32,7 @@ use crate::{graphics, log_error, log_info, log_panic};
 
 const LOG_ORIGIN: &str = "init";
 
-const USER_STACK_PAGES: usize = 4;
+const USER_STACK_PAGES: usize = 16;  // 64KB stack for userspace processes
 const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
 const USER_STACK_TOP: usize = 0x0000_8000_0000;
 const KERNEL_STACK_PAGES: usize = 8;
