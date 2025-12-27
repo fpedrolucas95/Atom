@@ -15,9 +15,10 @@ USER_BASE = 0x400000;
 
 SECTIONS
 {
-    /* Code section - includes .rodata so it's part of executable segment */
+    /* Start at USER_BASE */
     . = USER_BASE;
 
+    /* Code section - includes .rodata so it's part of executable segment */
     .text : ALIGN(4K)
     {
         *(.text .text.*)
@@ -25,11 +26,13 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
-    /* Initialized data */
+    /* Initialized data - include relocation-related sections */
     .data : ALIGN(4K)
     {
         *(.data .data.*)
+        *(.data.rel.ro .data.rel.ro.*)
         *(.got .got.*)
+        *(.got.plt .got.plt.*)
     }
 
     /* Zero-initialized data */
@@ -39,12 +42,25 @@ SECTIONS
         *(COMMON)
     }
 
-    /* Discard unneeded sections */
+    /* Discard unneeded sections - especially dynamic linking infrastructure */
     /DISCARD/ :
     {
         *(.comment)
         *(.note*)
         *(.eh_frame*)
+        *(.eh_frame_hdr*)
         *(.debug*)
+        /* Discard dynamic linking sections - we're fully static */
+        *(.dynsym)
+        *(.gnu.hash)
+        *(.hash)
+        *(.dynstr)
+        *(.dynamic)
+        *(.rela.dyn)
+        *(.rela.plt)
+        *(.plt)
+        *(.plt.got)
+        *(.relro_padding)
+        *(.interp)
     }
 }
