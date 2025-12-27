@@ -457,6 +457,186 @@ fn respond_to_basic_syscalls() {
     );
 }
 
+/// Spawn the ui_shell userspace process
+/// This loads the ui_shell binary and creates a new userspace thread to run it
+fn spawn_ui_shell_process() -> Result<(), ExecError> {
+    log_info!(LOG_ORIGIN, "Spawning ui_shell userspace process");
+    
+    // For now, use an embedded minimal UI shell image
+    // TODO: Load actual ui_shell binary from boot payload or disk
+    let ui_shell_image = embedded_ui_shell_image();
+    
+    // Create a new thread ID for ui_shell
+    let pid = ThreadId::new();
+    
+    // Use kernel's page table (same as init process for now)
+    let kernel_cr3 = crate::arch::read_cr3() as usize;
+    
+    // Load the ui_shell executable
+    let executable = load_ui_shell_into_kernel(pid, ui_shell_image)?;
+    
+    // Allocate user stack for ui_shell
+    let user_stack_top = allocate_ui_shell_stack()?;
+    
+    // Allocate kernel stack
+    let kernel_stack_top = allocate_kernel_stack()?;
+    
+    // Create CPU context for userspace execution
+    let context = CpuContext::new_user(
+        executable.entry_point as u64,
+        user_stack_top as u64,
+        kernel_cr3 as u64,
+    );
+    
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell context: RIP={:#016X} RSP={:#016X}",
+        context.rip,
+        context.rsp
+    );
+    
+    // Create thread with high priority for UI responsiveness
+    let thread = Thread {
+        id: pid,
+        state: ThreadState::Ready,
+        context,
+        kernel_stack: kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
+        address_space: kernel_cr3 as u64,
+        priority: ThreadPriority::High,
+        name: "ui_shell",
+        capability_table: crate::cap::create_capability_table(pid),
+    };
+    
+    log_info!(LOG_ORIGIN, "Adding ui_shell thread (tid={})", pid);
+    thread::add_thread(thread);
+    sched::mark_thread_ready(pid);
+    
+    log_info!(LOG_ORIGIN, "UI shell process spawned successfully");
+    Ok(())
+}
+
+/// Load ui_shell executable into kernel page table
+fn load_ui_shell_into_kernel(
+    _pid: ThreadId,
+    image: &[u8],
+) -> Result<LoadedExecutable, ExecError> {
+    let sections = executable::parse_image(image)?;
+    
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell executable: text_len={}, data_len={}, bss_size={}",
+        sections.text.len(),
+        sections.data.len(),
+        sections.bss_size
+    );
+    
+    // Use a different load base for ui_shell to avoid conflicts with init
+    const UI_SHELL_LOAD_BASE: usize = 0x0080_0000; // 8 MB
+    
+    let text_base = UI_SHELL_LOAD_BASE;
+    let text_size = align_up(sections.text.len().max(1));
+    let text_pages = text_size / PAGE_SIZE;
+    
+    let text_phys = pmm::alloc_pages_zeroed(text_pages)
+        .ok_or(ExecError::OutOfMemory)?;
+    
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            sections.text.as_ptr(),
+            text_phys as *mut u8,
+            sections.text.len(),
+        );
+    }
+    
+    // Unmap and remap text section
+    for i in 0..text_pages {
+        let virt = text_base + i * PAGE_SIZE;
+        let _ = vm::unmap_page(virt);
+    }
+    
+    for i in 0..text_pages {
+        let virt = text_base + i * PAGE_SIZE;
+        let phys = text_phys + i * PAGE_SIZE;
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER)
+            .map_err(|_| ExecError::OutOfMemory)?;
+    }
+    
+    // BSS section
+    let bss_base = align_up(text_base + text_size);
+    let bss_size = sections.bss_size.max(1);
+    let bss_pages = align_up(bss_size) / PAGE_SIZE;
+    
+    if bss_pages > 0 {
+        let bss_phys = pmm::alloc_pages_zeroed(bss_pages)
+            .ok_or(ExecError::OutOfMemory)?;
+        
+        for i in 0..bss_pages {
+            let virt = bss_base + i * PAGE_SIZE;
+            let phys = bss_phys + i * PAGE_SIZE;
+            let _ = vm::unmap_page(virt);
+            vm::map_page(
+                virt,
+                phys,
+                PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+            )
+            .map_err(|_| ExecError::OutOfMemory)?;
+        }
+    }
+    
+    let entry_point = text_base + sections.entry_offset;
+    
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell loaded: text=0x{:X}, bss=0x{:X}, entry=0x{:X}",
+        text_base,
+        bss_base,
+        entry_point
+    );
+    
+    Ok(LoadedExecutable {
+        entry_point,
+        text_base,
+        data_base: bss_base,
+        bss_base,
+    })
+}
+
+/// Allocate user stack for ui_shell
+fn allocate_ui_shell_stack() -> Result<usize, ExecError> {
+    // Use a different stack location for ui_shell
+    const UI_SHELL_STACK_TOP: usize = 0x0000_9000_0000;
+    const UI_SHELL_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
+    
+    let virt_base = UI_SHELL_STACK_TOP - UI_SHELL_STACK_SIZE;
+    let phys_base = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
+        .ok_or(ExecError::OutOfMemory)?;
+    
+    for i in 0..USER_STACK_PAGES {
+        let virt = virt_base + i * PAGE_SIZE;
+        let phys = phys_base + i * PAGE_SIZE;
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE)
+            .map_err(|_| ExecError::OutOfMemory)?;
+    }
+    
+    log_info!(
+        LOG_ORIGIN,
+        "UI shell stack: 0x{:X}-0x{:X}",
+        virt_base,
+        UI_SHELL_STACK_TOP
+    );
+    
+    Ok(UI_SHELL_STACK_TOP)
+}
+
+/// Embedded minimal ui_shell image (placeholder)
+/// TODO: Replace with actual ui_shell binary from build
+fn embedded_ui_shell_image() -> &'static [u8] {
+    // For now, use same embedded image as init
+    // This will just loop/yield - not a real UI shell
+    executable::embedded_init_image()
+}
+
 extern "C" fn service_worker() {
     log_info!("svc", "service_worker entered");
 
@@ -495,21 +675,22 @@ extern "C" fn service_worker() {
 
         // Check if this is the UI shell service
         if ctx.name == "ui_shell" {
-            log_info!(LOG_ORIGIN, "UI shell service requested");
-            log_info!(LOG_ORIGIN, "Userspace UI shell loading not yet implemented");
-            log_info!(LOG_ORIGIN, "Kernel should load userspace/drivers/ui_shell binary");
+            log_info!(LOG_ORIGIN, "UI shell service requested - loading userspace ui_shell");
             
-            // TODO: Load and execute the userspace ui_shell binary
-            // The kernel must NOT contain an embedded compositor
-            // Instead, it should:
-            // 1. Load the ui_shell ELF binary from disk/boot payload
-            // 2. Create a new user process for it
-            // 3. Give it capabilities to access framebuffer and input
-            // 4. Execute it in userspace
-            //
-            // For now, just loop to keep the thread alive
-            loop {
-                sched::yield_current();
+            // Spawn the ui_shell process
+            match spawn_ui_shell_process() {
+                Ok(()) => {
+                    log_info!(LOG_ORIGIN, "UI shell process spawned successfully");
+                    // The ui_shell thread is now running, this service worker can exit
+                    return;
+                }
+                Err(err) => {
+                    log_error!(LOG_ORIGIN, "Failed to spawn ui_shell: {:?}", err);
+                    log_info!(LOG_ORIGIN, "Service thread will wait indefinitely");
+                    loop {
+                        sched::yield_current();
+                    }
+                }
             }
         }
 
