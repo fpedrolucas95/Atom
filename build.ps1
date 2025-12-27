@@ -23,13 +23,14 @@ $REPO_PATH  = $PSScriptRoot
 $RUST_LLD   = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
 $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
-# Userspace drivers list
-$USERSPACE_DRIVERS = @(
-    "keyboard",
-    "mouse", 
-    "display",
-    "ui_shell"
-)
+# Userspace drivers: directory name -> binary name mapping
+# The binary name comes from the "name" field in each driver's Cargo.toml
+$USERSPACE_DRIVERS = @{
+    "keyboard"  = "keyboard_driver"
+    "mouse"     = "mouse_driver"
+    "display"   = "display_driver"
+    "ui_shell"  = "atom_desktop"
+}
 
 # -------------------------------------------------------------------------
 # Funções auxiliares
@@ -144,15 +145,16 @@ if (-not $Kernel) {
     Write-Success "atom_syscall verificada"
 
     # Compilar cada driver userspace
-    foreach ($driver in $USERSPACE_DRIVERS) {
-        $driverPath = "userspace\drivers\$driver"
+    foreach ($driverDir in $USERSPACE_DRIVERS.Keys) {
+        $binaryName = $USERSPACE_DRIVERS[$driverDir]
+        $driverPath = "userspace\drivers\$driverDir"
 
         if (-not (Test-Path "$driverPath\Cargo.toml")) {
-            Write-Warning "Driver $driver nao encontrado"
+            Write-Warning "Driver $driverDir nao encontrado"
             continue
         }
 
-        Write-Step "Compilando driver $driver..."
+        Write-Step "Compilando driver $driverDir ($binaryName)..."
 
         Push-Location $driverPath
         cargo build --release 2>&1 | Tee-Object -FilePath "build.log"
@@ -160,28 +162,33 @@ if (-not $Kernel) {
         Pop-Location
 
         if ($buildResult -ne 0) {
-            Write-ErrorMsg "Falha ao compilar driver $driver"
+            Write-ErrorMsg "Falha ao compilar driver $driverDir"
             exit 1
         }
 
-        # Encontrar o binário ELF gerado
-        $elfPath = "$driverPath\target\x86_64-unknown-none\release\$driver"
+        # Encontrar o binário ELF gerado (use binary name from Cargo.toml)
+        $elfPath = "$driverPath\target\x86_64-unknown-none\release\$binaryName"
         if (-not (Test-Path $elfPath)) {
-            Write-Warning "Binário ELF não encontrado para $driver"
+            Write-Warning "Binario ELF nao encontrado: $elfPath"
             continue
         }
 
         # Converter ELF para ATXF
-        $atxfPath = "efi\drivers\$driver.atxf"
-        Write-Step "Convertendo $driver para ATXF..."
+        $atxfPath = "efi\drivers\$driverDir.atxf"
+        Write-Step "Convertendo $binaryName para ATXF..."
 
-        & $ELF2ATXF_EXE $elfPath $atxfPath 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-ErrorMsg "Falha ao converter $driver para ATXF"
+        # Use Start-Process to avoid PowerShell path interpretation issues
+        $elf2atxfFullPath = Join-Path $REPO_PATH $ELF2ATXF_EXE
+        $elfFullPath = Join-Path $REPO_PATH $elfPath
+        $atxfFullPath = Join-Path $REPO_PATH $atxfPath
+
+        $process = Start-Process -FilePath $elf2atxfFullPath -ArgumentList "`"$elfFullPath`"", "`"$atxfFullPath`"" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -ne 0) {
+            Write-ErrorMsg "Falha ao converter $driverDir para ATXF (exit code: $($process.ExitCode))"
             exit 1
         }
 
-        Write-Success "$driver.atxf criado"
+        Write-Success "$driverDir.atxf criado"
     }
 
     # Copiar ui_shell.atxf para o diretório de boot como init.atxf
@@ -189,7 +196,7 @@ if (-not $Kernel) {
         Copy-Item "efi\drivers\ui_shell.atxf" "efi\EFI\BOOT\init.atxf" -Force
         Write-Success "init.atxf criado a partir de ui_shell"
     } else {
-        Write-ErrorMsg "ui_shell.atxf não encontrado - o kernel não poderá iniciar!"
+        Write-ErrorMsg "ui_shell.atxf nao encontrado - o kernel nao podera iniciar!"
     }
 
     Write-Success "Compilação de userspace concluída"
