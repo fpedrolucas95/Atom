@@ -588,8 +588,17 @@ fn main() -> ! {
     log("Atom Desktop Environment v1.0");
     log("Microkernel architecture - all UI in userspace");
 
-    let fb = match Framebuffer::new() {
-        Some(fb) => fb,
+    log("Desktop: About to call Framebuffer::new()");
+
+    let fb_result = Framebuffer::new();
+
+    log("Desktop: Framebuffer::new() returned");
+
+    let fb = match fb_result {
+        Some(fb) => {
+            log("Desktop: Got Some(fb)");
+            fb
+        }
         None => {
             log("Desktop: Failed to acquire framebuffer");
             exit(1);

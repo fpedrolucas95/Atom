@@ -148,12 +148,19 @@ pub struct Framebuffer {
 impl Framebuffer {
     /// Create a new framebuffer handle
     pub fn new() -> Option<Self> {
-        get_framebuffer().map(|info| Self { info })
+        // Explicit match to avoid closure that could cause indirect calls
+        match get_framebuffer() {
+            Some(info) => Some(Self { info }),
+            None => None,
+        }
     }
 
     /// Create from mapped framebuffer
     pub fn from_mapped() -> Option<Self> {
-        map_framebuffer().map(|info| Self { info })
+        match map_framebuffer() {
+            Some(info) => Some(Self { info }),
+            None => None,
+        }
     }
 
     #[inline]
