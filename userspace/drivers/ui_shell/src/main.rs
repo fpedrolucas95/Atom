@@ -451,24 +451,24 @@ impl Compositor {
     fn handle_dock_click(&mut self, icon: DockIcon) {
         match icon {
             DockIcon::Terminal => {
-                if self.wm.is_terminal_window_open() {
-                    // Terminal window already exists - focus it
-                    if let Some(id) = self.wm.get_terminal_window_id() {
-                        log("Desktop: Focusing existing terminal window");
-                        self.wm.focus_window(id);
-                        self.dirty = true;
-                    }
-                } else {
-                    // Create terminal window
-                    log("Desktop: Creating terminal window");
-                    self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
-                    self.dirty = true;
-                    
-                    // NOTE: In a full implementation, we would spawn the terminal process here.
-                    // The terminal app runs independently and draws to its region of the framebuffer.
-                    // The compositor provides the window chrome (title bar, borders, close button).
-                    // For now, we just create the window container.
-                }
+                // Since process spawning is not yet implemented, we cannot launch the terminal
+                log("Desktop: Terminal spawning not yet implemented");
+                log("Desktop: Kernel syscall for process spawning required");
+                
+                // TODO: When process spawning is implemented:
+                // 1. Spawn terminal process via syscall
+                // 2. Get process ID and IPC port
+                // 3. Create window container and associate with process
+                // 4. Terminal process will render its content independently
+                // 
+                // Example future implementation:
+                // match spawn_process("/bin/terminal", &[]) {
+                //     Ok((pid, port)) => {
+                //         let id = self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
+                //         // Associate window with process and port
+                //     }
+                //     Err(_) => log("Desktop: Failed to spawn terminal"),
+                // }
             }
         }
     }
