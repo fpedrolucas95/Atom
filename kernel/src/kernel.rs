@@ -68,6 +68,10 @@ mod shared_mem;
 mod system;
 mod executable;
 mod init_process;
+// NOTE: service_manager is not used in the current microkernel architecture.
+// The UI shell (ui_shell.atxf) is loaded directly from the boot payload.
+// Future versions may use a service manager for additional userspace services.
+#[allow(dead_code)]
 mod service_manager;
 mod util;
 
@@ -150,29 +154,58 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     ipc::init();
     shared_mem::init();
 
-    log_info!(LOG_INIT_PROC, "Calling init_process::launch_init()...");
+    // =======================================================================
+    // MICROKERNEL ARCHITECTURE: Launch UI Shell as First Userspace Process
+    // =======================================================================
+    //
+    // The kernel does NOT contain any UI logic. All rendering, window
+    // management, and input handling runs in userspace via ui_shell.atxf.
+    //
+    // The bootloader MUST provide a valid ATXF executable as the init payload.
+    // If the payload is missing or invalid, the system WILL halt.
+    // There are NO fallback shells or embedded UI components.
+    //
+    // This enforces proper separation between kernel and userspace.
+    // =======================================================================
+
+    log_info!(LOG_INIT_PROC, "Loading UI shell from boot payload...");
     match init_process::launch_init(boot_info) {
         Ok(init) => {
-            log_info!(LOG_INIT_PROC, "Init process launched (pid={})", init.pid);
+            log_info!(
+                LOG_INIT_PROC,
+                "UI shell loaded successfully (pid={}, entry=0x{:X})",
+                init.pid,
+                init.entry_point
+            );
         }
         Err(e) => {
-            log_panic!(LOG_INIT_PROC, "FATAL: Init process launch failed: {:?}", e);
-            log_panic!(LOG_INIT_PROC, "System cannot continue without init. Halting.");
+            log_panic!(LOG_INIT_PROC, "================================================");
+            log_panic!(LOG_INIT_PROC, "FATAL: Failed to load UI shell: {:?}", e);
+            log_panic!(LOG_INIT_PROC, "================================================");
+            log_panic!(LOG_INIT_PROC, "The kernel requires a valid ui_shell.atxf payload");
+            log_panic!(LOG_INIT_PROC, "to be provided by the bootloader. Without the UI");
+            log_panic!(LOG_INIT_PROC, "shell, the system cannot operate.");
+            log_panic!(LOG_INIT_PROC, "");
+            log_panic!(LOG_INIT_PROC, "This is NOT a fallback scenario - the microkernel");
+            log_panic!(LOG_INIT_PROC, "architecture requires all UI to run in userspace.");
+            log_panic!(LOG_INIT_PROC, "================================================");
+            log_panic!(LOG_INIT_PROC, "SYSTEM HALTED");
+            log_panic!(LOG_INIT_PROC, "================================================");
             loop {
                 halt();
             }
         }
     }
-    
-    // Microkernel architecture: Desktop environment launches from userspace.
-    // The init_process is responsible for starting essential userspace services:
-    // - Input drivers (keyboard, mouse)
-    // - Display/graphics service
-    // - Desktop environment compositor
-    //
-    // No UI code runs in the kernel - all rendering, input routing, and window
-    // management is handled by userspace components communicating via IPC.
-    log_info!(LOG_KERNEL_INIT, "Microkernel ready. Userspace services will be started by init.");
+
+    log_info!(LOG_KERNEL_INIT, "===========================================");
+    log_info!(LOG_KERNEL_INIT, "MICROKERNEL READY");
+    log_info!(LOG_KERNEL_INIT, "===========================================");
+    log_info!(LOG_KERNEL_INIT, "All UI functionality runs in userspace.");
+    log_info!(LOG_KERNEL_INIT, "The kernel provides only:");
+    log_info!(LOG_KERNEL_INIT, "  - Syscalls for framebuffer/input access");
+    log_info!(LOG_KERNEL_INIT, "  - Capability-based security");
+    log_info!(LOG_KERNEL_INIT, "  - IPC for inter-process communication");
+    log_info!(LOG_KERNEL_INIT, "===========================================");
 
     log_info!(LOG_KERNEL_INIT, "Handing over to scheduler.");
     start_scheduling();
