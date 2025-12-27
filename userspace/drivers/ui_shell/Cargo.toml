@@ -5,10 +5,11 @@ edition = "2021"
 authors = ["Atom OS Contributors"]
 description = "Atom Desktop Environment - Compositor and Window Manager"
 
+[workspace]
+
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
-libgui = { path = "../../libs/libgui" }
 
 [[bin]]
 name = "atom_desktop"

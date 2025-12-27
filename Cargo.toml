@@ -11,6 +11,8 @@ exclude = [
     "userspace/drivers/mouse",
     "userspace/drivers/display",
     "userspace/drivers/ui_shell",
+    "tools/elf2atxf",
+    "tools/embed_binary",
 ]
 resolver = "2"
 

@@ -69,6 +69,7 @@ mod system;
 mod executable;
 mod init_process;
 mod service_manager;
+mod ui_shell_binary;
 mod util;
 
 // Microkernel architecture: All UI components run in userspace.
