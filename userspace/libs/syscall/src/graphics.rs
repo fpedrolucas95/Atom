@@ -34,11 +34,19 @@ impl FramebufferInfo {
     }
 }
 
+/// Simple test function to check if function calls work
+#[inline(never)]
+pub fn test_function_call() -> u64 {
+    42
+}
+
 /// Get framebuffer information for direct graphics access
 ///
 /// Returns Some(FramebufferInfo) on success, None if framebuffer is not available
 /// or the process doesn't have permission to access it.
+#[inline(never)]
 pub fn get_framebuffer() -> Option<FramebufferInfo> {
+    // DEBUG: Try just the syscall without any processing
     let mut info = [0u64; 6];
     let result = unsafe {
         syscall1(SYS_GET_FRAMEBUFFER, info.as_mut_ptr() as u64)

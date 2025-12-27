@@ -590,6 +590,16 @@ fn main() -> ! {
 
     log("Desktop: About to call Framebuffer::new()");
 
+    // Test if simple non-inline function calls work
+    log("Desktop: Testing simple function call...");
+    let test_val = atom_syscall::graphics::test_function_call();
+    if test_val == 42 {
+        log("Desktop: Simple function call works!");
+    } else {
+        log("Desktop: Function call returned wrong value!");
+    }
+
+    log("Desktop: Now calling Framebuffer::new()...");
     let fb_result = Framebuffer::new();
 
     log("Desktop: Framebuffer::new() returned");
