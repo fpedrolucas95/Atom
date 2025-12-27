@@ -402,6 +402,10 @@ fn launch_ui_service() {
         "Desktop environment will be launched as userspace service"
     );
 
+    // TODO: Load and execute the userspace ui_shell binary
+    // For now, this is a placeholder until process spawning is fully implemented
+    // The kernel should NOT have any embedded compositor or UI code
+    
     // Schedule the desktop environment service
     // This uses the manifest-based service loading system
     // The 'atom_desktop' service handles:
@@ -491,10 +495,22 @@ extern "C" fn service_worker() {
 
         // Check if this is the UI shell service
         if ctx.name == "ui_shell" {
-            log_info!(LOG_ORIGIN, "Starting desktop environment (ui_shell)");
-            run_desktop_environment();
-            // Desktop runs forever, shouldn't return
-            return;
+            log_info!(LOG_ORIGIN, "UI shell service requested");
+            log_info!(LOG_ORIGIN, "Userspace UI shell loading not yet implemented");
+            log_info!(LOG_ORIGIN, "Kernel should load userspace/drivers/ui_shell binary");
+            
+            // TODO: Load and execute the userspace ui_shell binary
+            // The kernel must NOT contain an embedded compositor
+            // Instead, it should:
+            // 1. Load the ui_shell ELF binary from disk/boot payload
+            // 2. Create a new user process for it
+            // 3. Give it capabilities to access framebuffer and input
+            // 4. Execute it in userspace
+            //
+            // For now, just loop to keep the thread alive
+            loop {
+                sched::yield_current();
+            }
         }
 
         // Other services enter a generic service loop
@@ -513,6 +529,28 @@ extern "C" fn service_worker() {
     }
 }
 
+// ============================================================================
+// EMBEDDED COMPOSITOR - DEPRECATED
+// ============================================================================
+// 
+// The code below is an embedded compositor that was temporarily included in
+// the kernel for testing. This violates microkernel architecture principles.
+//
+// ** THIS CODE SHOULD NOT BE USED **
+//
+// The kernel must NOT contain any UI code. UI components must run in userspace.
+// The proper architecture is:
+// - kernel: Exposes framebuffer and input via syscalls
+// - userspace/drivers/ui_shell: Compositor and window manager
+// - userspace/drivers/terminal: Terminal application
+// - userspace/drivers/keyboard: Keyboard driver  
+// - userspace/drivers/mouse: Mouse driver
+//
+// TODO: Remove this code entirely once userspace process loading is working
+//
+// ============================================================================
+
+/*
 /// Desktop environment entry point
 /// Runs the compositor with window management, input handling, and rendering
 fn run_desktop_environment() {
@@ -849,3 +887,7 @@ impl Compositor {
         (self.cursor_x, self.cursor_y)
     }
 }
+
+*/
+
+// End of deprecated embedded compositor code
