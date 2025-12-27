@@ -68,6 +68,7 @@ mod shared_mem;
 mod system;
 mod executable;
 mod init_process;
+mod driver_registry;
 // NOTE: service_manager is not used in the current microkernel architecture.
 // The UI shell (ui_shell.atxf) is loaded directly from the boot payload.
 // Future versions may use a service manager for additional userspace services.
@@ -153,6 +154,9 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     syscall::init();
     ipc::init();
     shared_mem::init();
+
+    // Initialize driver registry with boot-loaded drivers
+    driver_registry::init(&boot_info.drivers);
 
     // =======================================================================
     // MICROKERNEL ARCHITECTURE: Launch UI Shell as First Userspace Process

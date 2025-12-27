@@ -97,6 +97,7 @@ USERSPACE_DRIVERS=(
     "keyboard"
     "mouse"
     "display"
+    "terminal"
     "ui_shell"
 )
 

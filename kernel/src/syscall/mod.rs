@@ -112,8 +112,10 @@ pub const SYS_MAP_FRAMEBUFFER: u64 = 41;
 pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
 pub const SYS_IPC_WAIT_ANY: u64 = 43;  // Wait on multiple ports for any event
 pub const SYS_GET_IRQ_COUNT: u64 = 44; // Get IRQ occurrence count for a registered handler
+pub const SYS_SPAWN_PROCESS: u64 = 45; // Spawn a new process from a registered driver
 
 pub const ESUCCESS: u64 = 0;
+pub const ENOTFOUND: u64 = u64::MAX - 10;
 pub const EINVAL: u64 = u64::MAX - 1;
 pub const ENOSYS: u64 = u64::MAX - 2;
 pub const ENOMEM: u64 = u64::MAX - 3;
@@ -259,6 +261,7 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_UNREGISTER_IRQ_HANDLER => sys_unregister_irq_handler(arg0 as u8),
         SYS_IPC_WAIT_ANY => sys_ipc_wait_any(arg0, arg1, arg2),
         SYS_GET_IRQ_COUNT => sys_get_irq_count(arg0 as u8),
+        SYS_SPAWN_PROCESS => sys_spawn_process(arg0 as *const u8, arg1 as usize),
 
         _ => {
             log_warn!(
@@ -2829,4 +2832,309 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         }
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
     }
+}
+
+/// Spawn a new process from a registered driver
+///
+/// This syscall creates a new process by loading an ATXF executable from
+/// the driver registry. The driver must have been loaded by the bootloader.
+///
+/// # Arguments
+/// * `name_ptr` - Pointer to the driver name (null-terminated or length-bounded)
+/// * `name_len` - Length of the driver name
+///
+/// # Returns
+/// * On success: The new process ID (PID)
+/// * On failure: Error code (EINVAL, ENOTFOUND, ENOMEM)
+fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
+    const LOG_ORIGIN: &str = "syscall:spawn";
+
+    log_info!(LOG_ORIGIN, "spawn_process(name_ptr={:p}, name_len={})", name_ptr, name_len);
+
+    // Validate arguments
+    if name_ptr.is_null() || name_len == 0 || name_len > 64 {
+        log_warn!(LOG_ORIGIN, "spawn_process: invalid arguments");
+        return EINVAL;
+    }
+
+    // Copy name from userspace
+    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+    let name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s.trim_end_matches('\0'),
+        Err(_) => {
+            log_warn!(LOG_ORIGIN, "spawn_process: invalid UTF-8 in name");
+            return EINVAL;
+        }
+    };
+
+    log_info!(LOG_ORIGIN, "Looking up driver: '{}'", name);
+
+    // Look up the driver in the registry
+    let driver_image = match crate::driver_registry::get_driver_image(name) {
+        Some(img) => img,
+        None => {
+            log_warn!(LOG_ORIGIN, "spawn_process: driver '{}' not found", name);
+            return ENOTFOUND;
+        }
+    };
+
+    log_info!(
+        LOG_ORIGIN,
+        "Found driver '{}': ptr={:p}, size={}",
+        name,
+        driver_image.ptr,
+        driver_image.size
+    );
+
+    // Parse the ATXF executable
+    let image_bytes = unsafe {
+        core::slice::from_raw_parts(driver_image.ptr, driver_image.size)
+    };
+
+    let sections = match crate::executable::parse_image(image_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            log_error!(LOG_ORIGIN, "spawn_process: failed to parse executable: {:?}", e);
+            return EINVAL;
+        }
+    };
+
+    log_info!(
+        LOG_ORIGIN,
+        "Executable parsed: text={} bytes, data={} bytes, bss={} bytes, entry=0x{:X}",
+        sections.text.len(),
+        sections.data.len(),
+        sections.bss_size,
+        sections.entry_offset
+    );
+
+    // Create the new process
+    match spawn_process_internal(name, &sections) {
+        Ok(pid) => {
+            log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
+            pid.raw()
+        }
+        Err(e) => {
+            log_error!(LOG_ORIGIN, "spawn_process: failed to spawn: {:?}", e);
+            e
+        }
+    }
+}
+
+/// Map driver name to static string for Thread struct
+fn get_static_driver_name(name: &str) -> &'static str {
+    match name {
+        "terminal" => "terminal",
+        "keyboard" => "keyboard",
+        "mouse" => "mouse",
+        "display" => "display",
+        "browser" => "browser",
+        "files" => "files",
+        "settings" => "settings",
+        _ => "unknown",
+    }
+}
+
+/// Internal function to create a new userspace process from parsed sections
+fn spawn_process_internal(
+    name: &str,
+    sections: &crate::executable::ExecutableSections,
+) -> Result<crate::thread::ThreadId, u64> {
+    // Get static name for the thread
+    let static_name = get_static_driver_name(name);
+    use crate::cap::{self, CapPermissions, InputDeviceType, ResourceType};
+    use crate::executable::USER_EXEC_LOAD_BASE;
+    use crate::mm::pmm::{self, align_up, PAGE_SIZE};
+    use crate::mm::vm::{self, PageFlags};
+    use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
+
+    const USER_STACK_PAGES: usize = 4;
+    const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
+    const KERNEL_STACK_PAGES: usize = 8;
+
+    // Use unique stack addresses for each process to avoid conflicts
+    // Each process gets its own stack region at a different address
+    let pid = ThreadId::new();
+    let pid_offset = (pid.raw() as usize) * 0x10000; // 64KB per process offset
+    let user_stack_top: usize = 0x0000_8000_0000 + pid_offset;
+    let user_stack_base = user_stack_top - USER_STACK_SIZE;
+
+    // Also offset the executable load address for each process
+    let text_base = USER_EXEC_LOAD_BASE + pid_offset;
+
+    log_info!(
+        "spawn",
+        "Creating process '{}' (pid={}) at text=0x{:X}, stack=0x{:X}",
+        name,
+        pid,
+        text_base,
+        user_stack_top
+    );
+
+    // Use kernel's page table (shared address space for now)
+    let kernel_cr3 = crate::arch::read_cr3() as usize;
+
+    // Allocate and map text section
+    let text_size = align_up(sections.text.len().max(1));
+    let text_pages = text_size / PAGE_SIZE;
+
+    let text_phys = pmm::alloc_pages_zeroed(text_pages)
+        .ok_or(ENOMEM)?;
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            sections.text.as_ptr(),
+            text_phys as *mut u8,
+            sections.text.len(),
+        );
+    }
+
+    for i in 0..text_pages {
+        let virt = text_base + i * PAGE_SIZE;
+        let phys = text_phys + i * PAGE_SIZE;
+        let _ = vm::unmap_page(virt);
+        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER)
+            .map_err(|_| ENOMEM)?;
+    }
+
+    // Allocate and map data section
+    let data_base = align_up(text_base + text_size);
+    let data_size = align_up(sections.data.len().max(1));
+    let data_pages = data_size / PAGE_SIZE;
+
+    if !sections.data.is_empty() {
+        let data_phys = pmm::alloc_pages_zeroed(data_pages)
+            .ok_or(ENOMEM)?;
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                sections.data.as_ptr(),
+                data_phys as *mut u8,
+                sections.data.len(),
+            );
+        }
+
+        for i in 0..data_pages {
+            let virt = data_base + i * PAGE_SIZE;
+            let phys = data_phys + i * PAGE_SIZE;
+            let _ = vm::unmap_page(virt);
+            vm::map_page(
+                virt,
+                phys,
+                PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+            ).map_err(|_| ENOMEM)?;
+        }
+    }
+
+    // Allocate and map BSS section
+    let bss_base = align_up(data_base + data_size);
+    let bss_size = sections.bss_size.max(1);
+    let bss_pages = align_up(bss_size) / PAGE_SIZE;
+
+    let bss_phys = pmm::alloc_pages_zeroed(bss_pages)
+        .ok_or(ENOMEM)?;
+
+    for i in 0..bss_pages {
+        let virt = bss_base + i * PAGE_SIZE;
+        let phys = bss_phys + i * PAGE_SIZE;
+        let _ = vm::unmap_page(virt);
+        vm::map_page(
+            virt,
+            phys,
+            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+        ).map_err(|_| ENOMEM)?;
+    }
+
+    // Allocate user stack
+    let stack_phys = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
+        .ok_or(ENOMEM)?;
+
+    for i in 0..USER_STACK_PAGES {
+        let virt = user_stack_base + i * PAGE_SIZE;
+        let phys = stack_phys + i * PAGE_SIZE;
+        let _ = vm::unmap_page(virt);
+        vm::map_page(
+            virt,
+            phys,
+            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+        ).map_err(|_| ENOMEM)?;
+    }
+
+    // Allocate kernel stack
+    let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
+        .ok_or(ENOMEM)?;
+    let kernel_stack_top = (kernel_stack_phys + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+
+    // Calculate entry point
+    let entry_point = text_base + sections.entry_offset;
+
+    log_info!(
+        "spawn",
+        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, entry=0x{:X}",
+        text_base,
+        text_base + text_size,
+        data_base,
+        bss_base,
+        entry_point
+    );
+
+    // Create CPU context for Ring 3 execution
+    let context = CpuContext::new_user(
+        entry_point as u64,
+        user_stack_top as u64,
+        kernel_cr3 as u64,
+    );
+
+    // Create the thread
+    let thread = Thread {
+        id: pid,
+        state: ThreadState::Ready,
+        context,
+        kernel_stack: kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
+        address_space: kernel_cr3 as u64,
+        priority: ThreadPriority::Normal,
+        name: static_name,
+        capability_table: cap::create_capability_table(pid),
+    };
+
+    // Grant capabilities
+    // Framebuffer capability
+    if let Some((address, width, height, stride, bpp)) = crate::graphics::get_framebuffer_info() {
+        let fb_resource = ResourceType::Framebuffer {
+            address: address as u64,
+            width,
+            height,
+            stride,
+            bytes_per_pixel: bpp as u8,
+        };
+        let fb_perms = CapPermissions::READ.union(CapPermissions::WRITE);
+        if let Ok(cap) = cap::create_root_capability(fb_resource, pid, fb_perms) {
+            let _ = crate::thread::add_thread_capability(pid, cap);
+        }
+    }
+
+    // Keyboard capability
+    let kbd_resource = ResourceType::InputDevice {
+        device_type: InputDeviceType::Keyboard,
+    };
+    if let Ok(cap) = cap::create_root_capability(kbd_resource, pid, CapPermissions::READ) {
+        let _ = crate::thread::add_thread_capability(pid, cap);
+    }
+
+    // Mouse capability
+    let mouse_resource = ResourceType::InputDevice {
+        device_type: InputDeviceType::Mouse,
+    };
+    if let Ok(cap) = cap::create_root_capability(mouse_resource, pid, CapPermissions::READ) {
+        let _ = crate::thread::add_thread_capability(pid, cap);
+    }
+
+    // Add thread to scheduler
+    crate::thread::add_thread(thread);
+    crate::sched::mark_thread_ready(pid);
+
+    log_info!("spawn", "Process '{}' (pid={}) scheduled", name, pid);
+
+    Ok(pid)
 }

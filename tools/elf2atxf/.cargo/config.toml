@@ -1,13 +1,4 @@
-# Override parent config to build for host target
 # This is a host tool, not a UEFI application
-#
-# By explicitly setting [build] without a target, we override
-# the parent's x86_64-unknown-uefi target and use the default
-# host target (works on both Linux and Windows)
-
+# Build for the native host target
 [build]
-# No target specified - use host default
-
-# Don't use build-std for this tool (it's a normal std program)
-[unstable]
-# Empty - don't inherit parent's build-std settings
+target = "x86_64-unknown-linux-gnu"

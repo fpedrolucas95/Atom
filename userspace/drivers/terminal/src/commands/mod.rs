@@ -70,74 +70,159 @@ impl<'a> CommandContext<'a> {
     }
 }
 
+/// Helper for case-insensitive command matching
+fn cmd_eq(input: &str, target: &str) -> bool {
+    input.eq_ignore_ascii_case(target)
+}
+
 /// Execute a parsed command
 pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    match cmd.command.to_ascii_lowercase().as_str() {
-        // System information commands
-        "help" | "?" => system::cmd_help(cmd, ctx),
-        "version" | "ver" => system::cmd_version(cmd, ctx),
-        "uptime" => system::cmd_uptime(cmd, ctx),
-        "date" | "time" => system::cmd_date(cmd, ctx),
-        "clear" | "cls" => CommandResult::Clear,
-        "echo" => system::cmd_echo(cmd, ctx),
-        "sysinfo" => system::cmd_sysinfo(cmd, ctx),
+    let c = cmd.command;
 
-        // Process management commands
-        "ps" | "procs" => process::cmd_ps(cmd, ctx),
-        "kill" => process::cmd_kill(cmd, ctx),
-        "exec" | "run" => process::cmd_exec(cmd, ctx),
-        "mem" | "memory" => process::cmd_memory(cmd, ctx),
-        "services" | "svc" => process::cmd_services(cmd, ctx),
-
-        // Filesystem commands
-        "ls" | "dir" => filesystem::cmd_ls(cmd, ctx),
-        "cd" => filesystem::cmd_cd(cmd, ctx),
-        "pwd" => filesystem::cmd_pwd(cmd, ctx),
-        "cat" | "type" => filesystem::cmd_cat(cmd, ctx),
-        "tree" => filesystem::cmd_tree(cmd, ctx),
-
-        // Terminal control
-        "exit" | "quit" | "logout" => CommandResult::Exit,
-
-        // Debug/diagnostic commands
-        "log" | "dmesg" => system::cmd_log(cmd, ctx),
-        "ports" => system::cmd_ports(cmd, ctx),
-        "caps" => system::cmd_caps(cmd, ctx),
-
-        // Unknown command
-        _ => {
-            ctx.error("Unknown command. Type 'help' for available commands.");
-            CommandResult::NotFound
-        }
+    // System information commands
+    if cmd_eq(c, "help") || cmd_eq(c, "?") {
+        return system::cmd_help(cmd, ctx);
     }
+    if cmd_eq(c, "version") || cmd_eq(c, "ver") {
+        return system::cmd_version(cmd, ctx);
+    }
+    if cmd_eq(c, "uptime") {
+        return system::cmd_uptime(cmd, ctx);
+    }
+    if cmd_eq(c, "date") || cmd_eq(c, "time") {
+        return system::cmd_date(cmd, ctx);
+    }
+    if cmd_eq(c, "clear") || cmd_eq(c, "cls") {
+        return CommandResult::Clear;
+    }
+    if cmd_eq(c, "echo") {
+        return system::cmd_echo(cmd, ctx);
+    }
+    if cmd_eq(c, "sysinfo") {
+        return system::cmd_sysinfo(cmd, ctx);
+    }
+
+    // Process management commands
+    if cmd_eq(c, "ps") || cmd_eq(c, "procs") {
+        return process::cmd_ps(cmd, ctx);
+    }
+    if cmd_eq(c, "kill") {
+        return process::cmd_kill(cmd, ctx);
+    }
+    if cmd_eq(c, "exec") || cmd_eq(c, "run") {
+        return process::cmd_exec(cmd, ctx);
+    }
+    if cmd_eq(c, "mem") || cmd_eq(c, "memory") {
+        return process::cmd_memory(cmd, ctx);
+    }
+    if cmd_eq(c, "services") || cmd_eq(c, "svc") {
+        return process::cmd_services(cmd, ctx);
+    }
+
+    // Filesystem commands
+    if cmd_eq(c, "ls") || cmd_eq(c, "dir") {
+        return filesystem::cmd_ls(cmd, ctx);
+    }
+    if cmd_eq(c, "cd") {
+        return filesystem::cmd_cd(cmd, ctx);
+    }
+    if cmd_eq(c, "pwd") {
+        return filesystem::cmd_pwd(cmd, ctx);
+    }
+    if cmd_eq(c, "cat") || cmd_eq(c, "type") {
+        return filesystem::cmd_cat(cmd, ctx);
+    }
+    if cmd_eq(c, "tree") {
+        return filesystem::cmd_tree(cmd, ctx);
+    }
+
+    // Terminal control
+    if cmd_eq(c, "exit") || cmd_eq(c, "quit") || cmd_eq(c, "logout") {
+        return CommandResult::Exit;
+    }
+
+    // Debug/diagnostic commands
+    if cmd_eq(c, "log") || cmd_eq(c, "dmesg") {
+        return system::cmd_log(cmd, ctx);
+    }
+    if cmd_eq(c, "ports") {
+        return system::cmd_ports(cmd, ctx);
+    }
+    if cmd_eq(c, "caps") {
+        return system::cmd_caps(cmd, ctx);
+    }
+
+    // Unknown command
+    ctx.error("Unknown command. Type 'help' for available commands.");
+    CommandResult::NotFound
 }
 
 /// Get command description for help text
-pub fn get_command_help(cmd: &str) -> Option<(&'static str, &'static str)> {
-    match cmd.to_ascii_lowercase().as_str() {
-        "help" | "?" => Some(("help [command]", "Display help information")),
-        "version" | "ver" => Some(("version", "Display system version information")),
-        "uptime" => Some(("uptime", "Show system uptime")),
-        "date" | "time" => Some(("date", "Display current date and time")),
-        "clear" | "cls" => Some(("clear", "Clear the terminal screen")),
-        "echo" => Some(("echo [text...]", "Display text")),
-        "sysinfo" => Some(("sysinfo", "Display system information summary")),
-        "ps" | "procs" => Some(("ps", "List running processes")),
-        "kill" => Some(("kill <pid>", "Terminate a process")),
-        "exec" | "run" => Some(("exec <program>", "Execute a program")),
-        "mem" | "memory" => Some(("mem", "Display memory usage")),
-        "services" | "svc" => Some(("services", "List registered services")),
-        "ls" | "dir" => Some(("ls [path]", "List directory contents")),
-        "cd" => Some(("cd <path>", "Change current directory")),
-        "pwd" => Some(("pwd", "Print working directory")),
-        "cat" | "type" => Some(("cat <file>", "Display file contents")),
-        "tree" => Some(("tree [path]", "Display directory tree")),
-        "exit" | "quit" => Some(("exit", "Exit the terminal")),
-        "log" | "dmesg" => Some(("log", "Display system log")),
-        "ports" => Some(("ports", "List IPC ports")),
-        "caps" => Some(("caps", "List capabilities")),
-        _ => None,
+pub fn get_command_help(c: &str) -> Option<(&'static str, &'static str)> {
+    if cmd_eq(c, "help") || cmd_eq(c, "?") {
+        return Some(("help [command]", "Display help information"));
     }
+    if cmd_eq(c, "version") || cmd_eq(c, "ver") {
+        return Some(("version", "Display system version information"));
+    }
+    if cmd_eq(c, "uptime") {
+        return Some(("uptime", "Show system uptime"));
+    }
+    if cmd_eq(c, "date") || cmd_eq(c, "time") {
+        return Some(("date", "Display current date and time"));
+    }
+    if cmd_eq(c, "clear") || cmd_eq(c, "cls") {
+        return Some(("clear", "Clear the terminal screen"));
+    }
+    if cmd_eq(c, "echo") {
+        return Some(("echo [text...]", "Display text"));
+    }
+    if cmd_eq(c, "sysinfo") {
+        return Some(("sysinfo", "Display system information summary"));
+    }
+    if cmd_eq(c, "ps") || cmd_eq(c, "procs") {
+        return Some(("ps", "List running processes"));
+    }
+    if cmd_eq(c, "kill") {
+        return Some(("kill <pid>", "Terminate a process"));
+    }
+    if cmd_eq(c, "exec") || cmd_eq(c, "run") {
+        return Some(("exec <program>", "Execute a program"));
+    }
+    if cmd_eq(c, "mem") || cmd_eq(c, "memory") {
+        return Some(("mem", "Display memory usage"));
+    }
+    if cmd_eq(c, "services") || cmd_eq(c, "svc") {
+        return Some(("services", "List registered services"));
+    }
+    if cmd_eq(c, "ls") || cmd_eq(c, "dir") {
+        return Some(("ls [path]", "List directory contents"));
+    }
+    if cmd_eq(c, "cd") {
+        return Some(("cd <path>", "Change current directory"));
+    }
+    if cmd_eq(c, "pwd") {
+        return Some(("pwd", "Print working directory"));
+    }
+    if cmd_eq(c, "cat") || cmd_eq(c, "type") {
+        return Some(("cat <file>", "Display file contents"));
+    }
+    if cmd_eq(c, "tree") {
+        return Some(("tree [path]", "Display directory tree"));
+    }
+    if cmd_eq(c, "exit") || cmd_eq(c, "quit") {
+        return Some(("exit", "Exit the terminal"));
+    }
+    if cmd_eq(c, "log") || cmd_eq(c, "dmesg") {
+        return Some(("log", "Display system log"));
+    }
+    if cmd_eq(c, "ports") {
+        return Some(("ports", "List IPC ports"));
+    }
+    if cmd_eq(c, "caps") {
+        return Some(("caps", "List capabilities"));
+    }
+    None
 }
 
 /// Get all available commands for help display

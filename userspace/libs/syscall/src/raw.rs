@@ -52,6 +52,7 @@ pub mod numbers {
     pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
     pub const SYS_IPC_WAIT_ANY: u64 = 43;
     pub const SYS_GET_IRQ_COUNT: u64 = 44;
+    pub const SYS_SPAWN_PROCESS: u64 = 45;
 }
 
 /// Raw syscall with no arguments
