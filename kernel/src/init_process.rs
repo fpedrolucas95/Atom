@@ -629,12 +629,10 @@ fn allocate_ui_shell_stack() -> Result<usize, ExecError> {
     Ok(UI_SHELL_STACK_TOP)
 }
 
-/// Embedded minimal ui_shell image (placeholder)
-/// TODO: Replace with actual ui_shell binary from build
+/// Embedded UI shell ATXF binary
+/// This is the actual ui_shell binary converted to ATXF format
 fn embedded_ui_shell_image() -> &'static [u8] {
-    // For now, use same embedded image as init
-    // This will just loop/yield - not a real UI shell
-    executable::embedded_init_image()
+    crate::ui_shell_binary::UI_SHELL_BINARY
 }
 
 extern "C" fn service_worker() {
