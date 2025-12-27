@@ -301,8 +301,47 @@ fn load_ui_shell_executable(
             .map_err(|_| InitError::MemoryAllocationFailed)?;
     }
 
-    // Allocate and map BSS section
-    let bss_base = align_up(text_base + text_size);
+    // Allocate and map DATA section (initialized data - strings, globals, etc.)
+    let data_base = align_up(text_base + text_size);
+    let data_size = align_up(sections.data.len().max(1));
+    let data_pages = data_size / PAGE_SIZE;
+
+    if !sections.data.is_empty() {
+        log_info!(
+            LOG_ORIGIN,
+            "Loading .data: base=0x{:X}, size={}, pages={}",
+            data_base,
+            data_size,
+            data_pages
+        );
+
+        let data_phys = pmm::alloc_pages_zeroed(data_pages)
+            .ok_or(InitError::MemoryAllocationFailed)?;
+
+        // Copy data section content
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                sections.data.as_ptr(),
+                data_phys as *mut u8,
+                sections.data.len(),
+            );
+        }
+
+        for i in 0..data_pages {
+            let virt = data_base + i * PAGE_SIZE;
+            let phys = data_phys + i * PAGE_SIZE;
+            let _ = vm::unmap_page(virt);
+            vm::map_page(
+                virt,
+                phys,
+                PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+            )
+            .map_err(|_| InitError::MemoryAllocationFailed)?;
+        }
+    }
+
+    // Allocate and map BSS section (zero-initialized data)
+    let bss_base = align_up(data_base + data_size);
     let bss_size = sections.bss_size.max(1);
     let bss_pages = align_up(bss_size) / PAGE_SIZE;
 
@@ -333,8 +372,9 @@ fn load_ui_shell_executable(
 
     log_info!(
         LOG_ORIGIN,
-        "Executable loaded: text=0x{:X}, bss=0x{:X}, entry=0x{:X}",
+        "Executable loaded: text=0x{:X}, data=0x{:X}, bss=0x{:X}, entry=0x{:X}",
         text_base,
+        data_base,
         bss_base,
         entry_point
     );
@@ -342,7 +382,7 @@ fn load_ui_shell_executable(
     Ok(LoadedExecutable {
         entry_point,
         text_base,
-        data_base: bss_base,
+        data_base,
         bss_base,
     })
 }
