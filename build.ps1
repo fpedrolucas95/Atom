@@ -114,7 +114,8 @@ if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
     Write-Step "Compilando elf2atxf tool..."
 
     Push-Location $ELF2ATXF_PATH
-    cargo build --release 2>&1 | Tee-Object -FilePath "build.log"
+    # Explicitly build for Windows host, not UEFI (overrides root .cargo/config.toml)
+    cargo build --release --target x86_64-pc-windows-msvc 2>&1 | Tee-Object -FilePath "build.log"
     $buildResult = $LASTEXITCODE
     Pop-Location
 
