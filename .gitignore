@@ -38,3 +38,13 @@ userspace/build/ui_shell.atxf
 build/*.obj
 build/*.log
 userspace/libs/syscall/build.log
+
+# EFI build outputs
+efi/EFI/
+efi/drivers/
+
+# Tool build logs
+tools/elf2atxf/build.log
+
+# Userspace driver build logs
+userspace/drivers/*/build.log
