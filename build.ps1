@@ -107,7 +107,8 @@ Write-Host "========== ELF2ATXF TOOL ==========" -ForegroundColor Magenta
 Write-Host ""
 
 $ELF2ATXF_PATH = "tools\elf2atxf"
-$ELF2ATXF_EXE = "$ELF2ATXF_PATH\target\release\elf2atxf.exe"
+# On Windows, cargo builds to target\<host-triple>\release\ by default
+$ELF2ATXF_EXE = "$ELF2ATXF_PATH\target\x86_64-pc-windows-msvc\release\elf2atxf.exe"
 
 if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
     Write-Step "Compilando elf2atxf tool..."
