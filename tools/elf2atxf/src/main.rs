@@ -17,6 +17,7 @@ use std::io::{self, Write};
 const ATXF_MAGIC: u32 = 0x4154_5846; // "ATXF" in ASCII, little-endian
 const ATXF_VERSION: u16 = 1;
 const PAGE_SIZE: usize = 4096;
+const USER_BASE: u64 = 0x400000; // Expected userspace load address
 
 // ELF constants
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -163,7 +164,7 @@ fn main() -> io::Result<()> {
     let mut text_vaddr: u64 = 0;
     let mut base_addr: u64 = u64::MAX;
 
-    // First pass: find base address
+    // First pass: find base address (only considering segments at/above USER_BASE)
     for i in 0..e_phnum as usize {
         let phdr_offset = e_phoff as usize + i * e_phentsize as usize;
         if phdr_offset + 56 > elf_data.len() {
@@ -173,13 +174,14 @@ fn main() -> io::Result<()> {
         let p_type = read_u32_le(&elf_data, phdr_offset);
         let p_vaddr = read_u64_le(&elf_data, phdr_offset + 16);
 
-        if p_type == PT_LOAD && p_vaddr < base_addr {
+        // Only consider segments at or above USER_BASE (skip dynamic linking junk at low addresses)
+        if p_type == PT_LOAD && p_vaddr >= USER_BASE && p_vaddr < base_addr {
             base_addr = p_vaddr;
         }
     }
 
     if base_addr == u64::MAX {
-        base_addr = 0;
+        base_addr = USER_BASE;
     }
     println!("  Base address: 0x{:X}", base_addr);
 
@@ -198,6 +200,12 @@ fn main() -> io::Result<()> {
         let p_memsz = read_u64_le(&elf_data, phdr_offset + 40);
 
         if p_type != PT_LOAD {
+            continue;
+        }
+
+        // Skip segments below USER_BASE (dynamic linking junk at low addresses)
+        if p_vaddr < USER_BASE {
+            println!("  Skipping segment at 0x{:X} (below USER_BASE)", p_vaddr);
             continue;
         }
 

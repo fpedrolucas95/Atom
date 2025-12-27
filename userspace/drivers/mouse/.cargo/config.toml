@@ -12,7 +12,10 @@ rustflags = [
     "-C", "link-arg=-T../../userspace.ld",
     "-C", "relocation-model=static",
     "-C", "code-model=small",
+    "-C", "panic=abort",
     "-C", "link-arg=--no-pie",
     "-C", "link-arg=-Bstatic",
-    "-C", "link-arg=--no-dynamic-linker"
+    "-C", "link-arg=--no-dynamic-linker",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=-z", "-C", "link-arg=norelro"
 ]
