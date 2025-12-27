@@ -1,0 +1,9 @@
+[package]
+name = "embed_binary"
+version = "0.1.0"
+edition = "2021"
+
+# This tool uses stable Rust standard library
+# It is NOT part of the no_std kernel build
+
+[dependencies]
