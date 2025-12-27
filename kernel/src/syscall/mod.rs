@@ -2948,14 +2948,14 @@ fn spawn_process_internal(
     use crate::mm::vm::{self, PageFlags};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
-    const USER_STACK_PAGES: usize = 4;
+    const USER_STACK_PAGES: usize = 16;  // 64KB stack for userspace processes
     const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
     const KERNEL_STACK_PAGES: usize = 8;
 
     // Use unique stack addresses for each process to avoid conflicts
     // Each process gets its own stack region at a different address
     let pid = ThreadId::new();
-    let pid_offset = (pid.raw() as usize) * 0x10000; // 64KB per process offset
+    let pid_offset = (pid.raw() as usize) * 0x100000; // 1MB per process offset
     let user_stack_top: usize = 0x0000_8000_0000 + pid_offset;
     let user_stack_base = user_stack_top - USER_STACK_SIZE;
 
