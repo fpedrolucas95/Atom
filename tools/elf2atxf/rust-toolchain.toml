@@ -1,0 +1,3 @@
+# Use stable Rust for this host tool
+[toolchain]
+channel = "stable"

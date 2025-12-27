@@ -100,7 +100,7 @@ impl Application {
         }
 
         // Check for keyboard input
-        if let Some(scancode) = atom_syscall::input::poll_keyboard() {
+        if let Some(scancode) = atom_syscall::input::keyboard_poll() {
             return Event::Key(crate::event::KeyEvent {
                 scancode,
                 character: scancode_to_ascii(scancode),

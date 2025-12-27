@@ -119,7 +119,7 @@ struct EfiBootServices {
     install_protocol_interface: usize,
     reinstall_protocol_interface: usize,
     uninstall_protocol_interface: usize,
-    handle_protocol: usize,
+    handle_protocol: EfiHandleProtocol,
     _reserved: usize,
     register_protocol_notify: usize,
     locate_handle: usize,
@@ -177,6 +177,100 @@ const GOP_GUID: EfiGuid = EfiGuid {
     data3: 0x4A38,
     data4: [0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A],
 };
+
+// Simple File System Protocol GUID
+const SIMPLE_FILE_SYSTEM_GUID: EfiGuid = EfiGuid {
+    data1: 0x0964E5B22,
+    data2: 0x6459,
+    data3: 0x11D2,
+    data4: [0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B],
+};
+
+// Loaded Image Protocol GUID
+const LOADED_IMAGE_GUID: EfiGuid = EfiGuid {
+    data1: 0x5B1B31A1,
+    data2: 0x9562,
+    data3: 0x11D2,
+    data4: [0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B],
+};
+
+// File modes
+const EFI_FILE_MODE_READ: u64 = 0x0000000000000001;
+
+// EFI File Protocol
+type EfiFileOpen = extern "win64" fn(
+    this: *mut EfiFileProtocol,
+    new_handle: *mut *mut EfiFileProtocol,
+    file_name: *const u16,
+    open_mode: u64,
+    attributes: u64,
+) -> EfiStatus;
+
+type EfiFileClose = extern "win64" fn(this: *mut EfiFileProtocol) -> EfiStatus;
+
+type EfiFileRead = extern "win64" fn(
+    this: *mut EfiFileProtocol,
+    buffer_size: *mut usize,
+    buffer: *mut c_void,
+) -> EfiStatus;
+
+type EfiFileGetInfo = extern "win64" fn(
+    this: *mut EfiFileProtocol,
+    information_type: *const EfiGuid,
+    buffer_size: *mut usize,
+    buffer: *mut c_void,
+) -> EfiStatus;
+
+#[repr(C)]
+struct EfiFileProtocol {
+    revision: u64,
+    open: EfiFileOpen,
+    close: EfiFileClose,
+    _delete: usize,
+    read: EfiFileRead,
+    _write: usize,
+    _get_position: usize,
+    _set_position: usize,
+    get_info: EfiFileGetInfo,
+    // ... more fields
+}
+
+// Simple File System Protocol
+type EfiOpenVolume = extern "win64" fn(
+    this: *mut EfiSimpleFileSystemProtocol,
+    root: *mut *mut EfiFileProtocol,
+) -> EfiStatus;
+
+#[repr(C)]
+struct EfiSimpleFileSystemProtocol {
+    revision: u64,
+    open_volume: EfiOpenVolume,
+}
+
+// Loaded Image Protocol
+#[repr(C)]
+struct EfiLoadedImageProtocol {
+    revision: u32,
+    parent_handle: EfiHandle,
+    system_table: *mut c_void,
+    device_handle: EfiHandle,
+    // ... more fields we don't need
+}
+
+// File Info GUID
+const EFI_FILE_INFO_GUID: EfiGuid = EfiGuid {
+    data1: 0x09576E92,
+    data2: 0x6D3F,
+    data3: 0x11D2,
+    data4: [0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B],
+};
+
+// Handle Protocol function type
+type EfiHandleProtocol = extern "win64" fn(
+    handle: EfiHandle,
+    protocol: *const EfiGuid,
+    interface: *mut *mut c_void,
+) -> EfiStatus;
 
 fn get_cpu_vendor() -> [u8; 12] {
     let mut vendor = [0u8; 12];
@@ -313,6 +407,157 @@ fn disable_watchdog(bs: &mut EfiBootServices) {
     let _ = (bs.set_watchdog_timer)(0, 0, 0, ptr::null_mut());
 }
 
+/// Convert ASCII string to UTF-16 for UEFI
+fn str_to_utf16(s: &str, buf: &mut [u16]) -> usize {
+    let mut i = 0;
+    for c in s.chars() {
+        if i >= buf.len() - 1 {
+            break;
+        }
+        buf[i] = c as u16;
+        i += 1;
+    }
+    buf[i] = 0; // null terminator
+    i + 1
+}
+
+/// Load init.atxf from the boot volume
+fn load_init_payload(
+    image: EfiHandle,
+    bs: &mut EfiBootServices,
+) -> Option<ExecutableImage> {
+    // Get Loaded Image Protocol to find our device handle
+    let mut loaded_image_ptr: *mut c_void = ptr::null_mut();
+    let status = (bs.handle_protocol)(
+        image,
+        &LOADED_IMAGE_GUID,
+        &mut loaded_image_ptr,
+    );
+
+    if status != EFI_SUCCESS || loaded_image_ptr.is_null() {
+        return None;
+    }
+
+    let loaded_image = unsafe { &*(loaded_image_ptr as *const EfiLoadedImageProtocol) };
+    let device_handle = loaded_image.device_handle;
+
+    if device_handle.is_null() {
+        return None;
+    }
+
+    // Get Simple File System Protocol from device handle
+    let mut fs_ptr: *mut c_void = ptr::null_mut();
+    let status = (bs.handle_protocol)(
+        device_handle,
+        &SIMPLE_FILE_SYSTEM_GUID,
+        &mut fs_ptr,
+    );
+
+    if status != EFI_SUCCESS || fs_ptr.is_null() {
+        return None;
+    }
+
+    let fs = unsafe { &mut *(fs_ptr as *mut EfiSimpleFileSystemProtocol) };
+
+    // Open root volume
+    let mut root: *mut EfiFileProtocol = ptr::null_mut();
+    let status = (fs.open_volume)(fs as *mut _, &mut root);
+
+    if status != EFI_SUCCESS || root.is_null() {
+        return None;
+    }
+
+    // Build path: "\\EFI\\BOOT\\init.atxf"
+    let mut path_buf = [0u16; 64];
+    str_to_utf16("\\EFI\\BOOT\\init.atxf", &mut path_buf);
+
+    // Open the file
+    let mut file: *mut EfiFileProtocol = ptr::null_mut();
+    let root_ref = unsafe { &mut *root };
+    let status = (root_ref.open)(
+        root,
+        &mut file,
+        path_buf.as_ptr(),
+        EFI_FILE_MODE_READ,
+        0,
+    );
+
+    if status != EFI_SUCCESS || file.is_null() {
+        // Try alternate path without EFI prefix
+        str_to_utf16("\\init.atxf", &mut path_buf);
+        let status = (root_ref.open)(
+            root,
+            &mut file,
+            path_buf.as_ptr(),
+            EFI_FILE_MODE_READ,
+            0,
+        );
+
+        if status != EFI_SUCCESS || file.is_null() {
+            let _ = (root_ref.close)(root);
+            return None;
+        }
+    }
+
+    let file_ref = unsafe { &mut *file };
+
+    // Get file size via GetInfo
+    let mut info_buf = [0u8; 256];
+    let mut info_size: usize = 256;
+    let status = (file_ref.get_info)(
+        file,
+        &EFI_FILE_INFO_GUID,
+        &mut info_size,
+        info_buf.as_mut_ptr() as *mut c_void,
+    );
+
+    if status != EFI_SUCCESS {
+        let _ = (file_ref.close)(file);
+        let _ = (root_ref.close)(root);
+        return None;
+    }
+
+    // File size is at offset 8 in EFI_FILE_INFO
+    let file_size = unsafe {
+        *(info_buf.as_ptr().add(8) as *const u64) as usize
+    };
+
+    if file_size == 0 || file_size > 16 * 1024 * 1024 {
+        // Sanity check: max 16 MB
+        let _ = (file_ref.close)(file);
+        let _ = (root_ref.close)(root);
+        return None;
+    }
+
+    // Allocate buffer for file
+    let mut file_buffer: *mut c_void = ptr::null_mut();
+    let status = (bs.allocate_pool)(EFI_LOADER_DATA, file_size, &mut file_buffer);
+
+    if status != EFI_SUCCESS || file_buffer.is_null() {
+        let _ = (file_ref.close)(file);
+        let _ = (root_ref.close)(root);
+        return None;
+    }
+
+    // Read file contents
+    let mut read_size = file_size;
+    let status = (file_ref.read)(file, &mut read_size, file_buffer);
+
+    // Close handles
+    let _ = (file_ref.close)(file);
+    let _ = (root_ref.close)(root);
+
+    if status != EFI_SUCCESS || read_size != file_size {
+        let _ = (bs.free_pool)(file_buffer);
+        return None;
+    }
+
+    Some(ExecutableImage {
+        ptr: file_buffer as *const u8,
+        size: file_size,
+    })
+}
+
 fn cleanup_pool(bs: &EfiBootServices, buf: &mut *mut c_void) {
     if !(*buf).is_null() {
         let _ = (bs.free_pool)(*buf);
@@ -335,6 +580,10 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
     disable_watchdog(bs);
 
     let framebuffer_info = setup_framebuffer(bs);
+
+    // Load the init payload (ui_shell.atxf) from the boot volume
+    let init_payload = load_init_payload(image, bs)
+        .unwrap_or_else(ExecutableImage::empty);
 
     let mut mmap_buf: *mut c_void = ptr::null_mut();
     let mut mmap_buf_size: usize = 0;
@@ -421,7 +670,7 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
             verbose: false,
             boot_method: BootMethod::Uefi,
             cpu: cpu_info(),
-            init_payload: ExecutableImage::empty(),
+            init_payload,
         });
 
         unsafe {

@@ -1,9 +1,7 @@
+# Build for bare-metal userspace (Ring 3)
 [build]
-target = "x86_64-unknown-uefi"
+target = "x86_64-unknown-none"
 
 [unstable]
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
-
-[target.x86_64-unknown-uefi]
-rustflags = ["-C", "link-arg=-nostartfiles"]

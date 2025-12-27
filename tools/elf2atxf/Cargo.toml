@@ -1,0 +1,14 @@
+[package]
+name = "elf2atxf"
+version = "0.1.0"
+edition = "2021"
+description = "Convert ELF binaries to Atom ATXF executable format"
+
+[workspace]
+
+[[bin]]
+name = "elf2atxf"
+path = "src/main.rs"
+
+# No external dependencies - we parse ELF manually
+[dependencies]

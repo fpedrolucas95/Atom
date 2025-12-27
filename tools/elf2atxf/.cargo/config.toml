@@ -1,0 +1,7 @@
+# Override parent config to build for host target
+# This is a host tool, not a UEFI application
+
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+# Don't use build-std for this tool

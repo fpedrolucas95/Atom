@@ -31,8 +31,70 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
+
+// ============================================================================
+// Simple Bump Allocator for Userspace
+// ============================================================================
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+const HEAP_SIZE: usize = 1024 * 1024; // 1 MB heap
+
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    next: AtomicUsize,
+}
+
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            heap: UnsafeCell::new([0; HEAP_SIZE]),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size();
+        let align = layout.align().max(16);
+
+        loop {
+            let current = self.next.load(Ordering::Relaxed);
+            let aligned = (current + align - 1) & !(align - 1);
+            let new_next = aligned + size;
+
+            if new_next > HEAP_SIZE {
+                return core::ptr::null_mut();
+            }
+
+            if self.next.compare_exchange_weak(
+                current, new_next, Ordering::SeqCst, Ordering::Relaxed
+            ).is_ok() {
+                return (self.heap.get() as *mut u8).add(aligned);
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Bump allocator doesn't free - memory is reclaimed when process exits
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    loop {}
+}
 
 use alloc::string::String;
 use alloc::vec::Vec;

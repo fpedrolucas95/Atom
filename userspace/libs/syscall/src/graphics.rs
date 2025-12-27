@@ -58,6 +58,16 @@ pub fn get_framebuffer() -> Option<FramebufferInfo> {
     }
 }
 
+/// Get framebuffer info as tuple (address, width, height, stride, bpp)
+///
+/// Returns an error if framebuffer is not available
+pub fn get_framebuffer_info() -> crate::SyscallResult<(usize, u32, u32, u32, u32)> {
+    match get_framebuffer() {
+        Some(info) => Ok((info.address, info.width, info.height, info.stride, info.bytes_per_pixel)),
+        None => Err(crate::error::SyscallError::PermissionDenied),
+    }
+}
+
 /// Map framebuffer into process address space
 ///
 /// Similar to get_framebuffer but may also perform memory mapping.

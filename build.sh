@@ -176,48 +176,87 @@ mkdir -p efi/EFI/BOOT
 mkdir -p efi/drivers
 
 # =========================================================================
-# BUILD USERSPACE DRIVERS (Verification only - drivers are embedded in kernel)
+# BUILD USERSPACE TOOLS AND DRIVERS
 # =========================================================================
 
 if [ "$KERNEL_ONLY" != true ]; then
-    header "USERSPACE LIBRARIES"
+    header "USERSPACE BUILD"
 
-    # Compilar biblioteca syscall primeiro
-    step "Compilando biblioteca atom_syscall..."
-    
-    pushd userspace/libs/syscall > /dev/null
-    if cargo check 2>build.log; then
-        success "atom_syscall verificada"
+    # -------------------------------------------------------------------------
+    # Build elf2atxf tool first
+    # -------------------------------------------------------------------------
+    step "Building elf2atxf tool..."
+
+    if ! rustup +nightly target list --installed | grep -q "x86_64-unknown-none"; then
+        step "Installing x86_64-unknown-none target..."
+        rustup +nightly target add x86_64-unknown-none
+    fi
+
+    pushd tools/elf2atxf > /dev/null
+    if cargo build --release 2>build.log; then
+        success "elf2atxf built"
     else
-        error "Falha ao verificar atom_syscall"
+        error "Failed to build elf2atxf"
         cat build.log
         exit 1
     fi
     popd > /dev/null
 
-    # Verificar cada driver (drivers estao excluidos do workspace principal)
-    # Nota: Os drivers userspace serao compilados como binarios ATXF
-    # quando o loader estiver implementado. Por enquanto, apenas verificamos.
-    step "Verificando drivers userspace..."
+    ELF2ATXF="tools/elf2atxf/target/x86_64-unknown-linux-gnu/release/elf2atxf"
+
+    # -------------------------------------------------------------------------
+    # Build userspace drivers and convert to ATXF
+    # -------------------------------------------------------------------------
+    step "Building userspace drivers..."
+
     for driver in "${USERSPACE_DRIVERS[@]}"; do
         driver_path="userspace/drivers/$driver"
-        
+
         if [ ! -f "$driver_path/Cargo.toml" ]; then
-            warning "Driver $driver não encontrado, pulando..."
+            warning "Driver $driver not found, skipping..."
             continue
         fi
 
+        step "  Building $driver driver..."
         pushd "$driver_path" > /dev/null
-        if cargo check 2>/dev/null; then
+
+        if cargo build --release 2>build.log; then
             popd > /dev/null
-            success "$driver driver verificado"
+
+            # Find the ELF binary name from Cargo.toml
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' || echo "$driver")
+            if [ -z "$bin_name" ]; then
+                bin_name="$driver"
+            fi
+
+            elf_path="$driver_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/drivers/${driver}.atxf"
+
+            if [ -f "$elf_path" ]; then
+                step "  Converting $driver to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$driver.log; then
+                    success "$driver.atxf created"
+                else
+                    warning "Failed to convert $driver to ATXF"
+                    cat build/elf2atxf_$driver.log
+                fi
+            else
+                warning "ELF not found at $elf_path"
+            fi
         else
-            warning "$driver driver tem erros de sintaxe"
             popd > /dev/null
+            warning "$driver driver failed to build"
+            cat "$driver_path/build.log" 2>/dev/null || true
         fi
     done
 
-    success "Verificacao de userspace concluida"
+    # Copy ui_shell.atxf to EFI boot directory as the init payload
+    if [ -f "efi/drivers/ui_shell.atxf" ]; then
+        cp efi/drivers/ui_shell.atxf efi/EFI/BOOT/init.atxf
+        success "init.atxf created from ui_shell"
+    fi
+
+    success "Userspace build completed"
 fi
 
 # Se --userspace only, parar aqui
