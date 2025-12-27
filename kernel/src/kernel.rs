@@ -69,6 +69,7 @@ mod system;
 mod executable;
 mod init_process;
 mod driver_registry;
+mod drivers;
 // NOTE: service_manager is not used in the current microkernel architecture.
 // The UI shell (ui_shell.atxf) is loaded directly from the boot payload.
 // Future versions may use a service manager for additional userspace services.
@@ -157,6 +158,17 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 
     // Initialize driver registry with boot-loaded drivers
     driver_registry::init(&boot_info.drivers);
+
+    // Initialize disk and filesystem for dynamic executable loading
+    if drivers::ahci::init() {
+        if drivers::fat32::init() {
+            log_info!(LOG_KERNEL_INIT, "Filesystem initialized for dynamic loading");
+        } else {
+            log_warn!(LOG_KERNEL_INIT, "FAT32 init failed - dynamic loading disabled");
+        }
+    } else {
+        log_warn!(LOG_KERNEL_INIT, "AHCI init failed - dynamic loading disabled");
+    }
 
     // =======================================================================
     // MICROKERNEL ARCHITECTURE: Launch UI Shell as First Userspace Process

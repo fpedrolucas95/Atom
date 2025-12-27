@@ -2869,29 +2869,52 @@ fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
 
     log_info!(LOG_ORIGIN, "Looking up driver: '{}'", name);
 
-    // Look up the driver in the registry
-    let driver_image = match crate::driver_registry::get_driver_image(name) {
-        Some(img) => img,
-        None => {
-            log_warn!(LOG_ORIGIN, "spawn_process: driver '{}' not found", name);
-            return ENOTFOUND;
+    // First try to load from filesystem (dynamic loading)
+    // Then fall back to boot-loaded driver registry
+    if crate::drivers::fat32::is_available() {
+        // Try loading from filesystem
+        let path = alloc::format!("/drivers/{}.atxf", name);
+        log_info!(LOG_ORIGIN, "Trying to load from filesystem: {}", path);
+
+        if let Some(data) = crate::drivers::fat32::open(&path) {
+            log_info!(LOG_ORIGIN, "Loaded {} bytes from filesystem", data.len());
+            return spawn_from_image(&data, name);
         }
-    };
+        // Fall back to registry if not found in filesystem
+        log_debug!(LOG_ORIGIN, "Not found in filesystem, trying registry");
+    }
 
-    log_info!(
-        LOG_ORIGIN,
-        "Found driver '{}': ptr={:p}, size={}",
-        name,
-        driver_image.ptr,
-        driver_image.size
-    );
+    // Load from boot-loaded driver registry
+    match load_from_registry(name) {
+        Ok(sections) => {
+            log_info!(
+                LOG_ORIGIN,
+                "Executable parsed: text={} bytes, data={} bytes, bss={} bytes, entry=0x{:X}",
+                sections.text.len(),
+                sections.data.len(),
+                sections.bss_size,
+                sections.entry_offset
+            );
+            match spawn_process_internal(name, &sections) {
+                Ok(pid) => {
+                    log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
+                    pid.raw()
+                }
+                Err(e) => {
+                    log_error!(LOG_ORIGIN, "spawn_process: failed to spawn: {:?}", e);
+                    e
+                }
+            }
+        }
+        Err(e) => e,
+    }
+}
 
-    // Parse the ATXF executable
-    let image_bytes = unsafe {
-        core::slice::from_raw_parts(driver_image.ptr, driver_image.size)
-    };
+/// Spawn a process from raw image data
+fn spawn_from_image(data: &[u8], name: &str) -> u64 {
+    const LOG_ORIGIN: &str = "syscall:spawn";
 
-    let sections = match crate::executable::parse_image(image_bytes) {
+    let sections = match crate::executable::parse_image(data) {
         Ok(s) => s,
         Err(e) => {
             log_error!(LOG_ORIGIN, "spawn_process: failed to parse executable: {:?}", e);
@@ -2908,7 +2931,6 @@ fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
         sections.entry_offset
     );
 
-    // Create the new process
     match spawn_process_internal(name, &sections) {
         Ok(pid) => {
             log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
@@ -2919,6 +2941,29 @@ fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
             e
         }
     }
+}
+
+/// Load driver from boot-loaded registry
+fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections, u64> {
+    let driver_image = crate::driver_registry::get_driver_image(name)
+        .ok_or(ENOTFOUND)?;
+
+    log_info!(
+        "syscall:spawn",
+        "Found driver '{}' in registry: ptr={:p}, size={}",
+        name,
+        driver_image.ptr,
+        driver_image.size
+    );
+
+    let image_bytes = unsafe {
+        core::slice::from_raw_parts(driver_image.ptr, driver_image.size)
+    };
+
+    crate::executable::parse_image(image_bytes).map_err(|e| {
+        log_error!("syscall:spawn", "Failed to parse executable: {:?}", e);
+        EINVAL
+    })
 }
 
 /// Map driver name to static string for Thread struct
