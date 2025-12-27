@@ -429,6 +429,8 @@ fn load_init_payload(
     image: EfiHandle,
     bs: &mut EfiBootServices,
 ) -> Option<ExecutableImage> {
+    serial_println!("[BOOT] Loading init payload...");
+
     // Get Loaded Image Protocol to find our device handle
     let mut loaded_image_ptr: *mut c_void = ptr::null_mut();
     let status = (bs.handle_protocol)(
@@ -438,6 +440,7 @@ fn load_init_payload(
     );
 
     if status != EFI_SUCCESS || loaded_image_ptr.is_null() {
+        serial_println!("[BOOT] Failed to get Loaded Image Protocol: {}", status);
         return None;
     }
 
@@ -445,8 +448,11 @@ fn load_init_payload(
     let device_handle = loaded_image.device_handle;
 
     if device_handle.is_null() {
+        serial_println!("[BOOT] Device handle is null");
         return None;
     }
+
+    serial_println!("[BOOT] Got device handle");
 
     // Get Simple File System Protocol from device handle
     let mut fs_ptr: *mut c_void = ptr::null_mut();
@@ -457,6 +463,7 @@ fn load_init_payload(
     );
 
     if status != EFI_SUCCESS || fs_ptr.is_null() {
+        serial_println!("[BOOT] Failed to get Simple File System Protocol: {}", status);
         return None;
     }
 
@@ -467,8 +474,11 @@ fn load_init_payload(
     let status = (fs.open_volume)(fs as *mut _, &mut root);
 
     if status != EFI_SUCCESS || root.is_null() {
+        serial_println!("[BOOT] Failed to open root volume: {}", status);
         return None;
     }
+
+    serial_println!("[BOOT] Opened root volume");
 
     // Build path: "\\EFI\\BOOT\\init.atxf"
     let mut path_buf = [0u16; 64];
@@ -486,6 +496,7 @@ fn load_init_payload(
     );
 
     if status != EFI_SUCCESS || file.is_null() {
+        serial_println!("[BOOT] Failed to open \\EFI\\BOOT\\init.atxf: {}, trying alternate", status);
         // Try alternate path without EFI prefix
         str_to_utf16("\\init.atxf", &mut path_buf);
         let status = (root_ref.open)(
@@ -497,10 +508,13 @@ fn load_init_payload(
         );
 
         if status != EFI_SUCCESS || file.is_null() {
+            serial_println!("[BOOT] Failed to open \\init.atxf: {}", status);
             let _ = (root_ref.close)(root);
             return None;
         }
     }
+
+    serial_println!("[BOOT] Opened init.atxf");
 
     let file_ref = unsafe { &mut *file };
 
@@ -515,6 +529,7 @@ fn load_init_payload(
     );
 
     if status != EFI_SUCCESS {
+        serial_println!("[BOOT] Failed to get file info: {}", status);
         let _ = (file_ref.close)(file);
         let _ = (root_ref.close)(root);
         return None;
@@ -525,7 +540,10 @@ fn load_init_payload(
         *(info_buf.as_ptr().add(8) as *const u64) as usize
     };
 
+    serial_println!("[BOOT] init.atxf file size: {} bytes", file_size);
+
     if file_size == 0 || file_size > 16 * 1024 * 1024 {
+        serial_println!("[BOOT] Invalid file size");
         // Sanity check: max 16 MB
         let _ = (file_ref.close)(file);
         let _ = (root_ref.close)(root);
@@ -537,6 +555,7 @@ fn load_init_payload(
     let status = (bs.allocate_pool)(EFI_LOADER_DATA, file_size, &mut file_buffer);
 
     if status != EFI_SUCCESS || file_buffer.is_null() {
+        serial_println!("[BOOT] Failed to allocate buffer: {}", status);
         let _ = (file_ref.close)(file);
         let _ = (root_ref.close)(root);
         return None;
@@ -551,9 +570,12 @@ fn load_init_payload(
     let _ = (root_ref.close)(root);
 
     if status != EFI_SUCCESS || read_size != file_size {
+        serial_println!("[BOOT] Failed to read file: status={}, read={}/{}", status, read_size, file_size);
         let _ = (bs.free_pool)(file_buffer);
         return None;
     }
+
+    serial_println!("[BOOT] init.atxf loaded successfully at {:p}", file_buffer);
 
     Some(ExecutableImage {
         ptr: file_buffer as *const u8,

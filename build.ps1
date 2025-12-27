@@ -29,6 +29,7 @@ $USERSPACE_DRIVERS = @{
     "keyboard"  = "keyboard_driver"
     "mouse"     = "mouse_driver"
     "display"   = "display_driver"
+    "terminal"  = "terminal"
     "ui_shell"  = "atom_desktop"
 }
 
