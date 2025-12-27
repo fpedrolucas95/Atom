@@ -199,7 +199,7 @@ impl CpuContext {
             rdx: 0,
             rsi: 0,
             rdi: 0,
-            rbp: 0,
+            rbp: user_stack - 16,  // Initialize RBP to stack base for frame pointer compatibility
             rsp: user_stack - 16,
             r8: 0,
             r9: 0,
