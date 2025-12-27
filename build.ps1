@@ -177,14 +177,17 @@ if (-not $Kernel) {
         $atxfPath = "efi\drivers\$driverDir.atxf"
         Write-Step "Convertendo $binaryName para ATXF..."
 
-        # Use Start-Process to avoid PowerShell path interpretation issues
-        $elf2atxfFullPath = Join-Path $REPO_PATH $ELF2ATXF_EXE
-        $elfFullPath = Join-Path $REPO_PATH $elfPath
-        $atxfFullPath = Join-Path $REPO_PATH $atxfPath
+        # Build full paths
+        $elf2atxfFullPath = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
+        if (-not $elf2atxfFullPath) {
+            Write-ErrorMsg "elf2atxf.exe nao encontrado em: $ELF2ATXF_EXE"
+            exit 1
+        }
 
-        $process = Start-Process -FilePath $elf2atxfFullPath -ArgumentList "`"$elfFullPath`"", "`"$atxfFullPath`"" -Wait -PassThru -NoNewWindow
-        if ($process.ExitCode -ne 0) {
-            Write-ErrorMsg "Falha ao converter $driverDir para ATXF (exit code: $($process.ExitCode))"
+        # Run elf2atxf using call operator with resolved path
+        & "$elf2atxfFullPath" "$elfPath" "$atxfPath"
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorMsg "Falha ao converter $driverDir para ATXF (exit code: $LASTEXITCODE)"
             exit 1
         }
 
