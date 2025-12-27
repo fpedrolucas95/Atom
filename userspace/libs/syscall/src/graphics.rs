@@ -34,12 +34,6 @@ impl FramebufferInfo {
     }
 }
 
-/// Simple test function to check if function calls work
-#[inline(never)]
-pub fn test_function_call() -> u64 {
-    42
-}
-
 /// Get framebuffer information for direct graphics access
 ///
 /// Returns Some(FramebufferInfo) on success, None if framebuffer is not available
