@@ -46,56 +46,8 @@ use atom_syscall::debug::log;
 
 use libipc::messages::{WindowId, KeyEvent as IpcKeyEvent, KeyModifiers, MessageType, MessageHeader};
 
-// ============================================================================
-// Simple Bump Allocator for userspace
-// ============================================================================
-
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
-
-struct BumpAllocator {
-    heap: UnsafeCell<[u8; 1024 * 1024]>, // 1MB heap
-    next: UnsafeCell<usize>,
-}
-
-unsafe impl Sync for BumpAllocator {}
-
-impl BumpAllocator {
-    const fn new() -> Self {
-        Self {
-            heap: UnsafeCell::new([0; 1024 * 1024]),
-            next: UnsafeCell::new(0),
-        }
-    }
-}
-
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let next = self.next.get();
-        let heap = self.heap.get();
-        
-        let align = layout.align();
-        let size = layout.size();
-        
-        // Align the next pointer
-        let offset = (*next + align - 1) & !(align - 1);
-        let new_next = offset + size;
-        
-        if new_next > (*heap).len() {
-            return core::ptr::null_mut();
-        }
-        
-        *next = new_next;
-        (*heap).as_mut_ptr().add(offset)
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator doesn't support deallocation
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+// Use shared allocator from syscall library
+atom_syscall::define_global_allocator!();
 
 // ============================================================================
 // Theme Colors (Nord-inspired)
@@ -569,34 +521,43 @@ impl Compositor {
     }
 
     fn handle_key(&mut self, scancode: u8) {
+        // Scancode constants
+        const ESCAPE_SCANCODE: u8 = 0x01;
+        const KEY_RELEASE_MASK: u8 = 0x80;
+        const LEFT_SHIFT: u8 = 0x2A;
+        const RIGHT_SHIFT: u8 = 0x36;
+        const CTRL: u8 = 0x1D;
+        const ALT: u8 = 0x38;
+        const CAPS_LOCK: u8 = 0x3A;
+
         // Handle escape to quit
-        if scancode == 0x01 && (scancode & 0x80) == 0 {
+        if scancode == ESCAPE_SCANCODE && (scancode & KEY_RELEASE_MASK) == 0 {
             log("Desktop: Escape pressed, exiting");
             exit(0);
         }
 
         // Track modifier state
-        let is_release = (scancode & 0x80) != 0;
+        let is_release = (scancode & KEY_RELEASE_MASK) != 0;
         let code = scancode & 0x7F;
         
         match code {
-            0x2A => { // Left Shift
+            LEFT_SHIFT => {
                 self.shift_left = !is_release;
                 return;
             }
-            0x36 => { // Right Shift
+            RIGHT_SHIFT => {
                 self.shift_right = !is_release;
                 return;
             }
-            0x1D => { // Ctrl
+            CTRL => {
                 self.ctrl = !is_release;
                 return;
             }
-            0x38 => { // Alt
+            ALT => {
                 self.alt = !is_release;
                 return;
             }
-            0x3A => { // Caps Lock (toggle on press)
+            CAPS_LOCK => {
                 if !is_release {
                     self.caps_lock = !self.caps_lock;
                 }

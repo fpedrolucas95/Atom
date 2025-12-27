@@ -20,6 +20,7 @@ pub mod io;
 pub mod ipc;
 pub mod debug;
 pub mod error;
+pub mod alloc;
 
 // Re-export common types at crate root
 pub use error::{SyscallError, SyscallResult};
