@@ -40,11 +40,11 @@ use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{Color, Framebuffer};
 use atom_syscall::input::{keyboard_poll, MouseDriver};
-use atom_syscall::ipc::{create_port, send, PortId};
+use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
-use libipc::messages::{WindowId, KeyEvent as IpcKeyEvent, KeyModifiers, MessageType, MessageHeader};
+use libipc::messages::{WindowId};
 
 // Use shared allocator from syscall library
 atom_syscall::define_global_allocator!();
@@ -73,11 +73,11 @@ mod theme {
 // Window Management
 // ============================================================================
 
-/// Application type for tracking running processes
+/// Application type identifier for managed windows
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppType {
     Static,      // Static window (like Welcome)
-    Terminal,    // Terminal application
+    Terminal,    // Terminal application window
 }
 
 /// Window state in the compositor
@@ -146,7 +146,7 @@ struct WindowManager {
     windows: Vec<Window>,
     next_id: WindowId,
     focused_id: Option<WindowId>,
-    /// Track if terminal is running
+    /// Track if terminal window exists
     terminal_window_id: Option<WindowId>,
 }
 
@@ -216,6 +216,7 @@ impl WindowManager {
         // If closing terminal, clear terminal window tracking
         if self.terminal_window_id == Some(id) {
             self.terminal_window_id = None;
+            // TODO: Send termination signal to terminal process
         }
         
         self.windows.retain(|w| w.id != id);
@@ -224,7 +225,7 @@ impl WindowManager {
         }
     }
 
-    fn is_terminal_running(&self) -> bool {
+    fn is_terminal_window_open(&self) -> bool {
         self.terminal_window_id.is_some()
     }
 
@@ -240,9 +241,6 @@ impl WindowManager {
 /// Dock icon identifier
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DockIcon {
-    Files,
-    Settings,
-    Browser,
     Terminal,
 }
 
@@ -354,12 +352,6 @@ struct Compositor {
     event_port: PortId,
     dirty: bool,
     dock_icons: Vec<DockIconInfo>,
-    // Keyboard state for modifier tracking
-    shift_left: bool,
-    shift_right: bool,
-    ctrl: bool,
-    alt: bool,
-    caps_lock: bool,
 }
 
 impl Compositor {
@@ -378,18 +370,13 @@ impl Compositor {
             event_port,
             dirty: true,
             dock_icons: Vec::new(),
-            shift_left: false,
-            shift_right: false,
-            ctrl: false,
-            alt: false,
-            caps_lock: false,
         }
     }
 
     fn run(&mut self) -> ! {
         log("Desktop: Starting compositor");
 
-        // Create initial windows - only Welcome, not Terminal (it will be launched from dock)
+        // Create initial windows - only Welcome, no Terminal (it's launched from dock)
         self.wm.create_window("Welcome to Atom", 100, 100, 400, 300);
 
         // Initialize dock icons
@@ -454,7 +441,7 @@ impl Compositor {
                 let close_x = w.x + w.width as i32 - 20;
                 let close_y = w.y + 6;
                 if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
-                    self.handle_window_close(id);
+                    self.wm.close_window(id);
                     self.dirty = true;
                 }
             }
@@ -464,207 +451,36 @@ impl Compositor {
     fn handle_dock_click(&mut self, icon: DockIcon) {
         match icon {
             DockIcon::Terminal => {
-                if self.wm.is_terminal_running() {
-                    // Terminal already running - focus it
+                if self.wm.is_terminal_window_open() {
+                    // Terminal window already exists - focus it
                     if let Some(id) = self.wm.get_terminal_window_id() {
                         log("Desktop: Focusing existing terminal window");
                         self.wm.focus_window(id);
                         self.dirty = true;
                     }
                 } else {
-                    // Launch terminal
-                    log("Desktop: Launching terminal");
-                    self.launch_terminal();
+                    // Create terminal window
+                    log("Desktop: Creating terminal window");
+                    self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
+                    self.dirty = true;
+                    
+                    // NOTE: In a full implementation, we would spawn the terminal process here.
+                    // The terminal app runs independently and draws to its region of the framebuffer.
+                    // The compositor provides the window chrome (title bar, borders, close button).
+                    // For now, we just create the window container.
                 }
-            }
-            DockIcon::Files => {
-                log("Desktop: Files app not yet implemented");
-            }
-            DockIcon::Settings => {
-                log("Desktop: Settings app not yet implemented");
-            }
-            DockIcon::Browser => {
-                log("Desktop: Browser app not yet implemented");
-            }
-        }
-    }
-
-    fn handle_window_close(&mut self, id: WindowId) {
-        log("Desktop: Closing window");
-        // TODO: Send close event to application via IPC
-        // For now, just remove the window
-        self.wm.close_window(id);
-    }
-
-    fn launch_terminal(&mut self) {
-        // Create an IPC port for the terminal
-        match create_port() {
-            Ok(port) => {
-                // Create a window for the terminal
-                let id = self.wm.create_window_with_type("Terminal", 150, 150, 640, 400, AppType::Terminal);
-                
-                // Set the IPC port for the terminal window
-                if let Some(window) = self.wm.windows.iter_mut().find(|w| w.id == id) {
-                    window.event_port = Some(port);
-                }
-                
-                log("Desktop: Terminal window created with IPC port");
-                self.dirty = true;
-                
-                // TODO: Actually spawn the terminal process and give it the port ID
-                // For now, we just create the window placeholder
-            }
-            Err(_) => {
-                log("Desktop: Failed to create IPC port for terminal");
             }
         }
     }
 
     fn handle_key(&mut self, scancode: u8) {
-        // Scancode constants
-        const ESCAPE_SCANCODE: u8 = 0x01;
-        const KEY_RELEASE_MASK: u8 = 0x80;
-        const LEFT_SHIFT: u8 = 0x2A;
-        const RIGHT_SHIFT: u8 = 0x36;
-        const CTRL: u8 = 0x1D;
-        const ALT: u8 = 0x38;
-        const CAPS_LOCK: u8 = 0x3A;
-
         // Handle escape to quit
-        if scancode == ESCAPE_SCANCODE && (scancode & KEY_RELEASE_MASK) == 0 {
+        if scancode == 0x01 {
             log("Desktop: Escape pressed, exiting");
             exit(0);
         }
 
-        // Track modifier state
-        let is_release = (scancode & KEY_RELEASE_MASK) != 0;
-        let code = scancode & 0x7F;
-        
-        match code {
-            LEFT_SHIFT => {
-                self.shift_left = !is_release;
-                return;
-            }
-            RIGHT_SHIFT => {
-                self.shift_right = !is_release;
-                return;
-            }
-            CTRL => {
-                self.ctrl = !is_release;
-                return;
-            }
-            ALT => {
-                self.alt = !is_release;
-                return;
-            }
-            CAPS_LOCK => {
-                if !is_release {
-                    self.caps_lock = !self.caps_lock;
-                }
-                return;
-            }
-            _ => {}
-        }
-
-        // Only send key press events to applications (not releases)
-        if is_release {
-            return;
-        }
-
-        // Route to focused window
-        if let Some(focused_id) = self.wm.focused_id {
-            if let Some(window) = self.wm.windows.iter().find(|w| w.id == focused_id) {
-                if window.app_type == AppType::Terminal {
-                    if let Some(port) = window.event_port {
-                        self.send_key_event(port, scancode);
-                    }
-                }
-            }
-        }
-    }
-
-    fn send_key_event(&self, port: PortId, scancode: u8) {
-        // Create keyboard event
-        let modifiers = KeyModifiers {
-            shift: self.shift_left || self.shift_right,
-            ctrl: self.ctrl,
-            alt: self.alt,
-            caps_lock: self.caps_lock,
-        };
-
-        // Simple scancode to character translation (only for testing)
-        // The terminal will do proper translation
-        let character = self.translate_scancode(scancode);
-
-        let key_event = IpcKeyEvent {
-            scancode,
-            character,
-            modifiers,
-        };
-
-        // Build IPC message
-        let header = MessageHeader::new(MessageType::KeyPress, 3);
-        let mut message = [0u8; 16];
-        message[0..12].copy_from_slice(&header.to_bytes());
-        message[12..15].copy_from_slice(&key_event.to_bytes());
-
-        // Send to application
-        let _ = send(port, &message[..15]);
-    }
-
-    fn translate_scancode(&self, code: u8) -> u8 {
-        let shift = self.shift_left || self.shift_right;
-        
-        // Basic scancode to character mapping (US keyboard layout)
-        match code {
-            // Letters
-            0x10 => if shift ^ self.caps_lock { b'Q' } else { b'q' },
-            0x11 => if shift ^ self.caps_lock { b'W' } else { b'w' },
-            0x12 => if shift ^ self.caps_lock { b'E' } else { b'e' },
-            0x13 => if shift ^ self.caps_lock { b'R' } else { b'r' },
-            0x14 => if shift ^ self.caps_lock { b'T' } else { b't' },
-            0x15 => if shift ^ self.caps_lock { b'Y' } else { b'y' },
-            0x16 => if shift ^ self.caps_lock { b'U' } else { b'u' },
-            0x17 => if shift ^ self.caps_lock { b'I' } else { b'i' },
-            0x18 => if shift ^ self.caps_lock { b'O' } else { b'o' },
-            0x19 => if shift ^ self.caps_lock { b'P' } else { b'p' },
-            0x1E => if shift ^ self.caps_lock { b'A' } else { b'a' },
-            0x1F => if shift ^ self.caps_lock { b'S' } else { b's' },
-            0x20 => if shift ^ self.caps_lock { b'D' } else { b'd' },
-            0x21 => if shift ^ self.caps_lock { b'F' } else { b'f' },
-            0x22 => if shift ^ self.caps_lock { b'G' } else { b'g' },
-            0x23 => if shift ^ self.caps_lock { b'H' } else { b'h' },
-            0x24 => if shift ^ self.caps_lock { b'J' } else { b'j' },
-            0x25 => if shift ^ self.caps_lock { b'K' } else { b'k' },
-            0x26 => if shift ^ self.caps_lock { b'L' } else { b'l' },
-            0x2C => if shift ^ self.caps_lock { b'Z' } else { b'z' },
-            0x2D => if shift ^ self.caps_lock { b'X' } else { b'x' },
-            0x2E => if shift ^ self.caps_lock { b'C' } else { b'c' },
-            0x2F => if shift ^ self.caps_lock { b'V' } else { b'v' },
-            0x30 => if shift ^ self.caps_lock { b'B' } else { b'b' },
-            0x31 => if shift ^ self.caps_lock { b'N' } else { b'n' },
-            0x32 => if shift ^ self.caps_lock { b'M' } else { b'm' },
-            
-            // Numbers
-            0x02 => if shift { b'!' } else { b'1' },
-            0x03 => if shift { b'@' } else { b'2' },
-            0x04 => if shift { b'#' } else { b'3' },
-            0x05 => if shift { b'$' } else { b'4' },
-            0x06 => if shift { b'%' } else { b'5' },
-            0x07 => if shift { b'^' } else { b'6' },
-            0x08 => if shift { b'&' } else { b'7' },
-            0x09 => if shift { b'*' } else { b'8' },
-            0x0A => if shift { b'(' } else { b'9' },
-            0x0B => if shift { b')' } else { b'0' },
-            
-            // Special keys
-            0x39 => b' ',  // Space
-            0x1C => b'\n', // Enter
-            0x0E => 0x08,  // Backspace
-            0x0F => b'\t', // Tab
-            
-            _ => 0, // Unknown/non-printable
-        }
+        // Route to focused window (TODO: IPC to application)
     }
 
     fn draw_all(&mut self) {
@@ -740,34 +556,18 @@ impl Compositor {
         self.fb.fill_rect(btn_x, btn_y, 10, 10, Color::new(255, 95, 86)); // Close
         self.fb.fill_rect(btn_x - 14, btn_y, 10, 10, Color::new(255, 189, 46)); // Minimize
         self.fb.fill_rect(btn_x - 28, btn_y, 10, 10, Color::new(39, 201, 63)); // Maximize
-
-        // Draw content for terminal windows
-        if window.app_type == AppType::Terminal {
-            // Draw a simple terminal-like content area
-            let content_x = x + 8;
-            let content_y = y + 30;
-            
-            // Terminal background (darker)
-            self.fb.fill_rect(content_x, content_y, w - 16, h - 38, Color::new(30, 30, 30));
-            
-            // Draw placeholder text indicating terminal is ready
-            if window.focused {
-                self.fb.draw_string(content_x + 8, content_y + 8, "Terminal Ready - Type to interact", Color::new(136, 192, 208), Color::new(30, 30, 30));
-                self.fb.draw_string(content_x + 8, content_y + 24, "Note: Terminal process should render here", Color::new(100, 100, 100), Color::new(30, 30, 30));
-            }
-        }
     }
 
     fn draw_dock(&mut self) {
         let width = self.fb.width();
         let height = self.fb.height();
 
-        let dock_w = 300u32;
+        let dock_w = 200u32;  // Reduced width for single icon
         let dock_h = 48u32;
         let dock_x = (width / 2).saturating_sub(dock_w / 2);
         let dock_y = height.saturating_sub(dock_h + 10);
 
-        // Dock background with semi-transparency effect (solid for now)
+        // Dock background - semi-transparent dark bar
         self.fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
 
         // Calculate and store dock icon positions if not already initialized
@@ -790,36 +590,27 @@ impl Compositor {
         let width = self.fb.width();
         let height = self.fb.height();
 
-        let dock_w = 300u32;
+        let dock_w = 200u32;
         let dock_h = 48u32;
         let dock_x = (width / 2).saturating_sub(dock_w / 2);
         let dock_y = height.saturating_sub(dock_h + 10);
 
         let icon_size = 32u32;
-        let padding = 16u32;
-        let start_x = dock_x + padding;
+        let padding = (dock_w - icon_size) / 2;  // Center the single icon
+        let icon_x = dock_x + padding;
         let icon_y = dock_y + (dock_h - icon_size) / 2;
 
-        let icons = [
-            (DockIcon::Files, Color::new(191, 97, 106), "F"),
-            (DockIcon::Settings, Color::new(163, 190, 140), "S"),
-            (DockIcon::Browser, Color::new(94, 129, 172), "B"),
-            (DockIcon::Terminal, Color::new(80, 80, 80), ">_"),
-        ];
-
+        // Only Terminal icon in dock
         self.dock_icons.clear();
-        for (i, (icon, color, label)) in icons.iter().enumerate() {
-            let ix = start_x + (i as u32 * (icon_size + padding));
-            self.dock_icons.push(DockIconInfo {
-                icon: *icon,
-                x: ix,
-                y: icon_y,
-                width: icon_size,
-                height: icon_size,
-                color: *color,
-                label,
-            });
-        }
+        self.dock_icons.push(DockIconInfo {
+            icon: DockIcon::Terminal,
+            x: icon_x,
+            y: icon_y,
+            width: icon_size,
+            height: icon_size,
+            color: Color::new(80, 80, 80),
+            label: ">_",
+        });
     }
 
     fn draw_cursor(&self) {

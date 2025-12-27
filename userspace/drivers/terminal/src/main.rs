@@ -41,12 +41,6 @@
 #![no_main]
 
 
-extern crate alloc;
-
-// Use shared allocator from syscall library
-atom_syscall::define_global_allocator!();
-
-
 
 mod buffer;
 
@@ -110,9 +104,6 @@ struct Terminal {
 
     prompt_col: usize,
 
-    /// IPC port for receiving keyboard events from compositor
-    event_port: Option<atom_syscall::ipc::PortId>,
-
 }
 
 
@@ -141,8 +132,6 @@ impl Terminal {
 
             prompt_col: 0,
 
-            event_port: None,
-
         }
 
     }
@@ -157,17 +146,6 @@ impl Terminal {
 
         self.ipc.init();
 
-
-        // Create IPC port for receiving events from compositor
-        match atom_syscall::ipc::create_port() {
-            Ok(port) => {
-                self.event_port = Some(port);
-                log("Terminal: Created IPC event port");
-            }
-            Err(_) => {
-                log("Terminal: Failed to create IPC event port");
-            }
-        }
 
 
         // Set display dimensions from window config
@@ -671,30 +649,7 @@ impl Terminal {
             let mut needs_render = false;
 
 
-            // First try to receive IPC keyboard events from compositor
-            if let Some(port) = self.event_port {
-                let mut buffer = [0u8; 64];
-                while let Ok(Some(size)) = atom_syscall::ipc::try_recv(port, &mut buffer) {
-                    // Message format: MessageHeader (12 bytes) + KeyEvent (3 bytes) = 15 bytes minimum
-                    const MIN_MESSAGE_SIZE: usize = 15;
-                    const HEADER_SIZE: usize = 12;
-                    
-                    if size >= MIN_MESSAGE_SIZE {
-                        // Parse key event from message payload
-                        let scancode = buffer[HEADER_SIZE];
-                        let _character = buffer[HEADER_SIZE + 1];
-                        let _modifiers = buffer[HEADER_SIZE + 2];
-                        
-                        // Process scancode through input handler
-                        if let Some(event) = self.input_handler.process_scancode(scancode) {
-                            self.handle_key(event);
-                            needs_render = true;
-                        }
-                    }
-                }
-            }
 
-            // Fallback: also poll keyboard directly (for standalone mode)
             while let Some(event) = self.input_handler.poll() {
 
                 self.handle_key(event);
@@ -739,19 +694,6 @@ pub extern "C" fn _start() -> ! {
 
     main()
 
-}
-
-/// EFI Entry Point
-/// 
-/// This function serves as the entry point when the binary is loaded as an UEFI application.
-/// It delegates to the common main() function. The dual entry point design (_start and efi_main)
-/// allows the binary to work both as a standalone executable and as an UEFI application.
-#[no_mangle]
-pub extern "efiapi" fn efi_main(
-    _image_handle: *const core::ffi::c_void,
-    _system_table: *const core::ffi::c_void,
-) -> usize {
-    main()
 }
 
 
