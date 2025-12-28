@@ -201,6 +201,25 @@ pub enum ResourceType {
     SharedMemoryRegion {
         region_id: u64,
     },
+    /// Framebuffer access capability - grants access to the display framebuffer
+    Framebuffer {
+        address: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        bytes_per_pixel: u8,
+    },
+    /// Input device capability - grants access to keyboard/mouse input
+    InputDevice {
+        device_type: InputDeviceType,
+    },
+}
+
+/// Type of input device for capability granting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputDeviceType {
+    Keyboard,
+    Mouse,
 }
 
 #[derive(Debug, Clone)]
@@ -436,7 +455,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 7];
+        let mut by_type = [0usize; 9];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -447,6 +466,8 @@ impl CapabilityManager {
                 ResourceType::Device { .. } => 4,
                 ResourceType::DmaBuffer { .. } => 5,
                 ResourceType::SharedMemoryRegion { .. } => 6,
+                ResourceType::Framebuffer { .. } => 7,
+                ResourceType::InputDevice { .. } => 8,
             };
             by_type[idx] += 1;
         }
@@ -459,6 +480,8 @@ impl CapabilityManager {
             irq_caps: by_type[3],
             device_caps: by_type[4],
             dma_caps: by_type[5],
+            framebuffer_caps: by_type[7],
+            input_caps: by_type[8],
         }
     }
 }
@@ -472,6 +495,8 @@ pub struct CapabilityStats {
     pub irq_caps: usize,
     pub device_caps: usize,
     pub dma_caps: usize,
+    pub framebuffer_caps: usize,
+    pub input_caps: usize,
 }
 
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();

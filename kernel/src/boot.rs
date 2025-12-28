@@ -118,6 +118,12 @@ impl FramebufferInfo {
     }
 }
 
+/// Maximum number of drivers that can be loaded at boot
+pub const MAX_BOOT_DRIVERS: usize = 16;
+
+/// Maximum length for driver names
+pub const MAX_DRIVER_NAME_LEN: usize = 32;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ExecutableImage {
@@ -140,6 +146,71 @@ impl ExecutableImage {
 
 unsafe impl Send for ExecutableImage {}
 unsafe impl Sync for ExecutableImage {}
+
+/// A named driver image loaded at boot time
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DriverImage {
+    /// Name of the driver (e.g., "terminal", "keyboard")
+    pub name: [u8; MAX_DRIVER_NAME_LEN],
+    /// The executable image data
+    pub image: ExecutableImage,
+}
+
+impl DriverImage {
+    pub const fn empty() -> Self {
+        Self {
+            name: [0; MAX_DRIVER_NAME_LEN],
+            image: ExecutableImage::empty(),
+        }
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.name[0] != 0 && self.image.is_present()
+    }
+
+    pub fn name_str(&self) -> &str {
+        let len = self.name.iter().position(|&c| c == 0).unwrap_or(MAX_DRIVER_NAME_LEN);
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+}
+
+unsafe impl Send for DriverImage {}
+unsafe impl Sync for DriverImage {}
+
+/// Collection of drivers loaded at boot
+#[repr(C)]
+pub struct DriverList {
+    pub drivers: [DriverImage; MAX_BOOT_DRIVERS],
+    pub count: usize,
+}
+
+impl DriverList {
+    pub const fn empty() -> Self {
+        Self {
+            drivers: [DriverImage::empty(); MAX_BOOT_DRIVERS],
+            count: 0,
+        }
+    }
+
+    /// Find a driver by name
+    pub fn find(&self, name: &str) -> Option<&DriverImage> {
+        for i in 0..self.count {
+            if self.drivers[i].name_str() == name {
+                return Some(&self.drivers[i]);
+            }
+        }
+        None
+    }
+
+    /// Get iterator over drivers
+    pub fn iter(&self) -> impl Iterator<Item = &DriverImage> {
+        self.drivers[..self.count].iter().filter(|d| d.is_present())
+    }
+}
+
+unsafe impl Send for DriverList {}
+unsafe impl Sync for DriverList {}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -173,6 +244,8 @@ pub struct BootInfo {
     pub boot_method: BootMethod,
     pub cpu: CpuInfo,
     pub init_payload: ExecutableImage,
+    /// Additional drivers loaded from \drivers\ directory
+    pub drivers: DriverList,
 }
 
 unsafe impl Send for BootInfo {}
@@ -196,6 +269,7 @@ impl BootInfo {
                 architecture: CpuArchitecture::Unknown,
             },
             init_payload: ExecutableImage::empty(),
+            drivers: DriverList::empty(),
         }
     }
 }

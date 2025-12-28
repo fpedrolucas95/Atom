@@ -10,7 +10,12 @@
 // - Load executables into user address spaces
 // - Allocate and map physical memory for code and data
 // - Provide automatic rollback on partial failure
-// - Support bootloader-provided payloads and an embedded fallback image
+//
+// MICROKERNEL ARCHITECTURE:
+// - The bootloader MUST provide a valid ui_shell.atxf payload
+// - There is NO embedded fallback image
+// - If the payload is missing or invalid, the system MUST fail
+// - This enforces proper separation of kernel and userspace
 //
 // Design and implementation:
 // - Simple format with a fixed header and explicit offsets
@@ -34,7 +39,6 @@
 // Public interface:
 // - `load_boot_payload` to load init provided at boot
 // - `load_into_address_space` to load generic executables
-// - `embedded_init_image` as a minimal init fallback
 // - `ExecError` for detailed failure diagnostics
 
 use alloc::vec::Vec;
@@ -47,23 +51,18 @@ use crate::mm::addrspace::{AddressSpaceId, USER_CANONICAL_MAX};
 use crate::mm::vm::PageFlags;
 use crate::thread::ThreadId;
 use crate::{log_error, log_info, log_warn};
-use spin::Once;
 
 #[allow(dead_code)]
 const LOG_ORIGIN: &str = "exec";
+
+/// ATXF executable format magic number: "ATXF" in little-endian
 pub const ATXF_MAGIC: u32 = 0x4154_5846;
+
+/// Current ATXF format version
 pub const ATXF_VERSION: u16 = 1;
+
+/// Base address where user executables are loaded
 pub const USER_EXEC_LOAD_BASE: usize = 0x0040_0000;
-const EMBEDDED_TEXT_OFFSET: usize = pmm::PAGE_SIZE;
-const EMBEDDED_TEXT_SIZE: usize = pmm::PAGE_SIZE;
-const EMBEDDED_DATA_OFFSET: usize = EMBEDDED_TEXT_OFFSET + EMBEDDED_TEXT_SIZE;
-const EMBEDDED_BSS_SIZE: usize = pmm::PAGE_SIZE;
-const EMBEDDED_IMAGE_SIZE: usize = EMBEDDED_DATA_OFFSET;
-const EMBEDDED_TEXT: [u8; 11] = [
-    0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00, 
-    0x0F, 0x05, 
-    0xEB, 0xF7, 
-];
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -246,38 +245,10 @@ pub fn parse_image<'a>(image: &'a [u8]) -> Result<ExecutableSections<'a>, ExecEr
     })
 }
 
-pub fn embedded_init_image() -> &'static [u8] {
-    static EMBEDDED: Once<[u8; EMBEDDED_IMAGE_SIZE]> = Once::new();
-
-    let image = EMBEDDED.call_once(build_embedded_image);
-    let _sections = parse_image(image).expect("Embedded image must be valid");
-
-    &*image
-}
-
-fn build_embedded_image() -> [u8; EMBEDDED_IMAGE_SIZE] {
-    let mut image = [0u8; EMBEDDED_IMAGE_SIZE];
-
-    let header = AtxfHeader {
-        magic: ATXF_MAGIC,
-        version: ATXF_VERSION,
-        header_size: size_of::<AtxfHeader>() as u16,
-        entry_offset: 0,
-        text_offset: EMBEDDED_TEXT_OFFSET as u32,
-        text_size: EMBEDDED_TEXT_SIZE as u32,
-        data_offset: EMBEDDED_DATA_OFFSET as u32,
-        data_size: 0,
-        bss_size: EMBEDDED_BSS_SIZE as u32,
-    };
-
-    let header_bytes: [u8; size_of::<AtxfHeader>()] = unsafe { core::mem::transmute(header) };
-    image[..header_bytes.len()].copy_from_slice(&header_bytes);
-
-    image[EMBEDDED_TEXT_OFFSET..EMBEDDED_TEXT_OFFSET + EMBEDDED_TEXT.len()]
-        .copy_from_slice(&EMBEDDED_TEXT);
-
-    image
-}
+// NOTE: No embedded fallback image is provided.
+// The bootloader MUST supply a valid ui_shell.atxf payload.
+// If the payload is missing or invalid, the system will halt.
+// This enforces proper microkernel architecture where all UI runs in userspace.
 
 #[allow(dead_code)]
 pub fn load_into_address_space(

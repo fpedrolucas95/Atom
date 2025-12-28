@@ -23,13 +23,15 @@ $REPO_PATH  = $PSScriptRoot
 $RUST_LLD   = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
 $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
-# Userspace drivers list
-$USERSPACE_DRIVERS = @(
-    "keyboard",
-    "mouse", 
-    "display",
-    "ui_shell"
-)
+# Userspace drivers: directory name -> binary name mapping
+# The binary name comes from the "name" field in each driver's Cargo.toml
+$USERSPACE_DRIVERS = @{
+    "keyboard"  = "keyboard_driver"
+    "mouse"     = "mouse_driver"
+    "display"   = "display_driver"
+    "terminal"  = "terminal"
+    "ui_shell"  = "atom_desktop"
+}
 
 # -------------------------------------------------------------------------
 # Funções auxiliares
@@ -98,19 +100,46 @@ if (-not (Test-Path "efi\drivers")) {
 }
 
 # =========================================================================
-# BUILD USERSPACE DRIVERS (Library only - drivers are embedded in kernel)
+# BUILD ELF2ATXF TOOL
+# =========================================================================
+
+Write-Host ""
+Write-Host "========== ELF2ATXF TOOL ==========" -ForegroundColor Magenta
+Write-Host ""
+
+$ELF2ATXF_PATH = "tools\elf2atxf"
+# On Windows, cargo builds to target\<host-triple>\release\ by default
+$ELF2ATXF_EXE = "$ELF2ATXF_PATH\target\x86_64-pc-windows-msvc\release\elf2atxf.exe"
+
+if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
+    Write-Step "Compilando elf2atxf tool..."
+
+    Push-Location $ELF2ATXF_PATH
+    # Explicitly build for Windows host, not UEFI (overrides root .cargo/config.toml)
+    cargo build --release --target x86_64-pc-windows-msvc 2>&1 | Tee-Object -FilePath "build.log"
+    $buildResult = $LASTEXITCODE
+    Pop-Location
+
+    if ($buildResult -ne 0) {
+        Write-ErrorMsg "Falha ao compilar elf2atxf"
+        exit 1
+    }
+    Write-Success "elf2atxf compilado"
+} else {
+    Write-Success "elf2atxf já existe (use --clean para recompilar)"
+}
+
+# =========================================================================
+# BUILD USERSPACE DRIVERS (ATXF format)
 # =========================================================================
 
 if (-not $Kernel) {
     Write-Host ""
-    Write-Host "========== USERSPACE LIBRARIES ==========" -ForegroundColor Magenta
+    Write-Host "========== USERSPACE DRIVERS ==========" -ForegroundColor Magenta
     Write-Host ""
 
-    # Compilar biblioteca syscall (usada pelo shell embutido no kernel)
+    # Compilar biblioteca syscall primeiro
     Write-Step "Compilando biblioteca atom_syscall..."
-    
-    # A biblioteca syscall é compilada automaticamente como dependência
-    # quando o kernel é compilado. Aqui apenas verificamos se compila.
     cargo check -p atom_syscall 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-ErrorMsg "Falha ao verificar atom_syscall"
@@ -118,44 +147,75 @@ if (-not $Kernel) {
     }
     Write-Success "atom_syscall verificada"
 
-    # Nota: Os drivers userspace (keyboard, mouse, display, ui_shell) são
-    # compilados como crates separadas que eventualmente serao carregadas
-    # como binarios ATXF. Por enquanto, o kernel usa um shell embutido
-    # (shell.rs) que roda em Ring 3.
-    
-    Write-Step "Verificando drivers userspace..."
-    foreach ($driver in $USERSPACE_DRIVERS) {
-        $driverPath = "userspace\drivers\$driver"
-        
+    # Compilar cada driver userspace
+    foreach ($driverDir in $USERSPACE_DRIVERS.Keys) {
+        $binaryName = $USERSPACE_DRIVERS[$driverDir]
+        $driverPath = "userspace\drivers\$driverDir"
+
         if (-not (Test-Path "$driverPath\Cargo.toml")) {
-            Write-Warning "Driver $driver nao encontrado"
+            Write-Warning "Driver $driverDir nao encontrado"
             continue
         }
 
-        # Verificar sintaxe diretamente no diretorio do driver
-        # (drivers estao excluidos do workspace principal)
+        Write-Step "Compilando driver $driverDir ($binaryName)..."
+
         Push-Location $driverPath
-        cargo check 2>&1 | Out-Null
-        $checkResult = $LASTEXITCODE
+        cargo build --release 2>&1 | Tee-Object -FilePath "build.log"
+        $buildResult = $LASTEXITCODE
         Pop-Location
-        
-        if ($checkResult -eq 0) {
-            Write-Success "$driver driver verificado"
-        } else {
-            Write-Warning "$driver driver tem erros de sintaxe"
+
+        if ($buildResult -ne 0) {
+            Write-ErrorMsg "Falha ao compilar driver $driverDir"
+            exit 1
         }
+
+        # Encontrar o binário ELF gerado (use binary name from Cargo.toml)
+        $elfPath = "$driverPath\target\x86_64-unknown-none\release\$binaryName"
+        if (-not (Test-Path $elfPath)) {
+            Write-Warning "Binario ELF nao encontrado: $elfPath"
+            continue
+        }
+
+        # Converter ELF para ATXF
+        $atxfPath = "efi\drivers\$driverDir.atxf"
+        Write-Step "Convertendo $binaryName para ATXF..."
+
+        # Build full paths
+        $elf2atxfFullPath = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
+        if (-not $elf2atxfFullPath) {
+            Write-ErrorMsg "elf2atxf.exe nao encontrado em: $ELF2ATXF_EXE"
+            exit 1
+        }
+
+        # Run elf2atxf using call operator with resolved path
+        & "$elf2atxfFullPath" "$elfPath" "$atxfPath"
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorMsg "Falha ao converter $driverDir para ATXF (exit code: $LASTEXITCODE)"
+            exit 1
+        }
+
+        Write-Success "$driverDir.atxf criado"
     }
 
-    Write-Success "Verificacao de userspace concluida"
+    # Copiar ui_shell.atxf para o diretório de boot como init.atxf
+    if (Test-Path "efi\drivers\ui_shell.atxf") {
+        Copy-Item "efi\drivers\ui_shell.atxf" "efi\EFI\BOOT\init.atxf" -Force
+        Write-Success "init.atxf criado a partir de ui_shell"
+    } else {
+        Write-ErrorMsg "ui_shell.atxf nao encontrado - o kernel nao podera iniciar!"
+    }
+
+    Write-Success "Compilação de userspace concluída"
 }
 
 # Se --userspace only, parar aqui
 if ($Userspace) {
     Write-Host ""
-    Write-Success "Verificacao userspace concluida!"
+    Write-Success "Build userspace concluído!"
     Write-Host ""
-    Write-Host "Nota: Os drivers userspace sao verificados apenas." -ForegroundColor Yellow
-    Write-Host "O kernel usa um shell embutido (shell.rs) que roda em Ring 3." -ForegroundColor Yellow
+    Write-Host "Arquivos gerados:" -ForegroundColor Cyan
+    Get-ChildItem "efi\drivers\*.atxf" | ForEach-Object { Write-Host "  - $($_.Name)" }
+    Write-Host "  - efi\EFI\BOOT\init.atxf" -ForegroundColor White
     exit 0
 }
 
@@ -273,19 +333,29 @@ Write-Host "========== BUILD COMPLETO ==========" -ForegroundColor Green
 Write-Host ""
 Write-Host "Kernel:     build\Atom.efi" -ForegroundColor White
 Write-Host "EFI Image:  efi\EFI\BOOT\BOOTX64.EFI" -ForegroundColor White
+Write-Host "Init:       efi\EFI\BOOT\init.atxf" -ForegroundColor White
 Write-Host "Drivers:    efi\drivers\" -ForegroundColor White
 Write-Host ""
 
 # Lista de drivers compilados
 if (Test-Path "efi\drivers") {
-    $drivers = Get-ChildItem "efi\drivers\*.bin" -ErrorAction SilentlyContinue
+    $drivers = Get-ChildItem "efi\drivers\*.atxf" -ErrorAction SilentlyContinue
     if ($drivers) {
-        Write-Host "Drivers userspace:" -ForegroundColor Cyan
+        Write-Host "Drivers userspace (ATXF):" -ForegroundColor Cyan
         foreach ($d in $drivers) {
-            Write-Host "  - $($d.Name)" -ForegroundColor White
+            $size = [math]::Round($d.Length / 1024, 1)
+            Write-Host "  - $($d.Name) ($size KB)" -ForegroundColor White
         }
         Write-Host ""
     }
+}
+
+# Verificar se init.atxf existe
+if (Test-Path "efi\EFI\BOOT\init.atxf") {
+    $initSize = [math]::Round((Get-Item "efi\EFI\BOOT\init.atxf").Length / 1024, 1)
+    Write-Host "Init payload: init.atxf ($initSize KB)" -ForegroundColor Green
+} else {
+    Write-Host "AVISO: init.atxf não encontrado! O kernel não poderá iniciar o UI shell." -ForegroundColor Red
 }
 
 # -------------------------------------------------------------------------

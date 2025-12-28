@@ -38,7 +38,9 @@ impl FramebufferInfo {
 ///
 /// Returns Some(FramebufferInfo) on success, None if framebuffer is not available
 /// or the process doesn't have permission to access it.
+#[inline(never)]
 pub fn get_framebuffer() -> Option<FramebufferInfo> {
+    // DEBUG: Try just the syscall without any processing
     let mut info = [0u64; 6];
     let result = unsafe {
         syscall1(SYS_GET_FRAMEBUFFER, info.as_mut_ptr() as u64)
@@ -55,6 +57,16 @@ pub fn get_framebuffer() -> Option<FramebufferInfo> {
         })
     } else {
         None
+    }
+}
+
+/// Get framebuffer info as tuple (address, width, height, stride, bpp)
+///
+/// Returns an error if framebuffer is not available
+pub fn get_framebuffer_info() -> crate::SyscallResult<(usize, u32, u32, u32, u32)> {
+    match get_framebuffer() {
+        Some(info) => Ok((info.address, info.width, info.height, info.stride, info.bytes_per_pixel)),
+        None => Err(crate::error::SyscallError::PermissionDenied),
     }
 }
 
@@ -138,12 +150,19 @@ pub struct Framebuffer {
 impl Framebuffer {
     /// Create a new framebuffer handle
     pub fn new() -> Option<Self> {
-        get_framebuffer().map(|info| Self { info })
+        // Explicit match to avoid closure that could cause indirect calls
+        match get_framebuffer() {
+            Some(info) => Some(Self { info }),
+            None => None,
+        }
     }
 
     /// Create from mapped framebuffer
     pub fn from_mapped() -> Option<Self> {
-        map_framebuffer().map(|info| Self { info })
+        match map_framebuffer() {
+            Some(info) => Some(Self { info }),
+            None => None,
+        }
     }
 
     #[inline]

@@ -31,8 +31,70 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
+
+// ============================================================================
+// Simple Bump Allocator for Userspace
+// ============================================================================
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+const HEAP_SIZE: usize = 1024 * 1024; // 1 MB heap
+
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    next: AtomicUsize,
+}
+
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            heap: UnsafeCell::new([0; HEAP_SIZE]),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size();
+        let align = layout.align().max(16);
+
+        loop {
+            let current = self.next.load(Ordering::Relaxed);
+            let aligned = (current + align - 1) & !(align - 1);
+            let new_next = aligned + size;
+
+            if new_next > HEAP_SIZE {
+                return core::ptr::null_mut();
+            }
+
+            if self.next.compare_exchange_weak(
+                current, new_next, Ordering::SeqCst, Ordering::Relaxed
+            ).is_ok() {
+                return (self.heap.get() as *mut u8).add(aligned);
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Bump allocator doesn't free - memory is reclaimed when process exits
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    loop {}
+}
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -43,6 +105,7 @@ use atom_syscall::input::{keyboard_poll, MouseDriver};
 use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
+use atom_syscall::process::spawn_process;
 
 use libipc::messages::{MessageType, WindowId};
 use libipc::ports::well_known;
@@ -333,6 +396,12 @@ impl Compositor {
     }
 
     fn handle_click(&mut self, x: i32, y: i32) {
+        // Check if clicking on a dock icon first
+        if let Some(icon_index) = self.dock_icon_at(x, y) {
+            self.handle_dock_click(icon_index);
+            return;
+        }
+
         // Check if clicking on a window
         if let Some(id) = self.wm.window_at(x, y) {
             if self.wm.focused_id != Some(id) {
@@ -349,6 +418,71 @@ impl Compositor {
                     self.dirty = true;
                 }
             }
+        }
+    }
+
+    /// Check if a point is on a dock icon and return its index
+    fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {
+        let width = self.fb.width();
+        let height = self.fb.height();
+
+        let dock_w = 300u32;
+        let dock_h = 48u32;
+        let dock_x = (width / 2).saturating_sub(dock_w / 2) as i32;
+        let dock_y = height.saturating_sub(dock_h + 10) as i32;
+
+        let icon_size = 32i32;
+        let padding = 16i32;
+        let start_x = dock_x + padding;
+        let icon_y = dock_y + (dock_h as i32 - icon_size) / 2;
+
+        // Check if click is within dock vertical bounds
+        if y < icon_y || y >= icon_y + icon_size {
+            return None;
+        }
+
+        // Check each icon
+        for i in 0..4 {
+            let ix = start_x + (i as i32 * (icon_size + padding));
+            if x >= ix && x < ix + icon_size {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+
+    /// Handle click on a dock icon
+    fn handle_dock_click(&mut self, icon_index: usize) {
+        match icon_index {
+            0 => {
+                // Files - not implemented yet
+                log("Dock: Files icon clicked (not implemented)");
+            }
+            1 => {
+                // Settings - not implemented yet
+                log("Dock: Settings icon clicked (not implemented)");
+            }
+            2 => {
+                // Browser - not implemented yet
+                log("Dock: Browser icon clicked (not implemented)");
+            }
+            3 => {
+                // Terminal - spawn terminal process
+                log("Dock: Terminal icon clicked - spawning terminal");
+                match spawn_process("terminal") {
+                    Ok(pid) => {
+                        log("Dock: Terminal spawned successfully");
+                        // The terminal will render itself to the framebuffer
+                        // In a real compositor we'd create a window for it
+                        self.dirty = true;
+                    }
+                    Err(e) => {
+                        log("Dock: Failed to spawn terminal");
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
