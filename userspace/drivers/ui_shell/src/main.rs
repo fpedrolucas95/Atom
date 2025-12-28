@@ -473,8 +473,10 @@ impl Compositor {
                 match spawn_process("terminal") {
                     Ok(pid) => {
                         log("Dock: Terminal spawned successfully");
-                        // The terminal will render itself to the framebuffer
-                        // In a real compositor we'd create a window for it
+                        // Create a window for the terminal process
+                        // Position it with slight offset from existing windows
+                        let offset = (self.wm.windows.len() as i32) * 30;
+                        self.wm.create_window("Terminal", 150 + offset, 120 + offset, 600, 400);
                         self.dirty = true;
                     }
                     Err(e) => {
