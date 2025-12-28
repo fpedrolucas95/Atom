@@ -2993,19 +2993,18 @@ fn spawn_process_internal(
     use crate::mm::vm::{self, PageFlags};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
-    const USER_STACK_PAGES: usize = 16;  // 64KB stack for userspace processes
+    const USER_STACK_PAGES: usize = 64;  // 256KB stack for userspace processes
     const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
     const KERNEL_STACK_PAGES: usize = 8;
+    const USER_STACK_TOP: usize = 0x0000_8000_0000;
 
-    // Use unique stack addresses for each process to avoid conflicts
-    // Each process gets its own stack region at a different address
     let pid = ThreadId::new();
-    let pid_offset = (pid.raw() as usize) * 0x100000; // 1MB per process offset
-    let user_stack_top: usize = 0x0000_8000_0000 + pid_offset;
-    let user_stack_base = user_stack_top - USER_STACK_SIZE;
 
-    // Also offset the executable load address for each process
-    let text_base = USER_EXEC_LOAD_BASE + pid_offset;
+    // Each process gets its own address space - load at the standard base address
+    // since each process has isolated virtual memory
+    let text_base = USER_EXEC_LOAD_BASE;
+    let user_stack_top = USER_STACK_TOP;
+    let user_stack_base = user_stack_top - USER_STACK_SIZE;
 
     log_info!(
         "spawn",
@@ -3016,10 +3015,20 @@ fn spawn_process_internal(
         user_stack_top
     );
 
-    // Use kernel's page table (shared address space for now)
-    let kernel_cr3 = crate::arch::read_cr3() as usize;
+    // Create a new address space for this process
+    let new_pml4_phys = pmm::alloc_pages_zeroed(1).ok_or(ENOMEM)?;
 
-    // Allocate and map text section
+    // Clone kernel mappings to the new address space
+    vm::clone_kernel_mappings(new_pml4_phys).map_err(|_| ENOMEM)?;
+
+    log_info!(
+        "spawn",
+        "Created new address space for '{}': PML4=0x{:X}",
+        name,
+        new_pml4_phys
+    );
+
+    // Allocate and map text section in the NEW address space
     let text_size = align_up(sections.text.len().max(1));
     let text_pages = text_size / PAGE_SIZE;
 
@@ -3037,8 +3046,8 @@ fn spawn_process_internal(
     for i in 0..text_pages {
         let virt = text_base + i * PAGE_SIZE;
         let phys = text_phys + i * PAGE_SIZE;
-        let _ = vm::unmap_page(virt);
-        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER)
+        // Use remap to overwrite any existing mappings from shared page tables
+        vm::remap_page_in_pml4(new_pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
             .map_err(|_| ENOMEM)?;
     }
 
@@ -3062,8 +3071,8 @@ fn spawn_process_internal(
         for i in 0..data_pages {
             let virt = data_base + i * PAGE_SIZE;
             let phys = data_phys + i * PAGE_SIZE;
-            let _ = vm::unmap_page(virt);
-            vm::map_page(
+            vm::remap_page_in_pml4(
+                new_pml4_phys,
                 virt,
                 phys,
                 PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
@@ -3082,8 +3091,8 @@ fn spawn_process_internal(
     for i in 0..bss_pages {
         let virt = bss_base + i * PAGE_SIZE;
         let phys = bss_phys + i * PAGE_SIZE;
-        let _ = vm::unmap_page(virt);
-        vm::map_page(
+        vm::remap_page_in_pml4(
+            new_pml4_phys,
             virt,
             phys,
             PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
@@ -3097,8 +3106,8 @@ fn spawn_process_internal(
     for i in 0..USER_STACK_PAGES {
         let virt = user_stack_base + i * PAGE_SIZE;
         let phys = stack_phys + i * PAGE_SIZE;
-        let _ = vm::unmap_page(virt);
-        vm::map_page(
+        vm::remap_page_in_pml4(
+            new_pml4_phys,
             virt,
             phys,
             PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
@@ -3106,9 +3115,13 @@ fn spawn_process_internal(
     }
 
     // Allocate kernel stack
+    // CRITICAL: Use higher-half virtual address for kernel stack, not identity-mapped address.
+    // Child processes only have the upper-half PML4 entries cloned (kernel space at 0xFFFF_8000+).
+    // The identity mapping (phys == virt) is in the lower half which is cleared for children.
     let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
         .ok_or(ENOMEM)?;
-    let kernel_stack_top = (kernel_stack_phys + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+    let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
+    let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
 
     // Calculate entry point
     let entry_point = text_base + sections.entry_offset;
@@ -3123,21 +3136,21 @@ fn spawn_process_internal(
         entry_point
     );
 
-    // Create CPU context for Ring 3 execution
+    // Create CPU context for Ring 3 execution with the NEW address space
     let context = CpuContext::new_user(
         entry_point as u64,
         user_stack_top as u64,
-        kernel_cr3 as u64,
+        new_pml4_phys as u64,
     );
 
-    // Create the thread
+    // Create the thread with its own address space
     let thread = Thread {
         id: pid,
         state: ThreadState::Ready,
         context,
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
-        address_space: kernel_cr3 as u64,
+        address_space: new_pml4_phys as u64,
         priority: ThreadPriority::Normal,
         name: static_name,
         capability_table: cap::create_capability_table(pid),

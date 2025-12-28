@@ -84,7 +84,8 @@ const EFI_MEMORY_RP: u64 = 0x0000_0000_0000_2000;
 const EFI_MEMORY_XP: u64 = 0x8000_0000_0000_0000;
 const ENTRIES_PER_TABLE: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
+/// Higher-half kernel virtual memory base address
+pub const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
 const HIGHER_HALF_MIRROR_SIZE: usize = 512 * 1024 * 1024;
 static ACTIVE_PML4: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_PAGES: AtomicUsize = AtomicUsize::new(0);
@@ -463,6 +464,34 @@ pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageF
     map_page_internal(pml4_phys, virt, phys, flags)
 }
 
+/// Map a page in a specific PML4, overwriting any existing mapping.
+/// This is used when creating new processes that may share page table structures
+/// with the kernel but need their own mappings in user space regions.
+pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
+    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(phys) {
+        return Err(VmError::Unaligned);
+    }
+
+    if pml4_phys == 0 {
+        return Err(VmError::NotInitialized);
+    }
+
+    // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
+    let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;
+
+    let (entry, _created_table) = walk_to_entry_with_root_user(pml4_phys, virt, true, user_access)?;
+
+    // Overwrite existing entry if present (unlike map_page_internal which fails)
+    if !entry.is_present() {
+        MAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    entry.set(phys, flags);
+    invalidate_page(virt);
+
+    Ok(())
+}
+
 pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
     if !pmm::is_page_aligned(dst_pml4_phys) {
         return Err(VmError::Unaligned);
@@ -476,14 +505,91 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
     let src = unsafe { &*(src_pml4 as *const PageTable) };
     let dst = unsafe { &mut *(dst_pml4_phys as *mut PageTable) };
 
-    // Clear lower half (user space)
-    for idx in 0..ENTRIES_PER_TABLE / 2 {
-        dst.entries[idx].clear();
-    }
-
-    // Copy higher half (kernel space)
+    // For higher half (kernel space at 0xFFFF_8000+): share page tables
+    // These are kernel mappings that don't change per-process
     for idx in ENTRIES_PER_TABLE / 2..ENTRIES_PER_TABLE {
         dst.entries[idx] = src.entries[idx];
+    }
+
+    // For lower half: we need to deep-copy page tables to isolate user space.
+    // PML4[0] contains both kernel identity mapping (~0x1e24xxxx) and user code (0x400000).
+    // We must deep-copy so each process has its own page tables for this region.
+    for idx in 0..ENTRIES_PER_TABLE / 2 {
+        if !src.entries[idx].is_present() {
+            dst.entries[idx].clear();
+            continue;
+        }
+
+        // Deep copy PDPT for this PML4 entry
+        let src_pdpt_phys = src.entries[idx].addr();
+        let dst_pdpt_phys = match pmm::alloc_page_zeroed() {
+            Some(p) => p,
+            None => return Err(VmError::OutOfMemory),
+        };
+        PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
+
+        let src_pdpt = unsafe { &*(src_pdpt_phys as *const PageTable) };
+        let dst_pdpt = unsafe { &mut *(dst_pdpt_phys as *mut PageTable) };
+
+        // Copy PDPT entries - for kernel region, share PD; for user region, deep copy
+        for pdpt_idx in 0..ENTRIES_PER_TABLE {
+            if !src_pdpt.entries[pdpt_idx].is_present() {
+                dst_pdpt.entries[pdpt_idx].clear();
+                continue;
+            }
+
+            // Deep copy PD for this PDPT entry
+            let src_pd_phys = src_pdpt.entries[pdpt_idx].addr();
+            let dst_pd_phys = match pmm::alloc_page_zeroed() {
+                Some(p) => p,
+                None => return Err(VmError::OutOfMemory),
+            };
+            PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
+
+            let src_pd = unsafe { &*(src_pd_phys as *const PageTable) };
+            let dst_pd = unsafe { &mut *(dst_pd_phys as *mut PageTable) };
+
+            // Copy PD entries
+            for pd_idx in 0..ENTRIES_PER_TABLE {
+                if !src_pd.entries[pd_idx].is_present() {
+                    dst_pd.entries[pd_idx].clear();
+                    continue;
+                }
+
+                // Check if this is a 2MB huge page or points to a PT
+                if (src_pd.entries[pd_idx].0 & (1 << 7)) != 0 {
+                    // 2MB huge page - just copy the entry
+                    dst_pd.entries[pd_idx] = src_pd.entries[pd_idx];
+                } else {
+                    // Points to a PT - deep copy it
+                    let src_pt_phys = src_pd.entries[pd_idx].addr();
+                    let dst_pt_phys = match pmm::alloc_page_zeroed() {
+                        Some(p) => p,
+                        None => return Err(VmError::OutOfMemory),
+                    };
+                    PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
+
+                    // Copy all PT entries
+                    let src_pt = unsafe { &*(src_pt_phys as *const PageTable) };
+                    let dst_pt = unsafe { &mut *(dst_pt_phys as *mut PageTable) };
+                    for pt_idx in 0..ENTRIES_PER_TABLE {
+                        dst_pt.entries[pt_idx] = src_pt.entries[pt_idx];
+                    }
+
+                    // Set PD entry to point to new PT with same flags
+                    let flags = src_pd.entries[pd_idx].0 & 0xFFF;
+                    dst_pd.entries[pd_idx].0 = (dst_pt_phys as u64) | flags;
+                }
+            }
+
+            // Set PDPT entry to point to new PD with same flags
+            let flags = src_pdpt.entries[pdpt_idx].0 & 0xFFF;
+            dst_pdpt.entries[pdpt_idx].0 = (dst_pd_phys as u64) | flags;
+        }
+
+        // Set PML4 entry to point to new PDPT with same flags
+        let flags = src.entries[idx].0 & 0xFFF;
+        dst.entries[idx].0 = (dst_pdpt_phys as u64) | flags;
     }
 
     Ok(())
