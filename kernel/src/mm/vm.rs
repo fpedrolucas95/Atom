@@ -84,7 +84,8 @@ const EFI_MEMORY_RP: u64 = 0x0000_0000_0000_2000;
 const EFI_MEMORY_XP: u64 = 0x8000_0000_0000_0000;
 const ENTRIES_PER_TABLE: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
+/// Higher-half kernel virtual memory base address
+pub const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
 const HIGHER_HALF_MIRROR_SIZE: usize = 512 * 1024 * 1024;
 static ACTIVE_PML4: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_PAGES: AtomicUsize = AtomicUsize::new(0);

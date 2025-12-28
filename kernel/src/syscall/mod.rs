@@ -3114,9 +3114,13 @@ fn spawn_process_internal(
     }
 
     // Allocate kernel stack
+    // CRITICAL: Use higher-half virtual address for kernel stack, not identity-mapped address.
+    // Child processes only have the upper-half PML4 entries cloned (kernel space at 0xFFFF_8000+).
+    // The identity mapping (phys == virt) is in the lower half which is cleared for children.
     let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
         .ok_or(ENOMEM)?;
-    let kernel_stack_top = (kernel_stack_phys + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+    let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
+    let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
 
     // Calculate entry point
     let entry_point = text_base + sections.entry_offset;
