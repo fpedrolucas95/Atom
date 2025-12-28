@@ -2993,7 +2993,7 @@ fn spawn_process_internal(
     use crate::mm::vm::{self, PageFlags};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
-    const USER_STACK_PAGES: usize = 16;  // 64KB stack for userspace processes
+    const USER_STACK_PAGES: usize = 64;  // 256KB stack for userspace processes
     const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
     const KERNEL_STACK_PAGES: usize = 8;
 
