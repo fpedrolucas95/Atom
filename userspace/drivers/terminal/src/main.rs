@@ -1,187 +1,196 @@
 // Atom Terminal - Userspace Terminal Emulator
-
 //
-
 // This is a true userspace application for Atom OS that provides an
-
 // interactive command-line interface. It runs entirely in Ring 3 (userspace)
-
 // and communicates with all system services exclusively via IPC.
-
 //
-
 // Architecture:
-
-// - Window/Rendering: Communicates with display server for graphics
-
+// - Window/Rendering: Receives shared surface from compositor via IPC
 // - Input Handling: Receives keyboard events from input service
-
 // - Command Parser: Tokenizes and parses user input
-
 // - Command Execution: Executes built-in commands via IPC to services
-
 // - Buffer Management: Manages display buffer and scrollback
-
 //
-
 // This terminal does NOT:
-
 // - Access kernel internals directly
-
 // - Link against kernel code
-
 // - Use privileged CPU instructions
-
 // - Directly access hardware (all via syscalls)
-
-
+// - Acquire the global framebuffer (renders only to compositor-provided surface)
 
 #![no_std]
-
 #![no_main]
+#![feature(alloc_error_handler)]
 
-
+extern crate alloc;
 
 mod buffer;
-
 mod commands;
-
 mod input;
-
 mod ipc_client;
-
 mod parser;
-
 mod window;
 
-
-
 use core::panic::PanicInfo;
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
+// ============================================================================
+// Simple Bump Allocator for Userspace
+// ============================================================================
 
+const HEAP_SIZE: usize = 512 * 1024; // 512 KB heap
 
-use atom_syscall::graphics::Framebuffer;
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    next: AtomicUsize,
+}
 
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            heap: UnsafeCell::new([0; HEAP_SIZE]),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size();
+        let align = layout.align().max(16);
+
+        loop {
+            let current = self.next.load(Ordering::Relaxed);
+            let aligned = (current + align - 1) & !(align - 1);
+            let new_next = aligned + size;
+
+            if new_next > HEAP_SIZE {
+                return core::ptr::null_mut();
+            }
+
+            if self.next.compare_exchange_weak(
+                current, new_next, Ordering::SeqCst, Ordering::Relaxed
+            ).is_ok() {
+                return (self.heap.get() as *mut u8).add(aligned);
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Bump allocator doesn't free - memory is reclaimed when process exits
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    loop {}
+}
+
+use atom_syscall::graphics::SharedSurface;
+use atom_syscall::ipc::{create_port, try_recv, send, PortId};
 use atom_syscall::thread::{exit, yield_now};
-
 use atom_syscall::debug::log;
+
+use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg};
 
 
 
 use buffer::{DisplayBuffer, InputBuffer, History};
-
 use commands::{CommandContext, CommandResult, execute};
-
 use input::{InputHandler, KeyEvent};
-
 use ipc_client::IpcClient;
-
 use parser::parse_command;
-
-use window::{TerminalWindow, Theme};
+use window::Theme;
 
 
 
 /// Terminal state
-
 struct Terminal {
-
-    window: TerminalWindow,
-
     display: DisplayBuffer,
-
     input: InputBuffer,
-
     input_handler: InputHandler,
-
     history: History,
-
     ipc: IpcClient,
-
     running: bool,
-
     prompt_row: usize,
-
     prompt_col: usize,
-
+    /// Window ID assigned by compositor
+    window_id: u32,
+    /// Port for communicating with compositor
+    compositor_port: PortId,
+    /// Our local IPC port for receiving messages
+    local_port: PortId,
+    /// Surface dimensions
+    surface_width: u32,
+    surface_height: u32,
+    /// Character dimensions
+    char_width: u32,
+    char_height: u32,
 }
 
 
 
 impl Terminal {
-
-    fn new() -> Self {
-
+    fn new(window_id: u32, compositor_port: PortId, local_port: PortId, width: u32, height: u32) -> Self {
         Self {
-
-            window: TerminalWindow::new("Atom Terminal"),
-
             display: DisplayBuffer::new(),
-
             input: InputBuffer::new(),
-
             input_handler: InputHandler::new(),
-
             history: History::new(),
-
             ipc: IpcClient::new(),
-
             running: true,
-
             prompt_row: 0,
-
             prompt_col: 0,
-
+            window_id,
+            compositor_port,
+            local_port,
+            surface_width: width,
+            surface_height: height,
+            char_width: 8,
+            char_height: 8,
         }
+    }
 
+    /// Calculate number of columns
+    fn cols(&self) -> u32 {
+        self.surface_width / self.char_width
+    }
+
+    /// Calculate number of rows
+    fn rows(&self) -> u32 {
+        self.surface_height / self.char_height
     }
 
 
 
     /// Initialize the terminal
-
-    fn init(&mut self, fb: &Framebuffer) {
-
+    fn init(&mut self, surface: &SharedSurface) {
         // Initialize IPC client
-
         self.ipc.init();
 
-
-
-        // Set display dimensions from window config
-
-        let cfg = self.window.config();
-
-        let rows = cfg.rows() as usize;
-
-        let cols = cfg.cols() as usize;
-
+        // Set display dimensions based on surface size
+        let rows = self.rows() as usize;
+        let cols = self.cols() as usize;
         self.display.set_dimensions(rows, cols);
 
-
-
-        // Draw window frame
-
-        self.window.draw_frame(fb);
-
-
+        // Clear surface with terminal background color
+        surface.clear(Theme::WINDOW_BG);
 
         // Show welcome message
-
         self.show_welcome();
 
-
-
         // Show initial prompt
-
         self.show_prompt();
 
-
-
         // Render initial state
-
-        self.render(fb);
-
+        self.render(surface);
     }
 
 
@@ -524,226 +533,260 @@ impl Terminal {
 
 
 
-    /// Render the terminal to the framebuffer
-
-    fn render(&self, fb: &Framebuffer) {
-
-        let cfg = self.window.config();
-
-        let rows = cfg.rows() as usize;
-
-        let cols = cfg.cols() as usize;
-
-
+    /// Render the terminal to the shared surface
+    fn render(&self, surface: &SharedSurface) {
+        let rows = self.rows() as usize;
+        let cols = self.cols() as usize;
 
         // Render display buffer lines
-
         for row in 0..rows {
-
             if let Some(line) = self.display.get_line(row) {
-
                 for col in 0..cols {
-
                     if let Some(cell) = line.get(col) {
-
-                        self.window.draw_char(fb, row as u32, col as u32, cell.ch, cell.fg, cell.bg);
-
+                        self.draw_char(surface, row as u32, col as u32, cell.ch, cell.fg, cell.bg);
                     } else {
-
                         // Empty cell
-
-                        self.window.draw_char(fb, row as u32, col as u32, b' ', Theme::TEXT_NORMAL, Theme::WINDOW_BG);
-
+                        self.draw_char(surface, row as u32, col as u32, b' ', Theme::TEXT_NORMAL, Theme::WINDOW_BG);
                     }
-
                 }
-
             } else {
-
                 // Clear empty row
-
-                self.window.clear_row(fb, row as u32);
-
+                self.clear_row(surface, row as u32);
             }
-
         }
-
-
 
         // Render input line on top of buffer content at prompt position
-
         let input_row = self.prompt_row;
-
         let input_start_col = self.prompt_col;
 
-
-
         // Clear the input area
-
-        self.window.clear_to_eol(fb, input_row as u32, input_start_col as u32);
-
-
+        self.clear_to_eol(surface, input_row as u32, input_start_col as u32);
 
         // Draw input text
-
         let input_bytes = self.input.as_bytes();
-
         let cursor_pos = self.input.cursor();
 
-
-
         for (i, &byte) in input_bytes.iter().enumerate() {
-
             let col = input_start_col + i;
-
             if col < cols {
-
                 if i == cursor_pos {
-
                     // Cursor position - draw with inverted colors
-
-                    self.window.draw_char_with_cursor(fb, input_row as u32, col as u32, byte);
-
+                    self.draw_char_with_cursor(surface, input_row as u32, col as u32, byte);
                 } else {
-
-                    self.window.draw_char(fb, input_row as u32, col as u32, byte, Theme::TEXT_NORMAL, Theme::WINDOW_BG);
-
+                    self.draw_char(surface, input_row as u32, col as u32, byte, Theme::TEXT_NORMAL, Theme::WINDOW_BG);
                 }
-
             }
-
         }
-
-
 
         // Draw cursor at end if at end of input
-
         if cursor_pos >= input_bytes.len() {
-
             let col = input_start_col + input_bytes.len();
-
             if col < cols {
-
-                self.window.draw_cursor(fb, input_row as u32, col as u32);
-
+                self.draw_cursor(surface, input_row as u32, col as u32);
             }
-
         }
+    }
 
+    /// Draw a character at the given row/column position on the surface
+    fn draw_char(&self, surface: &SharedSurface, row: u32, col: u32, ch: u8, fg: atom_syscall::graphics::Color, bg: atom_syscall::graphics::Color) {
+        let x = col * self.char_width;
+        let y = row * self.char_height;
+
+        // Draw background
+        surface.fill_rect(x, y, self.char_width, self.char_height, bg);
+        // Draw character
+        surface.draw_char(x, y, ch, fg, bg);
+    }
+
+    /// Draw cursor at the given position
+    fn draw_cursor(&self, surface: &SharedSurface, row: u32, col: u32) {
+        let x = col * self.char_width;
+        let y = row * self.char_height;
+        surface.fill_rect(x, y, self.char_width, self.char_height, Theme::CURSOR_BG);
+    }
+
+    /// Draw a character with cursor (inverted colors)
+    fn draw_char_with_cursor(&self, surface: &SharedSurface, row: u32, col: u32, ch: u8) {
+        let x = col * self.char_width;
+        let y = row * self.char_height;
+
+        // Draw cursor background
+        surface.fill_rect(x, y, self.char_width, self.char_height, Theme::CURSOR_BG);
+        // Draw character in inverted color
+        surface.draw_char(x, y, ch, Theme::WINDOW_BG, Theme::CURSOR_BG);
+    }
+
+    /// Clear a specific row
+    fn clear_row(&self, surface: &SharedSurface, row: u32) {
+        let y = row * self.char_height;
+        surface.fill_rect(0, y, self.surface_width, self.char_height, Theme::WINDOW_BG);
+    }
+
+    /// Clear from cursor position to end of row
+    fn clear_to_eol(&self, surface: &SharedSurface, row: u32, col: u32) {
+        let x = col * self.char_width;
+        let y = row * self.char_height;
+        let remaining_width = self.surface_width.saturating_sub(x);
+        surface.fill_rect(x, y, remaining_width, self.char_height, Theme::WINDOW_BG);
     }
 
 
 
     /// Main event loop
-
-    fn run(&mut self, fb: &Framebuffer) {
-
+    fn run(&mut self, surface: &SharedSurface) {
         log("Terminal: Entering main event loop");
 
-
+        let mut msg_buffer = [0u8; 64];
 
         while self.running {
+            // Poll for IPC messages (terminate requests from compositor)
+            if let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buffer) {
+                if len >= MessageHeader::SIZE {
+                    if let Some(header) = MessageHeader::from_bytes(&msg_buffer) {
+                        match header.msg_type {
+                            MessageType::TerminateRequest => {
+                                log("Terminal: Received terminate request");
+                                self.running = false;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
 
-            // Poll for input
-
+            // Poll for keyboard input
             let mut needs_render = false;
 
-
-
             while let Some(event) = self.input_handler.poll() {
-
                 self.handle_key(event);
-
                 needs_render = true;
-
             }
-
-
 
             // Render if needed
-
             if needs_render {
-
-                self.render(fb);
-
+                self.render(surface);
             }
 
-
-
             // Yield to scheduler
-
             yield_now();
-
         }
-
-
 
         log("Terminal: Exiting");
-
     }
 
-}
+    /// Poll for surface assignment from compositor
+    fn wait_for_surface(port: PortId) -> Option<SurfaceAssignMsg> {
+        let mut buffer = [0u8; 64];
+        let mut attempts = 0;
 
-
-
-/// Entry point
-
-#[no_mangle]
-
-pub extern "C" fn _start() -> ! {
-
-    main()
-
-}
-
-
-
-fn main() -> ! {
-
-    log("Terminal: Starting userspace terminal");
-
-
-
-    // Acquire framebuffer
-
-    let fb = match Framebuffer::new() {
-
-        Some(fb) => fb,
-
-        None => {
-
-            log("Terminal: Failed to acquire framebuffer");
-
-            exit(1);
-
+        // Poll for surface assignment message (with timeout)
+        while attempts < 1000 {
+            if let Ok(Some(len)) = try_recv(port, &mut buffer) {
+                if len >= MessageHeader::SIZE {
+                    if let Some(header) = MessageHeader::from_bytes(&buffer) {
+                        if header.msg_type == MessageType::SurfaceAssign {
+                            let payload_start = MessageHeader::SIZE;
+                            if len >= payload_start + SurfaceAssignMsg::SIZE {
+                                return SurfaceAssignMsg::from_bytes(&buffer[payload_start..]);
+                            }
+                        }
+                    }
+                }
+            }
+            yield_now();
+            attempts += 1;
         }
 
+        None
+    }
+}
+
+/// Entry point
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    main()
+}
+
+fn main() -> ! {
+    log("Terminal: Starting userspace terminal");
+
+    // Create an IPC port to receive messages from compositor
+    let local_port = match create_port() {
+        Ok(port) => port,
+        Err(_) => {
+            log("Terminal: Failed to create IPC port");
+            exit(1);
+        }
     };
 
+    log("Terminal: Registering with compositor...");
 
+    // Register with the compositor by trying to find its registration port
+    // The compositor's registration port is one of the early dynamically allocated ports
+    let reg_msg = AppRegisterMsg {
+        app_port: local_port,
+        pid: 0, // Not used for matching, just for debugging
+    };
 
-    log("Terminal: Framebuffer acquired");
+    let header = MessageHeader::new(MessageType::AppRegister, AppRegisterMsg::SIZE as u32);
+    let header_bytes = header.to_bytes();
+    let payload_bytes = reg_msg.to_bytes();
 
+    let mut full_msg = [0u8; 32];
+    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + AppRegisterMsg::SIZE]
+        .copy_from_slice(&payload_bytes);
 
+    // Try to send to possible compositor registration ports
+    // Send to all in case the compositor's port is any of these
+    for possible_port in 1..50 {
+        let _ = send(possible_port, &full_msg[..MessageHeader::SIZE + AppRegisterMsg::SIZE]);
+    }
+
+    log("Terminal: Sent registration, waiting for surface assignment...");
+
+    // Wait for surface assignment from compositor
+    let surface_info = match Terminal::wait_for_surface(local_port) {
+        Some(info) => info,
+        None => {
+            log("Terminal: Timeout waiting for surface assignment");
+            exit(1);
+        }
+    };
+
+    log("Terminal: Received surface assignment");
+
+    // Map the shared surface into our address space
+    let surface = match SharedSurface::from_region(
+        surface_info.region_id,
+        surface_info.width,
+        surface_info.height,
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            log("Terminal: Failed to map shared surface");
+            exit(1);
+        }
+    };
+
+    log("Terminal: Shared surface mapped successfully");
 
     // Create and initialize terminal
-
-    let mut terminal = Terminal::new();
-
-    terminal.init(&fb);
-
-
+    let mut terminal = Terminal::new(
+        surface_info.window_id,
+        surface_info.compositor_port,
+        local_port,
+        surface_info.width,
+        surface_info.height,
+    );
+    terminal.init(&surface);
 
     // Run main loop
-
-    terminal.run(&fb);
-
-
+    terminal.run(&surface);
 
     // Clean exit
-
     exit(0);
-
 }
 
 

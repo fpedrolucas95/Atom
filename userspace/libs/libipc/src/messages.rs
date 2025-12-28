@@ -105,6 +105,20 @@ pub enum MessageType {
     Pong = 401,
     Shutdown = 402,
     Error = 499,
+
+    // Application Lifecycle (500-599)
+    /// Sent to application to provide its render surface
+    SurfaceAssign = 500,
+    /// Application acknowledges surface assignment
+    SurfaceAck = 501,
+    /// Application requests to present rendered content
+    SurfacePresent = 502,
+    /// Application registers its IPC port with compositor
+    AppRegister = 505,
+    /// Compositor requests application to terminate
+    TerminateRequest = 510,
+    /// Application acknowledges termination (clean exit)
+    TerminateAck = 511,
 }
 
 impl MessageType {
@@ -138,8 +152,125 @@ impl MessageType {
             401 => Some(Self::Pong),
             402 => Some(Self::Shutdown),
             499 => Some(Self::Error),
+            500 => Some(Self::SurfaceAssign),
+            501 => Some(Self::SurfaceAck),
+            502 => Some(Self::SurfacePresent),
+            505 => Some(Self::AppRegister),
+            510 => Some(Self::TerminateRequest),
+            511 => Some(Self::TerminateAck),
             _ => None,
         }
+    }
+}
+
+// ============================================================================
+// Application Lifecycle Messages
+// ============================================================================
+
+/// Surface assignment message sent from compositor to application
+/// Contains shared surface information for the application to render into
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceAssignMsg {
+    /// Window ID that owns this surface
+    pub window_id: WindowId,
+    /// Shared memory region ID
+    pub region_id: u64,
+    /// Surface dimensions
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub bytes_per_pixel: u32,
+    /// IPC port to send present requests back to compositor
+    pub compositor_port: u64,
+}
+
+impl SurfaceAssignMsg {
+    pub const SIZE: usize = 36; // 4 + 8 + 4 + 4 + 4 + 4 + 8
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.window_id.to_le_bytes());
+        bytes[4..12].copy_from_slice(&self.region_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.width.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.height.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.stride.to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.bytes_per_pixel.to_le_bytes());
+        bytes[28..36].copy_from_slice(&self.compositor_port.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            region_id: u64::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11]]),
+            width: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            height: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+            stride: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+            bytes_per_pixel: u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            compositor_port: u64::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31], bytes[32], bytes[33], bytes[34], bytes[35]]),
+        })
+    }
+}
+
+/// Terminate request sent from compositor to application
+#[derive(Debug, Clone, Copy)]
+pub struct TerminateRequestMsg {
+    pub window_id: WindowId,
+    pub reason: u32, // 0 = user requested close, 1 = system shutdown
+}
+
+impl TerminateRequestMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.window_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.reason.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            reason: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        })
+    }
+}
+
+/// Application registration message sent from app to compositor
+/// This tells the compositor which port to send window events to
+#[derive(Debug, Clone, Copy)]
+pub struct AppRegisterMsg {
+    /// The application's IPC port for receiving messages
+    pub app_port: u64,
+    /// Process ID (for matching to pending windows)
+    pub pid: u64,
+}
+
+impl AppRegisterMsg {
+    pub const SIZE: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.app_port.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.pid.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            app_port: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
+            pid: u64::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]]),
+        })
     }
 }
 

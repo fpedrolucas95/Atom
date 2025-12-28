@@ -9,6 +9,7 @@ pub enum SyscallError {
     OutOfMemory,
     PermissionDenied,
     Busy,
+    ResourceBusy,
     MessageTooLarge,
     TimedOut,
     WouldBlock,
