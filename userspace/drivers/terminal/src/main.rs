@@ -720,7 +720,7 @@ fn main() -> ! {
         }
     };
 
-    log("Terminal: Registering with compositor...");
+    log("Terminal: Port created, building registration message...");
 
     // Register with the compositor by trying to find its registration port
     // The compositor's registration port is one of the early dynamically allocated ports
@@ -729,14 +729,23 @@ fn main() -> ! {
         pid: 0, // Not used for matching, just for debugging
     };
 
+    log("Terminal: AppRegisterMsg created");
+
     let header = MessageHeader::new(MessageType::AppRegister, AppRegisterMsg::SIZE as u32);
+
+    log("Terminal: MessageHeader created");
+
     let header_bytes = header.to_bytes();
     let payload_bytes = reg_msg.to_bytes();
+
+    log("Terminal: Serialized header and payload");
 
     let mut full_msg = [0u8; 32];
     full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
     full_msg[MessageHeader::SIZE..MessageHeader::SIZE + AppRegisterMsg::SIZE]
         .copy_from_slice(&payload_bytes);
+
+    log("Terminal: Sending registration to compositor ports...");
 
     // Try to send to possible compositor registration ports
     // Send to all in case the compositor's port is any of these
@@ -744,7 +753,7 @@ fn main() -> ! {
         let _ = send(possible_port, &full_msg[..MessageHeader::SIZE + AppRegisterMsg::SIZE]);
     }
 
-    log("Terminal: Sent registration, waiting for surface assignment...");
+    log("Terminal: Registration sent, waiting for surface...");
 
     // Wait for surface assignment from compositor
     let surface_info = match Terminal::wait_for_surface(local_port) {
