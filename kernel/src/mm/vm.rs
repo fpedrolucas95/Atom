@@ -477,13 +477,13 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
     let src = unsafe { &*(src_pml4 as *const PageTable) };
     let dst = unsafe { &mut *(dst_pml4_phys as *mut PageTable) };
 
-    // Clear lower half (user space)
-    for idx in 0..ENTRIES_PER_TABLE / 2 {
-        dst.entries[idx].clear();
-    }
-
-    // Copy higher half (kernel space)
-    for idx in ENTRIES_PER_TABLE / 2..ENTRIES_PER_TABLE {
+    // Copy ALL entries from kernel PML4.
+    // The kernel code is identity-mapped in the lower half (e.g., 0x1e24xxxx),
+    // so we must preserve those mappings for the kernel to continue running
+    // after switching to the child's address space.
+    // The child's user code will be mapped at specific addresses (0x400000),
+    // which will create new page table entries in the hierarchy.
+    for idx in 0..ENTRIES_PER_TABLE {
         dst.entries[idx] = src.entries[idx];
     }
 
