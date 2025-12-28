@@ -464,6 +464,34 @@ pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageF
     map_page_internal(pml4_phys, virt, phys, flags)
 }
 
+/// Map a page in a specific PML4, overwriting any existing mapping.
+/// This is used when creating new processes that may share page table structures
+/// with the kernel but need their own mappings in user space regions.
+pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
+    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(phys) {
+        return Err(VmError::Unaligned);
+    }
+
+    if pml4_phys == 0 {
+        return Err(VmError::NotInitialized);
+    }
+
+    // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
+    let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;
+
+    let (entry, _created_table) = walk_to_entry_with_root_user(pml4_phys, virt, true, user_access)?;
+
+    // Overwrite existing entry if present (unlike map_page_internal which fails)
+    if !entry.is_present() {
+        MAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    entry.set(phys, flags);
+    invalidate_page(virt);
+
+    Ok(())
+}
+
 pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
     if !pmm::is_page_aligned(dst_pml4_phys) {
         return Err(VmError::Unaligned);

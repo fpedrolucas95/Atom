@@ -3046,7 +3046,8 @@ fn spawn_process_internal(
     for i in 0..text_pages {
         let virt = text_base + i * PAGE_SIZE;
         let phys = text_phys + i * PAGE_SIZE;
-        vm::map_page_in_pml4(new_pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
+        // Use remap to overwrite any existing mappings from shared page tables
+        vm::remap_page_in_pml4(new_pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
             .map_err(|_| ENOMEM)?;
     }
 
@@ -3070,7 +3071,7 @@ fn spawn_process_internal(
         for i in 0..data_pages {
             let virt = data_base + i * PAGE_SIZE;
             let phys = data_phys + i * PAGE_SIZE;
-            vm::map_page_in_pml4(
+            vm::remap_page_in_pml4(
                 new_pml4_phys,
                 virt,
                 phys,
@@ -3090,7 +3091,7 @@ fn spawn_process_internal(
     for i in 0..bss_pages {
         let virt = bss_base + i * PAGE_SIZE;
         let phys = bss_phys + i * PAGE_SIZE;
-        vm::map_page_in_pml4(
+        vm::remap_page_in_pml4(
             new_pml4_phys,
             virt,
             phys,
@@ -3105,7 +3106,7 @@ fn spawn_process_internal(
     for i in 0..USER_STACK_PAGES {
         let virt = user_stack_base + i * PAGE_SIZE;
         let phys = stack_phys + i * PAGE_SIZE;
-        vm::map_page_in_pml4(
+        vm::remap_page_in_pml4(
             new_pml4_phys,
             virt,
             phys,
