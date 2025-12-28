@@ -121,6 +121,24 @@ pub fn init() -> bool {
             AHCI_BASE = base;
             crate::log_info!("ahci", "Found AHCI controller at 0x{:X}", base);
 
+            // Map AHCI MMIO region into kernel address space
+            // AHCI uses ~4KB of MMIO, map 2 pages to be safe
+            use crate::mm::vm::{self, PageFlags};
+            let page_base = base & !0xFFF; // Align to page
+            for i in 0..2 {
+                let addr = page_base + i * 0x1000;
+                let _ = vm::unmap_page(addr); // Remove any existing mapping
+                if let Err(e) = vm::map_page(
+                    addr,
+                    addr, // Identity map for MMIO
+                    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::CACHE_DISABLE,
+                ) {
+                    crate::log_error!("ahci", "Failed to map MMIO page 0x{:X}: {:?}", addr, e);
+                    return false;
+                }
+            }
+            crate::log_debug!("ahci", "MMIO mapped at 0x{:X}", page_base);
+
             // Enable AHCI mode
             let ghc = read_reg(AHCI_GHC);
             write_reg(AHCI_GHC, ghc | GHC_AE);
