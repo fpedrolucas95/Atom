@@ -713,14 +713,17 @@ fn main() -> ! {
 
     // Create an IPC port to receive messages from compositor
     let local_port = match create_port() {
-        Ok(port) => port,
+        Ok(port) => {
+            log("Terminal: create_port returned Ok, inside match arm");
+            port
+        },
         Err(_) => {
             log("Terminal: Failed to create IPC port");
             exit(1);
         }
     };
 
-    log("Terminal: Port created, building registration message...");
+    log("Terminal: After match, building registration message...");
 
     // Register with the compositor by trying to find its registration port
     // The compositor's registration port is one of the early dynamically allocated ports
