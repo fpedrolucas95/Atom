@@ -841,10 +841,11 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
     let init_payload = load_init_payload(image, bs)
         .unwrap_or_else(ExecutableImage::empty);
 
-    // Drivers are now loaded dynamically from filesystem at runtime
-    // via the FAT32 driver in the kernel, not pre-loaded at boot.
-    // This allows applications to be loaded on-demand like executables.
-    let drivers = DriverList::empty();
+    // Load drivers from \drivers\ directory at boot time
+    // These are pre-loaded so they can be spawned by userspace via spawn_process()
+    // Note: QEMU uses virtual FAT which doesn't work with AHCI, so we must
+    // load drivers at boot when EFI filesystem protocol is still available
+    let drivers = load_drivers(image, bs);
 
     let mut mmap_buf: *mut c_void = ptr::null_mut();
     let mut mmap_buf_size: usize = 0;
