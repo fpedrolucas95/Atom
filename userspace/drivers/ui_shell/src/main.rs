@@ -100,14 +100,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-use atom_syscall::graphics::{Color, Framebuffer};
+use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId};
 use atom_syscall::input::{keyboard_poll, MouseDriver};
-use atom_syscall::ipc::{create_port, PortId};
+use atom_syscall::ipc::{create_port, send, try_recv, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
-use atom_syscall::process::spawn_process;
+use atom_syscall::process::{spawn_process, ProcessId};
 
-use libipc::messages::{MessageType, WindowId};
+use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg};
 use libipc::ports::well_known;
 
 // ============================================================================
@@ -135,7 +135,6 @@ mod theme {
 // ============================================================================
 
 /// Window state in the compositor
-#[derive(Clone)]
 struct Window {
     id: WindowId,
     title: String,
@@ -147,6 +146,14 @@ struct Window {
     focused: bool,
     /// IPC port for sending events to the owning application
     event_port: Option<PortId>,
+    /// Process ID of the owning application (if any)
+    process_id: Option<ProcessId>,
+    /// Shared surface for application rendering (if managed)
+    surface: Option<SharedSurface>,
+    /// Shared region ID for passing to the application
+    surface_region_id: Option<SharedRegionId>,
+    /// Whether the content is dirty and needs compositing
+    content_dirty: bool,
 }
 
 impl Window {
@@ -161,7 +168,68 @@ impl Window {
             visible: true,
             focused: false,
             event_port: None,
+            process_id: None,
+            surface: None,
+            surface_region_id: None,
+            content_dirty: false,
         }
+    }
+
+    /// Create a window with an associated process and shared surface
+    fn new_with_process(
+        id: WindowId,
+        title: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        process_id: ProcessId,
+        event_port: PortId,
+    ) -> Option<Self> {
+        // Calculate content area dimensions (subtract header and borders)
+        let content_width = width.saturating_sub(2);  // 1px border each side
+        let content_height = height.saturating_sub(24 + 1); // 24px header + 1px bottom border
+
+        // Create shared surface for the content area
+        let surface = match SharedSurface::create(content_width, content_height) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+
+        let region_id = surface.region_id();
+
+        Some(Self {
+            id,
+            title: String::from(title),
+            x,
+            y,
+            width,
+            height,
+            visible: true,
+            focused: false,
+            event_port: Some(event_port),
+            process_id: Some(process_id),
+            surface_region_id: Some(region_id),
+            surface: Some(surface),
+            content_dirty: true,
+        })
+    }
+
+    /// Get content area position (inside window chrome)
+    fn content_x(&self) -> u32 {
+        (self.x + 1) as u32 // 1px border
+    }
+
+    fn content_y(&self) -> u32 {
+        (self.y + 24) as u32 // 24px header
+    }
+
+    fn content_width(&self) -> u32 {
+        self.width.saturating_sub(2)
+    }
+
+    fn content_height(&self) -> u32 {
+        self.height.saturating_sub(24 + 1)
     }
 
     fn contains(&self, px: i32, py: i32) -> bool {
@@ -201,6 +269,36 @@ impl WindowManager {
         self.windows.push(window);
         self.focus_window(id);
         id
+    }
+
+    /// Create a window with an associated process and shared surface
+    fn create_window_with_process(
+        &mut self,
+        title: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        process_id: ProcessId,
+        event_port: PortId,
+    ) -> Option<WindowId> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let window = Window::new_with_process(id, title, x, y, width, height, process_id, event_port)?;
+        self.windows.push(window);
+        self.focus_window(id);
+        Some(id)
+    }
+
+    /// Get window by ID
+    fn get_window(&self, id: WindowId) -> Option<&Window> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    /// Get mutable window by ID
+    fn get_window_mut(&mut self, id: WindowId) -> Option<&mut Window> {
+        self.windows.iter_mut().find(|w| w.id == id)
     }
 
     fn focus_window(&mut self, id: WindowId) {
@@ -323,12 +421,22 @@ impl CursorState {
 // Compositor
 // ============================================================================
 
+/// Pending window info waiting for application registration
+struct PendingWindow {
+    pid: ProcessId,
+    window_id: WindowId,
+}
+
 struct Compositor {
     fb: Framebuffer,
     wm: WindowManager,
     cursor: CursorState,
     mouse: MouseDriver,
     event_port: PortId,
+    /// Port for receiving application registration messages
+    register_port: PortId,
+    /// Windows waiting for application to register
+    pending_windows: Vec<PendingWindow>,
     dirty: bool,
 }
 
@@ -339,6 +447,10 @@ impl Compositor {
 
         // Create IPC port for receiving events
         let event_port = create_port().expect("Failed to create event port");
+        // Create registration port for applications
+        let register_port = create_port().expect("Failed to create registration port");
+
+        log("Compositor: Registration port created");
 
         Self {
             fb,
@@ -346,6 +458,8 @@ impl Compositor {
             cursor: CursorState::new(width, height),
             mouse: MouseDriver::new(),
             event_port,
+            register_port,
+            pending_windows: Vec::new(),
             dirty: true,
         }
     }
@@ -353,9 +467,8 @@ impl Compositor {
     fn run(&mut self) -> ! {
         log("Desktop: Starting compositor");
 
-        // Create initial windows
+        // Create initial demo windows (no surface/process)
         self.wm.create_window("Welcome to Atom", 100, 100, 400, 300);
-        self.wm.create_window("Terminal", 150, 150, 500, 350);
 
         // Initial draw
         self.draw_all();
@@ -363,8 +476,14 @@ impl Compositor {
         log("Desktop: Entering event loop");
 
         let mut prev_left = false;
+        let mut reg_buffer = [0u8; 64];
 
         loop {
+            // Poll for application registrations
+            while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
+                self.handle_app_registration(&reg_buffer[..len]);
+            }
+
             // Process mouse events
             while let Some(event) = self.mouse.poll_event() {
                 self.cursor.restore_region(&self.fb);
@@ -395,6 +514,73 @@ impl Compositor {
         }
     }
 
+    /// Handle an application registration message
+    fn handle_app_registration(&mut self, data: &[u8]) {
+        if data.len() < MessageHeader::SIZE {
+            return;
+        }
+
+        let header = match MessageHeader::from_bytes(data) {
+            Some(h) => h,
+            None => return,
+        };
+
+        if header.msg_type != MessageType::AppRegister {
+            return;
+        }
+
+        let payload_start = MessageHeader::SIZE;
+        if data.len() < payload_start + AppRegisterMsg::SIZE {
+            return;
+        }
+
+        let reg_msg = match AppRegisterMsg::from_bytes(&data[payload_start..]) {
+            Some(m) => m,
+            None => return,
+        };
+
+        log("Compositor: Received app registration");
+
+        // Match to first pending window (FIFO order)
+        // In a more sophisticated implementation, we'd match by PID
+        if !self.pending_windows.is_empty() {
+            let pending = self.pending_windows.remove(0);
+
+            // Get the window and update its event port
+            if let Some(window) = self.wm.get_window_mut(pending.window_id) {
+                window.event_port = Some(reg_msg.app_port);
+
+                // Send surface assignment to the application
+                if let Some(region_id) = window.surface_region_id {
+                    let msg = SurfaceAssignMsg {
+                        window_id: pending.window_id,
+                        region_id,
+                        width: window.content_width(),
+                        height: window.content_height(),
+                        stride: window.content_width(),
+                        bytes_per_pixel: 4,
+                        compositor_port: self.event_port,
+                    };
+
+                    let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
+                    let header_bytes = header.to_bytes();
+                    let payload_bytes = msg.to_bytes();
+
+                    let mut full_msg = [0u8; 48];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]
+                        .copy_from_slice(&payload_bytes);
+
+                    if let Err(_) = send(reg_msg.app_port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]) {
+                        log("Compositor: Failed to send surface assignment");
+                    } else {
+                        log("Compositor: Sent surface assignment to application");
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_click(&mut self, x: i32, y: i32) {
         // Check if clicking on a dock icon first
         if let Some(icon_index) = self.dock_icon_at(x, y) {
@@ -410,13 +596,41 @@ impl Compositor {
             }
 
             // Check for close button click
+            let mut should_close = false;
+            let mut event_port = None;
+
             if let Some(w) = self.wm.windows.iter().find(|w| w.id == id) {
                 let close_x = w.x + w.width as i32 - 20;
                 let close_y = w.y + 6;
                 if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
-                    self.wm.close_window(id);
-                    self.dirty = true;
+                    should_close = true;
+                    event_port = w.event_port;
                 }
+            }
+
+            if should_close {
+                // Send terminate request to the application if it has an IPC port
+                if let Some(port) = event_port {
+                    let msg = TerminateRequestMsg {
+                        window_id: id,
+                        reason: 0, // User requested close
+                    };
+                    let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
+                    let header_bytes = header.to_bytes();
+                    let payload_bytes = msg.to_bytes();
+
+                    let mut full_msg = [0u8; 24];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE]
+                        .copy_from_slice(&payload_bytes);
+
+                    let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+                    log("Compositor: Sent terminate request to application");
+                }
+
+                // Close the window (surface will be cleaned up via Drop)
+                self.wm.close_window(id);
+                self.dirty = true;
             }
         }
     }
@@ -468,24 +682,62 @@ impl Compositor {
                 log("Dock: Browser icon clicked (not implemented)");
             }
             3 => {
-                // Terminal - spawn terminal process
-                log("Dock: Terminal icon clicked - spawning terminal");
-                match spawn_process("terminal") {
-                    Ok(pid) => {
-                        log("Dock: Terminal spawned successfully");
-                        // Create a window for the terminal process
-                        // Position it with slight offset from existing windows
-                        let offset = (self.wm.windows.len() as i32) * 30;
-                        self.wm.create_window("Terminal", 150 + offset, 120 + offset, 600, 400);
-                        self.dirty = true;
-                    }
-                    Err(e) => {
-                        log("Dock: Failed to spawn terminal");
-                    }
-                }
+                // Terminal - spawn terminal process with managed window
+                self.spawn_terminal();
             }
             _ => {}
         }
+    }
+
+    /// Spawn terminal process with a managed window and shared surface
+    fn spawn_terminal(&mut self) {
+        log("Dock: Terminal icon clicked - spawning terminal");
+
+        // Spawn the terminal process
+        let pid = match spawn_process("terminal") {
+            Ok(pid) => pid,
+            Err(_) => {
+                log("Dock: Failed to spawn terminal process");
+                return;
+            }
+        };
+
+        log("Dock: Terminal spawned successfully");
+
+        // Calculate window position with offset from existing windows
+        let offset = (self.wm.windows.len() as i32) * 30;
+        let win_x = 150 + offset;
+        let win_y = 120 + offset;
+        let win_width = 600u32;
+        let win_height = 400u32;
+
+        // Create window with associated process and shared surface
+        // Use dummy port 0 for now - will be updated on registration
+        let window_id = match self.wm.create_window_with_process(
+            "Terminal",
+            win_x,
+            win_y,
+            win_width,
+            win_height,
+            pid,
+            0, // Port will be set when app registers
+        ) {
+            Some(id) => id,
+            None => {
+                log("Dock: Failed to create window with surface");
+                return;
+            }
+        };
+
+        // Store as pending - surface assignment will be sent when terminal registers
+        self.pending_windows.push(PendingWindow {
+            pid,
+            window_id,
+        });
+
+        log("Dock: Window created, waiting for terminal to register");
+
+        self.dirty = true;
     }
 
     fn handle_key(&mut self, scancode: u8) {
@@ -551,8 +803,10 @@ impl Compositor {
         // Border
         self.fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
 
-        // Window content
-        self.fb.fill_rect(x + 1, y + 1, w - 2, h - 2, theme::WINDOW_BG);
+        // Window content background (only if no surface)
+        if window.surface.is_none() {
+            self.fb.fill_rect(x + 1, y + 1, w - 2, h - 2, theme::WINDOW_BG);
+        }
 
         // Header
         let header_color = if window.focused {
@@ -571,6 +825,11 @@ impl Compositor {
         self.fb.fill_rect(btn_x, btn_y, 10, 10, Color::new(255, 95, 86)); // Close
         self.fb.fill_rect(btn_x - 14, btn_y, 10, 10, Color::new(255, 189, 46)); // Minimize
         self.fb.fill_rect(btn_x - 28, btn_y, 10, 10, Color::new(39, 201, 63)); // Maximize
+
+        // Composite shared surface content into window
+        if let Some(ref surface) = window.surface {
+            surface.blit_to_framebuffer(&self.fb, window.content_x(), window.content_y());
+        }
     }
 
     fn draw_dock(&self) {
