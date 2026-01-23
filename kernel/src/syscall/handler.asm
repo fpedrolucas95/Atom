@@ -88,10 +88,10 @@ syscall_entry:
 
     ; Return to userspace using iretq with proper stack frame
     ; Stack needs: SS, RSP, RFLAGS, CS, RIP (pushed in reverse order)
-    push    qword 0x23       ; SS = User Data Selector (0x20 | RPL=3)
-    push    [rel temp_user_rsp]  ; RSP
-    push    r11              ; RFLAGS
-    push    qword 0x1B       ; CS = User Code Selector (0x18 | RPL=3)
-    push    rcx              ; RIP (unmodified return address from syscall)
+    push    qword 0x23                ; SS = User Data Selector (0x20 | RPL=3)
+    push    qword [rel temp_user_rsp] ; RSP (must specify qword size)
+    push    r11                        ; RFLAGS
+    push    qword 0x1B                ; CS = User Code Selector (0x18 | RPL=3)
+    push    rcx                        ; RIP (unmodified return address from syscall)
 
     iretq
