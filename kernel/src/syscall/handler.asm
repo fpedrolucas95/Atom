@@ -53,7 +53,7 @@ syscall_entry:
     mov     r8,  rsi        ; r8 = arg1
     mov     r9,  rax        ; r9 = arg2 (from saved value)
 
-    sub     rsp, 56
+    sub     rsp, 72         ; Increased to 72 for 2 extra args
 
     mov     rax, r10
     mov     [rsp + 32], rax
@@ -64,9 +64,16 @@ syscall_entry:
     mov     rax, [rel temp_arg5]
     mov     [rsp + 48], rax
 
+    ; Pass user RIP and RSP so dispatcher can update thread context
+    mov     rax, [rel temp_user_rcx]  ; RIP return address
+    mov     [rsp + 56], rax
+
+    mov     rax, [rel temp_user_rsp]  ; User RSP
+    mov     [rsp + 64], rax
+
     call    rust_syscall_dispatcher
 
-    add     rsp, 56
+    add     rsp, 72
 
     pop     r15
     pop     r14

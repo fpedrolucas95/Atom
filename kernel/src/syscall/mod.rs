@@ -206,6 +206,8 @@ extern "C" fn rust_syscall_dispatcher(
     arg3: u64,
     arg4: u64,
     arg5: u64,
+    user_rip: u64,
+    user_rsp: u64,
 ) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
@@ -214,6 +216,13 @@ extern "C" fn rust_syscall_dispatcher(
         "Syscall entry: num={} args=({:#X}, {:#X}, {:#X}, {:#X}, {:#X}, {:#X})",
         syscall_num, arg0, arg1, arg2, arg3, arg4, arg5
     );
+
+    // CRITICAL: Update current thread context with userspace RIP/RSP
+    // This ensures that if the syscall causes a context switch (e.g., yield),
+    // the saved context has the correct userspace return address, not the kernel RIP
+    if let Some(current_tid) = crate::sched::current_thread() {
+        crate::thread::update_thread_userspace_context(current_tid, user_rip, user_rsp);
+    }
 
     match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),

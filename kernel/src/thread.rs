@@ -735,6 +735,21 @@ where
     THREAD_LIST.with_contexts(from_id, to_id, f)
 }
 
+/// Update the userspace portion of a thread's saved context
+/// This is called at syscall entry to ensure the saved context has the correct
+/// userspace RIP (return address) and RSP, not the kernel's RIP/RSP.
+/// This is critical for syscalls that may cause context switches (e.g., yield).
+pub fn update_thread_userspace_context(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
+    let mut threads = THREAD_LIST.threads.lock();
+    if let Some(thread) = threads.iter_mut().find(|t| t.id == thread_id) {
+        // Only update if this is a userspace thread (CPL=3)
+        if (thread.context.cs & 0x3) == 0x3 {
+            thread.context.rip = user_rip;
+            thread.context.rsp = user_rsp;
+        }
+    }
+}
+
 pub fn capture_current_context() -> CpuContext {
     let mut ctx = CpuContext::zero();
 
