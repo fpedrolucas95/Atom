@@ -78,19 +78,20 @@ syscall_entry:
     mov     rcx, [rel temp_user_rcx]
     mov     r11, [rel temp_user_r11]
 
+    ; Ensure RFLAGS has IF set for user mode (interrupts enabled)
+    ; Clear trap flag and other problematic bits
     and     r11, 0x3C7FD7
     or      r11, 0x200
 
-    shl     rcx, 16
-    sar     rcx, 16
+    ; Restore user stack directly - don't corrupt RCX (it contains RIP!)
+    mov     rsp, [rel temp_user_rsp]
 
-    mov     r10, [rel temp_user_rsp]
-    mov     rsp, r10
-
+    ; Return to userspace using iretq with proper stack frame
+    ; Stack needs: SS, RSP, RFLAGS, CS, RIP (pushed in reverse order)
     push    qword 0x23       ; SS = User Data Selector (0x20 | RPL=3)
-    push    r10              ; RSP
+    push    [rel temp_user_rsp]  ; RSP
     push    r11              ; RFLAGS
     push    qword 0x1B       ; CS = User Code Selector (0x18 | RPL=3)
-    push    rcx              ; RIP
+    push    rcx              ; RIP (unmodified return address from syscall)
 
     iretq
