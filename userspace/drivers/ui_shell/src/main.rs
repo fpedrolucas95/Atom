@@ -108,7 +108,6 @@ use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg};
-use libipc::ports::well_known;
 
 // ============================================================================
 // Theme Colors (Nord-inspired)
@@ -450,9 +449,7 @@ impl Compositor {
         // Create registration port for applications
         let register_port = create_port().expect("Failed to create registration port");
 
-        log("Compositor: Ports created");
-        log_tagged("Compositor", "Event port: checking...");
-        log_tagged("Compositor", "Register port: checking...");
+        log("Compositor: Ports created successfully");
 
         Self {
             fb,
