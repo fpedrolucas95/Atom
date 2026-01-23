@@ -733,9 +733,10 @@ fn main() -> ! {
     log("Terminal: Starting userspace terminal");
 
     // Create an IPC port to receive messages from compositor
+    log("Terminal: About to call create_port");
     let local_port = match create_port() {
         Ok(port) => {
-            log("Terminal: create_port returned Ok, inside match arm");
+            log("Terminal: create_port returned Ok");
             port
         },
         Err(_) => {
@@ -744,25 +745,26 @@ fn main() -> ! {
         }
     };
 
-    log("Terminal: After match, building registration message...");
+    log("Terminal: Port created successfully, building registration message...");
 
     // Register with the compositor by trying to find its registration port
     // The compositor's registration port is one of the early dynamically allocated ports
+    log("Terminal: Creating AppRegisterMsg...");
     let reg_msg = AppRegisterMsg {
         app_port: local_port,
         pid: 0, // Not used for matching, just for debugging
     };
 
-    log("Terminal: AppRegisterMsg created");
+    log("Terminal: AppRegisterMsg created, creating header...");
 
     let header = MessageHeader::new(MessageType::AppRegister, AppRegisterMsg::SIZE as u32);
 
-    log("Terminal: MessageHeader created");
+    log("Terminal: MessageHeader created, serializing...");
 
     let header_bytes = header.to_bytes();
     let payload_bytes = reg_msg.to_bytes();
 
-    log("Terminal: Serialized header and payload");
+    log("Terminal: Serialized header and payload, preparing message buffer...");
 
     let mut full_msg = [0u8; 32];
     full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
@@ -772,9 +774,18 @@ fn main() -> ! {
     log("Terminal: Sending registration to compositor ports...");
 
     // Try to send to possible compositor registration ports
-    // Send to all in case the compositor's port is any of these
-    for possible_port in 1..50 {
-        let _ = send(possible_port, &full_msg[..MessageHeader::SIZE + AppRegisterMsg::SIZE]);
+    // The compositor likely created port 1 (event) and port 2 (register) first
+    let msg_slice = &full_msg[..MessageHeader::SIZE + AppRegisterMsg::SIZE];
+
+    // Try well-known port and early dynamic ports
+    for possible_port in 1..15 {
+        if let Ok(_) = send(possible_port, msg_slice) {
+            if possible_port == 10 {
+                log("Terminal: Successfully sent registration to well-known port 10");
+            } else if possible_port <= 3 {
+                log("Terminal: Successfully sent registration to early port");
+            }
+        }
     }
 
     log("Terminal: Registration sent, waiting for surface...");

@@ -450,7 +450,9 @@ impl Compositor {
         // Create registration port for applications
         let register_port = create_port().expect("Failed to create registration port");
 
-        log("Compositor: Registration port created");
+        log("Compositor: Ports created");
+        log_tagged("Compositor", "Event port: checking...");
+        log_tagged("Compositor", "Register port: checking...");
 
         Self {
             fb,
@@ -481,6 +483,7 @@ impl Compositor {
         loop {
             // Poll for application registrations
             while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
+                log("Compositor: Received message on register_port");
                 self.handle_app_registration(&reg_buffer[..len]);
             }
 
@@ -521,18 +524,24 @@ impl Compositor {
     }
 
     /// Handle an application registration message
-    /// Handle an application registration message
     fn handle_app_registration(&mut self, data: &[u8]) {
+        log("Compositor: handle_app_registration called");
+
         if data.len() < MessageHeader::SIZE {
+            log("Compositor: Message too small for header");
             return;
         }
 
         let header = match MessageHeader::from_bytes(data) {
             Some(h) => h,
-            None => return,
+            None => {
+                log("Compositor: Failed to parse message header");
+                return;
+            }
         };
 
         if header.msg_type != MessageType::AppRegister {
+            log("Compositor: Message type is not AppRegister");
             return;
         }
 
