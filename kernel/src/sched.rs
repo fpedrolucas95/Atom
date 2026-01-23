@@ -76,6 +76,13 @@ impl ReadyQueues {
     }
 
     fn pop_next(&mut self) -> Option<ThreadId> {
+        // Debug: log queue contents before selection
+        for idx in (0..PRIORITY_LEVELS).rev() {
+            if !self.queues[idx].is_empty() {
+                crate::serial_println!("[SCHED_DEBUG] Priority {} queue: {:?}", idx, self.queues[idx]);
+            }
+        }
+
         for idx in (0..PRIORITY_LEVELS).rev() {
             if let Some(id) = self.queues[idx].pop_front() {
                 self.queues[idx].push_back(id);
@@ -264,6 +271,7 @@ impl Scheduler {
         let priority = self.get_priority(id);
         thread::set_thread_state(id, ThreadState::Ready);
         self.ready.lock().push(id, priority);
+        crate::serial_println!("[SCHED_DEBUG] mark_thread_ready: thread {} added to queue (priority={:?})", id, priority);
     }
 
     fn current_thread(&self) -> Option<ThreadId> {
