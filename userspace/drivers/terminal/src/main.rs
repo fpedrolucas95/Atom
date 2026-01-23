@@ -745,50 +745,36 @@ fn main() -> ! {
         }
     };
 
-    log("Terminal: Port created successfully, building registration message...");
+    log("Terminal: Port created successfully, preparing registration");
 
-    // Register with the compositor by trying to find its registration port
-    // The compositor's registration port is one of the early dynamically allocated ports
-    log("Terminal: Creating AppRegisterMsg...");
-    let reg_msg = AppRegisterMsg {
-        app_port: local_port,
-        pid: 0, // Not used for matching, just for debugging
-    };
-
-    log("Terminal: AppRegisterMsg created, creating header...");
-
-    let header = MessageHeader::new(MessageType::AppRegister, AppRegisterMsg::SIZE as u32);
-
-    log("Terminal: MessageHeader created, serializing...");
-
-    let header_bytes = header.to_bytes();
-    let payload_bytes = reg_msg.to_bytes();
-
-    log("Terminal: Serialized header and payload, preparing message buffer...");
-
+    // Build registration message
     let mut full_msg = [0u8; 32];
-    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
-    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + AppRegisterMsg::SIZE]
-        .copy_from_slice(&payload_bytes);
 
-    log("Terminal: Sending registration to compositor ports...");
+    // Create header manually to avoid any potential issues
+    let header = MessageHeader::new(MessageType::AppRegister, 16);
+    let header_bytes = header.to_bytes();
+    full_msg[0..12].copy_from_slice(&header_bytes);
 
-    // Try to send to possible compositor registration ports
-    // The compositor likely created port 1 (event) and port 2 (register) first
-    let msg_slice = &full_msg[..MessageHeader::SIZE + AppRegisterMsg::SIZE];
+    // Create payload manually (app_port + pid)
+    full_msg[12..20].copy_from_slice(&local_port.to_le_bytes());
+    full_msg[20..28].copy_from_slice(&0u64.to_le_bytes()); // pid = 0
 
-    // Try well-known port and early dynamic ports
-    for possible_port in 1..15 {
-        if let Ok(_) = send(possible_port, msg_slice) {
-            if possible_port == 10 {
-                log("Terminal: Successfully sent registration to well-known port 10");
-            } else if possible_port <= 3 {
-                log("Terminal: Successfully sent registration to early port");
-            }
-        }
-    }
+    log("Terminal: Message built, sending to compositor ports");
 
-    log("Terminal: Registration sent, waiting for surface...");
+    // Send to port 2 (likely the compositor's register_port)
+    // The compositor creates two ports first: event_port (1) and register_port (2)
+    let msg_slice = &full_msg[0..28]; // 12 bytes header + 16 bytes payload
+
+    log("Terminal: Sending to port 1");
+    let _ = send(1, msg_slice);
+
+    log("Terminal: Sending to port 2");
+    let _ = send(2, msg_slice);
+
+    log("Terminal: Sending to port 3");
+    let _ = send(3, msg_slice);
+
+    log("Terminal: Messages sent, waiting for surface...");
 
     // Wait for surface assignment from compositor
     let surface_info = match Terminal::wait_for_surface(local_port) {
