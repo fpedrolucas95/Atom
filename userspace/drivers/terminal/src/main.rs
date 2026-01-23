@@ -737,6 +737,7 @@ fn main() -> ! {
     let local_port = match create_port() {
         Ok(port) => {
             log("Terminal: create_port returned Ok");
+            log("Terminal: Port value received");
             port
         },
         Err(_) => {
@@ -745,7 +746,8 @@ fn main() -> ! {
         }
     };
 
-    log("Terminal: Port created successfully, preparing registration");
+    log("Terminal: After port assignment");
+    log("Terminal: Preparing registration message");
 
     // Build registration message
     let mut full_msg = [0u8; 32];
