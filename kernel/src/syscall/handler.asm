@@ -83,15 +83,17 @@ syscall_entry:
     and     r11, 0x3C7FD7
     or      r11, 0x200
 
-    ; Restore user stack directly - don't corrupt RCX (it contains RIP!)
-    mov     rsp, [rel temp_user_rsp]
+    ; Load user RSP into R10 but DON'T restore it yet!
+    ; We need to build iretq frame on the KERNEL stack first
+    mov     r10, [rel temp_user_rsp]
 
-    ; Return to userspace using iretq with proper stack frame
-    ; Stack needs: SS, RSP, RFLAGS, CS, RIP (pushed in reverse order)
-    push    qword 0x23                ; SS = User Data Selector (0x20 | RPL=3)
-    push    qword [rel temp_user_rsp] ; RSP (must specify qword size)
-    push    r11                        ; RFLAGS
-    push    qword 0x1B                ; CS = User Code Selector (0x18 | RPL=3)
-    push    rcx                        ; RIP (unmodified return address from syscall)
+    ; Build iretq stack frame on KERNEL stack (current RSP)
+    ; Stack needs (pushed in reverse): SS, RSP, RFLAGS, CS, RIP
+    push    qword 0x23       ; SS = User Data Selector (0x20 | RPL=3)
+    push    r10              ; User RSP
+    push    r11              ; RFLAGS
+    push    qword 0x1B       ; CS = User Code Selector (0x18 | RPL=3)
+    push    rcx              ; RIP (unmodified return address from syscall)
 
+    ; iretq will pop these 5 values and restore to user context
     iretq
