@@ -98,7 +98,7 @@ use atom_syscall::ipc::{create_port, try_recv, send, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
 
-use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg};
+use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg};
 
 
 
@@ -585,6 +585,27 @@ impl Terminal {
                 self.draw_cursor(surface, input_row as u32, col as u32);
             }
         }
+
+        // Notify compositor that we've finished rendering
+        self.notify_present();
+    }
+
+    /// Notify the compositor that we've finished rendering and it should redraw
+    fn notify_present(&self) {
+        let present_msg = SurfacePresentMsg {
+            window_id: self.window_id,
+        };
+        let header = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
+
+        let header_bytes = header.to_bytes();
+        let payload_bytes = present_msg.to_bytes();
+
+        let mut full_msg = [0u8; MessageHeader::SIZE + SurfacePresentMsg::SIZE];
+        full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+        full_msg[MessageHeader::SIZE..].copy_from_slice(&payload_bytes);
+
+        // Send to compositor
+        let _ = send(self.compositor_port, &full_msg);
     }
 
     /// Draw a character at the given row/column position on the surface

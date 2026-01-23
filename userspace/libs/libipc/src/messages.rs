@@ -243,6 +243,32 @@ impl TerminateRequestMsg {
     }
 }
 
+/// Surface present message sent from application to compositor
+/// Notifies the compositor that the application has finished rendering
+/// and the surface content should be composited to the screen
+#[derive(Debug, Clone, Copy)]
+pub struct SurfacePresentMsg {
+    /// Window ID that owns this surface
+    pub window_id: u32,
+}
+
+impl SurfacePresentMsg {
+    pub const SIZE: usize = 4;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.window_id.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        })
+    }
+}
+
 /// Application registration message sent from app to compositor
 /// This tells the compositor which port to send window events to
 #[derive(Debug, Clone, Copy)]
