@@ -1,8 +1,5 @@
 # Atom Kernel
 
-![Atom with UI loaded on QEMU](images/ui.png)
-![Atom kernel showing terminal on QEMU](images/qemu_screenshot.png)
-
 **Atom Kernel** is an experimental operating system kernel written in **Rust**, following a **capability-based microkernel design**.
 
 The project is structured around a small, reliable kernel core responsible for bootstrapping, memory management, interrupts, scheduling, and system calls, while higher-level services and policies—such as drivers, filesystems, and networking—are designed to live in user space.
