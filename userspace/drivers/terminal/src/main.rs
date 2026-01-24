@@ -98,7 +98,7 @@ use atom_syscall::ipc::{create_port, try_recv, send, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
 
-use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg};
+use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent as IpcKeyEvent};
 
 
 
@@ -702,6 +702,40 @@ impl Terminal {
 
 
 
+    /// Convert IPC KeyEvent to Terminal KeyEvent
+    fn convert_ipc_key_event(&self, ipc_event: &IpcKeyEvent) -> Option<KeyEvent> {
+        let character = ipc_event.character;
+        let modifiers = &ipc_event.modifiers;
+
+        // Handle special keys first (backspace, enter, tab, etc.)
+        match character {
+            0x08 => return Some(KeyEvent::Backspace),   // Backspace
+            b'\n' => return Some(KeyEvent::Enter),       // Enter
+            b'\t' => return Some(KeyEvent::Tab),         // Tab
+            0x1B => return Some(KeyEvent::Escape),       // Escape
+            _ => {}
+        }
+
+        // Handle control characters (Ctrl+letter)
+        if modifiers.ctrl && character > 0 && character <= 0x1F {
+            return Some(KeyEvent::Control(character as char));
+        }
+
+        // Handle printable characters
+        if character >= 0x20 && character <= 0x7E {
+            // ASCII printable range
+            if modifiers.alt {
+                return Some(KeyEvent::Alt(character as char));
+            } else {
+                return Some(KeyEvent::Char(character as char));
+            }
+        }
+
+        // For now, ignore keys without ASCII representation
+        // TODO: Handle arrow keys, function keys, etc. via extended scancodes
+        None
+    }
+
     /// Main event loop
     fn run(&mut self, surface: &SharedSurface) {
         log("Terminal: Entering main event loop");
@@ -712,27 +746,34 @@ impl Terminal {
         while self.running {
             let mut had_events = false;
 
-            // Poll for IPC messages (terminate requests from compositor)
-            if let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buffer) {
+            // Poll for IPC messages (keyboard input and compositor messages)
+            while let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buffer) {
                 if len >= MessageHeader::SIZE {
                     if let Some(header) = MessageHeader::from_bytes(&msg_buffer) {
                         match header.msg_type {
                             MessageType::TerminateRequest => {
                                 log("Terminal: Received terminate request");
                                 self.running = false;
-                                continue;
+                                break;
                             }
-                            _ => {}
+                            MessageType::KeyPress => {
+                                // Process keyboard event from compositor
+                                let payload_start = MessageHeader::SIZE;
+                                if len >= payload_start + 3 {
+                                    if let Some(ipc_event) = IpcKeyEvent::from_bytes(&msg_buffer[payload_start..]) {
+                                        // Convert IPC event to terminal event and handle it
+                                        if let Some(event) = self.convert_ipc_key_event(&ipc_event) {
+                                            self.handle_key(event);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Ignore unknown message types
+                            }
                         }
                     }
                 }
-                had_events = true;
-                idle_count = 0;
-            }
-
-            // Poll for keyboard input - process ALL available events without limit
-            while let Some(event) = self.input_handler.poll() {
-                self.handle_key(event);
                 had_events = true;
                 idle_count = 0;
             }

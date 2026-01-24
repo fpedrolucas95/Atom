@@ -232,27 +232,25 @@ fn letter(base: u8, shift: bool, caps_lock: bool) -> u8 {
 
 struct KeyboardDriver {
     state: KeyboardState,
-    desktop_port: Option<PortId>,
+    compositor_port: PortId,
     event_count: u64,
 }
 
 impl KeyboardDriver {
-    fn new() -> Self {
+    fn new(compositor_port: PortId) -> Self {
         Self {
             state: KeyboardState::new(),
-            desktop_port: None,
+            compositor_port,
             event_count: 0,
         }
     }
 
     fn run(&mut self) -> ! {
         log("Keyboard Driver: Starting PS/2 keyboard driver");
+        log("Keyboard Driver: Connected to compositor event port");
 
-        // Create our own IPC port for receiving commands
+        // Create our own IPC port for receiving commands (for future use)
         let _our_port = create_port().ok();
-
-        // TODO: Discover desktop port via service registry
-        // For now, the desktop environment will poll directly from kernel buffer
 
         log("Keyboard Driver: Entering main loop");
 
@@ -269,16 +267,10 @@ impl KeyboardDriver {
                         modifiers: self.state.modifiers(),
                     };
 
-                    // Send to desktop environment if connected
-                    if let Some(port) = self.desktop_port {
-                        let msg_type = if pressed {
-                            MessageType::KeyDown
-                        } else {
-                            MessageType::KeyUp
-                        };
-
+                    // Send to compositor (only key press events to reduce traffic)
+                    if pressed {
                         let payload = event.to_bytes();
-                        let _ = send_message_async(port, msg_type, &payload);
+                        let _ = send_message_async(self.compositor_port, MessageType::KeyPress, &payload);
                     }
                 }
             }
@@ -298,7 +290,11 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    let mut driver = KeyboardDriver::new();
+    // Well-known port: compositor event_port is always port 1
+    // (created first in Compositor::new())
+    const COMPOSITOR_EVENT_PORT: PortId = 1;
+
+    let mut driver = KeyboardDriver::new(COMPOSITOR_EVENT_PORT);
     driver.run()
 }
 
