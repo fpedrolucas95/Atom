@@ -220,10 +220,16 @@ extern "C" fn rust_syscall_dispatcher(
     // CRITICAL: Update current thread context with userspace RIP/RSP
     // This ensures that if the syscall causes a context switch (e.g., yield),
     // the saved context has the correct userspace return address, not the kernel RIP
+    crate::serial_println!("[SYSCALL_DEBUG] Getting current thread...");
     if let Some(current_tid) = crate::sched::current_thread() {
+        crate::serial_println!("[SYSCALL_DEBUG] Updating context for thread {} with RIP={:#X}, RSP={:#X}", current_tid, user_rip, user_rsp);
         crate::thread::update_thread_userspace_context(current_tid, user_rip, user_rsp);
+        crate::serial_println!("[SYSCALL_DEBUG] Context updated successfully");
+    } else {
+        crate::serial_println!("[SYSCALL_DEBUG] No current thread!");
     }
 
+    crate::serial_println!("[SYSCALL_DEBUG] Dispatching syscall {}...", syscall_num);
     match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),
         SYS_THREAD_EXIT => sys_thread_exit(arg0),
