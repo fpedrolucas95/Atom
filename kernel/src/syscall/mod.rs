@@ -268,7 +268,7 @@ extern "C" fn rust_syscall_dispatcher(
         });
     }
 
-    match syscall_num {
+    let result = match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),
         SYS_THREAD_EXIT => sys_thread_exit(arg0),
         SYS_THREAD_SLEEP => sys_thread_sleep(arg0),
@@ -324,7 +324,10 @@ extern "C" fn rust_syscall_dispatcher(
             );
             ENOSYS
         }
-    }
+    };
+
+    crate::serial_println!("[SYSCALL_RET] Syscall {} returning: {:#X}", syscall_num, result);
+    result
 }
 
 fn sys_mouse_poll() -> u64 {
