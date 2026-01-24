@@ -53,6 +53,7 @@ pub mod numbers {
     pub const SYS_IPC_WAIT_ANY: u64 = 43;
     pub const SYS_GET_IRQ_COUNT: u64 = 44;
     pub const SYS_SPAWN_PROCESS: u64 = 45;
+    pub const SYS_GET_MEMORY_INFO: u64 = 46;
 }
 
 /// Raw syscall with no arguments

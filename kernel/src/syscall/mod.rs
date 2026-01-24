@@ -113,6 +113,7 @@ pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
 pub const SYS_IPC_WAIT_ANY: u64 = 43;  // Wait on multiple ports for any event
 pub const SYS_GET_IRQ_COUNT: u64 = 44; // Get IRQ occurrence count for a registered handler
 pub const SYS_SPAWN_PROCESS: u64 = 45; // Spawn a new process from a registered driver
+pub const SYS_GET_MEMORY_INFO: u64 = 46; // Get system memory information
 
 pub const ESUCCESS: u64 = 0;
 pub const ENOTFOUND: u64 = u64::MAX - 10;
@@ -315,6 +316,7 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_IPC_WAIT_ANY => sys_ipc_wait_any(arg0, arg1, arg2),
         SYS_GET_IRQ_COUNT => sys_get_irq_count(arg0 as u8),
         SYS_SPAWN_PROCESS => sys_spawn_process(arg0 as *const u8, arg1 as usize),
+        SYS_GET_MEMORY_INFO => sys_get_memory_info(arg0 as *mut u64),
 
         _ => {
             log_warn!(
@@ -3318,4 +3320,28 @@ fn spawn_process_internal(
     log_info!("spawn", "Process '{}' (pid={}) scheduled", name, pid);
 
     Ok(pid)
+}
+
+/// Get system memory information
+/// Returns total and free memory in KB via pointer
+///
+/// # Arguments
+/// * `info_ptr` - Pointer to array of 2 u64 values [total_kb, free_kb]
+///
+/// # Returns
+/// * ESUCCESS if successful
+/// * EINVAL if pointer is invalid
+fn sys_get_memory_info(info_ptr: *mut u64) -> u64 {
+    if info_ptr.is_null() {
+        return EINVAL;
+    }
+
+    let (total_kb, free_kb) = crate::mm::pmm::get_memory_stats();
+
+    unsafe {
+        *info_ptr.offset(0) = total_kb;
+        *info_ptr.offset(1) = free_kb;
+    }
+
+    ESUCCESS
 }

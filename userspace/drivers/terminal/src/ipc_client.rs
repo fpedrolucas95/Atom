@@ -167,13 +167,11 @@ impl IpcClient {
     /// Returns (total_kb, used_kb, free_kb)
     /// Note: In early stage, returns estimated values
     pub fn query_memory(&self) -> (u64, u64, u64) {
-        // In a full implementation, we would query the memory manager service
-        // For now, return placeholder values based on typical early boot state
+        // Query real memory information from kernel
+        use atom_syscall::debug::get_memory_info;
 
-        // These would come from MEMORY_MANAGER service
-        let total_kb = 128 * 1024; // 128 MB typical for testing
-        let used_kb = 32 * 1024;   // Approximate kernel + userspace usage
-        let free_kb = total_kb - used_kb;
+        let (total_kb, free_kb) = get_memory_info();
+        let used_kb = total_kb.saturating_sub(free_kb);
 
         (total_kb, used_kb, free_kb)
     }
