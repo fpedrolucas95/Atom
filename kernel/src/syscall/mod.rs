@@ -374,18 +374,28 @@ fn sys_get_ticks() -> u64 {
 
 /// Debug log from userspace
 fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
+    crate::serial_println!("[DEBUG_LOG] Entry: msg_ptr={:p}, len={}", msg_ptr, len);
+
     if msg_ptr.is_null() || len > 256 {
+        crate::serial_println!("[DEBUG_LOG] Invalid args, returning EINVAL");
         return EINVAL;
     }
-    
+
+    crate::serial_println!("[DEBUG_LOG] Creating slice...");
     let msg = unsafe {
         core::slice::from_raw_parts(msg_ptr, len)
     };
-    
+
+    crate::serial_println!("[DEBUG_LOG] Converting to UTF-8...");
     if let Ok(s) = core::str::from_utf8(msg) {
+        crate::serial_println!("[DEBUG_LOG] Logging message...");
         log_info!("userspace", "{}", s);
+        crate::serial_println!("[DEBUG_LOG] Message logged successfully");
+    } else {
+        crate::serial_println!("[DEBUG_LOG] UTF-8 conversion failed");
     }
-    
+
+    crate::serial_println!("[DEBUG_LOG] Returning ESUCCESS");
     ESUCCESS
 }
 
