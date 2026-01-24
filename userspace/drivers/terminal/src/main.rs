@@ -197,7 +197,9 @@ impl Terminal {
         self.show_prompt();
 
         // Render initial state
-        self.render(surface);
+        if self.render(surface) {
+            self.notify_present();
+        }
     }
 
 
@@ -277,8 +279,13 @@ impl Terminal {
 
             KeyEvent::Enter => {
 
-                // Execute command
+                // First, write the input text to the display buffer so it persists
+                let input_text = self.input.as_str();
+                if !input_text.is_empty() {
+                    self.display.write_str(input_text, Theme::TEXT_NORMAL);
+                }
 
+                // Move to next line
                 self.display.newline();
 
 
@@ -320,6 +327,7 @@ impl Terminal {
                             CommandResult::Clear => {
 
                                 self.display.clear();
+                                self.full_redraw_needed = true;
 
                             }
 
@@ -569,14 +577,18 @@ impl Terminal {
 
 
     /// Render the terminal to the shared surface
-    fn render(&mut self, surface: &SharedSurface) {
+    /// Returns true if anything was actually rendered
+    fn render(&mut self, surface: &SharedSurface) -> bool {
         let rows = self.rows() as usize;
         let cols = self.cols() as usize;
 
         // Check if we need to render at all
         if !self.display_dirty && !self.input_dirty && !self.full_redraw_needed {
-            return;
+            return false;
         }
+
+        // Track if we rendered anything
+        let did_render = self.display_dirty || self.input_dirty || self.full_redraw_needed;
 
         // Render display buffer lines if needed
         if self.display_dirty || self.full_redraw_needed {
@@ -635,8 +647,7 @@ impl Terminal {
         self.input_dirty = false;
         self.full_redraw_needed = false;
 
-        // Notify compositor that we've finished rendering
-        self.notify_present();
+        did_render
     }
 
     /// Notify the compositor that we've finished rendering and it should redraw
@@ -741,7 +752,6 @@ impl Terminal {
         log("Terminal: Entering main event loop");
 
         let mut msg_buffer = [0u8; 64];
-        let mut idle_count = 0;
 
         while self.running {
             let mut had_events = false;
@@ -775,22 +785,17 @@ impl Terminal {
                     }
                 }
                 had_events = true;
-                idle_count = 0;
             }
 
-            // Render if needed (dirty flags are checked inside render)
-            self.render(surface);
+            // Render if needed and notify compositor only if we actually rendered
+            if self.render(surface) {
+                self.notify_present();
+            }
 
-            // Aggressive polling: only yield after multiple idle iterations
-            if had_events {
-                idle_count = 0;
-            } else {
-                idle_count += 1;
-                // Only yield after 100 consecutive idle iterations
-                if idle_count >= 100 {
-                    yield_now();
-                    idle_count = 0;
-                }
+            // Always yield to other processes to prevent hogging CPU
+            // This is critical for system responsiveness
+            if !had_events {
+                yield_now();
             }
         }
 
