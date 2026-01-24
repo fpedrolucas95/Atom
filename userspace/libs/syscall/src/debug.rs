@@ -45,3 +45,28 @@ pub fn get_memory_info() -> (u64, u64) {
         (0, 0)
     }
 }
+
+/// Read kernel log buffer
+/// Returns the number of bytes read
+pub fn read_klog(buffer: &mut [u8]) -> usize {
+    use crate::raw::syscall2;
+
+    if buffer.is_empty() {
+        return 0;
+    }
+
+    let result = unsafe {
+        syscall2(
+            SYS_READ_KLOG,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64
+        )
+    };
+
+    // Check for error (high values indicate error)
+    if result >= u64::MAX - 100 {
+        return 0;
+    }
+
+    result as usize
+}

@@ -54,6 +54,9 @@ pub mod numbers {
     pub const SYS_GET_IRQ_COUNT: u64 = 44;
     pub const SYS_SPAWN_PROCESS: u64 = 45;
     pub const SYS_GET_MEMORY_INFO: u64 = 46;
+    pub const SYS_LIST_PROCESSES: u64 = 47;
+    pub const SYS_GET_PROCESS_COUNT: u64 = 48;
+    pub const SYS_READ_KLOG: u64 = 49;
 }
 
 /// Raw syscall with no arguments

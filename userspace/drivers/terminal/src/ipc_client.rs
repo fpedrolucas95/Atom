@@ -140,27 +140,22 @@ impl IpcClient {
         pos
     }
 
-    /// Query process list from process manager service
+    /// Query process list from kernel via syscall
     /// Returns process info via the provided callback
-    /// Note: In the current early stage, this returns simulated data
-    /// as the full process manager service may not be running
     pub fn query_processes<F>(&self, mut callback: F)
     where
         F: FnMut(u64, &str, &str), // pid, name, state
     {
-        // In a full implementation, we would:
-        // 1. Send ProcessList request to PROCESS_MANAGER port
-        // 2. Receive response with process data
-        // 3. Parse and call callback for each process
+        use atom_syscall::process::{ProcessInfo, list_processes};
 
-        // For now, return known system processes
-        callback(0, "kernel", "running");
-        callback(1, "init", "running");
-        callback(2, "display", "running");
-        callback(3, "keyboard", "running");
-        callback(4, "mouse", "running");
-        callback(5, "ui_shell", "running");
-        callback(6, "terminal", "running");
+        // Allocate buffer for process list
+        let mut buffer = [ProcessInfo::empty(); 32];
+        let count = list_processes(&mut buffer);
+
+        for i in 0..count {
+            let proc = &buffer[i];
+            callback(proc.pid, proc.name_str(), proc.state_str());
+        }
     }
 
     /// Query memory statistics from memory service
@@ -176,17 +171,35 @@ impl IpcClient {
         (total_kb, used_kb, free_kb)
     }
 
-    /// Query registered services from service manager
+    /// Query registered services
+    /// Note: Currently returns well-known system services since there's no
+    /// service manager protocol implemented yet. Services are inferred from
+    /// the running process list.
     pub fn query_services<F>(&self, mut callback: F)
     where
         F: FnMut(&str, u64, &str), // name, port, status
     {
-        // In a full implementation, query SERVICE_MANAGER
-        // For now, return known services
-        callback("display_server", 5, "active");
-        callback("keyboard_driver", 6, "active");
-        callback("mouse_driver", 7, "active");
-        callback("ui_shell", 8, "active");
+        use atom_syscall::process::{ProcessInfo, list_processes};
+
+        // Get process list to infer active services
+        let mut buffer = [ProcessInfo::empty(); 32];
+        let count = list_processes(&mut buffer);
+
+        // Map known processes to services with their ports
+        for i in 0..count {
+            let proc = &buffer[i];
+            let name = proc.name_str();
+            let status = if proc.state == 0 { "active" } else { "idle" };
+
+            // Map process names to service names and ports
+            match name {
+                "display" | "display_server" => callback("display_server", service_ports::DISPLAY_SERVER, status),
+                "keyboard" | "input" => callback("keyboard_driver", service_ports::INPUT_SERVER, status),
+                "ui_shell" | "shell" => callback("ui_shell", 8, status),
+                "terminal" => callback("terminal", 9, status),
+                _ => {}
+            }
+        }
     }
 
     /// Attempt to terminate a process
@@ -199,33 +212,147 @@ impl IpcClient {
 
     /// Attempt to launch a program
     /// Returns the new process ID if successful
-    pub fn spawn_process(&self, _path: &str, _args: &[&str]) -> Option<u64> {
-        // Would send ProcessSpawn to PROCESS_MANAGER
-        // Not implemented in early stage
-        None
+    pub fn spawn_process(&self, name: &str, _args: &[&str]) -> Option<u64> {
+        use atom_syscall::process::spawn_process;
+
+        // Try to spawn the process using the kernel syscall
+        match spawn_process(name) {
+            Ok(pid) => Some(pid),
+            Err(_) => None,
+        }
     }
 
-    /// List directory contents via filesystem service
-    pub fn list_directory<F>(&self, _path: &str, mut callback: F)
+    /// List directory contents
+    /// For virtual directories (/proc, /sys), returns system information
+    /// For other paths, returns standard directory structure
+    pub fn list_directory<F>(&self, path: &str, mut callback: F)
     where
         F: FnMut(&str, bool, u64), // name, is_dir, size
     {
-        // Would query FILESYSTEM service
-        // For now, return simulated root directory
-        callback("bin", true, 0);
-        callback("etc", true, 0);
-        callback("dev", true, 0);
-        callback("sys", true, 0);
-        callback("proc", true, 0);
-        callback("home", true, 0);
+        match path {
+            "/" => {
+                // Root directory structure
+                callback("bin", true, 0);
+                callback("etc", true, 0);
+                callback("dev", true, 0);
+                callback("sys", true, 0);
+                callback("proc", true, 0);
+                callback("home", true, 0);
+            }
+            "/proc" => {
+                // Process information directory
+                use atom_syscall::process::{ProcessInfo, list_processes};
+                let mut buffer = [ProcessInfo::empty(); 32];
+                let count = list_processes(&mut buffer);
+
+                // Each process gets a directory named by its PID
+                for i in 0..count {
+                    // Create a static string for the PID
+                    let pid = buffer[i].pid;
+                    // Use a simple approach - just show as numbered entries
+                    if pid < 10 {
+                        let digit = b'0' + pid as u8;
+                        let name = unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&digit)) };
+                        callback(name, true, 0);
+                    }
+                }
+                callback("meminfo", false, 128);
+                callback("version", false, 64);
+                callback("uptime", false, 32);
+            }
+            "/sys" => {
+                // System information directory
+                callback("kernel", true, 0);
+                callback("memory", true, 0);
+                callback("devices", true, 0);
+            }
+            "/dev" => {
+                // Device nodes
+                callback("null", false, 0);
+                callback("zero", false, 0);
+                callback("fb0", false, 0);
+                callback("tty0", false, 0);
+                callback("kbd", false, 0);
+                callback("mouse", false, 0);
+            }
+            "/bin" => {
+                // Executables (drivers)
+                callback("terminal", false, 0);
+                callback("display", false, 0);
+                callback("keyboard", false, 0);
+                callback("mouse", false, 0);
+                callback("ui_shell", false, 0);
+            }
+            "/etc" => {
+                // Configuration files
+                callback("hostname", false, 32);
+                callback("version", false, 64);
+            }
+            "/home" => {
+                callback("user", true, 0);
+            }
+            _ => {
+                // Unknown path - return empty
+            }
+        }
     }
 
-    /// Read file contents via filesystem service
-    pub fn read_file(&self, _path: &str, buffer: &mut [u8]) -> Option<usize> {
-        // Would query FILESYSTEM service
-        // Not implemented in early stage
-        let _ = buffer;
-        None
+    /// Read file contents
+    /// For virtual files in /proc and /sys, returns system information
+    pub fn read_file(&self, path: &str, buffer: &mut [u8]) -> Option<usize> {
+        let content: &[u8] = match path {
+            "/proc/version" | "/etc/version" => {
+                b"Atom OS 0.1.0 (Helium)\nKernel: 0.1.0-microkernel\nArch: x86_64\n"
+            }
+            "/proc/meminfo" => {
+                // Get real memory info
+                let (total_kb, free_kb) = atom_syscall::debug::get_memory_info();
+                let used_kb = total_kb.saturating_sub(free_kb);
+
+                // Format memory info into buffer
+                let mut pos = 0;
+                let prefix = b"MemTotal:  ";
+                buffer[pos..pos + prefix.len()].copy_from_slice(prefix);
+                pos += prefix.len();
+                pos += format_number_to_buffer(total_kb, &mut buffer[pos..]);
+                buffer[pos..pos + 4].copy_from_slice(b" kB\n");
+                pos += 4;
+
+                let prefix = b"MemFree:   ";
+                buffer[pos..pos + prefix.len()].copy_from_slice(prefix);
+                pos += prefix.len();
+                pos += format_number_to_buffer(free_kb, &mut buffer[pos..]);
+                buffer[pos..pos + 4].copy_from_slice(b" kB\n");
+                pos += 4;
+
+                let prefix = b"MemUsed:   ";
+                buffer[pos..pos + prefix.len()].copy_from_slice(prefix);
+                pos += prefix.len();
+                pos += format_number_to_buffer(used_kb, &mut buffer[pos..]);
+                buffer[pos..pos + 4].copy_from_slice(b" kB\n");
+                pos += 4;
+
+                return Some(pos);
+            }
+            "/proc/uptime" => {
+                let ticks = atom_syscall::thread::get_ticks();
+                let seconds = ticks / 100;
+
+                let mut pos = 0;
+                pos += format_number_to_buffer(seconds, &mut buffer[pos..]);
+                buffer[pos..pos + 3].copy_from_slice(b" s\n");
+                pos += 3;
+
+                return Some(pos);
+            }
+            "/etc/hostname" => b"atom\n",
+            "/dev/null" => b"",
+            _ => return None,
+        };
+
+        let copy_len = content.len().min(buffer.len());
+        buffer[..copy_len].copy_from_slice(&content[..copy_len]);
+        Some(copy_len)
     }
 
     /// Get file information
@@ -234,20 +361,30 @@ impl IpcClient {
         None
     }
 
-    /// Read system log entries
+    /// Read system log entries from kernel log buffer
     pub fn read_log<F>(&self, mut callback: F)
     where
         F: FnMut(&str), // log line
     {
-        // Would query logging service or read from /sys/log
-        callback("[0.000] Atom OS kernel initializing");
-        callback("[0.001] Memory manager initialized");
-        callback("[0.002] Scheduler started");
-        callback("[0.003] IPC subsystem ready");
-        callback("[0.010] Loading userspace drivers");
-        callback("[0.020] Display server started");
-        callback("[0.030] Input drivers initialized");
-        callback("[0.050] UI shell launched");
+        use atom_syscall::debug::read_klog;
+
+        // Read kernel log buffer
+        let mut buffer = [0u8; 4096];
+        let len = read_klog(&mut buffer);
+
+        if len == 0 {
+            callback("[no log entries available]");
+            return;
+        }
+
+        // Parse log buffer into lines
+        let log_data = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
+
+        for line in log_data.lines() {
+            if !line.is_empty() {
+                callback(line);
+            }
+        }
     }
 }
 
@@ -343,4 +480,38 @@ pub fn format_size(bytes: u64, buffer: &mut [u8]) -> usize {
     }
 
     pos
+}
+
+/// Format a number into a buffer for IpcClient use
+fn format_number_to_buffer(mut n: u64, buffer: &mut [u8]) -> usize {
+    if buffer.is_empty() {
+        return 0;
+    }
+
+    if n == 0 {
+        buffer[0] = b'0';
+        return 1;
+    }
+
+    // Count digits
+    let mut temp = n;
+    let mut digits = 0;
+    while temp > 0 {
+        digits += 1;
+        temp /= 10;
+    }
+
+    if digits > buffer.len() {
+        return 0;
+    }
+
+    // Write digits in reverse
+    let mut pos = digits;
+    while n > 0 {
+        pos -= 1;
+        buffer[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    digits
 }

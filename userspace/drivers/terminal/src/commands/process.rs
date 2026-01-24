@@ -288,17 +288,11 @@ pub fn cmd_exec(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
 
         None => {
 
-            ctx.warning("Process spawning not yet implemented");
+            ctx.error("Failed to spawn process");
 
-            ctx.info("In a full implementation, this would:");
+            ctx.info("The program may not exist or may not be registered.");
 
-            ctx.info("  1. Send request to process manager");
-
-            ctx.info("  2. Load executable from filesystem");
-
-            ctx.info("  3. Create new address space");
-
-            ctx.info("  4. Start execution");
+            ctx.info("Available programs: terminal, display, keyboard, mouse, ui_shell");
 
         }
 

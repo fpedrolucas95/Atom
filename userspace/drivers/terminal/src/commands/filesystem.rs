@@ -578,15 +578,7 @@ pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
 
         None => {
 
-            ctx.warning("File reading not yet implemented");
-
-            ctx.info("In a full implementation, this would:");
-
-            ctx.info("  1. Send request to filesystem service");
-
-            ctx.info("  2. Receive file data via shared memory");
-
-            ctx.info("  3. Display contents to terminal");
+            ctx.error("File not found or not readable");
 
         }
 
