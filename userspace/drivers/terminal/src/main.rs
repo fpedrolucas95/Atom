@@ -707,6 +707,7 @@ impl Terminal {
         log("Terminal: Entering main event loop");
 
         let mut msg_buffer = [0u8; 64];
+        let mut idle_count = 0;
 
         while self.running {
             let mut had_events = false;
@@ -726,28 +727,29 @@ impl Terminal {
                     }
                 }
                 had_events = true;
+                idle_count = 0;
             }
 
-            // Poll for keyboard input - process all available events
-            let mut processed_keys = 0;
+            // Poll for keyboard input - process ALL available events without limit
             while let Some(event) = self.input_handler.poll() {
                 self.handle_key(event);
-                processed_keys += 1;
                 had_events = true;
-
-                // Limit processing to avoid starving rendering
-                if processed_keys >= 32 {
-                    break;
-                }
+                idle_count = 0;
             }
 
             // Render if needed (dirty flags are checked inside render)
             self.render(surface);
 
-            // Only yield if we had no events to process
-            // This keeps the loop responsive to input
-            if !had_events {
-                yield_now();
+            // Aggressive polling: only yield after multiple idle iterations
+            if had_events {
+                idle_count = 0;
+            } else {
+                idle_count += 1;
+                // Only yield after 100 consecutive idle iterations
+                if idle_count >= 100 {
+                    yield_now();
+                    idle_count = 0;
+                }
             }
         }
 

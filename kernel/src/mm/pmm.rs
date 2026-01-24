@@ -336,3 +336,15 @@ pub struct MemoryStats {
     pub free_bytes: usize,
     pub used_bytes: usize,
 }
+
+/// Get memory statistics in KB for userspace
+/// Returns (total_kb, free_kb)
+pub fn get_memory_stats() -> (u64, u64) {
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    let free = FREE_PAGES.load(Ordering::Relaxed);
+
+    let total_kb = (total * PAGE_SIZE / 1024) as u64;
+    let free_kb = (free * PAGE_SIZE / 1024) as u64;
+
+    (total_kb, free_kb)
+}
