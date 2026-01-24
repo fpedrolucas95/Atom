@@ -94,7 +94,7 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 use atom_syscall::graphics::SharedSurface;
-use atom_syscall::ipc::{create_port, try_recv, send, PortId};
+use atom_syscall::ipc::{create_port, try_recv, send, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
 
@@ -752,39 +752,12 @@ impl Terminal {
         log("Terminal: Entering main event loop");
 
         let mut msg_buffer = [0u8; 64];
+        let ports = [self.local_port];
 
         while self.running {
-            let mut had_events = false;
-
-            // Poll for IPC messages (keyboard input and compositor messages)
+            // First, drain any pending messages (non-blocking)
             while let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buffer) {
-                if len >= MessageHeader::SIZE {
-                    if let Some(header) = MessageHeader::from_bytes(&msg_buffer) {
-                        match header.msg_type {
-                            MessageType::TerminateRequest => {
-                                log("Terminal: Received terminate request");
-                                self.running = false;
-                                break;
-                            }
-                            MessageType::KeyPress => {
-                                // Process keyboard event from compositor
-                                let payload_start = MessageHeader::SIZE;
-                                if len >= payload_start + 3 {
-                                    if let Some(ipc_event) = IpcKeyEvent::from_bytes(&msg_buffer[payload_start..]) {
-                                        // Convert IPC event to terminal event and handle it
-                                        if let Some(event) = self.convert_ipc_key_event(&ipc_event) {
-                                            self.handle_key(event);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Ignore unknown message types
-                            }
-                        }
-                    }
-                }
-                had_events = true;
+                self.process_message(&msg_buffer, len);
             }
 
             // Render if needed and notify compositor only if we actually rendered
@@ -792,14 +765,52 @@ impl Terminal {
                 self.notify_present();
             }
 
-            // Always yield to other processes to prevent hogging CPU
-            // This is critical for system responsiveness
-            if !had_events {
-                yield_now();
+            // Block waiting for messages with a timeout
+            // This prevents busy-waiting and allows the system to be responsive
+            // Timeout of 100ms allows for cursor blinking, periodic updates, etc.
+            match wait_any(&ports, 100) {
+                Ok(_) => {
+                    // Message available, will be processed in next iteration
+                }
+                Err(_) => {
+                    // Timeout or error, just continue the loop
+                    // This allows for periodic tasks like cursor blinking
+                }
             }
         }
 
         log("Terminal: Exiting");
+    }
+
+    /// Process a received IPC message
+    fn process_message(&mut self, msg_buffer: &[u8], len: usize) {
+        if len < MessageHeader::SIZE {
+            return;
+        }
+
+        if let Some(header) = MessageHeader::from_bytes(msg_buffer) {
+            match header.msg_type {
+                MessageType::TerminateRequest => {
+                    log("Terminal: Received terminate request");
+                    self.running = false;
+                }
+                MessageType::KeyPress => {
+                    // Process keyboard event from compositor
+                    let payload_start = MessageHeader::SIZE;
+                    if len >= payload_start + 3 {
+                        if let Some(ipc_event) = IpcKeyEvent::from_bytes(&msg_buffer[payload_start..]) {
+                            // Convert IPC event to terminal event and handle it
+                            if let Some(event) = self.convert_ipc_key_event(&ipc_event) {
+                                self.handle_key(event);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Ignore unknown message types
+                }
+            }
+        }
     }
 
     /// Poll for surface assignment from compositor
