@@ -45,13 +45,17 @@
 // - Runtime-configurable backends via user-space logging services
 
 use core::fmt;
+use core::fmt::Write;
 use crate::serial;
 use crate::vga::{self, Color};
 use spin::Mutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Ring buffer for kernel log storage (accessible by userspace)
 const LOG_BUFFER_SIZE: usize = 8192;
 static LOG_BUFFER: Mutex<LogBuffer> = Mutex::new(LogBuffer::new());
+/// Flag to track if heap is available for allocations
+static HEAP_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 struct LogBuffer {
     data: [u8; LOG_BUFFER_SIZE],
@@ -68,13 +72,11 @@ impl LogBuffer {
         }
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.data[self.write_pos] = b;
-            self.write_pos = (self.write_pos + 1) % LOG_BUFFER_SIZE;
-            if self.len < LOG_BUFFER_SIZE {
-                self.len += 1;
-            }
+    fn write_byte(&mut self, b: u8) {
+        self.data[self.write_pos] = b;
+        self.write_pos = (self.write_pos + 1) % LOG_BUFFER_SIZE;
+        if self.len < LOG_BUFFER_SIZE {
+            self.len += 1;
         }
     }
 
@@ -82,10 +84,17 @@ impl LogBuffer {
         if self.len < LOG_BUFFER_SIZE {
             &self.data[..self.len]
         } else {
-            // Buffer wrapped - return from write_pos to end, then start to write_pos
-            // For simplicity, just return the whole buffer from write_pos
             &self.data[..]
         }
+    }
+}
+
+impl Write for LogBuffer {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for b in s.bytes() {
+            self.write_byte(b);
+        }
+        Ok(())
     }
 }
 
@@ -129,6 +138,12 @@ pub fn init() {
     set_level(LogLevel::Debug);
 }
 
+/// Mark that the heap is now available for allocations
+/// Call this after heap initialization
+pub fn set_heap_available() {
+    HEAP_AVAILABLE.store(true, Ordering::Release);
+}
+
 pub fn set_level(level: LogLevel) {
     unsafe {
         CURRENT_LOG_LEVEL = level;
@@ -164,6 +179,7 @@ fn format_timestamp(ms: u64) -> (u64, u64) {
 }
 
 /// Read log buffer contents (for userspace)
+/// Returns a copy of the log buffer data
 pub fn read_log_buffer() -> alloc::vec::Vec<u8> {
     let buffer = LOG_BUFFER.lock();
     buffer.read_all().to_vec()
@@ -182,23 +198,22 @@ pub fn _log(level: LogLevel, origin: &str, args: fmt::Arguments, file: &str, lin
     let level_str = level.as_str();
     let args_for_vga = args.clone();
 
-    // Format log entry to buffer
-    let log_entry = if is_debug {
-        alloc::format!(
-            "[{}.{:03}] {} [{}] {} ({}:{})\n",
-            seconds, milliseconds, level_str, origin, args, file, line
-        )
-    } else {
-        alloc::format!(
-            "[{}.{:03}] {} [{}] {}\n",
-            seconds, milliseconds, level_str, origin, args
-        )
-    };
-
-    // Write to ring buffer for userspace access
+    // Write to ring buffer for userspace access (no allocation needed)
     {
         let mut buffer = LOG_BUFFER.lock();
-        buffer.write(log_entry.as_bytes());
+        if is_debug {
+            let _ = write!(
+                buffer,
+                "[{}.{:03}] {} [{}] {} ({}:{})\n",
+                seconds, milliseconds, level_str, origin, args, file, line
+            );
+        } else {
+            let _ = write!(
+                buffer,
+                "[{}.{:03}] {} [{}] {}\n",
+                seconds, milliseconds, level_str, origin, args
+            );
+        }
     }
 
     if is_debug {
