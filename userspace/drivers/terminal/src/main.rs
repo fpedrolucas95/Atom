@@ -133,6 +133,10 @@ struct Terminal {
     /// Character dimensions
     char_width: u32,
     char_height: u32,
+    /// Dirty tracking flags
+    display_dirty: bool,
+    input_dirty: bool,
+    full_redraw_needed: bool,
 }
 
 
@@ -155,6 +159,9 @@ impl Terminal {
             surface_height: height,
             char_width: 8,
             char_height: 8,
+            display_dirty: true,
+            input_dirty: true,
+            full_redraw_needed: true,
         }
     }
 
@@ -207,6 +214,8 @@ impl Terminal {
 
         self.display.writeln("", Theme::TEXT_NORMAL);
 
+        self.display_dirty = true;
+
     }
 
 
@@ -239,6 +248,8 @@ impl Terminal {
 
         self.prompt_col = col;
 
+        self.display_dirty = true;
+
     }
 
 
@@ -256,6 +267,7 @@ impl Terminal {
                 if ch.is_ascii() && !ch.is_ascii_control() {
 
                     self.input.insert(ch as u8);
+                    self.input_dirty = true;
 
                 }
 
@@ -331,6 +343,9 @@ impl Terminal {
 
                 self.show_prompt();
 
+                self.display_dirty = true;
+                self.input_dirty = true;
+
             }
 
 
@@ -338,6 +353,7 @@ impl Terminal {
             KeyEvent::Backspace => {
 
                 self.input.backspace();
+                self.input_dirty = true;
 
             }
 
@@ -346,6 +362,7 @@ impl Terminal {
             KeyEvent::Delete => {
 
                 self.input.delete();
+                self.input_dirty = true;
 
             }
 
@@ -354,6 +371,7 @@ impl Terminal {
             KeyEvent::ArrowLeft => {
 
                 self.input.cursor_left();
+                self.input_dirty = true;
 
             }
 
@@ -362,6 +380,7 @@ impl Terminal {
             KeyEvent::ArrowRight => {
 
                 self.input.cursor_right();
+                self.input_dirty = true;
 
             }
 
@@ -374,6 +393,7 @@ impl Terminal {
                 if let Some(prev) = self.history.previous() {
 
                     self.input.set(prev);
+                    self.input_dirty = true;
 
                 }
 
@@ -392,6 +412,7 @@ impl Terminal {
                     None => self.input.clear(),
 
                 }
+                self.input_dirty = true;
 
             }
 
@@ -400,6 +421,7 @@ impl Terminal {
             KeyEvent::Home => {
 
                 self.input.cursor_home();
+                self.input_dirty = true;
 
             }
 
@@ -408,6 +430,7 @@ impl Terminal {
             KeyEvent::End => {
 
                 self.input.cursor_end();
+                self.input_dirty = true;
 
             }
 
@@ -424,6 +447,7 @@ impl Terminal {
                     self.input.insert(b' ');
 
                 }
+                self.input_dirty = true;
 
             }
 
@@ -434,6 +458,7 @@ impl Terminal {
                 // Clear current input
 
                 self.input.clear();
+                self.input_dirty = true;
 
             }
 
@@ -452,6 +477,9 @@ impl Terminal {
                         self.input.clear();
 
                         self.show_prompt();
+
+                        self.display_dirty = true;
+                        self.input_dirty = true;
 
                     }
 
@@ -475,6 +503,9 @@ impl Terminal {
 
                         self.show_prompt();
 
+                        self.display_dirty = true;
+                        self.input_dirty = true;
+
                     }
 
                     '\x01' => {
@@ -482,6 +513,7 @@ impl Terminal {
                         // Ctrl+A - beginning of line
 
                         self.input.cursor_home();
+                        self.input_dirty = true;
 
                     }
 
@@ -490,6 +522,7 @@ impl Terminal {
                         // Ctrl+E - end of line
 
                         self.input.cursor_end();
+                        self.input_dirty = true;
 
                     }
 
@@ -498,6 +531,7 @@ impl Terminal {
                         // Ctrl+U - clear line
 
                         self.input.clear();
+                        self.input_dirty = true;
 
                     }
 
@@ -510,6 +544,7 @@ impl Terminal {
                             self.input.delete();
 
                         }
+                        self.input_dirty = true;
 
                     }
 
@@ -534,57 +569,71 @@ impl Terminal {
 
 
     /// Render the terminal to the shared surface
-    fn render(&self, surface: &SharedSurface) {
+    fn render(&mut self, surface: &SharedSurface) {
         let rows = self.rows() as usize;
         let cols = self.cols() as usize;
 
-        // Render display buffer lines
-        for row in 0..rows {
-            if let Some(line) = self.display.get_line(row) {
-                for col in 0..cols {
-                    if let Some(cell) = line.get(col) {
-                        self.draw_char(surface, row as u32, col as u32, cell.ch, cell.fg, cell.bg);
+        // Check if we need to render at all
+        if !self.display_dirty && !self.input_dirty && !self.full_redraw_needed {
+            return;
+        }
+
+        // Render display buffer lines if needed
+        if self.display_dirty || self.full_redraw_needed {
+            for row in 0..rows {
+                if let Some(line) = self.display.get_line(row) {
+                    for col in 0..cols {
+                        if let Some(cell) = line.get(col) {
+                            self.draw_char(surface, row as u32, col as u32, cell.ch, cell.fg, cell.bg);
+                        } else {
+                            // Empty cell
+                            self.draw_char(surface, row as u32, col as u32, b' ', Theme::TEXT_NORMAL, Theme::WINDOW_BG);
+                        }
+                    }
+                } else {
+                    // Clear empty row
+                    self.clear_row(surface, row as u32);
+                }
+            }
+        }
+
+        // Render input line if needed
+        if self.input_dirty || self.full_redraw_needed {
+            let input_row = self.prompt_row;
+            let input_start_col = self.prompt_col;
+
+            // Clear the input area
+            self.clear_to_eol(surface, input_row as u32, input_start_col as u32);
+
+            // Draw input text
+            let input_bytes = self.input.as_bytes();
+            let cursor_pos = self.input.cursor();
+
+            for (i, &byte) in input_bytes.iter().enumerate() {
+                let col = input_start_col + i;
+                if col < cols {
+                    if i == cursor_pos {
+                        // Cursor position - draw with inverted colors
+                        self.draw_char_with_cursor(surface, input_row as u32, col as u32, byte);
                     } else {
-                        // Empty cell
-                        self.draw_char(surface, row as u32, col as u32, b' ', Theme::TEXT_NORMAL, Theme::WINDOW_BG);
+                        self.draw_char(surface, input_row as u32, col as u32, byte, Theme::TEXT_NORMAL, Theme::WINDOW_BG);
                     }
                 }
-            } else {
-                // Clear empty row
-                self.clear_row(surface, row as u32);
             }
-        }
 
-        // Render input line on top of buffer content at prompt position
-        let input_row = self.prompt_row;
-        let input_start_col = self.prompt_col;
-
-        // Clear the input area
-        self.clear_to_eol(surface, input_row as u32, input_start_col as u32);
-
-        // Draw input text
-        let input_bytes = self.input.as_bytes();
-        let cursor_pos = self.input.cursor();
-
-        for (i, &byte) in input_bytes.iter().enumerate() {
-            let col = input_start_col + i;
-            if col < cols {
-                if i == cursor_pos {
-                    // Cursor position - draw with inverted colors
-                    self.draw_char_with_cursor(surface, input_row as u32, col as u32, byte);
-                } else {
-                    self.draw_char(surface, input_row as u32, col as u32, byte, Theme::TEXT_NORMAL, Theme::WINDOW_BG);
+            // Draw cursor at end if at end of input
+            if cursor_pos >= input_bytes.len() {
+                let col = input_start_col + input_bytes.len();
+                if col < cols {
+                    self.draw_cursor(surface, input_row as u32, col as u32);
                 }
             }
         }
 
-        // Draw cursor at end if at end of input
-        if cursor_pos >= input_bytes.len() {
-            let col = input_start_col + input_bytes.len();
-            if col < cols {
-                self.draw_cursor(surface, input_row as u32, col as u32);
-            }
-        }
+        // Reset dirty flags
+        self.display_dirty = false;
+        self.input_dirty = false;
+        self.full_redraw_needed = false;
 
         // Notify compositor that we've finished rendering
         self.notify_present();
@@ -660,6 +709,8 @@ impl Terminal {
         let mut msg_buffer = [0u8; 64];
 
         while self.running {
+            let mut had_events = false;
+
             // Poll for IPC messages (terminate requests from compositor)
             if let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buffer) {
                 if len >= MessageHeader::SIZE {
@@ -674,23 +725,30 @@ impl Terminal {
                         }
                     }
                 }
+                had_events = true;
             }
 
-            // Poll for keyboard input
-            let mut needs_render = false;
-
+            // Poll for keyboard input - process all available events
+            let mut processed_keys = 0;
             while let Some(event) = self.input_handler.poll() {
                 self.handle_key(event);
-                needs_render = true;
+                processed_keys += 1;
+                had_events = true;
+
+                // Limit processing to avoid starving rendering
+                if processed_keys >= 32 {
+                    break;
+                }
             }
 
-            // Render if needed
-            if needs_render {
-                self.render(surface);
-            }
+            // Render if needed (dirty flags are checked inside render)
+            self.render(surface);
 
-            // Yield to scheduler
-            yield_now();
+            // Only yield if we had no events to process
+            // This keeps the loop responsive to input
+            if !had_events {
+                yield_now();
+            }
         }
 
         log("Terminal: Exiting");
