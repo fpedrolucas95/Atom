@@ -740,14 +740,28 @@ where
 /// userspace RIP (return address) and RSP, not the kernel's RIP/RSP.
 /// This is critical for syscalls that may cause context switches (e.g., yield).
 pub fn update_thread_userspace_context(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
+    crate::serial_println!("[UPDATE_CTX] Entry: thread_id={}, user_rip={:#X}, user_rsp={:#X}", thread_id, user_rip, user_rsp);
+
+    crate::serial_println!("[UPDATE_CTX] Acquiring THREAD_LIST lock...");
     let mut threads = THREAD_LIST.threads.lock();
+    crate::serial_println!("[UPDATE_CTX] Lock acquired, searching for thread {}...", thread_id);
+
     if let Some(thread) = threads.iter_mut().find(|t| t.id == thread_id) {
+        crate::serial_println!("[UPDATE_CTX] Thread found, CS={:#X}", thread.context.cs);
         // Only update if this is a userspace thread (CPL=3)
         if (thread.context.cs & 0x3) == 0x3 {
+            crate::serial_println!("[UPDATE_CTX] Updating RIP and RSP...");
             thread.context.rip = user_rip;
             thread.context.rsp = user_rsp;
+            crate::serial_println!("[UPDATE_CTX] Update complete");
+        } else {
+            crate::serial_println!("[UPDATE_CTX] Not a userspace thread, skipping update");
         }
+    } else {
+        crate::serial_println!("[UPDATE_CTX] Thread {} not found!", thread_id);
     }
+
+    crate::serial_println!("[UPDATE_CTX] Releasing lock and returning");
 }
 
 pub fn capture_current_context() -> CpuContext {
