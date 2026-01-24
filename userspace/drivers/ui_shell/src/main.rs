@@ -107,7 +107,8 @@ use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 
-use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg};
+use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers};
+use libipc::protocol::send_message_async;
 
 // ============================================================================
 // Theme Colors (Nord-inspired)
@@ -437,6 +438,12 @@ struct Compositor {
     /// Windows waiting for application to register
     pending_windows: Vec<PendingWindow>,
     dirty: bool,
+    /// Keyboard modifier state
+    keyboard_shift: bool,
+    keyboard_ctrl: bool,
+    keyboard_alt: bool,
+    keyboard_caps_lock: bool,
+    keyboard_extended: bool,
 }
 
 impl Compositor {
@@ -460,6 +467,11 @@ impl Compositor {
             register_port,
             pending_windows: Vec::new(),
             dirty: true,
+            keyboard_shift: false,
+            keyboard_ctrl: false,
+            keyboard_alt: false,
+            keyboard_caps_lock: false,
+            keyboard_extended: false,
         }
     }
 
@@ -594,7 +606,7 @@ impl Compositor {
         }
     }
 
-    /// Handle application event messages (e.g., SurfacePresent)
+    /// Handle application event messages (e.g., SurfacePresent, KeyPress from keyboard driver)
     fn handle_app_event(&mut self, data: &[u8]) {
         if data.len() < MessageHeader::SIZE {
             return;
@@ -618,6 +630,29 @@ impl Compositor {
                         }
                         // Trigger compositor redraw
                         self.dirty = true;
+                    }
+                }
+            }
+            MessageType::KeyPress => {
+                // Keyboard event from keyboard driver - route to focused window
+                let payload_start = MessageHeader::SIZE;
+                if data.len() >= payload_start + 3 {
+                    if let Some(key_event) = KeyEvent::from_bytes(&data[payload_start..]) {
+                        // Get focused window's event port
+                        let event_port = if let Some(focused_id) = self.wm.focused_id {
+                            if let Some(window) = self.wm.get_window(focused_id) {
+                                window.event_port
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        // Forward to focused window
+                        if let Some(port) = event_port {
+                            let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
+                        }
                     }
                 }
             }
@@ -787,13 +822,172 @@ impl Compositor {
     }
 
     fn handle_key(&mut self, scancode: u8) {
-        // Handle escape to quit
-        if scancode == 0x01 {
+        // Handle extended prefix (0xE0)
+        if scancode == 0xE0 {
+            self.keyboard_extended = true;
+            return;
+        }
+
+        let is_extended = self.keyboard_extended;
+        self.keyboard_extended = false;
+
+        let is_release = (scancode & 0x80) != 0;
+        let code = scancode & 0x7F;
+
+        // Handle modifier keys
+        match code {
+            0x2A | 0x36 => {
+                // Left/Right Shift
+                self.keyboard_shift = !is_release;
+                return;
+            }
+            0x1D => {
+                // Ctrl
+                self.keyboard_ctrl = !is_release;
+                return;
+            }
+            0x38 => {
+                // Alt
+                self.keyboard_alt = !is_release;
+                return;
+            }
+            0x3A => {
+                // Caps Lock (toggle on press)
+                if !is_release {
+                    self.keyboard_caps_lock = !self.keyboard_caps_lock;
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Handle escape to quit (compositor shortcut)
+        if code == 0x01 && !is_release {
             log("Desktop: Escape pressed, exiting");
             exit(0);
         }
 
-        // Route to focused window (TODO: IPC to application)
+        // Only route key press events (not releases) to focused window
+        if is_release {
+            return;
+        }
+
+        // Get focused window's event port
+        let event_port = if let Some(focused_id) = self.wm.focused_id {
+            if let Some(window) = self.wm.get_window(focused_id) {
+                window.event_port
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // If no focused window with event port, ignore the key
+        if event_port.is_none() {
+            return;
+        }
+
+        // Translate scancode to ASCII character
+        let character = self.translate_scancode(code, is_extended);
+
+        // Create key event
+        let key_event = KeyEvent {
+            scancode,
+            character,
+            modifiers: KeyModifiers {
+                shift: self.keyboard_shift,
+                ctrl: self.keyboard_ctrl,
+                alt: self.keyboard_alt,
+                caps_lock: self.keyboard_caps_lock,
+            },
+        };
+
+        // Send KeyPress message to the focused window
+        if let Some(port) = event_port {
+            let payload = key_event.to_bytes();
+            let _ = send_message_async(port, MessageType::KeyPress, &payload);
+        }
+    }
+
+    /// Translate scancode to ASCII character
+    fn translate_scancode(&self, code: u8, _extended: bool) -> u8 {
+        let shift = self.keyboard_shift;
+        let caps = self.keyboard_caps_lock;
+
+        match code {
+            // Numbers
+            0x02 => if shift { b'!' } else { b'1' },
+            0x03 => if shift { b'@' } else { b'2' },
+            0x04 => if shift { b'#' } else { b'3' },
+            0x05 => if shift { b'$' } else { b'4' },
+            0x06 => if shift { b'%' } else { b'5' },
+            0x07 => if shift { b'^' } else { b'6' },
+            0x08 => if shift { b'&' } else { b'7' },
+            0x09 => if shift { b'*' } else { b'8' },
+            0x0A => if shift { b'(' } else { b'9' },
+            0x0B => if shift { b')' } else { b'0' },
+            0x0C => if shift { b'_' } else { b'-' },
+            0x0D => if shift { b'+' } else { b'=' },
+
+            // Special keys
+            0x0E => 0x08,  // Backspace
+            0x0F => b'\t', // Tab
+            0x1C => b'\n', // Enter
+            0x39 => b' ',  // Space
+            0x01 => 0x1B,  // Escape
+
+            // Punctuation
+            0x1A => if shift { b'{' } else { b'[' },
+            0x1B => if shift { b'}' } else { b']' },
+            0x27 => if shift { b':' } else { b';' },
+            0x28 => if shift { b'"' } else { b'\'' },
+            0x29 => if shift { b'~' } else { b'`' },
+            0x2B => if shift { b'|' } else { b'\\' },
+            0x33 => if shift { b'<' } else { b',' },
+            0x34 => if shift { b'>' } else { b'.' },
+            0x35 => if shift { b'?' } else { b'/' },
+
+            // Letters (QWERTY layout)
+            0x10 => self.letter(b'q', shift, caps),
+            0x11 => self.letter(b'w', shift, caps),
+            0x12 => self.letter(b'e', shift, caps),
+            0x13 => self.letter(b'r', shift, caps),
+            0x14 => self.letter(b't', shift, caps),
+            0x15 => self.letter(b'y', shift, caps),
+            0x16 => self.letter(b'u', shift, caps),
+            0x17 => self.letter(b'i', shift, caps),
+            0x18 => self.letter(b'o', shift, caps),
+            0x19 => self.letter(b'p', shift, caps),
+            0x1E => self.letter(b'a', shift, caps),
+            0x1F => self.letter(b's', shift, caps),
+            0x20 => self.letter(b'd', shift, caps),
+            0x21 => self.letter(b'f', shift, caps),
+            0x22 => self.letter(b'g', shift, caps),
+            0x23 => self.letter(b'h', shift, caps),
+            0x24 => self.letter(b'j', shift, caps),
+            0x25 => self.letter(b'k', shift, caps),
+            0x26 => self.letter(b'l', shift, caps),
+            0x2C => self.letter(b'z', shift, caps),
+            0x2D => self.letter(b'x', shift, caps),
+            0x2E => self.letter(b'c', shift, caps),
+            0x2F => self.letter(b'v', shift, caps),
+            0x30 => self.letter(b'b', shift, caps),
+            0x31 => self.letter(b'n', shift, caps),
+            0x32 => self.letter(b'm', shift, caps),
+
+            _ => 0, // Unknown key
+        }
+    }
+
+    /// Handle letter case with shift and caps lock
+    fn letter(&self, base: u8, shift: bool, caps: bool) -> u8 {
+        let upper = shift ^ caps;
+        if upper {
+            base.to_ascii_uppercase()
+        } else {
+            base
+        }
     }
 
     fn draw_all(&mut self) {
