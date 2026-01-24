@@ -107,8 +107,7 @@ use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 
-use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg};
-use libipc::ports::well_known;
+use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg};
 
 // ============================================================================
 // Theme Colors (Nord-inspired)
@@ -450,7 +449,7 @@ impl Compositor {
         // Create registration port for applications
         let register_port = create_port().expect("Failed to create registration port");
 
-        log("Compositor: Registration port created");
+        log("Compositor: Ports created successfully");
 
         Self {
             fb,
@@ -481,7 +480,14 @@ impl Compositor {
         loop {
             // Poll for application registrations
             while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
+                log("Compositor: Received message on register_port");
                 self.handle_app_registration(&reg_buffer[..len]);
+            }
+
+            // Poll for application events (e.g., SurfacePresent)
+            let mut event_buffer = [0u8; 64];
+            while let Ok(Some(len)) = try_recv(self.event_port, &mut event_buffer) {
+                self.handle_app_event(&event_buffer[..len]);
             }
 
             // Process mouse events
@@ -516,16 +522,23 @@ impl Compositor {
 
     /// Handle an application registration message
     fn handle_app_registration(&mut self, data: &[u8]) {
+        log("Compositor: handle_app_registration called");
+
         if data.len() < MessageHeader::SIZE {
+            log("Compositor: Message too small for header");
             return;
         }
 
         let header = match MessageHeader::from_bytes(data) {
             Some(h) => h,
-            None => return,
+            None => {
+                log("Compositor: Failed to parse message header");
+                return;
+            }
         };
 
         if header.msg_type != MessageType::AppRegister {
+            log("Compositor: Message type is not AppRegister");
             return;
         }
 
@@ -577,6 +590,39 @@ impl Compositor {
                         log("Compositor: Sent surface assignment to application");
                     }
                 }
+            }
+        }
+    }
+
+    /// Handle application event messages (e.g., SurfacePresent)
+    fn handle_app_event(&mut self, data: &[u8]) {
+        if data.len() < MessageHeader::SIZE {
+            return;
+        }
+
+        let header = match MessageHeader::from_bytes(data) {
+            Some(h) => h,
+            None => return,
+        };
+
+        match header.msg_type {
+            MessageType::SurfacePresent => {
+                // Application has finished rendering, trigger redraw
+                let payload_start = MessageHeader::SIZE;
+                if data.len() >= payload_start + SurfacePresentMsg::SIZE {
+                    if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
+                        log("Compositor: Received SurfacePresent, triggering redraw");
+                        // Mark the specific window as dirty
+                        if let Some(window) = self.wm.get_window_mut(msg.window_id) {
+                            window.content_dirty = true;
+                        }
+                        // Trigger compositor redraw
+                        self.dirty = true;
+                    }
+                }
+            }
+            _ => {
+                // Ignore other message types for now
             }
         }
     }

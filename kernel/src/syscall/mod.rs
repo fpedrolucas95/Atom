@@ -197,6 +197,37 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
+// Storage for userspace return addresses, indexed by thread ID
+// This avoids deadlock by not requiring THREAD_LIST lock
+static USERSPACE_RETURN_ADDRS: Mutex<BTreeMap<crate::thread::ThreadId, (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+// Storage for userspace GPRs (callee-saved registers)
+// Order: RBX, RBP, R12, R13, R14, R15
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct UserspaceGprs {
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+}
+
+// Public access to USERSPACE_GPRS for obtaining stable pointers
+pub static USERSPACE_GPRS: Mutex<BTreeMap<crate::thread::ThreadId, UserspaceGprs>> = Mutex::new(BTreeMap::new());
+
+/// Get the userspace return address for a thread (if stored)
+/// This is used by the scheduler to update thread context before context switch
+pub fn get_userspace_return_addr(thread_id: crate::thread::ThreadId) -> Option<(u64, u64)> {
+    USERSPACE_RETURN_ADDRS.lock().get(&thread_id).copied()
+}
+
+/// Get the userspace GPRs for a thread (if stored)
+pub fn get_userspace_gprs(thread_id: crate::thread::ThreadId) -> Option<UserspaceGprs> {
+    USERSPACE_GPRS.lock().get(&thread_id).copied()
+}
+
 #[no_mangle]
 extern "C" fn rust_syscall_dispatcher(
     syscall_num: u64,
@@ -206,6 +237,14 @@ extern "C" fn rust_syscall_dispatcher(
     arg3: u64,
     arg4: u64,
     arg5: u64,
+    user_rip: u64,
+    user_rsp: u64,
+    user_rbx: u64,
+    user_rbp: u64,
+    user_r12: u64,
+    user_r13: u64,
+    user_r14: u64,
+    user_r15: u64,
 ) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
@@ -215,7 +254,21 @@ extern "C" fn rust_syscall_dispatcher(
         syscall_num, arg0, arg1, arg2, arg3, arg4, arg5
     );
 
-    match syscall_num {
+    // Store userspace return address and GPRs for this thread without acquiring THREAD_LIST lock
+    // This avoids deadlock when context switching
+    if let Some(current_tid) = crate::sched::current_thread() {
+        USERSPACE_RETURN_ADDRS.lock().insert(current_tid, (user_rip, user_rsp));
+        USERSPACE_GPRS.lock().insert(current_tid, UserspaceGprs {
+            rbx: user_rbx,
+            rbp: user_rbp,
+            r12: user_r12,
+            r13: user_r13,
+            r14: user_r14,
+            r15: user_r15,
+        });
+    }
+
+    let result = match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),
         SYS_THREAD_EXIT => sys_thread_exit(arg0),
         SYS_THREAD_SLEEP => sys_thread_sleep(arg0),
@@ -271,7 +324,10 @@ extern "C" fn rust_syscall_dispatcher(
             );
             ENOSYS
         }
-    }
+    };
+
+    crate::serial_println!("[SYSCALL_RET] Syscall {} returning: {:#X}", syscall_num, result);
+    result
 }
 
 fn sys_mouse_poll() -> u64 {
@@ -365,18 +421,28 @@ fn sys_get_ticks() -> u64 {
 
 /// Debug log from userspace
 fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
+    crate::serial_println!("[DEBUG_LOG] Entry: msg_ptr={:p}, len={}", msg_ptr, len);
+
     if msg_ptr.is_null() || len > 256 {
+        crate::serial_println!("[DEBUG_LOG] Invalid args, returning EINVAL");
         return EINVAL;
     }
-    
+
+    crate::serial_println!("[DEBUG_LOG] Creating slice...");
     let msg = unsafe {
         core::slice::from_raw_parts(msg_ptr, len)
     };
-    
+
+    crate::serial_println!("[DEBUG_LOG] Converting to UTF-8...");
     if let Ok(s) = core::str::from_utf8(msg) {
+        crate::serial_println!("[DEBUG_LOG] Logging message...");
         log_info!("userspace", "{}", s);
+        crate::serial_println!("[DEBUG_LOG] Message logged successfully");
+    } else {
+        crate::serial_println!("[DEBUG_LOG] UTF-8 conversion failed");
     }
-    
+
+    crate::serial_println!("[DEBUG_LOG] Returning ESUCCESS");
     ESUCCESS
 }
 
@@ -528,9 +594,9 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         caller
     );
 
-    const KERNEL_STACK_SIZE: usize = 16 * 1024;
-    let kernel_stack = match crate::mm::pmm::alloc_pages(KERNEL_STACK_SIZE / 4096) {
-        Some(addr) => addr + KERNEL_STACK_SIZE,
+    const KERNEL_STACK_SIZE: usize = 64 * 1024;  // 64KB to handle deep call stacks with logging/IPC
+    let kernel_stack_phys = match crate::mm::pmm::alloc_pages(KERNEL_STACK_SIZE / 4096) {
+        Some(addr) => addr,
         None => {
             log_error!(
                 LOG_ORIGIN,
@@ -539,6 +605,12 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
             return ENOMEM;
         }
     };
+    let kernel_stack = kernel_stack_phys + KERNEL_STACK_SIZE;
+    
+    crate::serial_println!(
+        "[THREAD_CREATE] Allocating kernel stack: phys={:#X} top={:#X} size={} pages={}",
+        kernel_stack_phys, kernel_stack, KERNEL_STACK_SIZE, KERNEL_STACK_SIZE / 4096
+    );
 
     let thread = crate::thread::Thread::new(
         entry_point,
@@ -2053,10 +2125,32 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         }
     };
 
+    // Get the caller's PML4 (address space)
+    let caller_pml4 = match crate::thread::get_thread_address_space(caller) {
+        Some(pml4) => pml4,
+        None => {
+            log_error!("syscall", "shared_region_map: caller thread {} not found", caller);
+            return EINVAL;
+        }
+    };
+
+    // Log current CR3 vs caller's address space (debug the bug!)
+    let current_cr3 = unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        cr3
+    };
+    
+    log_info!(
+        "syscall",
+        "shared_region_map: current_cr3={:#X} caller_pml4={:#X} match={}",
+        current_cr3, caller_pml4, current_cr3 == caller_pml4
+    );
+
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
     let flags = crate::shared_mem::RegionFlags::from_raw(flags_raw);
 
-    match crate::shared_mem::map_region(region_id, caller, virt_addr as usize, flags) {
+    match crate::shared_mem::map_region_in_pml4(region_id, caller, caller_pml4, virt_addr as usize, flags) {
         Ok(()) => {
             log_debug!(
                 "syscall",
@@ -2995,7 +3089,7 @@ fn spawn_process_internal(
 
     const USER_STACK_PAGES: usize = 64;  // 256KB stack for userspace processes
     const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
-    const KERNEL_STACK_PAGES: usize = 8;
+    const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
     const USER_STACK_TOP: usize = 0x0000_8000_0000;
 
     let pid = ThreadId::new();
@@ -3122,6 +3216,12 @@ fn spawn_process_internal(
         .ok_or(ENOMEM)?;
     let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+    
+    crate::serial_println!(
+        "[SPAWN_PROCESS] Allocating kernel stack: phys={:#X} virt={:#X} top={:#X} size={} pages={}",
+        kernel_stack_phys, kernel_stack_virt, kernel_stack_top,
+        KERNEL_STACK_PAGES * PAGE_SIZE, KERNEL_STACK_PAGES
+    );
 
     // Calculate entry point
     let entry_point = text_base + sections.entry_offset;
@@ -3142,6 +3242,29 @@ fn spawn_process_internal(
         user_stack_top as u64,
         new_pml4_phys as u64,
     );
+
+    // CRITICAL: Write stack canary (spawn_process creates Thread manually, bypassing Thread::new)
+    unsafe {
+        const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let bottom = kernel_stack_top - (KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+        let canary_addr = bottom as *mut u64;
+        core::ptr::write_volatile(canary_addr, STACK_CANARY);
+        
+        // Verify write
+        let readback = core::ptr::read_volatile(canary_addr);
+        crate::serial_println!(
+            "[CANARY_SET] tid={} name={} addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
+            pid, static_name, canary_addr as u64, readback, STACK_CANARY,
+            kernel_stack_top, bottom, KERNEL_STACK_PAGES * PAGE_SIZE
+        );
+        
+        if readback != STACK_CANARY {
+            crate::serial_println!(
+                "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
+                readback, STACK_CANARY
+            );
+        }
+    }
 
     // Create the thread with its own address space
     let thread = Thread {

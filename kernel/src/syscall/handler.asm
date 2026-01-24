@@ -53,7 +53,7 @@ syscall_entry:
     mov     r8,  rsi        ; r8 = arg1
     mov     r9,  rax        ; r9 = arg2 (from saved value)
 
-    sub     rsp, 56
+    sub     rsp, 120        ; Increased to 120 for 2+6 extra args (RIP, RSP, RBX, RBP, R12-R15)
 
     mov     rax, r10
     mov     [rsp + 32], rax
@@ -64,9 +64,36 @@ syscall_entry:
     mov     rax, [rel temp_arg5]
     mov     [rsp + 48], rax
 
+    ; Pass user RIP and RSP so dispatcher can update thread context
+    mov     rax, [rel temp_user_rcx]  ; RIP return address
+    mov     [rsp + 56], rax
+
+    mov     rax, [rel temp_user_rsp]  ; User RSP
+    mov     [rsp + 64], rax
+
+    ; Pass saved callee-saved registers (RBX, RBP, R12-R15)
+    ; These are on the stack now (we just pushed them)
+    mov     rax, [rsp + 120 + 40]  ; RBX (6th push, offset from current RSP)
+    mov     [rsp + 72], rax
+    
+    mov     rax, [rsp + 120 + 32]  ; RBP (5th push)
+    mov     [rsp + 80], rax
+    
+    mov     rax, [rsp + 120 + 24]  ; R12 (4th push)
+    mov     [rsp + 88], rax
+    
+    mov     rax, [rsp + 120 + 16]  ; R13 (3rd push)
+    mov     [rsp + 96], rax
+    
+    mov     rax, [rsp + 120 + 8]   ; R14 (2nd push)
+    mov     [rsp + 104], rax
+    
+    mov     rax, [rsp + 120]       ; R15 (1st push)
+    mov     [rsp + 112], rax
+
     call    rust_syscall_dispatcher
 
-    add     rsp, 56
+    add     rsp, 120
 
     pop     r15
     pop     r14
@@ -78,19 +105,22 @@ syscall_entry:
     mov     rcx, [rel temp_user_rcx]
     mov     r11, [rel temp_user_r11]
 
+    ; Ensure RFLAGS has IF set for user mode (interrupts enabled)
+    ; Clear trap flag and other problematic bits
     and     r11, 0x3C7FD7
     or      r11, 0x200
 
-    shl     rcx, 16
-    sar     rcx, 16
-
+    ; Load user RSP into R10 but DON'T restore it yet!
+    ; We need to build iretq frame on the KERNEL stack first
     mov     r10, [rel temp_user_rsp]
-    mov     rsp, r10
 
+    ; Build iretq stack frame on KERNEL stack (current RSP)
+    ; Stack needs (pushed in reverse): SS, RSP, RFLAGS, CS, RIP
     push    qword 0x23       ; SS = User Data Selector (0x20 | RPL=3)
-    push    r10              ; RSP
+    push    r10              ; User RSP
     push    r11              ; RFLAGS
     push    qword 0x1B       ; CS = User Code Selector (0x18 | RPL=3)
-    push    rcx              ; RIP
+    push    rcx              ; RIP (unmodified return address from syscall)
 
+    ; iretq will pop these 5 values and restore to user context
     iretq

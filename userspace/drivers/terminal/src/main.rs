@@ -98,7 +98,7 @@ use atom_syscall::ipc::{create_port, try_recv, send, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
 
-use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg};
+use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg};
 
 
 
@@ -585,6 +585,27 @@ impl Terminal {
                 self.draw_cursor(surface, input_row as u32, col as u32);
             }
         }
+
+        // Notify compositor that we've finished rendering
+        self.notify_present();
+    }
+
+    /// Notify the compositor that we've finished rendering and it should redraw
+    fn notify_present(&self) {
+        let present_msg = SurfacePresentMsg {
+            window_id: self.window_id,
+        };
+        let header = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
+
+        let header_bytes = header.to_bytes();
+        let payload_bytes = present_msg.to_bytes();
+
+        let mut full_msg = [0u8; MessageHeader::SIZE + SurfacePresentMsg::SIZE];
+        full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+        full_msg[MessageHeader::SIZE..].copy_from_slice(&payload_bytes);
+
+        // Send to compositor
+        let _ = send(self.compositor_port, &full_msg);
     }
 
     /// Draw a character at the given row/column position on the surface
@@ -712,9 +733,11 @@ fn main() -> ! {
     log("Terminal: Starting userspace terminal");
 
     // Create an IPC port to receive messages from compositor
+    log("Terminal: About to call create_port");
     let local_port = match create_port() {
         Ok(port) => {
-            log("Terminal: create_port returned Ok, inside match arm");
+            log("Terminal: create_port returned Ok");
+            log("Terminal: Port value received");
             port
         },
         Err(_) => {
@@ -723,40 +746,37 @@ fn main() -> ! {
         }
     };
 
-    log("Terminal: After match, building registration message...");
+    log("Terminal: After port assignment");
+    log("Terminal: Preparing registration message");
 
-    // Register with the compositor by trying to find its registration port
-    // The compositor's registration port is one of the early dynamically allocated ports
-    let reg_msg = AppRegisterMsg {
-        app_port: local_port,
-        pid: 0, // Not used for matching, just for debugging
-    };
-
-    log("Terminal: AppRegisterMsg created");
-
-    let header = MessageHeader::new(MessageType::AppRegister, AppRegisterMsg::SIZE as u32);
-
-    log("Terminal: MessageHeader created");
-
-    let header_bytes = header.to_bytes();
-    let payload_bytes = reg_msg.to_bytes();
-
-    log("Terminal: Serialized header and payload");
-
+    // Build registration message
     let mut full_msg = [0u8; 32];
-    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
-    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + AppRegisterMsg::SIZE]
-        .copy_from_slice(&payload_bytes);
 
-    log("Terminal: Sending registration to compositor ports...");
+    // Create header manually to avoid any potential issues
+    let header = MessageHeader::new(MessageType::AppRegister, 16);
+    let header_bytes = header.to_bytes();
+    full_msg[0..12].copy_from_slice(&header_bytes);
 
-    // Try to send to possible compositor registration ports
-    // Send to all in case the compositor's port is any of these
-    for possible_port in 1..50 {
-        let _ = send(possible_port, &full_msg[..MessageHeader::SIZE + AppRegisterMsg::SIZE]);
-    }
+    // Create payload manually (app_port + pid)
+    full_msg[12..20].copy_from_slice(&local_port.to_le_bytes());
+    full_msg[20..28].copy_from_slice(&0u64.to_le_bytes()); // pid = 0
 
-    log("Terminal: Registration sent, waiting for surface...");
+    log("Terminal: Message built, sending to compositor ports");
+
+    // Send to port 2 (likely the compositor's register_port)
+    // The compositor creates two ports first: event_port (1) and register_port (2)
+    let msg_slice = &full_msg[0..28]; // 12 bytes header + 16 bytes payload
+
+    log("Terminal: Sending to port 1");
+    let _ = send(1, msg_slice);
+
+    log("Terminal: Sending to port 2");
+    let _ = send(2, msg_slice);
+
+    log("Terminal: Sending to port 3");
+    let _ = send(3, msg_slice);
+
+    log("Terminal: Messages sent, waiting for surface...");
 
     // Wait for surface assignment from compositor
     let surface_info = match Terminal::wait_for_surface(local_port) {
