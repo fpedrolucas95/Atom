@@ -83,9 +83,10 @@ impl ReadyQueues {
             }
         }
 
+        // Simply pop from the highest priority non-empty queue
+        // Don't push back - that should only happen when thread yields/is preempted
         for idx in (0..PRIORITY_LEVELS).rev() {
             if let Some(id) = self.queues[idx].pop_front() {
-                self.queues[idx].push_back(id);
                 return Some(id);
             }
         }
