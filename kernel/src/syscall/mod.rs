@@ -197,6 +197,16 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
+// Storage for userspace return addresses, indexed by thread ID
+// This avoids deadlock by not requiring THREAD_LIST lock
+static USERSPACE_RETURN_ADDRS: Mutex<BTreeMap<crate::thread::ThreadId, (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+/// Get the userspace return address for a thread (if stored)
+/// This is used by the scheduler to update thread context before context switch
+pub fn get_userspace_return_addr(thread_id: crate::thread::ThreadId) -> Option<(u64, u64)> {
+    USERSPACE_RETURN_ADDRS.lock().get(&thread_id).copied()
+}
+
 #[no_mangle]
 extern "C" fn rust_syscall_dispatcher(
     syscall_num: u64,
@@ -217,19 +227,12 @@ extern "C" fn rust_syscall_dispatcher(
         syscall_num, arg0, arg1, arg2, arg3, arg4, arg5
     );
 
-    // CRITICAL: Update current thread context with userspace RIP/RSP
-    // This ensures that if the syscall causes a context switch (e.g., yield),
-    // the saved context has the correct userspace return address, not the kernel RIP
-    crate::serial_println!("[SYSCALL_DEBUG] Getting current thread...");
+    // Store userspace return address for this thread without acquiring THREAD_LIST lock
+    // This avoids deadlock when context switching
     if let Some(current_tid) = crate::sched::current_thread() {
-        crate::serial_println!("[SYSCALL_DEBUG] Updating context for thread {} with RIP={:#X}, RSP={:#X}", current_tid, user_rip, user_rsp);
-        crate::thread::update_thread_userspace_context(current_tid, user_rip, user_rsp);
-        crate::serial_println!("[SYSCALL_DEBUG] Context updated successfully");
-    } else {
-        crate::serial_println!("[SYSCALL_DEBUG] No current thread!");
+        USERSPACE_RETURN_ADDRS.lock().insert(current_tid, (user_rip, user_rsp));
     }
 
-    crate::serial_println!("[SYSCALL_DEBUG] Dispatching syscall {}...", syscall_num);
     match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),
         SYS_THREAD_EXIT => sys_thread_exit(arg0),

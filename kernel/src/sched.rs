@@ -350,9 +350,22 @@ pub fn yield_current() {
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     without_interrupts(|| {
+        // Get userspace return address for FROM thread before acquiring any thread locks
+        let userspace_return = crate::syscall::get_userspace_return_addr(from_id);
+
         let target_kernel_stack = thread::kernel_stack_top(to_id);
 
         thread::with_thread_contexts(from_id, to_id, |from_ctx, to_ctx| unsafe {
+            // Update FROM thread's context with userspace return address
+            // This must be done BEFORE the context switch so the FROM thread
+            // can resume correctly when it's scheduled again
+            if let Some((user_rip, user_rsp)) = userspace_return {
+                if (from_ctx.cs & 0x3) == 0x3 {  // Only for userspace threads
+                    from_ctx.rip = user_rip;
+                    from_ctx.rsp = user_rsp;
+                }
+            }
+
             if let Some(stack) = target_kernel_stack {
                 gdt::set_rsp0(stack);
             }
