@@ -250,7 +250,7 @@ impl SharedRegion {
         })
     }
 
-    fn map(&mut self, thread_id: ThreadId, virt_addr: usize, flags: RegionFlags)
+    fn map(&mut self, thread_id: ThreadId, virt_addr: usize, flags: RegionFlags, pml4_phys: Option<usize>)
         -> Result<(), SharedMemError>
     {
         if !pmm::is_page_aligned(virt_addr) {
@@ -265,10 +265,23 @@ impl SharedRegion {
         for (i, &phys_page) in self.physical_pages.iter().enumerate() {
             let virt = virt_addr + (i * pmm::PAGE_SIZE);
 
-            if let Err(e) = vm::map_page(virt, phys_page, page_flags) {
+            let map_result = if let Some(pml4) = pml4_phys {
+                // Map into specific PML4 (correct for syscalls!)
+                vm::map_page_in_pml4(pml4, virt, phys_page, page_flags)
+            } else {
+                // Map into current PML4 (legacy path)
+                vm::map_page(virt, phys_page, page_flags)
+            };
+
+            if let Err(e) = map_result {
+                // Rollback on error
                 for j in 0..i {
                     let virt_to_unmap = virt_addr + (j * pmm::PAGE_SIZE);
-                    let _ = vm::unmap_page(virt_to_unmap);
+                    if let Some(pml4) = pml4_phys {
+                        let _ = vm::unmap_page_in_pml4(pml4, virt_to_unmap);
+                    } else {
+                        let _ = vm::unmap_page(virt_to_unmap);
+                    }
                 }
 
                 return match e {
@@ -288,11 +301,12 @@ impl SharedRegion {
 
         log_debug!(
             LOG_ORIGIN,
-            "Mapped region {} to thread {} at 0x{:X} ({} pages)",
+            "Mapped region {} to thread {} at 0x{:X} ({} pages) pml4={:?}",
             self.id,
             thread_id,
             virt_addr,
-            self.physical_pages.len()
+            self.physical_pages.len(),
+            pml4_phys
         );
 
         Ok(())
@@ -376,7 +390,21 @@ impl SharedMemManager {
         let mut regions = self.regions.lock();
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
 
-        region.map(thread_id, virt_addr, flags)
+        region.map(thread_id, virt_addr, flags, None)
+    }
+
+    fn map_region_in_pml4(
+        &self,
+        region_id: RegionId,
+        thread_id: ThreadId,
+        pml4_phys: usize,
+        virt_addr: usize,
+        flags: RegionFlags,
+    ) -> Result<(), SharedMemError> {
+        let mut regions = self.regions.lock();
+        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+
+        region.map(thread_id, virt_addr, flags, Some(pml4_phys))
     }
 
     fn unmap_region(&self, region_id: RegionId, thread_id: ThreadId) -> Result<(), SharedMemError> {
@@ -498,6 +526,16 @@ pub fn map_region(
     flags: RegionFlags,
 ) -> Result<(), SharedMemError> {
     SHARED_MEM_MANAGER.map_region(region_id, thread_id, virt_addr, flags)
+}
+
+pub fn map_region_in_pml4(
+    region_id: RegionId,
+    thread_id: ThreadId,
+    pml4_phys: u64,
+    virt_addr: usize,
+    flags: RegionFlags,
+) -> Result<(), SharedMemError> {
+    SHARED_MEM_MANAGER.map_region_in_pml4(region_id, thread_id, pml4_phys as usize, virt_addr, flags)
 }
 
 pub fn unmap_region(region_id: RegionId, thread_id: ThreadId) -> Result<(), SharedMemError> {

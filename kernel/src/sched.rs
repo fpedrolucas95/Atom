@@ -50,10 +50,8 @@ use alloc::collections::{BTreeMap, VecDeque};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use crate::arch::gdt;
 use crate::thread::{self, Thread, ThreadId, ThreadPriority, ThreadState};
-use crate::util::without_interrupts;
-use crate::{log_debug, log_info};
+use crate::log_debug;
 
 const PRIORITY_LEVELS: usize = 4;
 
@@ -349,42 +347,7 @@ pub fn yield_current() {
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
-    without_interrupts(|| {
-        // Get userspace return address for FROM thread before acquiring any thread locks
-        let userspace_return = crate::syscall::get_userspace_return_addr(from_id);
-
-        let target_kernel_stack = thread::kernel_stack_top(to_id);
-
-        thread::with_thread_contexts(from_id, to_id, |from_ctx, to_ctx| unsafe {
-            // Update FROM thread's context with userspace return address
-            // This must be done BEFORE the context switch so the FROM thread
-            // can resume correctly when it's scheduled again
-            if let Some((user_rip, user_rsp)) = userspace_return {
-                if (from_ctx.cs & 0x3) == 0x3 {  // Only for userspace threads
-                    from_ctx.rip = user_rip;
-                    from_ctx.rsp = user_rsp;
-                }
-            }
-
-            if let Some(stack) = target_kernel_stack {
-                gdt::set_rsp0(stack);
-            }
-
-            let target_cpl = (to_ctx.cs & 0x3) as u8;
-            if target_cpl == 3 {
-                thread::log_user_entry_once(to_id, to_ctx);
-                log_info!(
-                    "sched",
-                    "Switching to user context: RIP={:#016X} CS={:#04X} SS={:#04X} CPL={} CR3={:#016X}",
-                    to_ctx.rip,
-                    to_ctx.cs,
-                    to_ctx.ss,
-                    target_cpl,
-                    to_ctx.cr3
-                );
-            }
-
-            thread::switch_thread_context(from_ctx, to_ctx);
-        });
-    });
+    // Delegate to the thread subsystem's deadlock-free implementation
+    // which releases the THREAD_LIST lock BEFORE performing the actual switch
+    thread::perform_context_switch(from_id, to_id);
 }

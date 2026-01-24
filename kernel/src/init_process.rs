@@ -35,7 +35,7 @@ const LOG_ORIGIN: &str = "init";
 const USER_STACK_PAGES: usize = 16;  // 64KB stack for userspace processes
 const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
 const USER_STACK_TOP: usize = 0x0000_8000_0000;
-const KERNEL_STACK_PAGES: usize = 8;
+const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
 
 /// Result of launching the init process (UI shell)
 #[allow(dead_code)]
@@ -234,6 +234,29 @@ fn create_ui_shell_process(
         context.cs,
         context.ss
     );
+
+    // CRITICAL: Write stack canary (init_process creates Thread manually, bypassing Thread::new)
+    unsafe {
+        const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let bottom = kernel_stack_top - (KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
+        let canary_addr = bottom as *mut u64;
+        core::ptr::write_volatile(canary_addr, STACK_CANARY);
+        
+        // Verify write
+        let readback = core::ptr::read_volatile(canary_addr);
+        crate::serial_println!(
+            "[CANARY_SET] tid={} name=ui_shell addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
+            pid, canary_addr as u64, readback, STACK_CANARY,
+            kernel_stack_top, bottom, KERNEL_STACK_PAGES * PAGE_SIZE
+        );
+        
+        if readback != STACK_CANARY {
+            crate::serial_println!(
+                "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
+                readback, STACK_CANARY
+            );
+        }
+    }
 
     // Create the thread with its own capability table
     let thread = Thread {

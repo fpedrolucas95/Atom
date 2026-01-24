@@ -300,6 +300,31 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                     error_code
                 );
             }
+            
+            // Dump kernel stack to see the IRET frame
+            log_panic!(LOG_ORIGIN, "Dumping kernel stack from RSP={:#016X}:", frame.rsp);
+            unsafe {
+                let stack_ptr = frame.rsp as *const u64;
+                for i in 0..10 {
+                    let addr = stack_ptr.offset(i as isize);
+                    if let Some(val) = (addr as *const u64).as_ref() {
+                        log_panic!(
+                            LOG_ORIGIN,
+                            "  [RSP+{:#04X}] = {:#016X}{}",
+                            i * 8,
+                            *val,
+                            match i {
+                                0 => " (should be RIP if this is IRET frame)",
+                                1 => " (should be CS=0x1B if IRET frame)",
+                                2 => " (should be RFLAGS if IRET frame)",
+                                3 => " (should be user RSP if IRET frame)",
+                                4 => " (should be SS=0x23 if IRET frame)",
+                                _ => ""
+                            }
+                        );
+                    }
+                }
+            }
         }
 
         _ => {}

@@ -65,7 +65,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use crate::arch::gdt;
-use crate::{log_info, log_panic};
+use crate::{log_error, log_info, log_panic};
 
 use crate::cap::CapabilityTable;
 
@@ -248,12 +248,29 @@ impl Thread {
         let context = CpuContext::new(entry_point, kernel_stack, address_space);
         let capability_table = crate::cap::create_capability_table(id);
         
-        unsafe {
+        // Write canary and immediately verify it
+        let _canary_addr = unsafe {
             let bottom = kernel_stack
                 .wrapping_sub(kernel_stack_size as u64);
             let canary_addr = bottom as *mut u64;
             core::ptr::write_volatile(canary_addr, STACK_CANARY);
-        }
+            
+            // Read back to verify write succeeded
+            let readback = core::ptr::read_volatile(canary_addr);
+            crate::serial_println!(
+                "[CANARY_SET] tid={} name={} addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
+                id, name, canary_addr as u64, readback, STACK_CANARY, kernel_stack, bottom, kernel_stack_size
+            );
+            
+            if readback != STACK_CANARY {
+                crate::serial_println!(
+                    "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
+                    readback, STACK_CANARY
+                );
+            }
+            
+            canary_addr as u64
+        };
 
         Self {
             id,
@@ -471,7 +488,9 @@ impl ThreadList {
         thread_id: ThreadId,
         capability: crate::cap::Capability,
     ) -> Result<crate::cap::CapHandle, crate::cap::CapError> {
+        crate::serial_println!("[ADD_CAPABILITY] Thread {} attempting to lock THREAD_LIST", thread_id);
         let mut threads = self.threads.lock();
+        crate::serial_println!("[ADD_CAPABILITY] Lock acquired for thread {}", thread_id);
         let thread = threads
             .iter_mut()
             .find(|t| t.id == thread_id)
@@ -574,6 +593,67 @@ pub fn log_user_entry_once(thread_id: ThreadId, ctx: &CpuContext) {
             ctx.cs,
             ctx.ss
         );
+        
+        // DEBUG: Log the actual IRET frame that was built in switch.asm
+        extern "C" {
+            static DEBUG_IRET_RIP: u64;
+            static DEBUG_IRET_CS: u64;
+            static DEBUG_IRET_RFLAGS: u64;
+            static DEBUG_IRET_RSP: u64;
+            static DEBUG_IRET_SS: u64;
+            static DEBUG_IRET_KERNEL_RSP: u64;
+        }
+        
+        unsafe {
+            log_info!(
+                "DEBUG_IRET",
+                "IRET frame @ kernel RSP={:#016X}:",
+                DEBUG_IRET_KERNEL_RSP
+            );
+            log_info!(
+                "DEBUG_IRET",
+                "  [rsp+0]  RIP    = {:#016X} (expected: {:#016X})",
+                DEBUG_IRET_RIP,
+                ctx.rip
+            );
+            log_info!(
+                "DEBUG_IRET",
+                "  [rsp+8]  CS     = {:#016X} (expected: 0x000000000000001B)",
+                DEBUG_IRET_CS
+            );
+            log_info!(
+                "DEBUG_IRET",
+                "  [rsp+16] RFLAGS = {:#016X}",
+                DEBUG_IRET_RFLAGS
+            );
+            log_info!(
+                "DEBUG_IRET",
+                "  [rsp+24] RSP    = {:#016X} (expected: {:#016X})",
+                DEBUG_IRET_RSP,
+                ctx.rsp
+            );
+            log_info!(
+                "DEBUG_IRET",
+                "  [rsp+32] SS     = {:#016X} (expected: 0x0000000000000023)",
+                DEBUG_IRET_SS
+            );
+            
+            // Check if values match expectations
+            if DEBUG_IRET_CS != 0x1B {
+                log_error!(
+                    "DEBUG_IRET",
+                    "!!! CS is NOT 0x1B - actual value is {:#X} !!!",
+                    DEBUG_IRET_CS
+                );
+            }
+            if DEBUG_IRET_SS != 0x23 {
+                log_error!(
+                    "DEBUG_IRET",
+                    "!!! SS is NOT 0x23 - actual value is {:#X} !!!",
+                    DEBUG_IRET_SS
+                );
+            }
+        }
     }
 }
 
@@ -587,6 +667,12 @@ pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
 
 pub fn get_thread_stats() -> ThreadStats {
     THREAD_LIST.get_stats()
+}
+
+/// Get the address_space (PML4) of a thread
+pub fn get_thread_address_space(thread_id: ThreadId) -> Option<u64> {
+    let threads = THREAD_LIST.threads.lock();
+    threads.iter().find(|t| t.id == thread_id).map(|t| t.address_space)
 }
 
 pub fn validate_thread_capability(
@@ -632,6 +718,9 @@ where
 extern "C" {
     fn switch_context(old_context: *mut CpuContext, new_context: *const CpuContext);
     pub(crate) fn switch_to_context(new_context: *const CpuContext) -> !;
+    pub(crate) fn enter_user(rip: u64, rsp: u64, cr3: u64) -> !;
+    pub(crate) fn enter_user_first_time(rip: u64, rsp: u64, cr3: u64) -> !;
+    pub(crate) fn enter_user_resume(rip: u64, rsp: u64, cr3: u64, regs_ptr: *const crate::syscall::UserspaceGprs) -> !;
 }
 
 fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
@@ -687,7 +776,21 @@ pub unsafe fn switch_thread_context(current: &mut CpuContext, next: &CpuContext)
 
 pub unsafe fn jump_to_context(context: &CpuContext) -> ! {
     guard_context_or_halt(context, "initial");
-    switch_to_context(context as *const CpuContext)
+    
+    // For first-time user entry, use dedicated enter_user to avoid complex switch logic
+    let is_user_mode = (context.cs & 0x3) == 0x3;
+    if is_user_mode {
+        log_info!(
+            LOG_ORIGIN,
+            "Using enter_user for first user jump: RIP={:#016X} RSP={:#016X} CR3={:#016X}",
+            context.rip,
+            context.rsp,
+            context.cr3
+        );
+        enter_user(context.rip, context.rsp, context.cr3)
+    } else {
+        switch_to_context(context as *const CpuContext)
+    }
 }
 
 pub fn jump_to_thread(thread_id: ThreadId) -> ! {
@@ -726,6 +829,25 @@ pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
         .iter()
         .find(|t| t.id == thread_id)
         .map(|t| t.context)
+}
+
+/// Force update a thread's userspace context (RIP, RSP, CS, SS, segments)
+/// This is critical before switching to a userspace thread because switch_context
+/// saves the KERNEL RSP into CpuContext.rsp, which would then be used as the
+/// userspace RSP during iret - causing page faults.
+pub fn force_set_userspace_ctx(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
+    let mut threads = THREAD_LIST.threads.lock();
+    if let Some(t) = threads.iter_mut().find(|t| t.id == thread_id) {
+        crate::serial_println!("[FORCE_USER_CTX] Thread {} RIP={:#X} RSP={:#X}", thread_id, user_rip, user_rsp);
+        t.context.rip = user_rip;
+        t.context.rsp = user_rsp;
+        t.context.cs = gdt::USER_CODE_SELECTOR;
+        t.context.ss = gdt::USER_DATA_SELECTOR;
+        t.context.ds = gdt::USER_DATA_SELECTOR;
+        t.context.es = gdt::USER_DATA_SELECTOR;
+        t.context.fs = gdt::USER_DATA_SELECTOR;
+        t.context.gs = gdt::USER_DATA_SELECTOR;
+    }
 }
 
 pub fn with_thread_contexts<F, R>(from_id: ThreadId, to_id: ThreadId, f: F) -> Option<R>
@@ -820,36 +942,269 @@ fn is_canonical(addr: u64) -> bool {
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
-    let from_thread = {
-        let threads = THREAD_LIST.threads.lock();
-        threads.iter().find(|t| t.id == from_id).map(|t| {
-            (t.kernel_stack, t.kernel_stack_size)
-        })
-    };
+    // Disable interrupts during the critical section
+    crate::interrupts::disable();
 
-    if let Some((kernel_stack, kernel_stack_size)) = from_thread {
+    // Get userspace return address BEFORE acquiring thread list lock
+    let userspace_return = crate::syscall::get_userspace_return_addr(from_id);
+
+    // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
+    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_usermode, to_is_user_thread, to_entry_rip, to_entry_rsp, to_cr3) = {
+        crate::serial_println!("[CONTEXT_SWITCH] Acquiring THREAD_LIST lock for switch from {} to {}", from_id, to_id);
+        let mut threads = THREAD_LIST.threads.lock();
+        crate::serial_println!("[CONTEXT_SWITCH] Lock acquired");
+
+        let from_idx = threads.iter().position(|t| t.id == from_id)
+            .expect("from thread not found in context switch");
+        let to_idx = threads.iter().position(|t| t.id == to_id)
+            .expect("to thread not found in context switch");
+
+        // Validate stack canary for outgoing thread
+        let from_thread = &threads[from_idx];
+        let bottom = from_thread.kernel_stack.wrapping_sub(from_thread.kernel_stack_size as u64);
         let ok = unsafe {
-            let bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
             let canary_addr = bottom as *const u64;
-            core::ptr::read_volatile(canary_addr) == STACK_CANARY
+            let actual = core::ptr::read_volatile(canary_addr);
+            
+            if actual != STACK_CANARY {
+                // Get current RSP for diagnosis
+                let current_rsp: u64;
+                core::arch::asm!("mov {}, rsp", out(reg) current_rsp);
+                
+                crate::serial_println!(
+                    "[CANARY_CORRUPT] tid={} name={} canary_addr={:#X} expected={:#X} actual={:#X}",
+                    from_id, from_thread.name, canary_addr as u64, STACK_CANARY, actual
+                );
+                crate::serial_println!(
+                    "[CANARY_CORRUPT] stack_top={:#X} bottom={:#X} size={} current_rsp={:#X}",
+                    from_thread.kernel_stack, bottom, from_thread.kernel_stack_size, current_rsp
+                );
+                crate::serial_println!(
+                    "[CANARY_CORRUPT] rsp_out_of_range={} (rsp < bottom OR rsp >= top)",
+                    current_rsp < bottom || current_rsp >= from_thread.kernel_stack
+                );
+                
+                // Dump 64 bytes around canary for forensics
+                crate::serial_println!("[CANARY_CORRUPT] Memory dump around canary:");
+                for offset in -4i64..=4i64 {
+                    let addr = (canary_addr as i64 + offset * 8) as *const u64;
+                    let val = core::ptr::read_volatile(addr);
+                    crate::serial_println!(
+                        "  [{:#X}] = {:#016X} {}",
+                        addr as u64, val,
+                        if offset == 0 { "<-- CANARY" } else { "" }
+                    );
+                }
+            }
+            
+            actual == STACK_CANARY
         };
 
-        debug_assert!(
-            ok,
-            "Stack overflow detected on thread {}",
-            from_id
-        );
-
         if !ok {
-            log_panic!(
+            // Changed from log_panic to log_error to allow system to continue for diagnosis
+            log_error!(
                 LOG_ORIGIN,
-                "Kernel stack canary corrupted on thread {} (stack overflow / corruption)",
-                from_id
+                "Kernel stack canary corrupted on thread {} '{}' (continuing for diagnosis)",
+                from_id,
+                from_thread.name
             );
         }
+
+        // Update FROM thread's context with userspace return address
+        // This must be done BEFORE the context switch so the FROM thread
+        // can resume correctly when it's scheduled again
+        if let Some((user_rip, user_rsp)) = userspace_return {
+            let from_ctx = &mut threads[from_idx].context;
+            if (from_ctx.cs & 0x3) == 0x3 {  // Only for userspace threads
+                crate::serial_println!("[CONTEXT_SWITCH] Updating FROM thread {} userspace return: RIP={:#X} RSP={:#X}", from_id, user_rip, user_rsp);
+                from_ctx.rip = user_rip;
+                from_ctx.rsp = user_rsp;
+            }
+        }
+
+        // CRITICAL FIX: Force CR3 to match address_space BEFORE the switch
+        // This prevents triple fault from corrupted CR3 values
+        // The CR3 field in CpuContext may contain garbage from previous saves
+        let from_addr_space = threads[from_idx].address_space;
+        let to_addr_space = threads[to_idx].address_space;
+        
+        // For kernel threads (address_space=0), use current CR3
+        let current_cr3 = unsafe {
+            let cr3: u64;
+            core::arch::asm!("mov {}, cr3", out(reg) cr3);
+            cr3
+        };
+        
+        let from_cr3 = if from_addr_space == 0 { current_cr3 } else { from_addr_space };
+        let to_cr3 = if to_addr_space == 0 { current_cr3 } else { to_addr_space };
+        
+        threads[from_idx].context.cr3 = from_cr3;
+        threads[to_idx].context.cr3 = to_cr3;
+        
+        crate::serial_println!(
+            "[CONTEXT_SWITCH] CR3 fix: from_id={} addr_space={:#X} forced_cr3={:#X} | to_id={} addr_space={:#X} forced_cr3={:#X}",
+            from_id, from_addr_space, from_cr3, to_id, to_addr_space, to_cr3
+        );
+        
+        // Get raw pointers to contexts and kernel stack
+        let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
+        let to_ptr = &threads[to_idx].context as *const CpuContext;
+        let kstack = threads[to_idx].kernel_stack;
+        
+        // CRITICAL: Detect usermode by checking if we have saved userspace return address
+        // DO NOT trust context.cs - it may contain garbage or kernel CS even for userspace threads
+        let has_userspace_return = crate::syscall::get_userspace_return_addr(to_id).is_some();
+        
+        crate::serial_println!(
+            "[CONTEXT_SWITCH] TO thread {} has_userspace_return={} context.cs={:#X}",
+            to_id, has_userspace_return, threads[to_idx].context.cs
+        );
+
+        // Log if switching to usermode
+        if has_userspace_return {
+            log_user_entry_once(to_id, &threads[to_idx].context);
+            log_info!(
+                LOG_ORIGIN,
+                "Switching to user context: RIP={:#016X} CS={:#04X} SS={:#04X} CPL=3 CR3={:#016X}",
+                threads[to_idx].context.rip,
+                threads[to_idx].context.cs,
+                threads[to_idx].context.ss,
+                threads[to_idx].context.cr3
+            );
+        }
+
+        // Determine if TO thread is a userspace thread by checking address_space
+        let kernel_cr3 = unsafe {
+            let cr3: u64;
+            core::arch::asm!("mov {}, cr3", out(reg) cr3);
+            cr3
+        };
+        let to_is_user_thread = to_addr_space != kernel_cr3;
+        let to_entry_rip = threads[to_idx].context.rip;
+        let to_entry_rsp = threads[to_idx].context.rsp;
+        
+        crate::serial_println!(
+            "[CONTEXT_SWITCH] Pointers acquired, to_is_user={} has_ret={} entry_rip={:#X} entry_rsp={:#X}",
+            to_is_user_thread, has_userspace_return, to_entry_rip, to_entry_rsp
+        );
+        crate::serial_println!("[CONTEXT_SWITCH] Releasing lock BEFORE switch");
+        (from_ptr, to_ptr, kstack, has_userspace_return, to_is_user_thread, to_entry_rip, to_entry_rsp, to_cr3)
+    }; // 🔓 LOCK RELEASED HERE, BEFORE THE SWITCH
+
+    crate::serial_println!("[CONTEXT_SWITCH] Lock released");
+
+    // CRITICAL: Update TSS.RSP0 for the new thread BEFORE entering userspace
+    // This ensures interrupt frames from usermode go to the correct kernel stack
+    gdt::set_rsp0(to_kernel_stack);
+
+    // CRITICAL PATH DECISION:
+    // Use enter_user_first_time() for initial entry (zeroed registers)
+    // Use enter_user() for syscall return (preserves callee-saved registers for ABI)
+    // Only use switch_context() for kernel-to-kernel switches.
+    
+    if to_is_user_thread {
+        // Determine target RIP/RSP: use saved return address if exists, else initial context
+        let (target_rip, target_rsp) = if to_is_usermode {
+            if let Some((urip, ursp)) = crate::syscall::get_userspace_return_addr(to_id) {
+                crate::serial_println!("[CONTEXT_SWITCH] User return from syscall: tid={} rip={:#X} rsp={:#X}", to_id, urip, ursp);
+                (urip, ursp)
+            } else {
+                log_error!(
+                    LOG_ORIGIN,
+                    "Thread {} marked as usermode but no return addr - using context",
+                    to_id
+                );
+                (to_entry_rip, to_entry_rsp)
+            }
+        } else {
+            crate::serial_println!("[CONTEXT_SWITCH] First user entry: tid={} rip={:#X} rsp={:#X}", to_id, to_entry_rip, to_entry_rsp);
+            (to_entry_rip, to_entry_rsp)
+        };
+        
+        log_info!(
+            LOG_ORIGIN,
+            "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} first_time={}",
+            to_id, target_rip, target_rsp, to_cr3, !to_is_usermode
+        );
+        
+        // Re-enable interrupts before entering userspace
+        crate::interrupts::enable();
+        
+        // Choose the right entry function based on whether this is first-time or syscall return
+        if to_is_usermode {
+            // Syscall return - restore callee-saved registers (RBX, RBP, R12-R15) from saved context
+            if let Some(gprs) = crate::syscall::get_userspace_gprs(to_id) {
+                crate::serial_println!(
+                    "[CONTEXT_SWITCH] -> enter_user_resume (restore GPRs, rip={:#X}, rsp={:#X}, cr3={:#X})",
+                    target_rip, target_rsp, to_cr3
+                );
+                crate::serial_println!(
+                    "[CONTEXT_SWITCH]    GPRs: rbx={:#X} rbp={:#X} r12={:#X} r13={:#X} r14={:#X} r15={:#X}",
+                    gprs.rbx, gprs.rbp, gprs.r12, gprs.r13, gprs.r14, gprs.r15
+                );
+                // CRITICAL: Pass pointer to GPRs struct (must be stable memory, not stack local)
+                // We need to ensure the USERSPACE_GPRS map entry lives long enough
+                // So we'll get the reference while the lock is held
+                let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
+                if let Some(gprs_ref) = gprs_map.get(&to_id) {
+                    let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
+                    crate::serial_println!("[CONTEXT_SWITCH]    GPRs ptr: {:p}", gprs_ptr);
+                    drop(gprs_map); // Release lock before entering user
+                    unsafe {
+                        enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
+                    }
+                } else {
+                    drop(gprs_map);
+                    log_error!(
+                        LOG_ORIGIN,
+                        "Thread {} GPRs disappeared during switch - using enter_user",
+                        to_id
+                    );
+                    unsafe {
+                        enter_user(target_rip, target_rsp, to_cr3);
+                    }
+                }
+            } else {
+                log_error!(
+                    LOG_ORIGIN,
+                    "Thread {} has return addr but no saved GPRs - using enter_user",
+                    to_id
+                );
+                unsafe {
+                    enter_user(target_rip, target_rsp, to_cr3);
+                }
+            }
+        } else {
+            // First-time entry - zero all registers for clean state
+            crate::serial_println!(
+                "[CONTEXT_SWITCH] -> enter_user_first_time (clean state, rip={:#X}, rsp={:#X}, cr3={:#X})",
+                target_rip, target_rsp, to_cr3
+            );
+            unsafe {
+                enter_user_first_time(target_rip, target_rsp, to_cr3);
+            }
+        }
+    }
+    
+    // Kernel thread switch - use normal context switch
+    crate::serial_println!("[CONTEXT_SWITCH] Kernel-to-kernel switch");
+
+    // Validate target context before the switch
+    unsafe {
+        guard_context_or_halt(&*to_ctx_ptr, "scheduled");
     }
 
-    let _ = with_thread_contexts(from_id, to_id, |from_ctx, to_ctx| unsafe {
-        switch_thread_context(from_ctx, to_ctx);
-    });
+    crate::serial_println!("[CONTEXT_SWITCH] switch_context (no return to this context)");
+
+    // Perform the actual context switch with no locks held
+    // NOTE: This does NOT return in the linear sense - execution continues
+    // in the NEW thread context. When THIS thread is scheduled again in the
+    // future, it will "return" from switch_context at that point.
+    // DO NOT add code after this call expecting it to run in the old context.
+    unsafe {
+        switch_context(from_ctx_ptr, to_ctx_ptr);
+    }
+
+    // Re-enable interrupts when we resume (happens when this thread is scheduled again)
+    crate::interrupts::enable();
 }

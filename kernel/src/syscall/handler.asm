@@ -53,7 +53,7 @@ syscall_entry:
     mov     r8,  rsi        ; r8 = arg1
     mov     r9,  rax        ; r9 = arg2 (from saved value)
 
-    sub     rsp, 72         ; Increased to 72 for 2 extra args
+    sub     rsp, 120        ; Increased to 120 for 2+6 extra args (RIP, RSP, RBX, RBP, R12-R15)
 
     mov     rax, r10
     mov     [rsp + 32], rax
@@ -71,9 +71,29 @@ syscall_entry:
     mov     rax, [rel temp_user_rsp]  ; User RSP
     mov     [rsp + 64], rax
 
+    ; Pass saved callee-saved registers (RBX, RBP, R12-R15)
+    ; These are on the stack now (we just pushed them)
+    mov     rax, [rsp + 120 + 40]  ; RBX (6th push, offset from current RSP)
+    mov     [rsp + 72], rax
+    
+    mov     rax, [rsp + 120 + 32]  ; RBP (5th push)
+    mov     [rsp + 80], rax
+    
+    mov     rax, [rsp + 120 + 24]  ; R12 (4th push)
+    mov     [rsp + 88], rax
+    
+    mov     rax, [rsp + 120 + 16]  ; R13 (3rd push)
+    mov     [rsp + 96], rax
+    
+    mov     rax, [rsp + 120 + 8]   ; R14 (2nd push)
+    mov     [rsp + 104], rax
+    
+    mov     rax, [rsp + 120]       ; R15 (1st push)
+    mov     [rsp + 112], rax
+
     call    rust_syscall_dispatcher
 
-    add     rsp, 72
+    add     rsp, 120
 
     pop     r15
     pop     r14
