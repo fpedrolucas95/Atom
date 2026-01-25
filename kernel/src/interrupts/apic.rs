@@ -175,17 +175,27 @@ pub fn init() {
 
         ioapic_write(0x12, KEYBOARD_INTERRUPT_VECTOR as u32);
         ioapic_write(0x13, 0x0000_0000);
-        
-        ioapic_write(0x28, MOUSE_INTERRUPT_VECTOR as u32); 
+
+        // Debug: verify IRQ1 configuration
+        let kbd_low = ioapic_read(0x12);
+        let kbd_high = ioapic_read(0x13);
+        log_info!(LOG_ORIGIN, "IRQ1 I/O APIC redtbl[1]: low=0x{:08X}, high=0x{:08X}", kbd_low, kbd_high);
+        if (kbd_low & 0x10000) != 0 {
+            log_warn!(LOG_ORIGIN, "IRQ1 (keyboard) MASKED in I/O APIC! (bit16=1)");
+        } else {
+            log_info!(LOG_ORIGIN, "IRQ1 (keyboard) NOT masked, vector={}", kbd_low & 0xFF);
+        }
+
+        ioapic_write(0x28, MOUSE_INTERRUPT_VECTOR as u32);
         ioapic_write(0x29, 0x0000_0000);
 
         let redtbl_low = ioapic_read(0x28);
         let redtbl_high = ioapic_read(0x29);
         log_info!(LOG_ORIGIN, "IRQ12 I/O APIC redtbl[12]: low=0x{:08X}, high=0x{:08X}", redtbl_low, redtbl_high);
         if (redtbl_low & 0x10000) != 0 {
-            log_warn!(LOG_ORIGIN, "IRQ12 está MASCARADO no I/O APIC! (bit16=1)");
+            log_warn!(LOG_ORIGIN, "IRQ12 (mouse) MASKED in I/O APIC! (bit16=1)");
         } else {
-            log_info!(LOG_ORIGIN, "IRQ12 NÃO mascarado (bit16=0), vetor={}", redtbl_low & 0xFF);
+            log_info!(LOG_ORIGIN, "IRQ12 (mouse) NOT masked, vector={}", redtbl_low & 0xFF);
         }
         
         ioapic_write(0x14, 0x0001_0000);

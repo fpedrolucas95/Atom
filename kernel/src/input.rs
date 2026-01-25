@@ -133,16 +133,23 @@ fn read_data() -> u8 {
 /// Reads all available bytes and buffers them for userspace
 pub fn on_keyboard_irq() {
     let mut buf = KEYBOARD_BUFFER.lock();
-    
+    let mut count = 0u8;
+
     // Read all available keyboard data
     while read_status() & STATUS_OUTPUT_FULL != 0 {
         // Check it's not mouse data
         if read_status() & STATUS_AUX_DATA != 0 {
             break; // This is mouse data, not keyboard
         }
-        
+
         let scancode = read_data();
+        crate::serial_println!("[IRQ1] scancode: 0x{:02X}", scancode);
         buf.push(scancode);
+        count += 1;
+    }
+
+    if count == 0 {
+        crate::serial_println!("[IRQ1] no data available (status check failed)");
     }
 }
 
@@ -251,10 +258,10 @@ fn send_mouse_command(cmd: u8) {
     let _ = read_data(); // Consume ACK (0xFA)
 }
 
-/// Initialize PS/2 controller for mouse support with 1:1 scaling
+/// Initialize PS/2 controller for keyboard and mouse support
 /// Based on SANiK's PS/2 Mouse code and OSDev documentation
 pub fn init_ps2_mouse_full() {
-    log_info!("input", "Initializing PS/2 mouse with 1:1 scaling...");
+    log_info!("input", "Initializing PS/2 controller (keyboard + mouse)...");
     
     // Drain any pending data first (before IRQs are enabled)
     for _ in 0..100 {
@@ -264,18 +271,23 @@ pub fn init_ps2_mouse_full() {
         let _ = read_data();
     }
     
-    // 1. Enable the auxiliary mouse device
+    // 1. Enable both keyboard and mouse ports
     wait_for_input_buffer();
-    write_command(0xA8); // Enable aux port
+    write_command(0xAE); // Enable keyboard port (first PS/2 port)
+    wait_for_input_buffer();
+    write_command(0xA8); // Enable aux/mouse port (second PS/2 port)
+    log_info!("input", "PS/2 ports enabled (keyboard + mouse)");
     
     // 2. Enable the interrupts (compaq status byte)
     wait_for_input_buffer();
     write_command(0x20); // Get compaq status byte
     wait_for_output_buffer();
     let status = read_data();
-    
-    // Set bit 1 (enable IRQ12), clear bit 5 (enable mouse clock)
-    let new_status = (status | 0x02) & !0x20;
+
+    // Set bit 0 (enable IRQ1/keyboard), bit 1 (enable IRQ12/mouse)
+    // Clear bit 4 (enable keyboard clock), bit 5 (enable mouse clock)
+    let new_status = (status | 0x03) & !0x30;
+    log_info!("input", "PS/2 controller status: 0x{:02X} -> 0x{:02X} (IRQ1+IRQ12 enabled)", status, new_status);
     
     wait_for_input_buffer();
     write_command(0x60); // Set compaq status byte
