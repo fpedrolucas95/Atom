@@ -628,7 +628,7 @@ fn main() -> ! {
         Err(_) => {
             atom_syscall::debug::log("svcmgr: failed to create port");
             loop {
-                atom_syscall::thread::yield_now();
+                atom_syscall::thread::sleep_ms(1000);
             }
         }
     };
@@ -640,34 +640,33 @@ fn main() -> ! {
 
     // Message buffer
     let mut buffer = [0u8; 256];
-    let mut check_counter = 0u32;
+    let mut last_health_check = atom_syscall::thread::get_ticks();
 
-    // Main loop
+    // Main loop - use blocking receive with timeout
     loop {
-        // Process IPC messages
-        match atom_syscall::ipc::try_recv(port, &mut buffer) {
-            Ok(Some(len)) => {
-                let response = handle_message(&buffer[..len]);
-                // TODO: Send response back to sender
-                let _ = response;
-            }
-            Ok(None) => {
-                // No message
+        // Wait for messages with 1 second timeout
+        // This allows periodic health checks without busy-looping
+        let ports = [port];
+        match atom_syscall::ipc::wait_any(&ports, 1000) {
+            Ok(_idx) => {
+                // Message available - receive it
+                if let Ok(Some(len)) = atom_syscall::ipc::try_recv(port, &mut buffer) {
+                    let response = handle_message(&buffer[..len]);
+                    // TODO: Send response back to sender
+                    let _ = response;
+                }
             }
             Err(_) => {
-                // Error
+                // Timeout - this is expected for periodic health checks
             }
         }
 
-        // Periodically check service health
-        check_counter += 1;
-        if check_counter >= 100 {
+        // Check service health every ~10 seconds
+        let current_ticks = atom_syscall::thread::get_ticks();
+        if current_ticks.saturating_sub(last_health_check) >= 1000 {
             check_services();
-            check_counter = 0;
+            last_health_check = current_ticks;
         }
-
-        // Yield to other processes
-        atom_syscall::thread::yield_now();
     }
 }
 
@@ -675,6 +674,6 @@ fn main() -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     atom_syscall::debug::log("svcmgr: PANIC!");
     loop {
-        atom_syscall::thread::yield_now();
+        atom_syscall::thread::sleep_ms(1000);
     }
 }

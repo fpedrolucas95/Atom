@@ -361,7 +361,7 @@ fn main() -> ! {
         Err(_) => {
             // Can't create port - fatal
             loop {
-                atom_syscall::thread::yield_now();
+                atom_syscall::thread::sleep_ms(1000);
             }
         }
     };
@@ -377,23 +377,23 @@ fn main() -> ! {
     // Message buffer
     let mut buffer = [0u8; 256];
 
-    // Main service loop
+    // Main service loop - use blocking receive with timeout
     loop {
-        // Try to receive a message (non-blocking to allow checking for shutdown)
-        match atom_syscall::ipc::try_recv(port, &mut buffer) {
-            Ok(Some(len)) => {
-                let response = handle_message(&buffer[..len], 0);
-                // Send response back (we'd need the sender's port in a real implementation)
-                // For now, we'll rely on request-response port being encoded in message
-                let _ = response; // Response handling TBD
-            }
-            Ok(None) => {
-                // No message - yield and try again
-                atom_syscall::thread::yield_now();
+        // Use wait_any with timeout to avoid busy-loop
+        let ports = [port];
+        match atom_syscall::ipc::wait_any(&ports, 100) {
+            Ok(_idx) => {
+                // Message available - receive it
+                if let Ok(Some(len)) = atom_syscall::ipc::try_recv(port, &mut buffer) {
+                    let response = handle_message(&buffer[..len], 0);
+                    // Send response back (we'd need the sender's port in a real implementation)
+                    // For now, we'll rely on request-response port being encoded in message
+                    let _ = response; // Response handling TBD
+                }
             }
             Err(_) => {
-                // Error receiving - yield and continue
-                atom_syscall::thread::yield_now();
+                // Timeout or error - just continue
+                // This allows periodic maintenance if needed
             }
         }
     }
