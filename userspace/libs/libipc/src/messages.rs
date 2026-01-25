@@ -119,6 +119,38 @@ pub enum MessageType {
     TerminateRequest = 510,
     /// Application acknowledges termination (clean exit)
     TerminateAck = 511,
+
+    // Name Service (600-699)
+    /// Register with name service
+    NsRegister = 600,
+    /// Unregister from name service
+    NsUnregister = 601,
+    /// Lookup service by name
+    NsLookup = 602,
+    /// List all registered services
+    NsList = 603,
+    /// Name service response
+    NsResponse = 610,
+    /// Name service error
+    NsError = 611,
+
+    // Service Manager (700-799)
+    /// Start a service
+    SmStartService = 700,
+    /// Stop a service
+    SmStopService = 701,
+    /// Restart a service
+    SmRestartService = 702,
+    /// List all managed services
+    SmListServices = 703,
+    /// Get service status
+    SmServiceStatus = 704,
+    /// Register service IPC port
+    SmRegisterPort = 705,
+    /// Service manager response
+    SmResponse = 710,
+    /// Service manager error
+    SmError = 711,
 }
 
 impl MessageType {
@@ -158,6 +190,22 @@ impl MessageType {
             505 => Some(Self::AppRegister),
             510 => Some(Self::TerminateRequest),
             511 => Some(Self::TerminateAck),
+            // Name Service messages
+            600 => Some(Self::NsRegister),
+            601 => Some(Self::NsUnregister),
+            602 => Some(Self::NsLookup),
+            603 => Some(Self::NsList),
+            610 => Some(Self::NsResponse),
+            611 => Some(Self::NsError),
+            // Service Manager messages
+            700 => Some(Self::SmStartService),
+            701 => Some(Self::SmStopService),
+            702 => Some(Self::SmRestartService),
+            703 => Some(Self::SmListServices),
+            704 => Some(Self::SmServiceStatus),
+            705 => Some(Self::SmRegisterPort),
+            710 => Some(Self::SmResponse),
+            711 => Some(Self::SmError),
             _ => None,
         }
     }

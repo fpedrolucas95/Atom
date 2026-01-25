@@ -101,6 +101,12 @@ USERSPACE_DRIVERS=(
     "ui_shell"
 )
 
+# System services
+USERSPACE_SERVICES=(
+    "namesvc"
+    "service_manager"
+)
+
 # =========================================================================
 # SETUP: Configurar dependências Rust
 # =========================================================================
@@ -248,6 +254,52 @@ if [ "$KERNEL_ONLY" != true ]; then
             popd > /dev/null
             warning "$driver driver failed to build"
             cat "$driver_path/build.log" 2>/dev/null || true
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # Build userspace services and convert to ATXF
+    # -------------------------------------------------------------------------
+    step "Building userspace services..."
+
+    for service in "${USERSPACE_SERVICES[@]}"; do
+        service_path="userspace/services/$service"
+
+        if [ ! -f "$service_path/Cargo.toml" ]; then
+            warning "Service $service not found, skipping..."
+            continue
+        fi
+
+        step "  Building $service service..."
+        pushd "$service_path" > /dev/null
+
+        if cargo build --release 2>build.log; then
+            popd > /dev/null
+
+            # Find the ELF binary name from Cargo.toml
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' || echo "$service")
+            if [ -z "$bin_name" ]; then
+                bin_name="$service"
+            fi
+
+            elf_path="$service_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/drivers/${service}.atxf"
+
+            if [ -f "$elf_path" ]; then
+                step "  Converting $service to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$service.log; then
+                    success "$service.atxf created"
+                else
+                    warning "Failed to convert $service to ATXF"
+                    cat build/elf2atxf_$service.log
+                fi
+            else
+                warning "ELF not found at $elf_path"
+            fi
+        else
+            popd > /dev/null
+            warning "$service service failed to build"
+            cat "$service_path/build.log" 2>/dev/null || true
         fi
     done
 
