@@ -26,6 +26,12 @@ pub mod well_known {
     pub const TERMINAL_SERVICE: u64 = 5;
     /// Compositor window registration port
     pub const COMPOSITOR_REGISTER: u64 = 10;
+
+    // System Services (100-199)
+    /// Name service for service discovery
+    pub const NAME_SERVICE: u64 = 100;
+    /// Service manager for lifecycle control
+    pub const SERVICE_MANAGER: u64 = 101;
 }
 
 /// Port configuration for a service

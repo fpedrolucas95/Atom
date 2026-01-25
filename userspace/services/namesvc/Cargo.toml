@@ -1,0 +1,14 @@
+[package]
+name = "namesvc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Name Service - Service registry and discovery"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+
+[[bin]]
+name = "namesvc"
+path = "src/main.rs"

@@ -522,28 +522,60 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
     ESUCCESS
 }
 
-fn sys_thread_sleep(ticks: u64) -> u64 {
+fn sys_thread_sleep(milliseconds: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     log_debug!(
         LOG_ORIGIN,
-        "thread_sleep(ticks={})",
-        ticks
+        "thread_sleep(ms={})",
+        milliseconds
     );
 
-    if ticks == 0 {
+    if milliseconds == 0 {
         return sys_thread_yield();
     }
 
-    if let Some(tid) = crate::sched::current_thread() {
-        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Blocked);
-        let (prev, next) = crate::sched::on_timer_tick();
+    let tid = match crate::sched::current_thread() {
+        Some(t) => t,
+        None => return EINVAL,
+    };
 
+    // Calculate wake-up tick (assuming 100Hz timer = 10ms per tick)
+    let ticks_to_sleep = (milliseconds + 9) / 10; // Round up
+    let wake_tick = crate::interrupts::get_ticks() + ticks_to_sleep;
+
+    // Sleep loop - wait until enough ticks have passed
+    while crate::interrupts::get_ticks() < wake_tick {
+        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Blocked);
+
+        let (prev, next) = crate::sched::on_timer_tick();
         if let (Some(prev_id), Some(next_id)) = (prev, next) {
             if prev_id != next_id {
                 crate::sched::perform_context_switch(prev_id, next_id);
+            } else {
+                // No other thread - halt and wait for timer interrupt
+                unsafe {
+                    core::arch::asm!(
+                        "sti",
+                        "hlt",
+                        "cli",
+                        options(nomem, nostack)
+                    );
+                }
+            }
+        } else {
+            // No threads - halt
+            unsafe {
+                core::arch::asm!(
+                    "sti",
+                    "hlt",
+                    "cli",
+                    options(nomem, nostack)
+                );
             }
         }
+
+        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Ready);
     }
 
     ESUCCESS
@@ -2924,14 +2956,41 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
             }
         }
 
-        // Yield and retry
+        // Block this thread and yield to scheduler
+        // Mark as blocked so scheduler won't immediately pick us
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
+
+        // Try to switch to another thread
         let (prev, next) = crate::sched::on_timer_tick();
         if let (Some(prev_id), Some(next_id)) = (prev, next) {
             if prev_id != next_id {
+                // Switch to different thread
                 crate::sched::perform_context_switch(prev_id, next_id);
+            } else {
+                // No other thread to run - wait for interrupt (avoid busy-loop)
+                // Enable interrupts and halt until next interrupt
+                unsafe {
+                    core::arch::asm!(
+                        "sti",      // Enable interrupts
+                        "hlt",      // Halt until interrupt
+                        "cli",      // Disable interrupts again
+                        options(nomem, nostack)
+                    );
+                }
+            }
+        } else {
+            // No threads available - halt and wait
+            unsafe {
+                core::arch::asm!(
+                    "sti",
+                    "hlt",
+                    "cli",
+                    options(nomem, nostack)
+                );
             }
         }
+
+        // Back from blocking - mark as ready
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
     }
 }

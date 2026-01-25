@@ -33,11 +33,13 @@ pub mod messages;
 pub mod protocol;
 pub mod ports;
 pub mod serialization;
+pub mod services;
 
 // Re-exports for convenience
 pub use messages::*;
 pub use protocol::*;
 pub use ports::*;
+pub use services::*;
 
 /// Maximum message size in bytes
 pub const MAX_MESSAGE_SIZE: usize = 4096;
@@ -56,6 +58,10 @@ pub enum ServiceId {
     Graphics = 4,
     /// Terminal application
     Terminal = 5,
+    /// Name service (service registry)
+    NameService = 100,
+    /// Service manager (service lifecycle)
+    ServiceManager = 101,
 }
 
 impl ServiceId {
@@ -66,6 +72,8 @@ impl ServiceId {
             3 => Some(ServiceId::Mouse),
             4 => Some(ServiceId::Graphics),
             5 => Some(ServiceId::Terminal),
+            100 => Some(ServiceId::NameService),
+            101 => Some(ServiceId::ServiceManager),
             _ => None,
         }
     }

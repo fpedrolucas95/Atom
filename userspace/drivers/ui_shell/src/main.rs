@@ -109,6 +109,7 @@ use atom_syscall::process::{spawn_process, ProcessId};
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers};
 use libipc::protocol::send_message_async;
+use libipc::well_known;
 
 // ============================================================================
 // Theme Colors (Nord-inspired)
@@ -1157,6 +1158,22 @@ pub extern "efiapi" fn efi_main(
     main()
 }
 
+/// Register this service with the name service
+fn register_with_namesvc(service_name: &str, port: PortId) {
+    // Build registration message for name service
+    // Format: [msg_type: u32][port: u64][name_len: u32][name: bytes]
+    let mut msg = [0u8; 64];
+    let msg_type = 600u32; // NsRegister
+    msg[0..4].copy_from_slice(&msg_type.to_le_bytes());
+    msg[4..12].copy_from_slice(&port.to_le_bytes());
+    msg[12..16].copy_from_slice(&(service_name.len() as u32).to_le_bytes());
+    msg[16..16 + service_name.len()].copy_from_slice(service_name.as_bytes());
+
+    // Try to send to name service (best effort - name service may not be running yet)
+    let _ = send(well_known::NAME_SERVICE, &msg[..16 + service_name.len()]);
+    log("Desktop: Registered with name service");
+}
+
 fn main() -> ! {
     log("Atom Desktop Environment v1.0");
     log("Microkernel architecture - all UI in userspace");
@@ -1172,6 +1189,10 @@ fn main() -> ! {
     log("Desktop: Framebuffer acquired");
 
     let mut compositor = Compositor::new(fb);
+
+    // Register with name service
+    register_with_namesvc("compositor", compositor.event_port);
+
     compositor.run()
 }
 
