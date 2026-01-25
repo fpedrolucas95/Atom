@@ -823,6 +823,53 @@ pub fn kernel_stack_top(thread_id: ThreadId) -> Option<u64> {
         .map(|t| t.kernel_stack)
 }
 
+/// Process/thread information for userspace queries
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessInfo {
+    pub pid: u64,
+    pub state: u8,  // 0=Running, 1=Ready, 2=Blocked, 3=Exited
+    pub name: [u8; 32],
+}
+
+impl ProcessInfo {
+    fn from_thread(thread: &Thread) -> Self {
+        let mut name = [0u8; 32];
+        let name_bytes = thread.name.as_bytes();
+        let copy_len = name_bytes.len().min(31);
+        name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        ProcessInfo {
+            pid: thread.id.raw(),
+            state: match thread.state {
+                ThreadState::Running => 0,
+                ThreadState::Ready => 1,
+                ThreadState::Blocked => 2,
+                ThreadState::Exited => 3,
+            },
+            name,
+        }
+    }
+}
+
+/// Get list of all processes/threads for userspace
+/// Returns the number of processes written to the buffer
+pub fn list_processes(buffer: &mut [ProcessInfo]) -> usize {
+    let threads = THREAD_LIST.threads.lock();
+    let count = threads.len().min(buffer.len());
+
+    for (i, thread) in threads.iter().take(count).enumerate() {
+        buffer[i] = ProcessInfo::from_thread(thread);
+    }
+
+    count
+}
+
+/// Get total number of processes/threads
+pub fn process_count() -> usize {
+    THREAD_LIST.count()
+}
+
 pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
     let threads = THREAD_LIST.threads.lock();
     threads

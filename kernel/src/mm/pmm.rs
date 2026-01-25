@@ -52,6 +52,8 @@ static TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 static FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 static NEXT_FREE_HINT: AtomicUsize = AtomicUsize::new(0);
 static LARGEST_FREE_RUN: AtomicUsize = AtomicUsize::new(0);
+/// Actual physical RAM available (sum of all conventional memory regions)
+static PHYSICAL_RAM_PAGES: AtomicUsize = AtomicUsize::new(0);
 pub const PAGE_SIZE: usize = 4096;
 
 #[cfg(debug_assertions)]
@@ -68,7 +70,9 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     );
 
     let mut tracked_end_page: usize = 0;
+    let mut physical_ram_pages: usize = 0;
 
+    // First pass: calculate total physical RAM and highest address
     for d in memory_map.descriptors() {
         let start_page = (d.physical_start as usize) / PAGE_SIZE;
         let num_pages = d.number_of_pages as usize;
@@ -77,11 +81,17 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         if end_page > tracked_end_page {
             tracked_end_page = end_page;
         }
+
+        // Count all conventional memory as physical RAM
+        if d.typ == EFI_CONVENTIONAL_MEMORY {
+            physical_ram_pages += num_pages;
+        }
     }
 
     let total_pages = tracked_end_page.min(MAX_PAGES);
 
     TOTAL_PAGES.store(total_pages, Ordering::Relaxed);
+    PHYSICAL_RAM_PAGES.store(physical_ram_pages, Ordering::Relaxed);
     NEXT_FREE_HINT.store(0, Ordering::Relaxed);
 
     let mut free_pages: usize = 0;
@@ -100,7 +110,6 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         }
 
         for page in start_page..end_page {
-            // Agora TOTAL_PAGES já está setado, então set_page_free funciona.
             set_page_free(page);
             free_pages += 1;
         }
@@ -124,9 +133,11 @@ pub unsafe fn init(memory_map: &MemoryMap) {
 
     LARGEST_FREE_RUN.store(max_run, Ordering::Relaxed);
 
+    let physical_ram_mb = (physical_ram_pages * PAGE_SIZE) / (1024 * 1024);
     log_info!(
         "[pmm]",
-        "PMM initialized: tracked_pages={}, free_pages={}, largest_free_run={} pages",
+        "PMM initialized: physical_ram={}MB, tracked_pages={}, free_pages={}, largest_free_run={} pages",
+        physical_ram_mb,
         total_pages,
         free_pages,
         max_run
@@ -339,8 +350,9 @@ pub struct MemoryStats {
 
 /// Get memory statistics in KB for userspace
 /// Returns (total_kb, free_kb)
+/// Note: total_kb is the actual physical RAM available, not the address space size
 pub fn get_memory_stats() -> (u64, u64) {
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    let total = PHYSICAL_RAM_PAGES.load(Ordering::Relaxed);
     let free = FREE_PAGES.load(Ordering::Relaxed);
 
     let total_kb = (total * PAGE_SIZE / 1024) as u64;

@@ -1,10 +1,47 @@
 // Process management syscalls
 
-use crate::raw::{syscall2, numbers::*};
+use crate::raw::{syscall0, syscall2, numbers::*};
 use crate::error::{SyscallError, SyscallResult};
 
 /// Process ID type
 pub type ProcessId = u64;
+
+/// Process/thread information returned by list_processes
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessInfo {
+    pub pid: u64,
+    pub state: u8,  // 0=Running, 1=Ready, 2=Blocked, 3=Exited
+    pub name: [u8; 32],
+}
+
+impl ProcessInfo {
+    pub const fn empty() -> Self {
+        Self {
+            pid: 0,
+            state: 0,
+            name: [0u8; 32],
+        }
+    }
+
+    /// Get process name as string slice
+    pub fn name_str(&self) -> &str {
+        let len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
+        // Safety: kernel guarantees valid UTF-8 in name field
+        unsafe { core::str::from_utf8_unchecked(&self.name[..len]) }
+    }
+
+    /// Get state as string
+    pub fn state_str(&self) -> &'static str {
+        match self.state {
+            0 => "running",
+            1 => "ready",
+            2 => "blocked",
+            3 => "exited",
+            _ => "unknown",
+        }
+    }
+}
 
 /// Spawn a new process from a registered driver
 ///
@@ -39,4 +76,38 @@ pub fn spawn_process(name: &str) -> SyscallResult<ProcessId> {
 
     // Valid PID returned
     Ok(result)
+}
+
+/// List all processes/threads in the system
+///
+/// # Arguments
+/// * `buffer` - Buffer to receive ProcessInfo structs
+///
+/// # Returns
+/// * Number of processes written to buffer
+pub fn list_processes(buffer: &mut [ProcessInfo]) -> usize {
+    if buffer.is_empty() {
+        return 0;
+    }
+
+    let result = unsafe {
+        syscall2(
+            SYS_LIST_PROCESSES,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64
+        )
+    };
+
+    // Check for error
+    if result >= u64::MAX - 100 {
+        return 0;
+    }
+
+    result as usize
+}
+
+/// Get total number of processes/threads
+pub fn get_process_count() -> usize {
+    let result = unsafe { syscall0(SYS_GET_PROCESS_COUNT) };
+    result as usize
 }

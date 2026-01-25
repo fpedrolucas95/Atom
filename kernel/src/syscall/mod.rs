@@ -114,6 +114,9 @@ pub const SYS_IPC_WAIT_ANY: u64 = 43;  // Wait on multiple ports for any event
 pub const SYS_GET_IRQ_COUNT: u64 = 44; // Get IRQ occurrence count for a registered handler
 pub const SYS_SPAWN_PROCESS: u64 = 45; // Spawn a new process from a registered driver
 pub const SYS_GET_MEMORY_INFO: u64 = 46; // Get system memory information
+pub const SYS_LIST_PROCESSES: u64 = 47; // List all processes/threads
+pub const SYS_GET_PROCESS_COUNT: u64 = 48; // Get total number of processes
+pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 
 pub const ESUCCESS: u64 = 0;
 pub const ENOTFOUND: u64 = u64::MAX - 10;
@@ -317,6 +320,9 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_GET_IRQ_COUNT => sys_get_irq_count(arg0 as u8),
         SYS_SPAWN_PROCESS => sys_spawn_process(arg0 as *const u8, arg1 as usize),
         SYS_GET_MEMORY_INFO => sys_get_memory_info(arg0 as *mut u64),
+        SYS_LIST_PROCESSES => sys_list_processes(arg0 as *mut crate::thread::ProcessInfo, arg1 as usize),
+        SYS_GET_PROCESS_COUNT => sys_get_process_count(),
+        SYS_READ_KLOG => sys_read_klog(arg0 as *mut u8, arg1 as usize),
 
         _ => {
             log_warn!(
@@ -3344,4 +3350,65 @@ fn sys_get_memory_info(info_ptr: *mut u64) -> u64 {
     }
 
     ESUCCESS
+}
+
+/// List all processes/threads
+///
+/// # Arguments
+/// * `buffer` - Pointer to array of ProcessInfo structs
+/// * `max_count` - Maximum number of entries to write
+///
+/// # Returns
+/// * Number of processes written, or EINVAL if buffer is null
+fn sys_list_processes(buffer: *mut crate::thread::ProcessInfo, max_count: usize) -> u64 {
+    if buffer.is_null() || max_count == 0 {
+        return EINVAL;
+    }
+
+    // Create a temporary buffer on stack
+    let mut temp_buffer = [crate::thread::ProcessInfo {
+        pid: 0,
+        state: 0,
+        name: [0u8; 32],
+    }; 32]; // Support up to 32 processes
+
+    let actual_count = max_count.min(32);
+    let count = crate::thread::list_processes(&mut temp_buffer[..actual_count]);
+
+    // Copy to userspace buffer
+    unsafe {
+        for i in 0..count {
+            *buffer.add(i) = temp_buffer[i];
+        }
+    }
+
+    count as u64
+}
+
+/// Get total number of processes/threads
+fn sys_get_process_count() -> u64 {
+    crate::thread::process_count() as u64
+}
+
+/// Read kernel log buffer
+///
+/// # Arguments
+/// * `buffer` - Pointer to buffer to write log entries
+/// * `max_len` - Maximum bytes to write
+///
+/// # Returns
+/// * Number of bytes written, or EINVAL if buffer is null
+fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
+    if buffer.is_null() || max_len == 0 {
+        return EINVAL;
+    }
+
+    let log_data = crate::log::read_log_buffer();
+    let copy_len = log_data.len().min(max_len);
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(log_data.as_ptr(), buffer, copy_len);
+    }
+
+    copy_len as u64
 }
