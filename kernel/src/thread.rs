@@ -414,6 +414,11 @@ impl ThreadList {
         }
     }
 
+    fn get_state(&self, id: ThreadId) -> Option<ThreadState> {
+        let threads = self.threads.lock();
+        threads.iter().find(|t| t.id == id).map(|t| t.state)
+    }
+
     pub fn get_stats(&self) -> ThreadStats {
         let threads = self.threads.lock();
         let mut stats = ThreadStats::default();
@@ -663,6 +668,10 @@ pub fn get_runnable_threads() -> Vec<ThreadId> {
 
 pub fn set_thread_state(id: ThreadId, state: ThreadState) -> bool {
     THREAD_LIST.set_state(id, state)
+}
+
+pub fn get_thread_state(id: ThreadId) -> Option<ThreadState> {
+    THREAD_LIST.get_state(id)
 }
 
 pub fn get_thread_stats() -> ThreadStats {

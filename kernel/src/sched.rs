@@ -179,12 +179,22 @@ impl Scheduler {
             if let Some(cur) = *current {
                 previous = Some(cur);
 
-                if !ready.is_empty() {
+                // Only requeue if the thread is still runnable (not blocked or exited)
+                let current_state = thread::get_thread_state(cur);
+                let is_runnable = current_state
+                    .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
+                    .unwrap_or(false);
+
+                if is_runnable && !ready.is_empty() {
                     let priority = self.get_priority(cur);
                     ready.push(cur, priority);
 
                     log_debug!("sched", "Thread {} requeued (priority={:?})", cur, priority);
 
+                    *current = None;
+                } else if !is_runnable {
+                    // Thread is blocked or exited, don't requeue it
+                    log_debug!("sched", "Thread {} not requeued (state={:?})", cur, current_state);
                     *current = None;
                 }
             }
@@ -216,7 +226,12 @@ impl Scheduler {
 
         if let Some(prev) = previous {
             if Some(prev) != chosen {
-                thread::set_thread_state(prev, ThreadState::Ready);
+                // Only set to Ready if it was previously Running
+                // If it was Blocked, it should stay Blocked
+                let prev_state = thread::get_thread_state(prev);
+                if let Some(ThreadState::Running) = prev_state {
+                    thread::set_thread_state(prev, ThreadState::Ready);
+                }
             }
         }
 
