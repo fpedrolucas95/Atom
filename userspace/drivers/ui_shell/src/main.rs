@@ -638,20 +638,27 @@ impl Compositor {
                         // Get focused window's event port
                         let event_port = if let Some(focused_id) = self.wm.focused_id {
                             if let Some(window) = self.wm.get_window(focused_id) {
+                                log("Compositor: Focused window found");
                                 window.event_port
                             } else {
+                                log("Compositor: Focused window ID not found in windows list");
                                 None
                             }
                         } else {
+                            log("Compositor: No focused window ID set");
                             None
                         };
 
                         // Forward to focused window
                         if let Some(port) = event_port {
-                            log("Compositor: Forwarding KeyPress to focused window");
-                            let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
+                            if port == 0 {
+                                log("Compositor: ERROR - event_port is 0 (not registered yet)");
+                            } else {
+                                log("Compositor: Forwarding KeyPress to window");
+                                let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
+                            }
                         } else {
-                            log("Compositor: No focused window to forward KeyPress");
+                            log("Compositor: No event_port for focused window");
                         }
                     }
                 }
