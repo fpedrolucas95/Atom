@@ -399,6 +399,8 @@ struct PortState {
     owner: ThreadId,
     messages: VecDeque<Message>,
     receiver_blocked: Option<ThreadId>,
+    /// Threads waiting on this port via wait_any (can wait on multiple ports)
+    wait_any_waiters: Vec<ThreadId>,
     max_waiter_priority: Option<ThreadPriority>,
     metrics: IpcPortMetrics,
 }
@@ -410,6 +412,7 @@ impl PortState {
             owner,
             messages: VecDeque::new(),
             receiver_blocked: None,
+            wait_any_waiters: Vec::new(),
             max_waiter_priority: None,
             metrics: IpcPortMetrics::default(),
         }
@@ -519,6 +522,25 @@ impl IpcManager {
             size,
         });
 
+        // Wake up blocked receiver (regular recv)
+        if let Some(receiver_id) = port.receiver_blocked.take() {
+            port.max_waiter_priority = None;
+            drop(ports);
+
+            self.waiting_threads.lock().remove(&receiver_id);
+            crate::sched::mark_thread_ready(receiver_id);
+            self.restore_priority(receiver_id);
+        } else if !port.wait_any_waiters.is_empty() {
+            // Wake up wait_any waiters
+            let waiters = core::mem::take(&mut port.wait_any_waiters);
+            drop(ports);
+
+            for waiter_id in waiters {
+                log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on port {}", waiter_id, port_id);
+                crate::sched::mark_thread_ready(waiter_id);
+            }
+        }
+
         Ok(())
     }
 
@@ -574,11 +596,20 @@ impl IpcManager {
             self.waiting_threads.lock().remove(&receiver_id);
             crate::sched::mark_thread_ready(receiver_id);
             self.restore_priority(receiver_id);
+        } else if !port.wait_any_waiters.is_empty() {
+            // Wake up wait_any waiters
+            let waiters = core::mem::take(&mut port.wait_any_waiters);
+            drop(ports);
+
+            for waiter_id in waiters {
+                log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on port {} (batch)", waiter_id, port_id);
+                crate::sched::mark_thread_ready(waiter_id);
+            }
         }
 
         Ok(count)
     }
-    
+
     fn recv_batch(&self, port_id: PortId, caller: ThreadId, max_count: usize)
         -> Result<Vec<Message>, IpcError>
     {
@@ -765,6 +796,29 @@ impl IpcManager {
             log_warn!(LOG_ORIGIN, "Timeout waking blocked thread {} on {}", tid, port_id);
             crate::sched::mark_thread_ready(tid);
             self.restore_priority(tid);
+        }
+    }
+
+    /// Register a thread as waiting on multiple ports via wait_any
+    fn register_wait_any(&self, caller: ThreadId, ports_to_wait: &[PortId]) {
+        let mut ports = self.ports.lock();
+        for port_id in ports_to_wait {
+            if let Some(port) = ports.get_mut(port_id) {
+                if !port.wait_any_waiters.contains(&caller) {
+                    port.wait_any_waiters.push(caller);
+                    log_debug!(LOG_ORIGIN, "Thread {} registered as wait_any waiter on {}", caller, port_id);
+                }
+            }
+        }
+    }
+
+    /// Unregister a thread from wait_any on all ports
+    fn unregister_wait_any(&self, caller: ThreadId, ports_to_unregister: &[PortId]) {
+        let mut ports = self.ports.lock();
+        for port_id in ports_to_unregister {
+            if let Some(port) = ports.get_mut(port_id) {
+                port.wait_any_waiters.retain(|&tid| tid != caller);
+            }
         }
     }
 
@@ -964,4 +1018,14 @@ pub fn send_batch(port_id: PortId, messages: Vec<Message>) -> Result<usize, IpcE
 
 pub fn receive_batch(port_id: PortId, caller: ThreadId, max_count: usize) -> Result<Vec<Message>, IpcError> {
     IPC_MANAGER.recv_batch(port_id, caller, max_count)
+}
+
+/// Register a thread as waiting on multiple ports via wait_any
+pub fn register_wait_any(caller: ThreadId, ports: &[PortId]) {
+    IPC_MANAGER.register_wait_any(caller, ports)
+}
+
+/// Unregister a thread from wait_any on specified ports
+pub fn unregister_wait_any(caller: ThreadId, ports: &[PortId]) {
+    IPC_MANAGER.unregister_wait_any(caller, ports)
 }
