@@ -396,6 +396,9 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
+    // Debug: Log every IRQ1
+    crate::serial_println!("[IRQ1] keyboard handler called");
+
     // Buffer raw keyboard data for userspace driver
     input::on_keyboard_irq();
 

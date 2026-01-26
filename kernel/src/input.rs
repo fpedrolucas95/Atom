@@ -133,16 +133,23 @@ fn read_data() -> u8 {
 /// Reads all available bytes and buffers them for userspace
 pub fn on_keyboard_irq() {
     let mut buf = KEYBOARD_BUFFER.lock();
-    
+    let mut count = 0u8;
+
     // Read all available keyboard data
     while read_status() & STATUS_OUTPUT_FULL != 0 {
         // Check it's not mouse data
         if read_status() & STATUS_AUX_DATA != 0 {
             break; // This is mouse data, not keyboard
         }
-        
+
         let scancode = read_data();
+        crate::serial_println!("[IRQ1] scancode: 0x{:02X}", scancode);
         buf.push(scancode);
+        count += 1;
+    }
+
+    if count == 0 {
+        crate::serial_println!("[IRQ1] no data available (status check failed)");
     }
 }
 
@@ -251,11 +258,11 @@ fn send_mouse_command(cmd: u8) {
     let _ = read_data(); // Consume ACK (0xFA)
 }
 
-/// Initialize PS/2 controller for mouse support with 1:1 scaling
+/// Initialize PS/2 controller for keyboard and mouse support
 /// Based on SANiK's PS/2 Mouse code and OSDev documentation
 pub fn init_ps2_mouse_full() {
-    log_info!("input", "Initializing PS/2 mouse with 1:1 scaling...");
-    
+    log_info!("input", "Initializing PS/2 controller (keyboard + mouse)...");
+
     // Drain any pending data first (before IRQs are enabled)
     for _ in 0..100 {
         if read_status() & STATUS_OUTPUT_FULL == 0 {
@@ -263,37 +270,115 @@ pub fn init_ps2_mouse_full() {
         }
         let _ = read_data();
     }
-    
-    // 1. Enable the auxiliary mouse device
+
+    // 1. Disable devices during configuration
     wait_for_input_buffer();
-    write_command(0xA8); // Enable aux port
-    
-    // 2. Enable the interrupts (compaq status byte)
+    write_command(0xAD); // Disable keyboard port
+    wait_for_input_buffer();
+    write_command(0xA7); // Disable mouse port
+
+    // Flush output buffer again
+    for _ in 0..10 {
+        if read_status() & STATUS_OUTPUT_FULL == 0 {
+            break;
+        }
+        let _ = read_data();
+    }
+
+    // 2. Configure controller (compaq status byte)
     wait_for_input_buffer();
     write_command(0x20); // Get compaq status byte
     wait_for_output_buffer();
     let status = read_data();
-    
-    // Set bit 1 (enable IRQ12), clear bit 5 (enable mouse clock)
-    let new_status = (status | 0x02) & !0x20;
-    
+
+    // Set bit 0 (enable IRQ1/keyboard), bit 1 (enable IRQ12/mouse)
+    // Set bit 6 (enable translation to Scancode Set 1) - CRITICAL for QEMU!
+    // Clear bit 4 (enable keyboard clock), bit 5 (enable mouse clock)
+    let new_status = (status | 0x43) & !0x30;  // 0x43 = IRQ1 + IRQ12 + Translation
+    log_info!("input", "PS/2 controller status: 0x{:02X} -> 0x{:02X} (IRQ1+IRQ12+Translation enabled)", status, new_status);
+
     wait_for_input_buffer();
     write_command(0x60); // Set compaq status byte
     wait_for_input_buffer();
     write_data(new_status);
-    
-    // 3. Tell mouse to use default settings
+
+    // 3. Re-enable ports
+    wait_for_input_buffer();
+    write_command(0xAE); // Enable keyboard port (first PS/2 port)
+    wait_for_input_buffer();
+    write_command(0xA8); // Enable aux/mouse port (second PS/2 port)
+    log_info!("input", "PS/2 ports enabled (keyboard + mouse)");
+
+    // 4. Reset keyboard (0xFF) and wait for self-test
+    log_info!("input", "PS/2 keyboard: Sending reset command...");
+    wait_for_input_buffer();
+    write_data(0xFF); // Reset keyboard
+
+    // Wait for ACK (0xFA)
+    wait_for_output_buffer();
+    let reset_ack = read_data();
+    if reset_ack == 0xFA {
+        log_info!("input", "PS/2 keyboard: Reset ACK received");
+    } else {
+        log_info!("input", "PS/2 keyboard: Reset response: 0x{:02X} (expected 0xFA)", reset_ack);
+    }
+
+    // Wait for self-test pass (0xAA) - can take a while
+    // Some keyboards also send 0xFC (self-test failed) or just timeout
+    for _ in 0..1000 {
+        if read_status() & STATUS_OUTPUT_FULL != 0 {
+            let selftest = read_data();
+            if selftest == 0xAA {
+                log_info!("input", "PS/2 keyboard: Self-test passed (0xAA)");
+                break;
+            } else if selftest == 0xFC {
+                log_info!("input", "PS/2 keyboard: Self-test FAILED (0xFC)");
+                break;
+            } else {
+                log_info!("input", "PS/2 keyboard: Self-test response: 0x{:02X}", selftest);
+            }
+        }
+        // Small delay
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // 5. Set scancode set 2 (with translation enabled, we get Set 1 codes)
+    wait_for_input_buffer();
+    write_data(0xF0); // Set scancode set command
+    wait_for_output_buffer();
+    let _ = read_data(); // ACK
+
+    wait_for_input_buffer();
+    write_data(0x02); // Scancode Set 2
+    wait_for_output_buffer();
+    let scanset_ack = read_data();
+    log_info!("input", "PS/2 keyboard: Scancode set 2 response: 0x{:02X}", scanset_ack);
+
+    // 6. Enable keyboard scanning (send 0xF4 to keyboard)
+    wait_for_input_buffer();
+    write_data(0xF4); // Enable scanning
+    wait_for_output_buffer();
+    let kbd_ack = read_data();
+    if kbd_ack == 0xFA {
+        log_info!("input", "PS/2 keyboard: Scanning enabled (ACK received)");
+    } else {
+        log_info!("input", "PS/2 keyboard: Enable response: 0x{:02X} (expected 0xFA)", kbd_ack);
+    }
+
+    // 5. Tell mouse to use default settings
     send_mouse_command(0xF6);
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
-    
-    // 4. Set scaling 1:1 (0xE6) - LINEAR movement, no acceleration
+
+    // 6. Set scaling 1:1 (0xE6) - LINEAR movement, no acceleration
     send_mouse_command(0xE6);
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
     log_info!("input", "PS/2 mouse: Scaling set to 1:1 (linear)");
-    
-    // 5. Set resolution to 8 count/mm (0x03) for higher precision
+
+    // 7. Set resolution to 8 count/mm (0x03) for higher precision
     send_mouse_command(0xE8);
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
@@ -304,8 +389,8 @@ pub fn init_ps2_mouse_full() {
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
     log_info!("input", "PS/2 mouse: Resolution set to 8 count/mm");
-    
-    // 6. Set sample rate to 100 samples/sec
+
+    // 8. Set sample rate to 100 samples/sec
     send_mouse_command(0xF3);
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
@@ -316,13 +401,24 @@ pub fn init_ps2_mouse_full() {
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
     log_info!("input", "PS/2 mouse: Sample rate set to 100/sec");
-    
-    // 7. Enable the mouse (start streaming packets)
+
+    // 9. Enable the mouse (start streaming packets)
     send_mouse_command(0xF4);
     wait_for_output_buffer();
     let _ = read_data(); // Acknowledge
-    
-    // 8. Clear any leftover ACK bytes from the buffer
+
+    // 10. Verify final controller configuration
+    wait_for_input_buffer();
+    write_command(0x20); // Read controller status byte
+    wait_for_output_buffer();
+    let final_status = read_data();
+    log_info!("input", "PS/2 controller final status: 0x{:02X} (IRQ1={}, IRQ12={})",
+        final_status,
+        if final_status & 0x01 != 0 { "enabled" } else { "DISABLED" },
+        if final_status & 0x02 != 0 { "enabled" } else { "DISABLED" }
+    );
+
+    // 11. Clear any leftover ACK bytes from the buffer
     // (some ACKs may have been captured by IRQ12 during init)
     {
         let mut buf = MOUSE_BUFFER.lock();

@@ -2931,7 +2931,8 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         for (idx, port_id) in ports.iter().enumerate() {
             match crate::ipc::try_receive_message(*port_id, caller) {
                 Ok(Some(_msg)) => {
-                    // Found a message! Return the port index
+                    // Found a message! Unregister and return the port index
+                    crate::ipc::unregister_wait_any(caller, &ports);
                     log_debug!(
                         LOG_ORIGIN,
                         "ipc_wait_any: port {} (index {}) has message",
@@ -2948,6 +2949,7 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         // Check timeout
         if let Some(deadline_tick) = deadline {
             if crate::interrupts::get_ticks() >= deadline_tick {
+                crate::ipc::unregister_wait_any(caller, &ports);
                 if timeout_ms == 0 {
                     return EWOULDBLOCK;
                 } else {
@@ -2955,6 +2957,10 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
                 }
             }
         }
+
+        // Register as waiting on all ports BEFORE blocking
+        // This allows senders to wake us up
+        crate::ipc::register_wait_any(caller, &ports);
 
         // Block this thread and yield to scheduler
         // Mark as blocked so scheduler won't immediately pick us
@@ -2990,8 +2996,9 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
             }
         }
 
-        // Back from blocking - mark as ready
+        // Back from blocking - mark as ready and unregister
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
+        // Note: We'll re-register on the next iteration if we loop again
     }
 }
 
