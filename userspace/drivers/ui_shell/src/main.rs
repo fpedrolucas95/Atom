@@ -622,10 +622,12 @@ impl Compositor {
                 }
             }
             MessageType::KeyPress => {
+                log("Compositor: Received KeyPress from keyboard driver");
                 // Keyboard event from keyboard driver - route to focused window
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + 3 {
                     if let Some(key_event) = KeyEvent::from_bytes(&data[payload_start..]) {
+                        log("Compositor: Parsed key event successfully");
                         // Check for compositor shortcuts (Escape to quit - debug feature)
                         let scancode = key_event.scancode & 0x7F;
                         if scancode == 0x01 {
@@ -646,7 +648,10 @@ impl Compositor {
 
                         // Forward to focused window
                         if let Some(port) = event_port {
+                            log("Compositor: Forwarding KeyPress to focused window");
                             let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
+                        } else {
+                            log("Compositor: No focused window to forward KeyPress");
                         }
                     }
                 }

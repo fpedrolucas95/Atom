@@ -254,13 +254,27 @@ impl KeyboardDriver {
         // Create our own IPC port for receiving commands (for future use)
         let _our_port = create_port().ok();
 
-        log("Keyboard Driver: Entering main loop");
+        log("Keyboard Driver: Entering main loop - waiting for keyboard input");
+
+        let mut poll_count: u64 = 0;
+        let mut last_log_count: u64 = 0;
 
         loop {
+            poll_count += 1;
+
+            // Log periodically to show driver is alive
+            if poll_count - last_log_count >= 10000 {
+                log("Keyboard Driver: Still polling... (no scancodes yet)");
+                last_log_count = poll_count;
+            }
+
             // Poll for raw scancodes from kernel
             while let Some(scancode) = keyboard_poll() {
+                log("Keyboard Driver: Received scancode!");
+
                 if let Some((sc, ascii, pressed)) = self.state.process_scancode(scancode) {
                     self.event_count += 1;
+                    log("Keyboard Driver: Processed key event");
 
                     // Create key event
                     let event = KeyEvent {
@@ -271,6 +285,7 @@ impl KeyboardDriver {
 
                     // Send to compositor (only key press events to reduce traffic)
                     if pressed {
+                        log("Keyboard Driver: Sending KeyPress to compositor");
                         let payload = event.to_bytes();
                         let _ = send_message_async(self.compositor_port, MessageType::KeyPress, &payload);
                     }
