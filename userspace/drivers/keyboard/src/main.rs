@@ -270,12 +270,15 @@ impl KeyboardDriver {
 
             // Poll for raw scancodes from kernel
             while let Some(scancode) = keyboard_poll() {
-                log("Keyboard Driver: Received scancode!");
+                // Log the raw scancode to debug press vs release
+                if scancode & 0x80 != 0 {
+                    log("Keyboard Driver: Received RELEASE scancode");
+                } else {
+                    log("Keyboard Driver: Received PRESS scancode");
+                }
 
                 if let Some((sc, ascii, pressed)) = self.state.process_scancode(scancode) {
                     self.event_count += 1;
-                    log("Keyboard Driver: Processed key event");
-
                     // Create key event
                     let event = KeyEvent {
                         scancode: sc,
@@ -285,9 +288,11 @@ impl KeyboardDriver {
 
                     // Send to compositor (only key press events to reduce traffic)
                     if pressed {
-                        log("Keyboard Driver: Sending KeyPress to compositor");
+                        log("Keyboard Driver: Sending PRESS to compositor");
                         let payload = event.to_bytes();
                         let _ = send_message_async(self.compositor_port, MessageType::KeyPress, &payload);
+                    } else {
+                        log("Keyboard Driver: RELEASE ignored (not sent)");
                     }
                 }
             }
