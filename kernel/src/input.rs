@@ -262,7 +262,7 @@ fn send_mouse_command(cmd: u8) {
 /// Based on SANiK's PS/2 Mouse code and OSDev documentation
 pub fn init_ps2_mouse_full() {
     log_info!("input", "Initializing PS/2 controller (keyboard + mouse)...");
-    
+
     // Drain any pending data first (before IRQs are enabled)
     for _ in 0..100 {
         if read_status() & STATUS_OUTPUT_FULL == 0 {
@@ -270,34 +270,95 @@ pub fn init_ps2_mouse_full() {
         }
         let _ = read_data();
     }
-    
-    // 1. Enable both keyboard and mouse ports
-    wait_for_input_buffer();
-    write_command(0xAE); // Enable keyboard port (first PS/2 port)
-    wait_for_input_buffer();
-    write_command(0xA8); // Enable aux/mouse port (second PS/2 port)
-    log_info!("input", "PS/2 ports enabled (keyboard + mouse)");
 
-    // 2. Enable the interrupts (compaq status byte)
+    // 1. Disable devices during configuration
+    wait_for_input_buffer();
+    write_command(0xAD); // Disable keyboard port
+    wait_for_input_buffer();
+    write_command(0xA7); // Disable mouse port
+
+    // Flush output buffer again
+    for _ in 0..10 {
+        if read_status() & STATUS_OUTPUT_FULL == 0 {
+            break;
+        }
+        let _ = read_data();
+    }
+
+    // 2. Configure controller (compaq status byte)
     wait_for_input_buffer();
     write_command(0x20); // Get compaq status byte
     wait_for_output_buffer();
     let status = read_data();
 
     // Set bit 0 (enable IRQ1/keyboard), bit 1 (enable IRQ12/mouse)
+    // Set bit 6 (enable translation to Scancode Set 1) - CRITICAL for QEMU!
     // Clear bit 4 (enable keyboard clock), bit 5 (enable mouse clock)
-    let new_status = (status | 0x03) & !0x30;
-    log_info!("input", "PS/2 controller status: 0x{:02X} -> 0x{:02X} (IRQ1+IRQ12 enabled)", status, new_status);
+    let new_status = (status | 0x43) & !0x30;  // 0x43 = IRQ1 + IRQ12 + Translation
+    log_info!("input", "PS/2 controller status: 0x{:02X} -> 0x{:02X} (IRQ1+IRQ12+Translation enabled)", status, new_status);
 
     wait_for_input_buffer();
     write_command(0x60); // Set compaq status byte
     wait_for_input_buffer();
     write_data(new_status);
 
-    // 3. Enable keyboard scanning (send 0xF4 to keyboard)
-    // The keyboard needs to be explicitly enabled to generate scancodes
+    // 3. Re-enable ports
     wait_for_input_buffer();
-    write_data(0xF4); // Enable scanning (keyboard command, not controller command)
+    write_command(0xAE); // Enable keyboard port (first PS/2 port)
+    wait_for_input_buffer();
+    write_command(0xA8); // Enable aux/mouse port (second PS/2 port)
+    log_info!("input", "PS/2 ports enabled (keyboard + mouse)");
+
+    // 4. Reset keyboard (0xFF) and wait for self-test
+    log_info!("input", "PS/2 keyboard: Sending reset command...");
+    wait_for_input_buffer();
+    write_data(0xFF); // Reset keyboard
+
+    // Wait for ACK (0xFA)
+    wait_for_output_buffer();
+    let reset_ack = read_data();
+    if reset_ack == 0xFA {
+        log_info!("input", "PS/2 keyboard: Reset ACK received");
+    } else {
+        log_info!("input", "PS/2 keyboard: Reset response: 0x{:02X} (expected 0xFA)", reset_ack);
+    }
+
+    // Wait for self-test pass (0xAA) - can take a while
+    // Some keyboards also send 0xFC (self-test failed) or just timeout
+    for _ in 0..1000 {
+        if read_status() & STATUS_OUTPUT_FULL != 0 {
+            let selftest = read_data();
+            if selftest == 0xAA {
+                log_info!("input", "PS/2 keyboard: Self-test passed (0xAA)");
+                break;
+            } else if selftest == 0xFC {
+                log_info!("input", "PS/2 keyboard: Self-test FAILED (0xFC)");
+                break;
+            } else {
+                log_info!("input", "PS/2 keyboard: Self-test response: 0x{:02X}", selftest);
+            }
+        }
+        // Small delay
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // 5. Set scancode set 2 (with translation enabled, we get Set 1 codes)
+    wait_for_input_buffer();
+    write_data(0xF0); // Set scancode set command
+    wait_for_output_buffer();
+    let _ = read_data(); // ACK
+
+    wait_for_input_buffer();
+    write_data(0x02); // Scancode Set 2
+    wait_for_output_buffer();
+    let scanset_ack = read_data();
+    log_info!("input", "PS/2 keyboard: Scancode set 2 response: 0x{:02X}", scanset_ack);
+
+    // 6. Enable keyboard scanning (send 0xF4 to keyboard)
+    wait_for_input_buffer();
+    write_data(0xF4); // Enable scanning
     wait_for_output_buffer();
     let kbd_ack = read_data();
     if kbd_ack == 0xFA {
