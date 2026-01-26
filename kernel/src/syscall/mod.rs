@@ -1268,6 +1268,27 @@ fn sys_ipc_try_recv(
         }
 
         Ok(None) => {
+            // No message available, block the thread
+            log_debug!(
+                LOG_ORIGIN,
+                "ipc_try_recv blocking (caller={}, port_id={})",
+                caller,
+                port_id
+            );
+
+            if let Err(e) = crate::ipc::register_waiter(port_id, caller) {
+                log_error!(LOG_ORIGIN, "Failed to register waiter: {:?}", e);
+                return EINVAL;
+            }
+
+            crate::thread::set_thread_state(caller, crate::thread::ThreadState::WaitingIpc);
+            
+            // Yield to other threads
+            crate::sched::yield_current();
+
+            // When we return here, we might have a message or not (if we were woken up for other reasons)
+            // For now, return EWOULDBLOCK to let userspace retry, but the livelock is broken
+            // because we are no longer in the ready queue.
             EWOULDBLOCK
         }
 

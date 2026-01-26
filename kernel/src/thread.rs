@@ -74,6 +74,7 @@ pub enum ThreadState {
     Running,
     Ready,
     Blocked,
+    WaitingIpc,
     Exited,
 }
 
@@ -429,6 +430,7 @@ impl ThreadList {
                 ThreadState::Running => stats.running += 1,
                 ThreadState::Ready => stats.ready += 1,
                 ThreadState::Blocked => stats.blocked += 1,
+                ThreadState::WaitingIpc => stats.blocked += 1,
                 ThreadState::Exited => stats.exited += 1,
             }
         }

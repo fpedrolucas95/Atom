@@ -74,18 +74,23 @@ impl ReadyQueues {
     }
 
     fn pop_next(&mut self) -> Option<ThreadId> {
-        // Debug: log queue contents before selection
-        for idx in (0..PRIORITY_LEVELS).rev() {
-            if !self.queues[idx].is_empty() {
-                crate::serial_println!("[SCHED_DEBUG] Priority {} queue: {:?}", idx, self.queues[idx]);
-            }
-        }
-
         // Simply pop from the highest priority non-empty queue
-        // Don't push back - that should only happen when thread yields/is preempted
         for idx in (0..PRIORITY_LEVELS).rev() {
-            if let Some(id) = self.queues[idx].pop_front() {
-                return Some(id);
+            let mut i = 0;
+            while i < self.queues[idx].len() {
+                if let Some(id) = self.queues[idx].pop_front() {
+                    if let Some(state) = thread::get_thread_state(id) {
+                        if state == ThreadState::Ready {
+                            return Some(id);
+                        } else {
+                            // Thread is not Ready (e.g. WaitingIpc, Blocked, Exited)
+                            // Do not put it back in the queue.
+                            // It will be re-added when it becomes Ready.
+                            crate::serial_println!("[SCHED_DEBUG] pop_next: thread {} is in state {:?}, removing from queue", id, state);
+                        }
+                    }
+                }
+                // We don't increment i because we popped an element
             }
         }
         None

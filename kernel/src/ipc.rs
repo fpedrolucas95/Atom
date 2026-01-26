@@ -399,6 +399,8 @@ struct PortState {
     owner: ThreadId,
     messages: VecDeque<Message>,
     receiver_blocked: Option<ThreadId>,
+    /// Threads waiting for a message on this port
+    wait_queue: VecDeque<ThreadId>,
     /// Threads waiting on this port via wait_any (can wait on multiple ports)
     wait_any_waiters: Vec<ThreadId>,
     max_waiter_priority: Option<ThreadPriority>,
@@ -412,6 +414,7 @@ impl PortState {
             owner,
             messages: VecDeque::new(),
             receiver_blocked: None,
+            wait_queue: VecDeque::new(),
             wait_any_waiters: Vec::new(),
             max_waiter_priority: None,
             metrics: IpcPortMetrics::default(),
@@ -530,6 +533,11 @@ impl IpcManager {
             self.waiting_threads.lock().remove(&receiver_id);
             crate::sched::mark_thread_ready(receiver_id);
             self.restore_priority(receiver_id);
+        } else if let Some(waiter_id) = port.wait_queue.pop_front() {
+            // Wake up first thread in wait queue
+            drop(ports);
+            log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on port {}", waiter_id, port_id);
+            crate::sched::mark_thread_ready(waiter_id);
         } else if !port.wait_any_waiters.is_empty() {
             // Wake up wait_any waiters
             let waiters = core::mem::take(&mut port.wait_any_waiters);
@@ -596,6 +604,11 @@ impl IpcManager {
             self.waiting_threads.lock().remove(&receiver_id);
             crate::sched::mark_thread_ready(receiver_id);
             self.restore_priority(receiver_id);
+        } else if let Some(waiter_id) = port.wait_queue.pop_front() {
+            // Wake up first thread in wait queue
+            drop(ports);
+            log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on port {} (batch)", waiter_id, port_id);
+            crate::sched::mark_thread_ready(waiter_id);
         } else if !port.wait_any_waiters.is_empty() {
             // Wake up wait_any waiters
             let waiters = core::mem::take(&mut port.wait_any_waiters);
@@ -725,6 +738,17 @@ impl IpcManager {
             .lock()
             .get(&port_id)
             .and_then(|p| p.max_waiter_priority)
+    }
+
+    fn register_waiter(&self, port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
+        let mut ports = self.ports.lock();
+        let port = ports.get_mut(&port_id).ok_or(IpcError::InvalidPort)?;
+        
+        if !port.wait_queue.iter().any(|&id| id == caller) {
+            port.wait_queue.push_back(caller);
+        }
+        
+        Ok(())
     }
 
     fn detect_deadlock(&self, start: ThreadId, target_port: PortId) -> bool {
@@ -1028,4 +1052,7 @@ pub fn register_wait_any(caller: ThreadId, ports: &[PortId]) {
 /// Unregister a thread from wait_any on specified ports
 pub fn unregister_wait_any(caller: ThreadId, ports: &[PortId]) {
     IPC_MANAGER.unregister_wait_any(caller, ports)
+}
+pub fn register_waiter(port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
+    IPC_MANAGER.register_waiter(port_id, caller)
 }
