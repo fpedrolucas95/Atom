@@ -102,7 +102,7 @@ use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId};
 use atom_syscall::input::MouseDriver;
-use atom_syscall::ipc::{create_port, send, try_recv, PortId};
+use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
@@ -478,6 +478,7 @@ impl Compositor {
 
         let mut prev_left = false;
         let mut reg_buffer = [0u8; 64];
+        let ports = [self.register_port, self.event_port];
 
         loop {
             // Poll for application registrations
@@ -516,7 +517,9 @@ impl Compositor {
                 self.dirty = false;
             }
 
-            yield_now();
+            // Block waiting for IPC messages instead of busy-wait with yield_now()
+            // Timeout of 50ms allows for mouse polling and periodic updates
+            let _ = wait_any(&ports, 50);
         }
     }
 

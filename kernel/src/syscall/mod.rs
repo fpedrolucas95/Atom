@@ -1268,27 +1268,7 @@ fn sys_ipc_try_recv(
         }
 
         Ok(None) => {
-            // No message available, block the thread
-            log_debug!(
-                LOG_ORIGIN,
-                "ipc_try_recv blocking (caller={}, port_id={})",
-                caller,
-                port_id
-            );
-
-            if let Err(e) = crate::ipc::register_waiter(port_id, caller) {
-                log_error!(LOG_ORIGIN, "Failed to register waiter: {:?}", e);
-                return EINVAL;
-            }
-
-            crate::thread::set_thread_state(caller, crate::thread::ThreadState::WaitingIpc);
-            
-            // Yield to other threads
-            crate::sched::yield_current();
-
-            // When we return here, we might have a message or not (if we were woken up for other reasons)
-            // For now, return EWOULDBLOCK to let userspace retry, but the livelock is broken
-            // because we are no longer in the ready queue.
+            // No message available - return immediately (non-blocking)
             EWOULDBLOCK
         }
 
@@ -2947,11 +2927,13 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         Some(crate::interrupts::get_ticks() + ticks)
     };
 
-    // Polling loop - check each port for messages
+    // Polling loop - check each port for messages (peek without consuming)
     loop {
         for (idx, port_id) in ports.iter().enumerate() {
-            match crate::ipc::try_receive_message(*port_id, caller) {
-                Ok(Some(_msg)) => {
+            // Use has_message to check without consuming the message
+            // This allows userspace to receive the message via try_recv after wait_any returns
+            match crate::ipc::has_message(*port_id) {
+                Ok(true) => {
                     // Found a message! Unregister and return the port index
                     crate::ipc::unregister_wait_any(caller, &ports);
                     log_debug!(
@@ -2962,7 +2944,7 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
                     );
                     return idx as u64;
                 }
-                Ok(None) => continue,
+                Ok(false) => continue,
                 Err(_) => continue, // Skip invalid ports
             }
         }

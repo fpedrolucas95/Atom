@@ -6,12 +6,22 @@ use crate::error::{SyscallError, SyscallResult};
 /// Process ID type
 pub type ProcessId = u64;
 
+/// Thread state constants (must match kernel ThreadState encoding)
+pub mod thread_state {
+    pub const RUNNING: u8 = 0;
+    pub const READY: u8 = 1;
+    pub const BLOCKED: u8 = 2;
+    pub const EXITED: u8 = 3;
+    pub const WAITING_IPC: u8 = 4;
+}
+
 /// Process/thread information returned by list_processes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessInfo {
     pub pid: u64,
-    pub state: u8,  // 0=Running, 1=Ready, 2=Blocked, 3=Exited
+    /// Thread state: 0=Running, 1=Ready, 2=Blocked, 3=Exited, 4=WaitingIpc
+    pub state: u8,
     pub name: [u8; 32],
 }
 
@@ -34,10 +44,11 @@ impl ProcessInfo {
     /// Get state as string
     pub fn state_str(&self) -> &'static str {
         match self.state {
-            0 => "running",
-            1 => "ready",
-            2 => "blocked",
-            3 => "exited",
+            thread_state::RUNNING => "running",
+            thread_state::READY => "ready",
+            thread_state::BLOCKED => "blocked",
+            thread_state::EXITED => "exited",
+            thread_state::WAITING_IPC => "waiting_ipc",
             _ => "unknown",
         }
     }

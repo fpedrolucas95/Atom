@@ -857,6 +857,7 @@ impl ProcessInfo {
                 ThreadState::Ready => 1,
                 ThreadState::Blocked => 2,
                 ThreadState::Exited => 3,
+                ThreadState::WaitingIpc => 4,
             },
             name,
         }

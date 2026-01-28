@@ -179,7 +179,7 @@ impl IpcClient {
     where
         F: FnMut(&str, u64, &str), // name, port, status
     {
-        use atom_syscall::process::{ProcessInfo, list_processes};
+        use atom_syscall::process::{ProcessInfo, list_processes, thread_state};
 
         // Get process list to infer active services
         let mut buffer = [ProcessInfo::empty(); 32];
@@ -189,7 +189,12 @@ impl IpcClient {
         for i in 0..count {
             let proc = &buffer[i];
             let name = proc.name_str();
-            let status = if proc.state == 0 { "active" } else { "idle" };
+            // Active: Running, Ready, or WaitingIpc (blocked but alive)
+            // Idle: Blocked (generic) or Exited
+            let status = match proc.state {
+                thread_state::RUNNING | thread_state::READY | thread_state::WAITING_IPC => "active",
+                _ => "idle",
+            };
 
             // Map process names to service names and ports
             match name {
