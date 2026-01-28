@@ -6,11 +6,9 @@ target = "x86_64-unknown-none"
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
 
-# Use custom linker script to place code at 0x400000
+# Linker script (userspace.ld) is resolved by build.rs at build time
 [target.x86_64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Luserspace",
-    "-C", "link-arg=-Tuserspace.ld",
     "-C", "relocation-model=static",
     "-C", "code-model=small",
     "-C", "panic=abort",
