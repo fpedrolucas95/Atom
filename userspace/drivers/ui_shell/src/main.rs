@@ -1030,15 +1030,11 @@ fn main() -> ! {
 
     let mut compositor = Compositor::new(fb);
 
-    // Register with name service
+    // Register with name service so other processes can find us
     register_with_namesvc("compositor", compositor.event_port);
 
-    // Spawn input drivers - keyboard driver sends events to our event_port (port 1)
-    log("Desktop: Spawning keyboard driver");
-    match spawn_process("keyboard") {
-        Ok(_pid) => log("Desktop: Keyboard driver spawned successfully"),
-        Err(_) => log("Desktop: Failed to spawn keyboard driver"),
-    }
+    // NOTE: Drivers (keyboard, mouse, display) are spawned by the init process.
+    // ui_shell only receives events via IPC from already-running drivers.
 
     compositor.run()
 }

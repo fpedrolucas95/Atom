@@ -101,8 +101,9 @@ USERSPACE_DRIVERS=(
     "ui_shell"
 )
 
-# System services
+# System services (init is PID 1 - spawns everything else)
 USERSPACE_SERVICES=(
+    "init"
     "namesvc"
     "service_manager"
 )
@@ -303,10 +304,13 @@ if [ "$KERNEL_ONLY" != true ]; then
         fi
     done
 
-    # Copy ui_shell.atxf to EFI boot directory as the init payload
-    if [ -f "efi/drivers/ui_shell.atxf" ]; then
-        cp efi/drivers/ui_shell.atxf efi/EFI/BOOT/init.atxf
-        success "init.atxf created from ui_shell"
+    # Copy init.atxf to EFI boot directory as the boot payload (PID 1)
+    # The init process spawns: namesvc, service_manager, drivers, ui_shell, terminal
+    if [ -f "efi/drivers/init.atxf" ]; then
+        cp efi/drivers/init.atxf efi/EFI/BOOT/init.atxf
+        success "init.atxf installed as boot payload (PID 1)"
+    else
+        warning "init.atxf not found - system will not boot!"
     fi
 
     success "Userspace build completed"

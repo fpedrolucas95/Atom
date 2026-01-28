@@ -586,25 +586,31 @@ fn handle_message(data: &[u8]) -> Vec<u8> {
 // Built-in Services Configuration
 // ============================================================================
 
-/// Default services to start at boot
-/// Note: Service names must match the driver names in efi/drivers/
-const DEFAULT_SERVICES: &[&str] = &[
-    "ui_shell",  // Compositor/window manager
-    "keyboard",  // Keyboard driver
-    "terminal",  // Terminal emulator
-];
-
-/// Initialize and start default services
+/// Initialize default service registry entries.
+/// Note: The init process (PID 1) is responsible for spawning all services.
+/// The service_manager only tracks and supervises services that have been
+/// spawned by init. It does NOT spawn services at boot - init does that.
 fn init_default_services() {
-    atom_syscall::debug::log("svcmgr: initializing default services");
+    atom_syscall::debug::log("svcmgr: registering known service names");
 
-    for name in DEFAULT_SERVICES {
-        // Register and start each service
+    // Pre-register known service names for monitoring
+    // Init will spawn these; service_manager tracks their lifecycle
+    let known_services: &[&str] = &[
+        "namesvc",
+        "keyboard",
+        "mouse",
+        "display",
+        "ui_shell",
+        "terminal",
+    ];
+
+    for name in known_services {
         unsafe {
             let _ = REGISTRY.register(name, RestartPolicy::OnCrash);
         }
-        let _ = start_service(name);
     }
+
+    atom_syscall::debug::log("svcmgr: service registry ready");
 }
 
 // ============================================================================

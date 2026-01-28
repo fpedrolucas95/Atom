@@ -470,11 +470,11 @@ fn load_init_payload(
         return None;
     }
 
-    // Try multiple paths for init.atxf
+    // Try multiple paths for init.atxf (the init process, PID 1)
     let paths = [
         "\\EFI\\BOOT\\init.atxf",
         "\\init.atxf",
-        "\\drivers\\ui_shell.atxf",  // Fallback: use ui_shell from drivers
+        "\\drivers\\init.atxf",
     ];
 
     let mut path_buf = [0u16; 64];
@@ -837,7 +837,7 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
 
     let framebuffer_info = setup_framebuffer(bs);
 
-    // Load the init payload (ui_shell.atxf) from the boot volume
+    // Load the init payload (init.atxf) from the boot volume
     let init_payload = load_init_payload(image, bs)
         .unwrap_or_else(ExecutableImage::empty);
 

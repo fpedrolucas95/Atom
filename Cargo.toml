@@ -10,7 +10,11 @@ exclude = [
     "userspace/drivers/keyboard",
     "userspace/drivers/mouse",
     "userspace/drivers/display",
+    "userspace/drivers/terminal",
     "userspace/drivers/ui_shell",
+    "userspace/services/init",
+    "userspace/services/namesvc",
+    "userspace/services/service_manager",
 ]
 resolver = "2"
 
