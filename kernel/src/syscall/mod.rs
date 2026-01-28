@@ -334,15 +334,12 @@ extern "C" fn rust_syscall_dispatcher(
         }
     };
 
-    crate::serial_println!("[SYSCALL_RET] Syscall {} returning: {:#X}", syscall_num, result);
     result
 }
 
 fn sys_mouse_poll() -> u64 {
     // Return next raw mouse byte for userspace driver to process
     if let Some(byte) = crate::input::poll_mouse_byte() {
-        // Debug: Log bytes being returned to userspace
-        crate::serial_println!("[MOUSE_POLL] returning byte: 0x{:02X}", byte);
         return byte as u64;
     }
     EWOULDBLOCK
@@ -429,28 +426,18 @@ fn sys_get_ticks() -> u64 {
 
 /// Debug log from userspace
 fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
-    crate::serial_println!("[DEBUG_LOG] Entry: msg_ptr={:p}, len={}", msg_ptr, len);
-
     if msg_ptr.is_null() || len > 256 {
-        crate::serial_println!("[DEBUG_LOG] Invalid args, returning EINVAL");
         return EINVAL;
     }
 
-    crate::serial_println!("[DEBUG_LOG] Creating slice...");
     let msg = unsafe {
         core::slice::from_raw_parts(msg_ptr, len)
     };
 
-    crate::serial_println!("[DEBUG_LOG] Converting to UTF-8...");
     if let Ok(s) = core::str::from_utf8(msg) {
-        crate::serial_println!("[DEBUG_LOG] Logging message...");
         log_info!("userspace", "{}", s);
-        crate::serial_println!("[DEBUG_LOG] Message logged successfully");
-    } else {
-        crate::serial_println!("[DEBUG_LOG] UTF-8 conversion failed");
     }
 
-    crate::serial_println!("[DEBUG_LOG] Returning ESUCCESS");
     ESUCCESS
 }
 
@@ -647,11 +634,6 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
     };
     let kernel_stack = kernel_stack_phys + KERNEL_STACK_SIZE;
     
-    crate::serial_println!(
-        "[THREAD_CREATE] Allocating kernel stack: phys={:#X} top={:#X} size={} pages={}",
-        kernel_stack_phys, kernel_stack, KERNEL_STACK_SIZE, KERNEL_STACK_SIZE / 4096
-    );
-
     let thread = crate::thread::Thread::new(
         entry_point,
         kernel_stack as u64,
@@ -3294,11 +3276,6 @@ fn spawn_process_internal(
     let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
     
-    crate::serial_println!(
-        "[SPAWN_PROCESS] Allocating kernel stack: phys={:#X} virt={:#X} top={:#X} size={} pages={}",
-        kernel_stack_phys, kernel_stack_virt, kernel_stack_top,
-        KERNEL_STACK_PAGES * PAGE_SIZE, KERNEL_STACK_PAGES
-    );
 
     // Calculate entry point
     let entry_point = text_base + sections.entry_offset;
@@ -3329,16 +3306,12 @@ fn spawn_process_internal(
         
         // Verify write
         let readback = core::ptr::read_volatile(canary_addr);
-        crate::serial_println!(
-            "[CANARY_SET] tid={} name={} addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
-            pid, static_name, canary_addr as u64, readback, STACK_CANARY,
-            kernel_stack_top, bottom, KERNEL_STACK_PAGES * PAGE_SIZE
-        );
         
         if readback != STACK_CANARY {
-            crate::serial_println!(
-                "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
-                readback, STACK_CANARY
+            log_error!(
+                "spawn",
+                "tid={} name={} Canary read-back mismatch! Got {:#X} expected {:#X}",
+                pid, static_name, readback, STACK_CANARY
             );
         }
     }

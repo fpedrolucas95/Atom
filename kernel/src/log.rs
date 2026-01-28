@@ -135,7 +135,7 @@ static mut CURRENT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 static mut VGA_OUTPUT_ENABLED: bool = false;
 
 pub fn init() {
-    set_level(LogLevel::Debug);
+    set_level(LogLevel::Info);
 }
 
 /// Mark that the heap is now available for allocations

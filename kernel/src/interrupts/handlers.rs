@@ -396,8 +396,6 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    // Debug: Log every IRQ1
-    crate::serial_println!("[IRQ1] keyboard handler called");
 
     // Buffer raw keyboard data for userspace driver
     input::on_keyboard_irq();
@@ -411,8 +409,6 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    // Debug: Log every IRQ12
-    crate::serial_println!("[IRQ12] handler called");
     
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();

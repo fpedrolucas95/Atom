@@ -143,13 +143,8 @@ pub fn on_keyboard_irq() {
         }
 
         let scancode = read_data();
-        crate::serial_println!("[IRQ1] scancode: 0x{:02X}", scancode);
         buf.push(scancode);
         count += 1;
-    }
-
-    if count == 0 {
-        crate::serial_println!("[IRQ1] no data available (status check failed)");
     }
 }
 
@@ -171,15 +166,6 @@ pub fn on_mouse_irq() {
         count += 1;
     }
     
-    if count > 0 {
-        // Log raw bytes for debugging
-        if count >= 3 {
-            crate::serial_println!("[IRQ12] {} bytes: [{:02X} {:02X} {:02X}]",
-                count, bytes_debug[0], bytes_debug[1], bytes_debug[2]);
-        } else {
-            crate::serial_println!("[IRQ12] {} bytes", count);
-        }
-    }
 }
 
 /// Poll for next keyboard byte (called from syscall)

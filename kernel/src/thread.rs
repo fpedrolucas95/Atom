@@ -65,7 +65,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use crate::arch::gdt;
-use crate::{log_error, log_info, log_panic};
+use crate::{log_debug, log_error, log_info, log_panic};
 
 use crate::cap::CapabilityTable;
 
@@ -258,15 +258,12 @@ impl Thread {
             
             // Read back to verify write succeeded
             let readback = core::ptr::read_volatile(canary_addr);
-            crate::serial_println!(
-                "[CANARY_SET] tid={} name={} addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
-                id, name, canary_addr as u64, readback, STACK_CANARY, kernel_stack, bottom, kernel_stack_size
-            );
             
             if readback != STACK_CANARY {
-                crate::serial_println!(
-                    "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
-                    readback, STACK_CANARY
+                log_error!(
+                    LOG_ORIGIN,
+                    "tid={} name={} Canary read-back mismatch! Got {:#X} expected {:#X}",
+                    id, name, readback, STACK_CANARY
                 );
             }
             
@@ -495,9 +492,7 @@ impl ThreadList {
         thread_id: ThreadId,
         capability: crate::cap::Capability,
     ) -> Result<crate::cap::CapHandle, crate::cap::CapError> {
-        crate::serial_println!("[ADD_CAPABILITY] Thread {} attempting to lock THREAD_LIST", thread_id);
         let mut threads = self.threads.lock();
-        crate::serial_println!("[ADD_CAPABILITY] Lock acquired for thread {}", thread_id);
         let thread = threads
             .iter_mut()
             .find(|t| t.id == thread_id)
@@ -591,7 +586,7 @@ pub fn thread_count() -> usize {
 pub fn log_user_entry_once(thread_id: ThreadId, ctx: &CpuContext) {
     let mut entries = USERMODE_ENTRIES.lock();
     if entries.insert(thread_id) {
-        log_info!(
+        log_debug!(
             LOG_ORIGIN,
             "Thread {} entering user mode: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X}",
             thread_id,
@@ -612,34 +607,34 @@ pub fn log_user_entry_once(thread_id: ThreadId, ctx: &CpuContext) {
         }
         
         unsafe {
-            log_info!(
+            log_debug!(
                 "DEBUG_IRET",
                 "IRET frame @ kernel RSP={:#016X}:",
                 DEBUG_IRET_KERNEL_RSP
             );
-            log_info!(
+            log_debug!(
                 "DEBUG_IRET",
                 "  [rsp+0]  RIP    = {:#016X} (expected: {:#016X})",
                 DEBUG_IRET_RIP,
                 ctx.rip
             );
-            log_info!(
+            log_debug!(
                 "DEBUG_IRET",
                 "  [rsp+8]  CS     = {:#016X} (expected: 0x000000000000001B)",
                 DEBUG_IRET_CS
             );
-            log_info!(
+            log_debug!(
                 "DEBUG_IRET",
                 "  [rsp+16] RFLAGS = {:#016X}",
                 DEBUG_IRET_RFLAGS
             );
-            log_info!(
+            log_debug!(
                 "DEBUG_IRET",
                 "  [rsp+24] RSP    = {:#016X} (expected: {:#016X})",
                 DEBUG_IRET_RSP,
                 ctx.rsp
             );
-            log_info!(
+            log_debug!(
                 "DEBUG_IRET",
                 "  [rsp+32] SS     = {:#016X} (expected: 0x0000000000000023)",
                 DEBUG_IRET_SS
@@ -791,7 +786,7 @@ pub unsafe fn jump_to_context(context: &CpuContext) -> ! {
     // For first-time user entry, use dedicated enter_user to avoid complex switch logic
     let is_user_mode = (context.cs & 0x3) == 0x3;
     if is_user_mode {
-        log_info!(
+        log_debug!(
             LOG_ORIGIN,
             "Using enter_user for first user jump: RIP={:#016X} RSP={:#016X} CR3={:#016X}",
             context.rip,
@@ -897,7 +892,6 @@ pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
 pub fn force_set_userspace_ctx(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
     let mut threads = THREAD_LIST.threads.lock();
     if let Some(t) = threads.iter_mut().find(|t| t.id == thread_id) {
-        crate::serial_println!("[FORCE_USER_CTX] Thread {} RIP={:#X} RSP={:#X}", thread_id, user_rip, user_rsp);
         t.context.rip = user_rip;
         t.context.rsp = user_rsp;
         t.context.cs = gdt::USER_CODE_SELECTOR;
@@ -921,28 +915,15 @@ where
 /// userspace RIP (return address) and RSP, not the kernel's RIP/RSP.
 /// This is critical for syscalls that may cause context switches (e.g., yield).
 pub fn update_thread_userspace_context(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
-    crate::serial_println!("[UPDATE_CTX] Entry: thread_id={}, user_rip={:#X}, user_rsp={:#X}", thread_id, user_rip, user_rsp);
-
-    crate::serial_println!("[UPDATE_CTX] Acquiring THREAD_LIST lock...");
     let mut threads = THREAD_LIST.threads.lock();
-    crate::serial_println!("[UPDATE_CTX] Lock acquired, searching for thread {}...", thread_id);
 
     if let Some(thread) = threads.iter_mut().find(|t| t.id == thread_id) {
-        crate::serial_println!("[UPDATE_CTX] Thread found, CS={:#X}", thread.context.cs);
         // Only update if this is a userspace thread (CPL=3)
         if (thread.context.cs & 0x3) == 0x3 {
-            crate::serial_println!("[UPDATE_CTX] Updating RIP and RSP...");
             thread.context.rip = user_rip;
             thread.context.rsp = user_rsp;
-            crate::serial_println!("[UPDATE_CTX] Update complete");
-        } else {
-            crate::serial_println!("[UPDATE_CTX] Not a userspace thread, skipping update");
         }
-    } else {
-        crate::serial_println!("[UPDATE_CTX] Thread {} not found!", thread_id);
     }
-
-    crate::serial_println!("[UPDATE_CTX] Releasing lock and returning");
 }
 
 pub fn capture_current_context() -> CpuContext {
@@ -1009,9 +990,7 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
 
     // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
     let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_usermode, to_is_user_thread, to_entry_rip, to_entry_rsp, to_cr3) = {
-        crate::serial_println!("[CONTEXT_SWITCH] Acquiring THREAD_LIST lock for switch from {} to {}", from_id, to_id);
         let mut threads = THREAD_LIST.threads.lock();
-        crate::serial_println!("[CONTEXT_SWITCH] Lock acquired");
 
         let from_idx = threads.iter().position(|t| t.id == from_id)
             .expect("from thread not found in context switch");
@@ -1030,30 +1009,11 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
                 let current_rsp: u64;
                 core::arch::asm!("mov {}, rsp", out(reg) current_rsp);
                 
-                crate::serial_println!(
+                log_error!(
+                    LOG_ORIGIN,
                     "[CANARY_CORRUPT] tid={} name={} canary_addr={:#X} expected={:#X} actual={:#X}",
                     from_id, from_thread.name, canary_addr as u64, STACK_CANARY, actual
                 );
-                crate::serial_println!(
-                    "[CANARY_CORRUPT] stack_top={:#X} bottom={:#X} size={} current_rsp={:#X}",
-                    from_thread.kernel_stack, bottom, from_thread.kernel_stack_size, current_rsp
-                );
-                crate::serial_println!(
-                    "[CANARY_CORRUPT] rsp_out_of_range={} (rsp < bottom OR rsp >= top)",
-                    current_rsp < bottom || current_rsp >= from_thread.kernel_stack
-                );
-                
-                // Dump 64 bytes around canary for forensics
-                crate::serial_println!("[CANARY_CORRUPT] Memory dump around canary:");
-                for offset in -4i64..=4i64 {
-                    let addr = (canary_addr as i64 + offset * 8) as *const u64;
-                    let val = core::ptr::read_volatile(addr);
-                    crate::serial_println!(
-                        "  [{:#X}] = {:#016X} {}",
-                        addr as u64, val,
-                        if offset == 0 { "<-- CANARY" } else { "" }
-                    );
-                }
             }
             
             actual == STACK_CANARY
@@ -1075,7 +1035,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         if let Some((user_rip, user_rsp)) = userspace_return {
             let from_ctx = &mut threads[from_idx].context;
             if (from_ctx.cs & 0x3) == 0x3 {  // Only for userspace threads
-                crate::serial_println!("[CONTEXT_SWITCH] Updating FROM thread {} userspace return: RIP={:#X} RSP={:#X}", from_id, user_rip, user_rsp);
                 from_ctx.rip = user_rip;
                 from_ctx.rsp = user_rsp;
             }
@@ -1100,11 +1059,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         threads[from_idx].context.cr3 = from_cr3;
         threads[to_idx].context.cr3 = to_cr3;
         
-        crate::serial_println!(
-            "[CONTEXT_SWITCH] CR3 fix: from_id={} addr_space={:#X} forced_cr3={:#X} | to_id={} addr_space={:#X} forced_cr3={:#X}",
-            from_id, from_addr_space, from_cr3, to_id, to_addr_space, to_cr3
-        );
-        
         // Get raw pointers to contexts and kernel stack
         let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
         let to_ptr = &threads[to_idx].context as *const CpuContext;
@@ -1114,15 +1068,10 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         // DO NOT trust context.cs - it may contain garbage or kernel CS even for userspace threads
         let has_userspace_return = crate::syscall::get_userspace_return_addr(to_id).is_some();
         
-        crate::serial_println!(
-            "[CONTEXT_SWITCH] TO thread {} has_userspace_return={} context.cs={:#X}",
-            to_id, has_userspace_return, threads[to_idx].context.cs
-        );
-
         // Log if switching to usermode
         if has_userspace_return {
             log_user_entry_once(to_id, &threads[to_idx].context);
-            log_info!(
+            log_debug!(
                 LOG_ORIGIN,
                 "Switching to user context: RIP={:#016X} CS={:#04X} SS={:#04X} CPL=3 CR3={:#016X}",
                 threads[to_idx].context.rip,
@@ -1142,15 +1091,8 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         let to_entry_rip = threads[to_idx].context.rip;
         let to_entry_rsp = threads[to_idx].context.rsp;
         
-        crate::serial_println!(
-            "[CONTEXT_SWITCH] Pointers acquired, to_is_user={} has_ret={} entry_rip={:#X} entry_rsp={:#X}",
-            to_is_user_thread, has_userspace_return, to_entry_rip, to_entry_rsp
-        );
-        crate::serial_println!("[CONTEXT_SWITCH] Releasing lock BEFORE switch");
         (from_ptr, to_ptr, kstack, has_userspace_return, to_is_user_thread, to_entry_rip, to_entry_rsp, to_cr3)
     }; // 🔓 LOCK RELEASED HERE, BEFORE THE SWITCH
-
-    crate::serial_println!("[CONTEXT_SWITCH] Lock released");
 
     // CRITICAL: Update TSS.RSP0 for the new thread BEFORE entering userspace
     // This ensures interrupt frames from usermode go to the correct kernel stack
@@ -1165,7 +1107,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         // Determine target RIP/RSP: use saved return address if exists, else initial context
         let (target_rip, target_rsp) = if to_is_usermode {
             if let Some((urip, ursp)) = crate::syscall::get_userspace_return_addr(to_id) {
-                crate::serial_println!("[CONTEXT_SWITCH] User return from syscall: tid={} rip={:#X} rsp={:#X}", to_id, urip, ursp);
                 (urip, ursp)
             } else {
                 log_error!(
@@ -1176,11 +1117,10 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
                 (to_entry_rip, to_entry_rsp)
             }
         } else {
-            crate::serial_println!("[CONTEXT_SWITCH] First user entry: tid={} rip={:#X} rsp={:#X}", to_id, to_entry_rip, to_entry_rsp);
             (to_entry_rip, to_entry_rsp)
         };
         
-        log_info!(
+        log_debug!(
             LOG_ORIGIN,
             "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} first_time={}",
             to_id, target_rip, target_rsp, to_cr3, !to_is_usermode
@@ -1192,22 +1132,13 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         // Choose the right entry function based on whether this is first-time or syscall return
         if to_is_usermode {
             // Syscall return - restore callee-saved registers (RBX, RBP, R12-R15) from saved context
-            if let Some(gprs) = crate::syscall::get_userspace_gprs(to_id) {
-                crate::serial_println!(
-                    "[CONTEXT_SWITCH] -> enter_user_resume (restore GPRs, rip={:#X}, rsp={:#X}, cr3={:#X})",
-                    target_rip, target_rsp, to_cr3
-                );
-                crate::serial_println!(
-                    "[CONTEXT_SWITCH]    GPRs: rbx={:#X} rbp={:#X} r12={:#X} r13={:#X} r14={:#X} r15={:#X}",
-                    gprs.rbx, gprs.rbp, gprs.r12, gprs.r13, gprs.r14, gprs.r15
-                );
+            if let Some(_gprs) = crate::syscall::get_userspace_gprs(to_id) {
                 // CRITICAL: Pass pointer to GPRs struct (must be stable memory, not stack local)
                 // We need to ensure the USERSPACE_GPRS map entry lives long enough
                 // So we'll get the reference while the lock is held
                 let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
                 if let Some(gprs_ref) = gprs_map.get(&to_id) {
                     let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
-                    crate::serial_println!("[CONTEXT_SWITCH]    GPRs ptr: {:p}", gprs_ptr);
                     drop(gprs_map); // Release lock before entering user
                     unsafe {
                         enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
@@ -1235,25 +1166,16 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
             }
         } else {
             // First-time entry - zero all registers for clean state
-            crate::serial_println!(
-                "[CONTEXT_SWITCH] -> enter_user_first_time (clean state, rip={:#X}, rsp={:#X}, cr3={:#X})",
-                target_rip, target_rsp, to_cr3
-            );
             unsafe {
                 enter_user_first_time(target_rip, target_rsp, to_cr3);
             }
         }
     }
     
-    // Kernel thread switch - use normal context switch
-    crate::serial_println!("[CONTEXT_SWITCH] Kernel-to-kernel switch");
-
     // Validate target context before the switch
     unsafe {
         guard_context_or_halt(&*to_ctx_ptr, "scheduled");
     }
-
-    crate::serial_println!("[CONTEXT_SWITCH] switch_context (no return to this context)");
 
     // Perform the actual context switch with no locks held
     // NOTE: This does NOT return in the linear sense - execution continues
