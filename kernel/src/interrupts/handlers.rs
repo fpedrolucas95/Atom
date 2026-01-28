@@ -201,7 +201,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
         );
             loop { halt(); }
         }
-    
+
         log_panic!(
         LOG_ORIGIN,
         "CPU exception: {} (vector={})",
@@ -300,7 +300,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                     error_code
                 );
             }
-            
+
             // Dump kernel stack to see the IRET frame
             log_panic!(LOG_ORIGIN, "Dumping kernel stack from RSP={:#016X}:", frame.rsp);
             unsafe {
@@ -389,7 +389,7 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
     unsafe {
         TICKS += 1;
     }
-    
+
     ipc::on_timer_tick(get_ticks());
 
     super::apic::send_eoi();
@@ -400,6 +400,9 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
     // Buffer raw keyboard data for userspace driver
     input::on_keyboard_irq();
 
+    // Increment IRQ occurrence counter for userspace polling
+    crate::syscall::increment_irq_count(1);
+
     // Notify userspace handler if registered
     if crate::syscall::has_userspace_irq_handler(1) {
         crate::syscall::notify_irq_handler(1);
@@ -409,9 +412,12 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    
+
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();
+
+    // Increment IRQ occurrence counter for userspace polling
+    crate::syscall::increment_irq_count(12);
 
     // Notify userspace handler if registered
     if crate::syscall::has_userspace_irq_handler(12) {

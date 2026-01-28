@@ -173,12 +173,17 @@ pub fn init() {
 
         IOAPIC_VIRT_BASE = IOAPIC_BASE;
 
-        ioapic_write(0x12, KEYBOARD_INTERRUPT_VECTOR as u32);
-        ioapic_write(0x13, 0x0000_0000);
+        // Redirection table entries start at 0x10, 2 registers per IRQ
+        const IOAPIC_REDTBL_BASE: u32 = 0x10;
+
+        // IRQ1: Keyboard
+        let kbd_idx = IOAPIC_REDTBL_BASE + (1 * 2);
+        ioapic_write(kbd_idx, KEYBOARD_INTERRUPT_VECTOR as u32);
+        ioapic_write(kbd_idx + 1, 0x0000_0000);
 
         // Debug: verify IRQ1 configuration
-        let kbd_low = ioapic_read(0x12);
-        let kbd_high = ioapic_read(0x13);
+        let kbd_low = ioapic_read(kbd_idx);
+        let kbd_high = ioapic_read(kbd_idx + 1);
         log_info!(LOG_ORIGIN, "IRQ1 I/O APIC redtbl[1]: low=0x{:08X}, high=0x{:08X}", kbd_low, kbd_high);
         if (kbd_low & 0x10000) != 0 {
             log_warn!(LOG_ORIGIN, "IRQ1 (keyboard) MASKED in I/O APIC! (bit16=1)");
@@ -186,11 +191,13 @@ pub fn init() {
             log_info!(LOG_ORIGIN, "IRQ1 (keyboard) NOT masked, vector={}", kbd_low & 0xFF);
         }
 
-        ioapic_write(0x28, MOUSE_INTERRUPT_VECTOR as u32);
-        ioapic_write(0x29, 0x0000_0000);
+        // IRQ12: Mouse
+        let mouse_idx = IOAPIC_REDTBL_BASE + (12 * 2);
+        ioapic_write(mouse_idx, MOUSE_INTERRUPT_VECTOR as u32);
+        ioapic_write(mouse_idx + 1, 0x0000_0000);
 
-        let redtbl_low = ioapic_read(0x28);
-        let redtbl_high = ioapic_read(0x29);
+        let redtbl_low = ioapic_read(mouse_idx);
+        let redtbl_high = ioapic_read(mouse_idx + 1);
         log_info!(LOG_ORIGIN, "IRQ12 I/O APIC redtbl[12]: low=0x{:08X}, high=0x{:08X}", redtbl_low, redtbl_high);
         if (redtbl_low & 0x10000) != 0 {
             log_warn!(LOG_ORIGIN, "IRQ12 (mouse) MASKED in I/O APIC! (bit16=1)");
@@ -198,8 +205,10 @@ pub fn init() {
             log_info!(LOG_ORIGIN, "IRQ12 (mouse) NOT masked, vector={}", redtbl_low & 0xFF);
         }
         
-        ioapic_write(0x14, 0x0001_0000);
-        ioapic_write(0x15, 0x0000_0000);
+        // Mask IRQ2 (cascade)
+        let irq2_idx = IOAPIC_REDTBL_BASE + (2 * 2);
+        ioapic_write(irq2_idx, 0x0001_0000); // Set mask bit
+        ioapic_write(irq2_idx + 1, 0x0000_0000);
     }
 
     unsafe { disable_legacy_pic(); }

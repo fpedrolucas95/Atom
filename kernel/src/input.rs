@@ -354,44 +354,36 @@ pub fn init_ps2_mouse_full() {
     }
 
     // 5. Tell mouse to use default settings
-    send_mouse_command(0xF6);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    send_mouse_command(0xF6); // send_mouse_command already consumes ACK
 
     // 6. Set scaling 1:1 (0xE6) - LINEAR movement, no acceleration
     send_mouse_command(0xE6);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
     log_info!("input", "PS/2 mouse: Scaling set to 1:1 (linear)");
 
     // 7. Set resolution to 8 count/mm (0x03) for higher precision
     send_mouse_command(0xE8);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    // Send data byte for resolution
     wait_for_input_buffer();
     write_command(0xD4);
     wait_for_input_buffer();
     write_data(0x03); // 8 count/mm
     wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    let _ = read_data(); // Acknowledge data byte
     log_info!("input", "PS/2 mouse: Resolution set to 8 count/mm");
 
     // 8. Set sample rate to 100 samples/sec
     send_mouse_command(0xF3);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    // Send data byte for sample rate
     wait_for_input_buffer();
     write_command(0xD4);
     wait_for_input_buffer();
     write_data(100);
     wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    let _ = read_data(); // Acknowledge data byte
     log_info!("input", "PS/2 mouse: Sample rate set to 100/sec");
 
     // 9. Enable the mouse (start streaming packets)
     send_mouse_command(0xF4);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
 
     // 10. Verify final controller configuration
     wait_for_input_buffer();

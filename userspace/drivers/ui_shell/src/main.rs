@@ -107,7 +107,7 @@ use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 
-use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers};
+use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
 use libipc::well_known;
 
@@ -432,7 +432,6 @@ struct Compositor {
     fb: Framebuffer,
     wm: WindowManager,
     cursor: CursorState,
-    mouse: MouseDriver,
     event_port: PortId,
     /// Port for receiving application registration messages
     register_port: PortId,
@@ -457,7 +456,6 @@ impl Compositor {
             fb,
             wm: WindowManager::new(),
             cursor: CursorState::new(width, height),
-            mouse: MouseDriver::new(),
             event_port,
             register_port,
             pending_windows: Vec::new(),
@@ -476,7 +474,6 @@ impl Compositor {
 
         log("Desktop: Entering event loop");
 
-        let mut prev_left = false;
         let mut reg_buffer = [0u8; 64];
         let ports = [self.register_port, self.event_port];
 
@@ -487,29 +484,14 @@ impl Compositor {
                 self.handle_app_registration(&reg_buffer[..len]);
             }
 
-            // Poll for application events (e.g., SurfacePresent)
+            // Poll for application events (e.g., SurfacePresent, KeyPress, MouseMove)
             let mut event_buffer = [0u8; 64];
             while let Ok(Some(len)) = try_recv(self.event_port, &mut event_buffer) {
                 self.handle_app_event(&event_buffer[..len]);
             }
 
-            // Process mouse events
-            while let Some(event) = self.mouse.poll_event() {
-                self.cursor.restore_region(&self.fb);
-                self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
-
-                // Handle click
-                if event.left_button && !prev_left {
-                    self.handle_click(self.cursor.x, self.cursor.y);
-                }
-                prev_left = event.left_button;
-
-                self.cursor.save_region(&self.fb);
-                self.draw_cursor();
-            }
-
-            // Keyboard events are received via IPC from the keyboard driver
-            // (handled in handle_app_event when MessageType::KeyPress is received)
+            // Mouse events are now received via IPC from the mouse driver
+            // (handled in handle_app_event)
 
             // Redraw if needed
             if self.dirty {
@@ -518,7 +500,7 @@ impl Compositor {
             }
 
             // Block waiting for IPC messages instead of busy-wait with yield_now()
-            // Timeout of 50ms allows for mouse polling and periodic updates
+            // Timeout of 50ms allows for periodic updates
             let _ = wait_any(&ports, 50);
         }
     }
@@ -630,7 +612,6 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + 3 {
                     if let Some(key_event) = KeyEvent::from_bytes(&data[payload_start..]) {
-                        log("Compositor: Parsed key event successfully");
                         // Check for compositor shortcuts (Escape to quit - debug feature)
                         let scancode = key_event.scancode & 0x7F;
                         if scancode == 0x01 {
@@ -640,28 +621,37 @@ impl Compositor {
 
                         // Get focused window's event port
                         let event_port = if let Some(focused_id) = self.wm.focused_id {
-                            if let Some(window) = self.wm.get_window(focused_id) {
-                                log("Compositor: Focused window found");
-                                window.event_port
-                            } else {
-                                log("Compositor: Focused window ID not found in windows list");
-                                None
-                            }
+                            self.wm.get_window(focused_id).and_then(|w| w.event_port)
                         } else {
-                            log("Compositor: No focused window ID set");
                             None
                         };
 
                         // Forward to focused window
                         if let Some(port) = event_port {
-                            if port == 0 {
-                                log("Compositor: ERROR - event_port is 0 (not registered yet)");
-                            } else {
-                                log("Compositor: Forwarding KeyPress to window");
+                            if port != 0 {
                                 let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
                             }
-                        } else {
-                            log("Compositor: No event_port for focused window");
+                        }
+                    }
+                }
+            }
+            MessageType::MouseMove => {
+                let payload_start = MessageHeader::SIZE;
+                if data.len() >= payload_start + 12 {
+                    if let Some(msg) = MouseMoveEvent::from_bytes(&data[payload_start..]) {
+                        self.cursor.restore_region(&self.fb);
+                        self.cursor.apply_delta(msg.dx as i32, msg.dy as i32, self.fb.width(), self.fb.height());
+                        self.cursor.save_region(&self.fb);
+                        self.draw_cursor();
+                    }
+                }
+            }
+            MessageType::MouseButtonDown => {
+                let payload_start = MessageHeader::SIZE;
+                if data.len() >= payload_start + 9 {
+                    if let Some(msg) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
+                        if msg.button == MouseButton::Left {
+                            self.handle_click(self.cursor.x, self.cursor.y);
                         }
                     }
                 }
@@ -1033,11 +1023,17 @@ fn main() -> ! {
     // Register with name service
     register_with_namesvc("compositor", compositor.event_port);
 
-    // Spawn input drivers - keyboard driver sends events to our event_port (port 1)
-    log("Desktop: Spawning keyboard driver");
+    // Spawn input drivers - drivers send events to our event_port (port 1)
+    log("Desktop: Spawning input drivers");
+
     match spawn_process("keyboard") {
         Ok(_pid) => log("Desktop: Keyboard driver spawned successfully"),
         Err(_) => log("Desktop: Failed to spawn keyboard driver"),
+    }
+
+    match spawn_process("mouse") {
+        Ok(_pid) => log("Desktop: Mouse driver spawned successfully"),
+        Err(_) => log("Desktop: Failed to spawn mouse driver"),
     }
 
     compositor.run()
