@@ -129,43 +129,32 @@ fn read_data() -> u8 {
     }
 }
 
-/// Called from keyboard interrupt handler (IRQ1)
-/// Reads all available bytes and buffers them for userspace
-pub fn on_keyboard_irq() {
-    let mut buf = KEYBOARD_BUFFER.lock();
-    let mut count = 0u8;
-
-    // Read all available keyboard data
-    while read_status() & STATUS_OUTPUT_FULL != 0 {
-        // Check it's not mouse data
-        if read_status() & STATUS_AUX_DATA != 0 {
-            break; // This is mouse data, not keyboard
+/// Internal helper to drain the PS/2 controller's output buffer and route
+/// data to either the keyboard or mouse ring buffer.
+fn handle_ps2_input() {
+    loop {
+        let status = read_status();
+        if (status & STATUS_OUTPUT_FULL) == 0 {
+            break;
         }
 
-        let scancode = read_data();
-        buf.push(scancode);
-        count += 1;
+        let data = read_data();
+        if (status & STATUS_AUX_DATA) != 0 {
+            MOUSE_BUFFER.lock().push(data);
+        } else {
+            KEYBOARD_BUFFER.lock().push(data);
+        }
     }
 }
 
+/// Called from keyboard interrupt handler (IRQ1)
+pub fn on_keyboard_irq() {
+    handle_ps2_input();
+}
+
 /// Called from mouse interrupt handler (IRQ12)
-/// Reads all available bytes and buffers them for userspace
 pub fn on_mouse_irq() {
-    let mut buf = MOUSE_BUFFER.lock();
-    let mut count = 0u32;
-    let mut bytes_debug = [0u8; 16];
-    
-    // Read all available mouse data (marked with AUX bit)
-    while read_status() & (STATUS_OUTPUT_FULL | STATUS_AUX_DATA) == 
-          (STATUS_OUTPUT_FULL | STATUS_AUX_DATA) {
-        let byte = read_data();
-        if (count as usize) < bytes_debug.len() {
-            bytes_debug[count as usize] = byte;
-        }
-        buf.push(byte);
-        count += 1;
-    }
-    
+    handle_ps2_input();
 }
 
 /// Poll for next keyboard byte (called from syscall)

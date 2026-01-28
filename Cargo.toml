@@ -1,16 +1,9 @@
 [workspace]
 members = [
     "kernel",
-    "userspace/libs/syscall",
-]
-# Os drivers userspace serao compilados separadamente como binarios ATXF
-# quando o loader de executaveis estiver pronto.
-# Por enquanto, o kernel usa um shell embutido (shell.rs).
-exclude = [
-    "userspace/drivers/keyboard",
-    "userspace/drivers/mouse",
-    "userspace/drivers/display",
-    "userspace/drivers/ui_shell",
+    "userspace/libs/*",
+    "userspace/drivers/*",
+    "userspace/services/*",
 ]
 resolver = "2"
 

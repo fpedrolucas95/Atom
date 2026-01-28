@@ -1023,18 +1023,8 @@ fn main() -> ! {
     // Register with name service
     register_with_namesvc("compositor", compositor.event_port);
 
-    // Spawn input drivers - drivers send events to our event_port (port 1)
-    log("Desktop: Spawning input drivers");
-
-    match spawn_process("keyboard") {
-        Ok(_pid) => log("Desktop: Keyboard driver spawned successfully"),
-        Err(_) => log("Desktop: Failed to spawn keyboard driver"),
-    }
-
-    match spawn_process("mouse") {
-        Ok(_pid) => log("Desktop: Mouse driver spawned successfully"),
-        Err(_) => log("Desktop: Failed to spawn mouse driver"),
-    }
+    // Note: Input drivers (keyboard, mouse) are now spawned by the INIT process
+    // to ensure proper service orchestration in the microkernel architecture.
 
     compositor.run()
 }

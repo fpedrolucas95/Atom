@@ -103,6 +103,7 @@ USERSPACE_DRIVERS=(
 
 # System services
 USERSPACE_SERVICES=(
+    "init"
     "namesvc"
     "service_manager"
 )
@@ -230,16 +231,19 @@ if [ "$KERNEL_ONLY" != true ]; then
         if cargo build --release 2>build.log; then
             popd > /dev/null
 
-            # Find the ELF binary name from Cargo.toml
-            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' || echo "$driver")
+            # Find the ELF binary name from Cargo.toml (remove carriage returns)
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$driver")
             if [ -z "$bin_name" ]; then
                 bin_name="$driver"
             fi
 
-            elf_path="$driver_path/target/x86_64-unknown-none/release/$bin_name"
+            elf_path="target/x86_64-unknown-none/release/$bin_name"
+
+            # echo "DEBUG: service=$service bin_name=$bin_name elf_path=$elf_path"
+
             atxf_path="efi/drivers/${driver}.atxf"
 
-            if [ -f "$elf_path" ]; then
+            if ls "$elf_path" >/dev/null 2>&1; then
                 step "  Converting $driver to ATXF..."
                 if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$driver.log; then
                     success "$driver.atxf created"
@@ -276,16 +280,20 @@ if [ "$KERNEL_ONLY" != true ]; then
         if cargo build --release 2>build.log; then
             popd > /dev/null
 
-            # Find the ELF binary name from Cargo.toml
-            bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' || echo "$service")
+            # Find the ELF binary name from Cargo.toml (remove carriage returns)
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$service")
             if [ -z "$bin_name" ]; then
                 bin_name="$service"
             fi
 
-            elf_path="$service_path/target/x86_64-unknown-none/release/$bin_name"
+            elf_path="target/x86_64-unknown-none/release/$bin_name"
+
             atxf_path="efi/drivers/${service}.atxf"
 
-            if [ -f "$elf_path" ]; then
+            # Use ls to check existence and handle potential issues with [ -f ]
+            if ls "$elf_path" >/dev/null 2>&1; then
+                # Debug
+                # echo "Found ELF at $elf_path"
                 step "  Converting $service to ATXF..."
                 if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$service.log; then
                     success "$service.atxf created"
@@ -303,10 +311,16 @@ if [ "$KERNEL_ONLY" != true ]; then
         fi
     done
 
-    # Copy ui_shell.atxf to EFI boot directory as the init payload
-    if [ -f "efi/drivers/ui_shell.atxf" ]; then
-        cp efi/drivers/ui_shell.atxf efi/EFI/BOOT/init.atxf
-        success "init.atxf created from ui_shell"
+    # Copy init.atxf to EFI boot directory as the bootstrap payload
+    if [ -f "efi/drivers/init.atxf" ]; then
+        cp efi/drivers/init.atxf efi/EFI/BOOT/init.atxf
+        success "init.atxf created from userspace/init"
+    else
+        # Fallback to ui_shell if init is not found (backward compatibility)
+        if [ -f "efi/drivers/ui_shell.atxf" ]; then
+            cp efi/drivers/ui_shell.atxf efi/EFI/BOOT/init.atxf
+            warning "init.atxf created from ui_shell (init not found)"
+        fi
     fi
 
     success "Userspace build completed"
