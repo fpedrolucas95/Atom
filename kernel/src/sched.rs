@@ -86,7 +86,6 @@ impl ReadyQueues {
                             // Thread is not Ready (e.g. WaitingIpc, Blocked, Exited)
                             // Do not put it back in the queue.
                             // It will be re-added when it becomes Ready.
-                            crate::serial_println!("[SCHED_DEBUG] pop_next: thread {} is in state {:?}, removing from queue", id, state);
                         }
                     }
                 }
@@ -290,7 +289,6 @@ impl Scheduler {
         let priority = self.get_priority(id);
         thread::set_thread_state(id, ThreadState::Ready);
         self.ready.lock().push(id, priority);
-        crate::serial_println!("[SCHED_DEBUG] mark_thread_ready: thread {} added to queue (priority={:?})", id, priority);
     }
 
     fn current_thread(&self) -> Option<ThreadId> {
