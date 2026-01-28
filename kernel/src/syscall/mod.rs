@@ -1268,55 +1268,8 @@ fn sys_ipc_try_recv(
         }
 
         Ok(None) => {
-            // No message available, block the thread
-            log_debug!(
-                LOG_ORIGIN,
-                "ipc_try_recv blocking (caller={}, port_id={})",
-                caller,
-                port_id
-            );
-
-            if let Err(e) = crate::ipc::register_waiter(port_id, caller) {
-                log_error!(LOG_ORIGIN, "Failed to register waiter: {:?}", e);
-                return EINVAL;
-            }
-
-            crate::thread::set_thread_state(caller, crate::thread::ThreadState::WaitingIpc);
-
-            // Yield to other threads - we will be woken up when a message arrives
-            crate::sched::yield_current();
-
-            // After wakeup, try to receive the message that woke us up
-            match crate::ipc::try_receive_message(port_id, caller) {
-                Ok(Some(msg)) => {
-                    let bytes_to_copy =
-                        core::cmp::min(msg.payload.len(), buffer_size as usize);
-
-                    if buffer_ptr != 0 && bytes_to_copy > 0 {
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                msg.payload.as_ptr(),
-                                buffer_ptr as *mut u8,
-                                bytes_to_copy
-                            );
-                        }
-                    }
-
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "ipc_try_recv delivered {} bytes after wakeup (caller={}, port_id={})",
-                        bytes_to_copy,
-                        caller,
-                        port_id
-                    );
-
-                    bytes_to_copy as u64
-                }
-                _ => {
-                    // Spurious wakeup or error - let userspace retry
-                    EWOULDBLOCK
-                }
-            }
+            // No message available - return immediately (non-blocking)
+            EWOULDBLOCK
         }
 
         Err(crate::ipc::IpcError::InvalidPort) => {
