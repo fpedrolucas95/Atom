@@ -5,10 +5,15 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use atom_syscall::io::{port_read_u8, port_write_u8};
 use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
@@ -16,6 +21,46 @@ use atom_syscall::debug::log;
 
 use libipc::messages::{MessageType, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::{send_message_async, register_service, lookup_service};
+
+// ============================================================================
+// Simple Bump Allocator for Userspace
+// ============================================================================
+
+const HEAP_SIZE: usize = 64 * 1024; // 64 KB heap
+
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    next: AtomicUsize,
+}
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self { heap: UnsafeCell::new([0; HEAP_SIZE]), next: AtomicUsize::new(0) }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let align = layout.align().max(16);
+        loop {
+            let current = self.next.load(Ordering::Relaxed);
+            let aligned = (current + align - 1) & !(align - 1);
+            let new_next = aligned + layout.size();
+            if new_next > HEAP_SIZE { return core::ptr::null_mut(); }
+            if self.next.compare_exchange_weak(current, new_next, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                return (self.heap.get() as *mut u8).add(aligned);
+            }
+        }
+    }
+    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_: Layout) -> ! { loop {} }
 
 // ============================================================================
 // PS/2 Controller Constants
@@ -37,6 +82,7 @@ const CMD_AUX_PREFIX: u8 = 0xD4;
 const MOUSE_SET_DEFAULTS: u8 = 0xF6;
 const MOUSE_ENABLE_STREAMING: u8 = 0xF4;
 const MOUSE_SET_SAMPLE_RATE: u8 = 0xF3;
+const MOUSE_GET_ID: u8 = 0xF2;
 const MOUSE_SET_RESOLUTION: u8 = 0xE8;
 const MOUSE_SET_SCALING_1_1: u8 = 0xE6;
 
