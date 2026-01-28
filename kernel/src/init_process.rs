@@ -1,25 +1,26 @@
 // kernel/src/init_process.rs
 //
-// Init Process Bootstrap - Microkernel UI Shell Loader
+// Init Process Bootstrap - Loads the init process (PID 1)
 //
-// This module is responsible for loading and executing the UI shell as the
-// first userspace process. The kernel does NOT contain any UI logic - all
-// rendering, window management, and input handling runs in userspace.
+// This module is responsible for loading and executing the init process as the
+// first userspace process. The kernel does NOT contain any UI or service
+// orchestration logic - all of that runs in userspace via the init process.
 //
-// Key responsibilities:
-// - Load ui_shell.atxf from the boot payload provided by the bootloader
+// The init process (init.atxf) is responsible for:
+// - Spawning namesvc (service discovery)
+// - Spawning service_manager (lifecycle management)
+// - Spawning userspace drivers (keyboard, mouse, display)
+// - Spawning ui_shell (compositor / window manager)
+// - Spawning applications (terminal)
+//
+// Key responsibilities of this module:
+// - Load init.atxf from the boot payload provided by the bootloader
 // - Parse and validate the ATXF executable format
-// - Create a proper userspace address space for the UI shell
-// - Grant framebuffer and input capabilities via the capability system
+// - Create a proper userspace address space for the init process
+// - Grant root capabilities to the init process
 // - Transfer control to the userspace process in Ring 3
 //
-// CRITICAL: This module must NOT:
-// - Contain any UI/graphics code
-// - Provide fallback shells or compositors
-// - Mock or simulate UI functionality
-// - Use the embedded init image as a UI replacement
-//
-// If the UI shell cannot be loaded, the system MUST fail loudly.
+// If the init process cannot be loaded, the system MUST fail loudly.
 
 use crate::boot::BootInfo;
 use crate::cap::{self, CapPermissions, InputDeviceType, ResourceType};
@@ -37,7 +38,7 @@ const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
 const USER_STACK_TOP: usize = 0x0000_8000_0000;
 const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
 
-/// Result of launching the init process (UI shell)
+/// Result of launching the init process
 #[allow(dead_code)]
 pub struct InitProcess {
     pub pid: ThreadId,
@@ -59,28 +60,20 @@ pub enum InitError {
     ThreadCreationFailed,
     /// Failed to grant required capabilities
     CapabilityError,
-    /// Framebuffer not available (required for UI shell)
-    NoFramebuffer,
 }
 
-/// Launch the init process (UI shell) from the boot payload.
+/// Launch the init process from the boot payload.
 ///
-/// This function loads ui_shell.atxf from the boot image, creates a userspace
-/// process, grants it the necessary capabilities (framebuffer, input), and
-/// schedules it for execution.
+/// This function loads init.atxf from the boot image, creates a userspace
+/// process, grants it root capabilities, and schedules it for execution.
 ///
-/// # Panics
+/// The init process will then spawn all other services and drivers:
+/// namesvc, service_manager, keyboard, mouse, display, ui_shell, terminal.
 ///
-/// This function will cause a system halt if:
-/// - No boot payload is provided
-/// - The boot payload is not a valid ATXF executable
-/// - Memory allocation fails
-/// - Capability granting fails
-///
-/// The system CANNOT continue without a UI shell - there are no fallbacks.
+/// The system CANNOT continue without init - there are no fallbacks.
 pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
     log_info!(LOG_ORIGIN, "===========================================");
-    log_info!(LOG_ORIGIN, "MICROKERNEL INIT: Loading UI shell from boot payload");
+    log_info!(LOG_ORIGIN, "MICROKERNEL: Loading init process (PID 1)");
     log_info!(LOG_ORIGIN, "===========================================");
 
     // Step 1: Validate boot payload exists
@@ -91,26 +84,13 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
         );
         log_panic!(
             LOG_ORIGIN,
-            "The kernel requires ui_shell.atxf to be loaded by the bootloader."
+            "The kernel requires init.atxf to be loaded by the bootloader."
         );
         log_panic!(
             LOG_ORIGIN,
-            "Cannot continue without a UI shell. System halting."
+            "Cannot continue without the init process. System halting."
         );
         return Err(InitError::NoBootPayload);
-    }
-
-    // Step 2: Validate framebuffer is available
-    if !boot_info.framebuffer_present {
-        log_panic!(
-            LOG_ORIGIN,
-            "FATAL: No framebuffer available!"
-        );
-        log_panic!(
-            LOG_ORIGIN,
-            "The UI shell requires framebuffer access. System halting."
-        );
-        return Err(InitError::NoFramebuffer);
     }
 
     let payload_ptr = boot_info.init_payload.ptr;
@@ -123,7 +103,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
         payload_size
     );
 
-    // Step 3: Validate ATXF magic before full parsing
+    // Step 2: Validate ATXF magic before full parsing
     let payload_bytes =
         unsafe { core::slice::from_raw_parts(payload_ptr, payload_size) };
 
@@ -159,7 +139,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
 
     log_info!(LOG_ORIGIN, "ATXF magic validated: 0x{:08X}", magic);
 
-    // Step 4: Parse the executable
+    // Step 3: Parse the executable
     let sections = match executable::parse_image(payload_bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -181,41 +161,42 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
         sections.entry_offset
     );
 
-    // Step 5: Create the UI shell process
+    // Step 4: Create the init process
     let pid = ThreadId::new();
-    log_info!(LOG_ORIGIN, "Creating UI shell process with PID {}", pid);
+    log_info!(LOG_ORIGIN, "Creating init process with PID {}", pid);
 
-    let init = create_ui_shell_process(pid, &sections, boot_info)?;
+    let init = create_init_process(pid, &sections)?;
 
     log_info!(
         LOG_ORIGIN,
-        "UI shell process created: entry=0x{:X}, stack=0x{:X}",
+        "Init process created: entry=0x{:X}, stack=0x{:X}",
         init.entry_point,
         init.user_stack_top
     );
 
-    // Step 6: Grant capabilities to the UI shell
-    grant_ui_shell_capabilities(pid, boot_info)?;
+    // Step 5: Grant capabilities to the init process
+    // Init gets root capabilities so it can spawn and manage all services
+    grant_init_capabilities(pid, boot_info)?;
 
     log_info!(LOG_ORIGIN, "===========================================");
-    log_info!(LOG_ORIGIN, "UI shell ready for execution");
-    log_info!(LOG_ORIGIN, "Microkernel architecture: All UI runs in userspace");
+    log_info!(LOG_ORIGIN, "Init process ready for execution");
+    log_info!(LOG_ORIGIN, "Init will spawn: namesvc, service_manager,");
+    log_info!(LOG_ORIGIN, "  keyboard, mouse, display, ui_shell, terminal");
     log_info!(LOG_ORIGIN, "===========================================");
 
     Ok(init)
 }
 
-/// Create the UI shell userspace process
-fn create_ui_shell_process(
+/// Create the init userspace process
+fn create_init_process(
     pid: ThreadId,
     sections: &executable::ExecutableSections,
-    _boot_info: &BootInfo,
 ) -> Result<InitProcess, InitError> {
     // Use kernel's page table for now (simplified approach)
     let kernel_cr3 = crate::arch::read_cr3() as usize;
 
     // Load executable into memory
-    let executable = load_ui_shell_executable(sections)?;
+    let executable = load_executable(sections)?;
     let user_stack_top = allocate_user_stack()?;
     let kernel_stack_top = allocate_kernel_stack()?;
 
@@ -241,15 +222,15 @@ fn create_ui_shell_process(
         let bottom = kernel_stack_top - (KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
         let canary_addr = bottom as *mut u64;
         core::ptr::write_volatile(canary_addr, STACK_CANARY);
-        
+
         // Verify write
         let readback = core::ptr::read_volatile(canary_addr);
         crate::serial_println!(
-            "[CANARY_SET] tid={} name=ui_shell addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
+            "[CANARY_SET] tid={} name=init addr={:#X} val={:#X} (expected={:#X}) top={:#X} bottom={:#X} size={}",
             pid, canary_addr as u64, readback, STACK_CANARY,
             kernel_stack_top, bottom, KERNEL_STACK_PAGES * PAGE_SIZE
         );
-        
+
         if readback != STACK_CANARY {
             crate::serial_println!(
                 "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
@@ -259,6 +240,7 @@ fn create_ui_shell_process(
     }
 
     // Create the thread with its own capability table
+    // Init gets High priority as it orchestrates the entire boot
     let thread = Thread {
         id: pid,
         state: ThreadState::Ready,
@@ -266,8 +248,8 @@ fn create_ui_shell_process(
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
         address_space: kernel_cr3 as u64,
-        priority: ThreadPriority::High, // UI shell gets high priority
-        name: "ui_shell",
+        priority: ThreadPriority::High,
+        name: "init",
         capability_table: cap::create_capability_table(pid),
     };
 
@@ -282,8 +264,8 @@ fn create_ui_shell_process(
     })
 }
 
-/// Load the UI shell executable sections into memory
-fn load_ui_shell_executable(
+/// Load executable sections into memory
+fn load_executable(
     sections: &executable::ExecutableSections,
 ) -> Result<LoadedExecutable, InitError> {
     let text_base = executable::USER_EXEC_LOAD_BASE;
@@ -410,7 +392,7 @@ fn load_ui_shell_executable(
     })
 }
 
-/// Allocate user stack for the UI shell process
+/// Allocate user stack for the init process
 fn allocate_user_stack() -> Result<usize, InitError> {
     let virt_base = USER_STACK_TOP - USER_STACK_SIZE;
     let phys_base = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
@@ -455,74 +437,78 @@ fn allocate_kernel_stack() -> Result<u64, InitError> {
     Ok(top)
 }
 
-/// Grant framebuffer and input capabilities to the UI shell process
-fn grant_ui_shell_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<(), InitError> {
-    log_info!(LOG_ORIGIN, "Granting capabilities to UI shell process");
+/// Grant capabilities to the init process.
+///
+/// The init process needs broad capabilities since it spawns and
+/// orchestrates all other services. It gets framebuffer and input
+/// capabilities which it can delegate to child processes.
+fn grant_init_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<(), InitError> {
+    log_info!(LOG_ORIGIN, "Granting capabilities to init process");
 
-    // Grant framebuffer capability
-    let fb = &boot_info.framebuffer;
-    let fb_info = graphics::get_framebuffer_info();
+    // Grant framebuffer capability (init delegates to ui_shell via spawn)
+    if boot_info.framebuffer_present {
+        let fb = &boot_info.framebuffer;
+        let fb_info = graphics::get_framebuffer_info();
 
-    if let Some((address, width, height, stride, bpp)) = fb_info {
-        let fb_resource = ResourceType::Framebuffer {
-            address: address as u64,
-            width,
-            height,
-            stride,
-            bytes_per_pixel: bpp as u8,
-        };
+        if let Some((address, width, height, stride, bpp)) = fb_info {
+            let fb_resource = ResourceType::Framebuffer {
+                address: address as u64,
+                width,
+                height,
+                stride,
+                bytes_per_pixel: bpp as u8,
+            };
 
-        let fb_perms = CapPermissions::READ.union(CapPermissions::WRITE);
-        match cap::create_root_capability(fb_resource, pid, fb_perms) {
-            Ok(cap) => {
-                thread::add_thread_capability(pid, cap)
-                    .map_err(|_| InitError::CapabilityError)?;
-                log_info!(
-                    LOG_ORIGIN,
-                    "Framebuffer capability granted: {}x{} @ 0x{:X}",
-                    width,
-                    height,
-                    address
-                );
+            let fb_perms = CapPermissions::READ
+                .union(CapPermissions::WRITE)
+                .union(CapPermissions::GRANT);
+            match cap::create_root_capability(fb_resource, pid, fb_perms) {
+                Ok(cap) => {
+                    thread::add_thread_capability(pid, cap)
+                        .map_err(|_| InitError::CapabilityError)?;
+                    log_info!(
+                        LOG_ORIGIN,
+                        "Framebuffer capability granted: {}x{} @ 0x{:X}",
+                        width,
+                        height,
+                        address
+                    );
+                }
+                Err(e) => {
+                    log_error!(
+                        LOG_ORIGIN,
+                        "Failed to create framebuffer capability: {:?}",
+                        e
+                    );
+                    return Err(InitError::CapabilityError);
+                }
             }
-            Err(e) => {
-                log_error!(
-                    LOG_ORIGIN,
-                    "Failed to create framebuffer capability: {:?}",
-                    e
-                );
-                return Err(InitError::CapabilityError);
-            }
+        } else {
+            let fb_resource = ResourceType::Framebuffer {
+                address: fb.address as u64,
+                width: fb.width,
+                height: fb.height,
+                stride: fb.pixels_per_scan_line,
+                bytes_per_pixel: 4,
+            };
+
+            let fb_perms = CapPermissions::READ
+                .union(CapPermissions::WRITE)
+                .union(CapPermissions::GRANT);
+            cap::create_root_capability(fb_resource, pid, fb_perms)
+                .map_err(|_| InitError::CapabilityError)
+                .and_then(|cap| {
+                    thread::add_thread_capability(pid, cap)
+                        .map_err(|_| InitError::CapabilityError)
+                })?;
         }
-    } else {
-        log_info!(
-            LOG_ORIGIN,
-            "No framebuffer info available, using boot info: {}x{}",
-            fb.width,
-            fb.height
-        );
-        let fb_resource = ResourceType::Framebuffer {
-            address: fb.address as u64,
-            width: fb.width,
-            height: fb.height,
-            stride: fb.pixels_per_scan_line,
-            bytes_per_pixel: 4,
-        };
-
-        let fb_perms = CapPermissions::READ.union(CapPermissions::WRITE);
-        cap::create_root_capability(fb_resource, pid, fb_perms)
-            .map_err(|_| InitError::CapabilityError)
-            .and_then(|cap| {
-                thread::add_thread_capability(pid, cap)
-                    .map_err(|_| InitError::CapabilityError)
-            })?;
     }
 
     // Grant keyboard input capability
     let kbd_resource = ResourceType::InputDevice {
         device_type: InputDeviceType::Keyboard,
     };
-    let kbd_perms = CapPermissions::READ;
+    let kbd_perms = CapPermissions::READ.union(CapPermissions::GRANT);
     match cap::create_root_capability(kbd_resource, pid, kbd_perms) {
         Ok(cap) => {
             thread::add_thread_capability(pid, cap)
@@ -543,7 +529,7 @@ fn grant_ui_shell_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<()
     let mouse_resource = ResourceType::InputDevice {
         device_type: InputDeviceType::Mouse,
     };
-    let mouse_perms = CapPermissions::READ;
+    let mouse_perms = CapPermissions::READ.union(CapPermissions::GRANT);
     match cap::create_root_capability(mouse_resource, pid, mouse_perms) {
         Ok(cap) => {
             thread::add_thread_capability(pid, cap)

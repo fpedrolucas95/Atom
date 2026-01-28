@@ -70,11 +70,9 @@ mod executable;
 mod init_process;
 mod driver_registry;
 mod drivers;
-// NOTE: service_manager is not used in the current microkernel architecture.
-// The UI shell (ui_shell.atxf) is loaded directly from the boot payload.
-// Future versions may use a service manager for additional userspace services.
-#[allow(dead_code)]
-mod service_manager;
+// NOTE: service_manager and namesvc run as userspace processes.
+// They are spawned by the init process (PID 1), not by the kernel.
+// See userspace/services/ for their implementations.
 mod util;
 
 // Microkernel architecture: All UI components run in userspace.
@@ -171,39 +169,35 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     }
 
     // =======================================================================
-    // MICROKERNEL ARCHITECTURE: Launch UI Shell as First Userspace Process
+    // MICROKERNEL ARCHITECTURE: Launch Init Process (PID 1)
     // =======================================================================
     //
-    // The kernel does NOT contain any UI logic. All rendering, window
-    // management, and input handling runs in userspace via ui_shell.atxf.
+    // The kernel ONLY spawns the init process. Init then orchestrates:
+    //   1. namesvc (service discovery)
+    //   2. service_manager (lifecycle management)
+    //   3. userspace drivers (keyboard, mouse, display)
+    //   4. ui_shell (compositor / window manager)
+    //   5. terminal (and other applications)
     //
-    // The bootloader MUST provide a valid ATXF executable as the init payload.
-    // If the payload is missing or invalid, the system WILL halt.
-    // There are NO fallback shells or embedded UI components.
-    //
-    // This enforces proper separation between kernel and userspace.
+    // The kernel does NOT contain UI, service, or driver orchestration logic.
     // =======================================================================
 
-    log_info!(LOG_INIT_PROC, "Loading UI shell from boot payload...");
+    log_info!(LOG_INIT_PROC, "Loading init process from boot payload...");
     match init_process::launch_init(boot_info) {
         Ok(init) => {
             log_info!(
                 LOG_INIT_PROC,
-                "UI shell loaded successfully (pid={}, entry=0x{:X})",
+                "Init process loaded (pid={}, entry=0x{:X})",
                 init.pid,
                 init.entry_point
             );
         }
         Err(e) => {
             log_panic!(LOG_INIT_PROC, "================================================");
-            log_panic!(LOG_INIT_PROC, "FATAL: Failed to load UI shell: {:?}", e);
+            log_panic!(LOG_INIT_PROC, "FATAL: Failed to load init process: {:?}", e);
             log_panic!(LOG_INIT_PROC, "================================================");
-            log_panic!(LOG_INIT_PROC, "The kernel requires a valid ui_shell.atxf payload");
-            log_panic!(LOG_INIT_PROC, "to be provided by the bootloader. Without the UI");
-            log_panic!(LOG_INIT_PROC, "shell, the system cannot operate.");
-            log_panic!(LOG_INIT_PROC, "");
-            log_panic!(LOG_INIT_PROC, "This is NOT a fallback scenario - the microkernel");
-            log_panic!(LOG_INIT_PROC, "architecture requires all UI to run in userspace.");
+            log_panic!(LOG_INIT_PROC, "The kernel requires a valid init.atxf payload");
+            log_panic!(LOG_INIT_PROC, "to be provided by the bootloader.");
             log_panic!(LOG_INIT_PROC, "================================================");
             log_panic!(LOG_INIT_PROC, "SYSTEM HALTED");
             log_panic!(LOG_INIT_PROC, "================================================");
@@ -216,11 +210,8 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     log_info!(LOG_KERNEL_INIT, "===========================================");
     log_info!(LOG_KERNEL_INIT, "MICROKERNEL READY");
     log_info!(LOG_KERNEL_INIT, "===========================================");
-    log_info!(LOG_KERNEL_INIT, "All UI functionality runs in userspace.");
-    log_info!(LOG_KERNEL_INIT, "The kernel provides only:");
-    log_info!(LOG_KERNEL_INIT, "  - Syscalls for framebuffer/input access");
-    log_info!(LOG_KERNEL_INIT, "  - Capability-based security");
-    log_info!(LOG_KERNEL_INIT, "  - IPC for inter-process communication");
+    log_info!(LOG_KERNEL_INIT, "Kernel provides: syscalls, IPC, capabilities");
+    log_info!(LOG_KERNEL_INIT, "Init orchestrates: services, drivers, UI");
     log_info!(LOG_KERNEL_INIT, "===========================================");
 
     log_info!(LOG_KERNEL_INIT, "Handing over to scheduler.");
