@@ -112,14 +112,17 @@ impl NsRegisterRequest {
 #[derive(Debug, Clone)]
 pub struct NsLookupRequest {
     pub name: String,
+    /// Port where the name service should send the response
+    pub reply_port: u64,
 }
 
 impl NsLookupRequest {
     /// Serialize to bytes
-    /// Format: [msg_type: u32][name_len: u32][name: bytes]
+    /// Format: [msg_type: u32][reply_port: u64][name_len: u32][name: bytes]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(8 + self.name.len());
+        let mut buf = Vec::with_capacity(16 + self.name.len());
         buf.extend_from_slice(&(NsMessageType::Lookup as u32).to_le_bytes());
+        buf.extend_from_slice(&self.reply_port.to_le_bytes());
         buf.extend_from_slice(&(self.name.len() as u32).to_le_bytes());
         buf.extend_from_slice(self.name.as_bytes());
         buf
@@ -127,16 +130,21 @@ impl NsLookupRequest {
 
     /// Parse from bytes
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 8 {
+        if data.len() < 16 {
             return None;
         }
-        let name_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-        if data.len() < 8 + name_len {
+        let reply_port = u64::from_le_bytes([
+            data[4], data[5], data[6], data[7],
+            data[8], data[9], data[10], data[11],
+        ]);
+        let name_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+        if data.len() < 16 + name_len {
             return None;
         }
-        let name = core::str::from_utf8(&data[8..8 + name_len]).ok()?;
+        let name = core::str::from_utf8(&data[16..16 + name_len]).ok()?;
         Some(Self {
             name: String::from(name),
+            reply_port,
         })
     }
 }
@@ -462,16 +470,64 @@ impl SmListResponse {
 // Client Helpers
 // ============================================================================
 
-/// Helper to lookup a service port by name
-/// Returns the port if found, None otherwise
-pub fn lookup_service(_name: &str) -> Option<u64> {
-    // TODO: Implement actual IPC call to name service
-    // For now, return well-known ports for system services
-    None
+/// Maximum length of a service name in the name service protocol
+pub const MAX_SERVICE_NAME_LEN: usize = 32;
+
+/// Register a service with the name service (fire-and-forget).
+///
+/// Builds an `NsRegister` message and sends it to the well-known
+/// name-service port. Uses a stack buffer to avoid heap allocation.
+pub fn ns_register(service_name: &str, port: u64) {
+    let name_len = service_name.len().min(MAX_SERVICE_NAME_LEN);
+    let total = 16 + name_len;
+    let mut buf = [0u8; 16 + MAX_SERVICE_NAME_LEN];
+    buf[0..4].copy_from_slice(&(NsMessageType::Register as u32).to_le_bytes());
+    buf[4..12].copy_from_slice(&port.to_le_bytes());
+    buf[12..16].copy_from_slice(&(name_len as u32).to_le_bytes());
+    buf[16..16 + name_len].copy_from_slice(&service_name.as_bytes()[..name_len]);
+
+    let _ = atom_syscall::ipc::send(NAME_SERVICE_PORT, &buf[..total]);
 }
 
-/// Helper to register with the name service
-pub fn register_service(_name: &str, _port: u64) -> bool {
-    // TODO: Implement actual IPC call to name service
-    false
+/// Look up a service port by name via the name service.
+///
+/// Sends an `NsLookup` request that includes `reply_port` so the
+/// name service knows where to deliver the response.  Blocks up to
+/// `timeout_ms` milliseconds waiting for the reply.
+///
+/// Returns `Some(port)` on success, `None` on timeout / error.
+pub fn ns_lookup(service_name: &str, reply_port: u64, timeout_ms: u64) -> Option<u64> {
+    let name_len = service_name.len().min(MAX_SERVICE_NAME_LEN);
+    let total = 16 + name_len;
+    let mut buf = [0u8; 16 + MAX_SERVICE_NAME_LEN];
+    buf[0..4].copy_from_slice(&(NsMessageType::Lookup as u32).to_le_bytes());
+    buf[4..12].copy_from_slice(&reply_port.to_le_bytes());
+    buf[12..16].copy_from_slice(&(name_len as u32).to_le_bytes());
+    buf[16..16 + name_len].copy_from_slice(&service_name.as_bytes()[..name_len]);
+
+    if atom_syscall::ipc::send(NAME_SERVICE_PORT, &buf[..total]).is_err() {
+        return None;
+    }
+
+    // Wait for the name service to reply on our port
+    let ports = [reply_port];
+    if atom_syscall::ipc::wait_any(&ports, timeout_ms).is_err() {
+        return None;
+    }
+
+    let mut resp = [0u8; 16];
+    if let Ok(Some(len)) = atom_syscall::ipc::try_recv(reply_port, &mut resp) {
+        if len >= 12 {
+            let msg_type = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+            if msg_type == NsMessageType::Response as u32 {
+                let port = u64::from_le_bytes([
+                    resp[4], resp[5], resp[6], resp[7],
+                    resp[8], resp[9], resp[10], resp[11],
+                ]);
+                return Some(port);
+            }
+        }
+    }
+
+    None
 }

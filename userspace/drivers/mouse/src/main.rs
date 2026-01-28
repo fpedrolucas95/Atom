@@ -59,25 +59,27 @@ use core::panic::PanicInfo;
 
 // Use the atom_syscall library for all kernel interactions
 use atom_syscall::input::MouseDriver;
-use atom_syscall::ipc::{create_port, PortId, send};
+use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
 use libipc::messages::{MessageType, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
 use libipc::well_known;
+use libipc::services::{ns_register, ns_lookup};
 
 fn main() -> ! {
     log("Mouse Driver: Starting userspace driver");
 
-    // Well-known port: compositor event_port is always port 1
-    // (created first in Compositor::new())
-    const COMPOSITOR_EVENT_PORT: PortId = 1;
-
     // Create our IPC port and register with name service
-    if let Ok(our_port) = create_port() {
-        register_with_namesvc("mouse", our_port);
-    }
+    let our_port = create_port().expect("Mouse: failed to create port");
+    ns_register("mouse", our_port);
+
+    // Resolve the compositor event port via the name service instead
+    // of hard-coding PortId = 1.  Retry a few times since the
+    // compositor may not have registered yet at boot.
+    let compositor_port = resolve_compositor_port(our_port);
+    log("Mouse Driver: Compositor port resolved");
 
     let mut driver = MouseDriver::new();
     let mut prev_buttons = [false; 3]; // Left, Right, Middle
@@ -95,7 +97,7 @@ fn main() -> ! {
                     dx: event.dx as i16,
                     dy: event.dy as i16,
                 };
-                let _ = send_message_async(COMPOSITOR_EVENT_PORT, MessageType::MouseMove, &move_msg.to_bytes());
+                let _ = send_message_async(compositor_port, MessageType::MouseMove, &move_msg.to_bytes());
             }
 
             // 2. Handle buttons
@@ -113,7 +115,7 @@ fn main() -> ! {
                         x: 0,
                         y: 0,
                     };
-                    let _ = send_message_async(COMPOSITOR_EVENT_PORT, msg_type, &button_msg.to_bytes());
+                    let _ = send_message_async(compositor_port, msg_type, &button_msg.to_bytes());
                 }
             }
             prev_buttons = current_buttons;
@@ -123,16 +125,21 @@ fn main() -> ! {
     }
 }
 
-/// Register this service with the name service
-fn register_with_namesvc(service_name: &str, port: PortId) {
-    let mut msg = [0u8; 64];
-    let msg_type = 600u32; // NsRegister
-    msg[0..4].copy_from_slice(&msg_type.to_le_bytes());
-    msg[4..12].copy_from_slice(&port.to_le_bytes());
-    msg[12..16].copy_from_slice(&(service_name.len() as u32).to_le_bytes());
-    msg[16..16 + service_name.len()].copy_from_slice(service_name.as_bytes());
-
-    let _ = send(well_known::NAME_SERVICE, &msg[..16 + service_name.len()]);
+/// Resolve the compositor's event port via the name service.
+///
+/// Retries up to 10 times with a yield between attempts so the
+/// compositor has time to register.  Falls back to the well-known
+/// `DESKTOP_SERVICE` port if discovery fails.
+fn resolve_compositor_port(our_port: PortId) -> PortId {
+    const MAX_RETRIES: u32 = 10;
+    for _ in 0..MAX_RETRIES {
+        if let Some(port) = ns_lookup("compositor", our_port, 200) {
+            return port;
+        }
+        yield_now();
+    }
+    log("Mouse Driver: name-service lookup failed, using fallback port");
+    well_known::DESKTOP_SERVICE
 }
 
 #[no_mangle]

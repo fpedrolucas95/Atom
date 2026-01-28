@@ -247,7 +247,7 @@ fn parse_register(data: &[u8]) -> Option<(&str, u64)> {
     Some((name, port))
 }
 
-/// Parse a Lookup/Unregister message: [msg_type: u32][name_len: u32][name: bytes]
+/// Parse an Unregister message: [msg_type: u32][name_len: u32][name: bytes]
 fn parse_name_request(data: &[u8]) -> Option<&str> {
     if data.len() < 8 {
         return None;
@@ -257,6 +257,24 @@ fn parse_name_request(data: &[u8]) -> Option<&str> {
         return None;
     }
     core::str::from_utf8(&data[8..8 + name_len]).ok()
+}
+
+/// Parse a Lookup message with reply port:
+/// [msg_type: u32][reply_port: u64][name_len: u32][name: bytes]
+fn parse_lookup_request(data: &[u8]) -> Option<(u64, &str)> {
+    if data.len() < 16 {
+        return None;
+    }
+    let reply_port = u64::from_le_bytes([
+        data[4], data[5], data[6], data[7],
+        data[8], data[9], data[10], data[11],
+    ]);
+    let name_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+    if data.len() < 16 + name_len {
+        return None;
+    }
+    let name = core::str::from_utf8(&data[16..16 + name_len]).ok()?;
+    Some((reply_port, name))
 }
 
 /// Build a response message with port: [msg_type: u32][port: u64]
@@ -331,11 +349,19 @@ fn handle_message(data: &[u8], _sender_port: u64) -> Vec<u8> {
             }
         }
         Some(NsMessageType::Lookup) => {
-            if let Some(name) = parse_name_request(data) {
-                match unsafe { REGISTRY.lookup(name) } {
-                    Some(port) => build_port_response(port).to_vec(),
-                    None => build_error_response(3).to_vec(), // Not found
-                }
+            if let Some((reply_port, name)) = parse_lookup_request(data) {
+                let response = match unsafe { REGISTRY.lookup(name) } {
+                    Some(port) => build_port_response(port),
+                    None => {
+                        // Reuse the 12-byte buffer; pad the 8-byte error
+                        let err = build_error_response(3);
+                        let mut r = [0u8; 12];
+                        r[..8].copy_from_slice(&err);
+                        r
+                    }
+                };
+                let _ = atom_syscall::ipc::send(reply_port, &response);
+                Vec::new() // response already sent directly
             } else {
                 build_error_response(1).to_vec()
             }

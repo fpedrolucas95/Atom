@@ -63,14 +63,14 @@ fn alloc_error(_: Layout) -> ! { loop {} }
 use core::panic::PanicInfo;
 
 use atom_syscall::input::keyboard_poll;
-use atom_syscall::ipc::{create_port, send_async, PortId};
+use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 
 use libipc::messages::{KeyEvent, KeyModifiers, MessageType, MessageHeader};
 use libipc::protocol::send_message_async;
 use libipc::well_known;
-use atom_syscall::ipc::send;
+use libipc::services::{ns_register, ns_lookup};
 
 // ============================================================================
 // Keyboard State
@@ -311,33 +311,34 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
-/// Register this service with the name service
-fn register_with_namesvc(service_name: &str, port: PortId) {
-    // Build registration message for name service
-    // Format: [msg_type: u32][port: u64][name_len: u32][name: bytes]
-    let mut msg = [0u8; 64];
-    let msg_type = 600u32; // NsRegister
-    msg[0..4].copy_from_slice(&msg_type.to_le_bytes());
-    msg[4..12].copy_from_slice(&port.to_le_bytes());
-    msg[12..16].copy_from_slice(&(service_name.len() as u32).to_le_bytes());
-    msg[16..16 + service_name.len()].copy_from_slice(service_name.as_bytes());
-
-    // Try to send to name service (best effort - name service may not be running yet)
-    let _ = send(well_known::NAME_SERVICE, &msg[..16 + service_name.len()]);
-    log("Keyboard: Registered with name service");
+/// Resolve the compositor's event port via the name service.
+///
+/// Retries up to 10 times with a yield between attempts so the
+/// compositor has time to register.  Falls back to the well-known
+/// `DESKTOP_SERVICE` port if discovery fails.
+fn resolve_compositor_port(our_port: PortId) -> PortId {
+    const MAX_RETRIES: u32 = 10;
+    for _ in 0..MAX_RETRIES {
+        if let Some(port) = ns_lookup("compositor", our_port, 200) {
+            return port;
+        }
+        yield_now();
+    }
+    log("Keyboard: name-service lookup failed, using fallback port");
+    well_known::DESKTOP_SERVICE
 }
 
 fn main() -> ! {
-    // Well-known port: compositor event_port is always port 1
-    // (created first in Compositor::new())
-    const COMPOSITOR_EVENT_PORT: PortId = 1;
-
     // Create our IPC port and register with name service
-    if let Ok(our_port) = create_port() {
-        register_with_namesvc("keyboard", our_port);
-    }
+    let our_port = create_port().expect("Keyboard: failed to create port");
+    ns_register("keyboard", our_port);
 
-    let mut driver = KeyboardDriver::new(COMPOSITOR_EVENT_PORT);
+    // Resolve the compositor event port via the name service instead
+    // of hard-coding PortId = 1.
+    let compositor_port = resolve_compositor_port(our_port);
+    log("Keyboard: Compositor port resolved");
+
+    let mut driver = KeyboardDriver::new(compositor_port);
     driver.run()
 }
 
