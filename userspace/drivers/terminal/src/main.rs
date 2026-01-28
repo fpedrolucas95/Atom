@@ -817,24 +817,26 @@ impl Terminal {
     /// Poll for surface assignment from compositor
     fn wait_for_surface(port: PortId) -> Option<SurfaceAssignMsg> {
         let mut buffer = [0u8; 64];
-        let mut attempts = 0;
+        let ports = [port];
 
-        // Poll for surface assignment message (with timeout)
-        while attempts < 1000 {
-            if let Ok(Some(len)) = try_recv(port, &mut buffer) {
-                if len >= MessageHeader::SIZE {
-                    if let Some(header) = MessageHeader::from_bytes(&buffer) {
-                        if header.msg_type == MessageType::SurfaceAssign {
-                            let payload_start = MessageHeader::SIZE;
-                            if len >= payload_start + SurfaceAssignMsg::SIZE {
-                                return SurfaceAssignMsg::from_bytes(&buffer[payload_start..]);
+        // Wait for surface assignment message with proper blocking IPC
+        // Total timeout: 10 seconds (100 iterations * 100ms each)
+        for _ in 0..100 {
+            // Block waiting for message with 100ms timeout
+            if wait_any(&ports, 100).is_ok() {
+                if let Ok(Some(len)) = try_recv(port, &mut buffer) {
+                    if len >= MessageHeader::SIZE {
+                        if let Some(header) = MessageHeader::from_bytes(&buffer) {
+                            if header.msg_type == MessageType::SurfaceAssign {
+                                let payload_start = MessageHeader::SIZE;
+                                if len >= payload_start + SurfaceAssignMsg::SIZE {
+                                    return SurfaceAssignMsg::from_bytes(&buffer[payload_start..]);
+                                }
                             }
                         }
                     }
                 }
             }
-            yield_now();
-            attempts += 1;
         }
 
         None

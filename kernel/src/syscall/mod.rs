@@ -1282,14 +1282,41 @@ fn sys_ipc_try_recv(
             }
 
             crate::thread::set_thread_state(caller, crate::thread::ThreadState::WaitingIpc);
-            
-            // Yield to other threads
+
+            // Yield to other threads - we will be woken up when a message arrives
             crate::sched::yield_current();
 
-            // When we return here, we might have a message or not (if we were woken up for other reasons)
-            // For now, return EWOULDBLOCK to let userspace retry, but the livelock is broken
-            // because we are no longer in the ready queue.
-            EWOULDBLOCK
+            // After wakeup, try to receive the message that woke us up
+            match crate::ipc::try_receive_message(port_id, caller) {
+                Ok(Some(msg)) => {
+                    let bytes_to_copy =
+                        core::cmp::min(msg.payload.len(), buffer_size as usize);
+
+                    if buffer_ptr != 0 && bytes_to_copy > 0 {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                msg.payload.as_ptr(),
+                                buffer_ptr as *mut u8,
+                                bytes_to_copy
+                            );
+                        }
+                    }
+
+                    log_debug!(
+                        LOG_ORIGIN,
+                        "ipc_try_recv delivered {} bytes after wakeup (caller={}, port_id={})",
+                        bytes_to_copy,
+                        caller,
+                        port_id
+                    );
+
+                    bytes_to_copy as u64
+                }
+                _ => {
+                    // Spurious wakeup or error - let userspace retry
+                    EWOULDBLOCK
+                }
+            }
         }
 
         Err(crate::ipc::IpcError::InvalidPort) => {
