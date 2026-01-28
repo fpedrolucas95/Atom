@@ -14,24 +14,12 @@ use atom_syscall::SyscallResult;
 /// These are reserved port IDs that services register with.
 /// Port 0 is invalid, ports 1-255 are reserved for system services.
 pub mod well_known {
-    /// Desktop environment service port
-    pub const DESKTOP_SERVICE: u64 = 1;
-    /// Keyboard driver input port
-    pub const KEYBOARD_INPUT: u64 = 2;
-    /// Mouse driver input port
-    pub const MOUSE_INPUT: u64 = 3;
-    /// Graphics service port
-    pub const GRAPHICS_SERVICE: u64 = 4;
-    /// Terminal service port
-    pub const TERMINAL_SERVICE: u64 = 5;
-    /// Compositor window registration port
-    pub const COMPOSITOR_REGISTER: u64 = 10;
-
-    // System Services (100-199)
     /// Name service for service discovery
-    pub const NAME_SERVICE: u64 = 100;
+    /// This is the primary bootstrap port for the system.
+    pub const NAME_SERVICE: u64 = 1;
+
     /// Service manager for lifecycle control
-    pub const SERVICE_MANAGER: u64 = 101;
+    pub const SERVICE_MANAGER: u64 = 2;
 }
 
 /// Port configuration for a service

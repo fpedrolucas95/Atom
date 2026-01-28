@@ -101,13 +101,12 @@ use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId};
-use atom_syscall::input::MouseDriver;
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 
-use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers};
+use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
 use libipc::well_known;
 
@@ -432,13 +431,14 @@ struct Compositor {
     fb: Framebuffer,
     wm: WindowManager,
     cursor: CursorState,
-    mouse: MouseDriver,
     event_port: PortId,
     /// Port for receiving application registration messages
     register_port: PortId,
     /// Windows waiting for application to register
     pending_windows: Vec<PendingWindow>,
     dirty: bool,
+    /// Mouse button state
+    mouse_left_down: bool,
 }
 
 impl Compositor {
@@ -457,11 +457,11 @@ impl Compositor {
             fb,
             wm: WindowManager::new(),
             cursor: CursorState::new(width, height),
-            mouse: MouseDriver::new(),
             event_port,
             register_port,
             pending_windows: Vec::new(),
             dirty: true,
+            mouse_left_down: false,
         }
     }
 
@@ -476,7 +476,6 @@ impl Compositor {
 
         log("Desktop: Entering event loop");
 
-        let mut prev_left = false;
         let mut reg_buffer = [0u8; 64];
         let ports = [self.register_port, self.event_port];
 
@@ -487,29 +486,14 @@ impl Compositor {
                 self.handle_app_registration(&reg_buffer[..len]);
             }
 
-            // Poll for application events (e.g., SurfacePresent)
+            // Poll for application events (e.g., SurfacePresent, Mouse, Keyboard)
             let mut event_buffer = [0u8; 64];
             while let Ok(Some(len)) = try_recv(self.event_port, &mut event_buffer) {
                 self.handle_app_event(&event_buffer[..len]);
             }
 
-            // Process mouse events
-            while let Some(event) = self.mouse.poll_event() {
-                self.cursor.restore_region(&self.fb);
-                self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
-
-                // Handle click
-                if event.left_button && !prev_left {
-                    self.handle_click(self.cursor.x, self.cursor.y);
-                }
-                prev_left = event.left_button;
-
-                self.cursor.save_region(&self.fb);
-                self.draw_cursor();
-            }
-
-            // Keyboard events are received via IPC from the keyboard driver
-            // (handled in handle_app_event when MessageType::KeyPress is received)
+            // Keyboard and Mouse events are received via IPC from drivers
+            // (handled in handle_app_event)
 
             // Redraw if needed
             if self.dirty {
@@ -597,7 +581,7 @@ impl Compositor {
         }
     }
 
-    /// Handle application event messages (e.g., SurfacePresent, KeyPress from keyboard driver)
+    /// Handle application event messages (e.g., SurfacePresent, KeyPress, MouseMove)
     fn handle_app_event(&mut self, data: &[u8]) {
         if data.len() < MessageHeader::SIZE {
             return;
@@ -609,6 +593,34 @@ impl Compositor {
         };
 
         match header.msg_type {
+            MessageType::MouseMove => {
+                let payload_start = MessageHeader::SIZE;
+                if let Some(event) = MouseMoveEvent::from_bytes(&data[payload_start..]) {
+                    self.cursor.restore_region(&self.fb);
+                    self.cursor.apply_delta(event.dx as i32, event.dy as i32, self.fb.width(), self.fb.height());
+                    self.cursor.save_region(&self.fb);
+                    self.draw_cursor();
+                }
+            }
+            MessageType::MouseButtonDown => {
+                let payload_start = MessageHeader::SIZE;
+                if let Some(event) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
+                    if event.button == MouseButton::Left {
+                        if !self.mouse_left_down {
+                            self.handle_click(self.cursor.x, self.cursor.y);
+                        }
+                        self.mouse_left_down = true;
+                    }
+                }
+            }
+            MessageType::MouseButtonUp => {
+                let payload_start = MessageHeader::SIZE;
+                if let Some(event) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
+                    if event.button == MouseButton::Left {
+                        self.mouse_left_down = false;
+                    }
+                }
+            }
             MessageType::SurfacePresent => {
                 // Application has finished rendering, trigger redraw
                 let payload_start = MessageHeader::SIZE;
@@ -998,22 +1010,6 @@ pub extern "efiapi" fn efi_main(
     main()
 }
 
-/// Register this service with the name service
-fn register_with_namesvc(service_name: &str, port: PortId) {
-    // Build registration message for name service
-    // Format: [msg_type: u32][port: u64][name_len: u32][name: bytes]
-    let mut msg = [0u8; 64];
-    let msg_type = 600u32; // NsRegister
-    msg[0..4].copy_from_slice(&msg_type.to_le_bytes());
-    msg[4..12].copy_from_slice(&port.to_le_bytes());
-    msg[12..16].copy_from_slice(&(service_name.len() as u32).to_le_bytes());
-    msg[16..16 + service_name.len()].copy_from_slice(service_name.as_bytes());
-
-    // Try to send to name service (best effort - name service may not be running yet)
-    let _ = send(well_known::NAME_SERVICE, &msg[..16 + service_name.len()]);
-    log("Desktop: Registered with name service");
-}
-
 fn main() -> ! {
     log("Atom Desktop Environment v1.0");
     log("Microkernel architecture - all UI in userspace");
@@ -1031,7 +1027,8 @@ fn main() -> ! {
     let mut compositor = Compositor::new(fb);
 
     // Register with name service so other processes can find us
-    register_with_namesvc("compositor", compositor.event_port);
+    let _ = libipc::protocol::register_service("compositor", compositor.event_port);
+    let _ = libipc::protocol::register_service("compositor.register", compositor.register_port);
 
     // NOTE: Drivers (keyboard, mouse, display) are spawned by the init process.
     // ui_shell only receives events via IPC from already-running drivers.

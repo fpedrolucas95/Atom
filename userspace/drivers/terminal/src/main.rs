@@ -98,9 +98,7 @@ use atom_syscall::ipc::{create_port, try_recv, send, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
 
-use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent as IpcKeyEvent};
-use libipc::well_known;
-
+use libipc::messages::{MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg, KeyEvent as IpcKeyEvent};
 
 
 use buffer::{DisplayBuffer, InputBuffer, History};
@@ -849,33 +847,12 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
-/// Register this service with the name service
-fn register_with_namesvc(service_name: &str, port: PortId) {
-    // Build registration message for name service
-    // Format: [msg_type: u32][port: u64][name_len: u32][name: bytes]
-    let mut msg = [0u8; 64];
-    let msg_type = 600u32; // NsRegister
-    msg[0..4].copy_from_slice(&msg_type.to_le_bytes());
-    msg[4..12].copy_from_slice(&port.to_le_bytes());
-    msg[12..16].copy_from_slice(&(service_name.len() as u32).to_le_bytes());
-    msg[16..16 + service_name.len()].copy_from_slice(service_name.as_bytes());
-
-    // Try to send to name service (best effort - name service may not be running yet)
-    let _ = send(well_known::NAME_SERVICE, &msg[..16 + service_name.len()]);
-    log("Terminal: Registered with name service");
-}
-
 fn main() -> ! {
     log("Terminal: Starting userspace terminal");
 
     // Create an IPC port to receive messages from compositor
-    log("Terminal: About to call create_port");
     let local_port = match create_port() {
-        Ok(port) => {
-            log("Terminal: create_port returned Ok");
-            log("Terminal: Port value received");
-            port
-        },
+        Ok(port) => port,
         Err(_) => {
             log("Terminal: Failed to create IPC port");
             exit(1);
@@ -883,15 +860,26 @@ fn main() -> ! {
     };
 
     // Register with name service
-    register_with_namesvc("terminal", local_port);
+    let _ = libipc::protocol::register_service("terminal", local_port);
 
-    log("Terminal: After port assignment");
-    log("Terminal: Preparing registration message");
+    // Look up compositor registration port
+    log("Terminal: Looking up compositor.register...");
+    let register_port = loop {
+        match libipc::protocol::lookup_service("compositor.register") {
+            Ok(port) => {
+                log("Terminal: Found compositor.register");
+                break port;
+            }
+            Err(_) => {
+                yield_now();
+            }
+        }
+    };
 
     // Build registration message
     let mut full_msg = [0u8; 32];
 
-    // Create header manually to avoid any potential issues
+    // Create header manually
     let header = MessageHeader::new(MessageType::AppRegister, 16);
     let header_bytes = header.to_bytes();
     full_msg[0..12].copy_from_slice(&header_bytes);
@@ -900,22 +888,12 @@ fn main() -> ! {
     full_msg[12..20].copy_from_slice(&local_port.to_le_bytes());
     full_msg[20..28].copy_from_slice(&0u64.to_le_bytes()); // pid = 0
 
-    log("Terminal: Message built, sending to compositor ports");
-
-    // Send to port 2 (likely the compositor's register_port)
-    // The compositor creates two ports first: event_port (1) and register_port (2)
     let msg_slice = &full_msg[0..28]; // 12 bytes header + 16 bytes payload
 
-    log("Terminal: Sending to port 1");
-    let _ = send(1, msg_slice);
+    log("Terminal: Sending registration to compositor");
+    let _ = send(register_port, msg_slice);
 
-    log("Terminal: Sending to port 2");
-    let _ = send(2, msg_slice);
-
-    log("Terminal: Sending to port 3");
-    let _ = send(3, msg_slice);
-
-    log("Terminal: Messages sent, waiting for surface...");
+    log("Terminal: Message sent, waiting for surface...");
 
     // Wait for surface assignment from compositor
     let surface_info = match Terminal::wait_for_surface(local_port) {

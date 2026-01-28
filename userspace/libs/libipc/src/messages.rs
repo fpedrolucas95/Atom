@@ -709,3 +709,97 @@ impl Rect {
         })
     }
 }
+
+// ============================================================================
+// Name Service Messages
+// ============================================================================
+
+/// Message to register a service with the name service
+#[derive(Debug, Clone)]
+pub struct NsRegisterMsg {
+    /// The port to register for this service
+    pub port: u64,
+    /// The name of the service
+    pub name: String,
+}
+
+impl NsRegisterMsg {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let name_bytes = self.name.as_bytes();
+        let mut bytes = Vec::with_capacity(12 + name_bytes.len());
+        bytes.extend_from_slice(&self.port.to_le_bytes());
+        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(name_bytes);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 12 {
+            return None;
+        }
+        let port = u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let name_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        if bytes.len() < 12 + name_len {
+            return None;
+        }
+        let name = String::from(core::str::from_utf8(&bytes[12..12 + name_len]).ok()?);
+        Some(Self { port, name })
+    }
+}
+
+/// Message to lookup a service by name
+#[derive(Debug, Clone)]
+pub struct NsLookupMsg {
+    /// The port to send the response back to
+    pub reply_port: u64,
+    /// The name of the service to lookup
+    pub name: String,
+}
+
+impl NsLookupMsg {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let name_bytes = self.name.as_bytes();
+        let mut bytes = Vec::with_capacity(12 + name_bytes.len());
+        bytes.extend_from_slice(&self.reply_port.to_le_bytes());
+        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(name_bytes);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 12 {
+            return None;
+        }
+        let reply_port = u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let name_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        if bytes.len() < 12 + name_len {
+            return None;
+        }
+        let name = String::from(core::str::from_utf8(&bytes[12..12 + name_len]).ok()?);
+        Some(Self { reply_port, name })
+    }
+}
+
+/// Response from the name service
+#[derive(Debug, Clone, Copy)]
+pub struct NsResponseMsg {
+    /// The port of the requested service (0 if not found)
+    pub port: u64,
+}
+
+impl NsResponseMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.port.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            port: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
+        })
+    }
+}

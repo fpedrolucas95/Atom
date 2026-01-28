@@ -6,9 +6,9 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use atom_syscall::ipc::{PortId, send, recv, send_async, try_recv};
+use atom_syscall::ipc::{PortId, send, recv, send_async, try_recv, close_port};
 use atom_syscall::SyscallResult;
-use crate::messages::{MessageHeader, MessageType};
+use crate::messages::{MessageHeader, MessageType, NsRegisterMsg, NsLookupMsg, NsResponseMsg};
 
 /// Send a typed message with header
 pub fn send_message(port: PortId, msg_type: MessageType, payload: &[u8]) -> SyscallResult<()> {
@@ -73,4 +73,53 @@ pub fn get_payload(buffer: &[u8], total_len: usize) -> &[u8] {
 /// Helper to check if a message matches expected type
 pub fn is_message_type(header: &MessageHeader, expected: MessageType) -> bool {
     header.msg_type == expected
+}
+
+/// Register a service with the name service
+pub fn register_service(name: &str, port: PortId) -> SyscallResult<()> {
+    let msg = NsRegisterMsg {
+        port: port,
+        name: alloc::string::String::from(name),
+    };
+    send_message(crate::well_known::NAME_SERVICE, MessageType::NsRegister, &msg.to_bytes())
+}
+
+/// Look up a service by name via the name service
+pub fn lookup_service(name: &str) -> SyscallResult<PortId> {
+    let reply_port = atom_syscall::ipc::create_port()?;
+
+    let lookup_msg = NsLookupMsg {
+        reply_port: reply_port,
+        name: alloc::string::String::from(name),
+    };
+
+    if let Err(e) = send_message(crate::well_known::NAME_SERVICE, MessageType::NsLookup, &lookup_msg.to_bytes()) {
+        let _ = close_port(reply_port);
+        return Err(e);
+    }
+
+    // Wait for response
+    let mut buffer = [0u8; 128];
+    // Simple retry loop with yield
+    let mut result = Err(atom_syscall::SyscallError::TimedOut);
+
+    for _ in 0..100 {
+        if let Ok(Some((header, len))) = try_recv_message(reply_port, &mut buffer) {
+            if header.msg_type == MessageType::NsResponse {
+                let payload = get_payload(&buffer, len);
+                if let Some(resp) = NsResponseMsg::from_bytes(payload) {
+                    if resp.port != 0 {
+                        result = Ok(resp.port);
+                    } else {
+                        result = Err(atom_syscall::SyscallError::NotFound);
+                    }
+                    break;
+                }
+            }
+        }
+        atom_syscall::thread::yield_now();
+    }
+
+    let _ = close_port(reply_port);
+    result
 }

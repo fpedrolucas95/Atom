@@ -232,7 +232,7 @@ if [ "$KERNEL_ONLY" != true ]; then
             popd > /dev/null
 
             # Find the ELF binary name from Cargo.toml
-            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' || echo "$driver")
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$driver")
             if [ -z "$bin_name" ]; then
                 bin_name="$driver"
             fi
@@ -278,7 +278,7 @@ if [ "$KERNEL_ONLY" != true ]; then
             popd > /dev/null
 
             # Find the ELF binary name from Cargo.toml
-            bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' || echo "$service")
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$service")
             if [ -z "$bin_name" ]; then
                 bin_name="$service"
             fi
