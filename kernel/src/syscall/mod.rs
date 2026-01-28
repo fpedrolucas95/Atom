@@ -2974,11 +2974,13 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         Some(crate::interrupts::get_ticks() + ticks)
     };
 
-    // Polling loop - check each port for messages
+    // Polling loop - check each port for messages (peek without consuming)
     loop {
         for (idx, port_id) in ports.iter().enumerate() {
-            match crate::ipc::try_receive_message(*port_id, caller) {
-                Ok(Some(_msg)) => {
+            // Use has_message to check without consuming the message
+            // This allows userspace to receive the message via try_recv after wait_any returns
+            match crate::ipc::has_message(*port_id) {
+                Ok(true) => {
                     // Found a message! Unregister and return the port index
                     crate::ipc::unregister_wait_any(caller, &ports);
                     log_debug!(
@@ -2989,7 +2991,7 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
                     );
                     return idx as u64;
                 }
-                Ok(None) => continue,
+                Ok(false) => continue,
                 Err(_) => continue, // Skip invalid ports
             }
         }

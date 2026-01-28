@@ -685,6 +685,13 @@ impl IpcManager {
         }
     }
 
+    /// Check if a port has messages without consuming them (peek)
+    fn has_message(&self, port_id: PortId) -> Result<bool, IpcError> {
+        let ports = self.ports.lock();
+        let port = ports.get(&port_id).ok_or(IpcError::InvalidPort)?;
+        Ok(!port.messages.is_empty())
+    }
+
     fn block_recv(
         &self,
         port_id: PortId,
@@ -1055,4 +1062,9 @@ pub fn unregister_wait_any(caller: ThreadId, ports: &[PortId]) {
 }
 pub fn register_waiter(port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
     IPC_MANAGER.register_waiter(port_id, caller)
+}
+
+/// Check if a port has messages without consuming them (for wait_any)
+pub fn has_message(port_id: PortId) -> Result<bool, IpcError> {
+    IPC_MANAGER.has_message(port_id)
 }
