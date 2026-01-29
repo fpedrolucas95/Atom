@@ -125,6 +125,31 @@ fn spawn_service(name: &str) -> Option<u64> {
 // Boot sequence
 // ============================================================================
 
+fn wait_for_namesvc() {
+    log("init: waiting for namesvc on Port(1)...");
+    loop {
+        // Try sending a raw async message to Port(1)
+        // This will only succeed once Port(1) is created by namesvc
+        if atom_syscall::ipc::send_async(1, &[]).is_ok() {
+            log("init: namesvc Port(1) is ready");
+            break;
+        }
+        atom_syscall::thread::yield_now();
+    }
+}
+
+fn wait_for_service(name: &str) {
+    log("init: waiting for service registration: ");
+    log(name);
+    loop {
+        if libipc::protocol::lookup_service(name).is_ok() {
+            log("  -> service is registered and ready");
+            break;
+        }
+        atom_syscall::thread::sleep_ms(10);
+    }
+}
+
 fn boot_sequence() {
     log("===========================================");
     log("Atom Init Process (PID 1)");
@@ -134,13 +159,15 @@ fn boot_sequence() {
     // Phase 1: Core system services
     // -----------------------------------------------------------------------
     log("");
-    log("[Phase 1] Spawning core services...");
-
+    log("[Phase 1] Spawning namesvc...");
     let _namesvc_pid = spawn_service("namesvc");
-    let _svcmgr_pid = spawn_service("service_manager");
 
-    // Give services time to initialize their IPC ports
-    atom_syscall::thread::sleep_ms(100);
+    // CRITICAL: Wait for namesvc to initialize Port(1) before anything else
+    // This prevents other services from "stealing" Port(1).
+    wait_for_namesvc();
+
+    log("[Phase 1] Spawning service_manager...");
+    let _svcmgr_pid = spawn_service("service_manager");
 
     log("[Phase 1] Core services ready");
 
@@ -148,12 +175,13 @@ fn boot_sequence() {
     // Phase 2: UI shell (compositor)
     // -----------------------------------------------------------------------
     log("");
-    log("[Phase 2] Spawning UI shell...");
+    log("[Phase 2] Spawning UI shell (compositor)...");
 
     let _ui_pid = spawn_service("ui_shell");
 
-    // Give UI shell time to set up framebuffer and IPC
-    atom_syscall::thread::sleep_ms(100);
+    // CRITICAL: Wait for compositor to be registered before drivers
+    // Input drivers depend on the compositor's IPC port.
+    wait_for_service("compositor");
 
     log("[Phase 2] UI shell ready");
 

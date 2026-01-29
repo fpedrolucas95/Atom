@@ -715,67 +715,61 @@ impl Rect {
 // ============================================================================
 
 /// Message to register a service with the name service
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct NsRegisterMsg {
     /// The port to register for this service
     pub port: u64,
-    /// The name of the service
-    pub name: String,
+    /// The name of the service (null-terminated or fixed-size)
+    pub name: [u8; 32],
 }
 
 impl NsRegisterMsg {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let name_bytes = self.name.as_bytes();
-        let mut bytes = Vec::with_capacity(12 + name_bytes.len());
-        bytes.extend_from_slice(&self.port.to_le_bytes());
-        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(name_bytes);
+    pub const SIZE: usize = 8 + 32;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.port.to_le_bytes());
+        bytes[8..40].copy_from_slice(&self.name);
         bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 12 {
+        if bytes.len() < Self::SIZE {
             return None;
         }
         let port = u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
-        let name_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
-        if bytes.len() < 12 + name_len {
-            return None;
-        }
-        let name = String::from(core::str::from_utf8(&bytes[12..12 + name_len]).ok()?);
+        let mut name = [0u8; 32];
+        name.copy_from_slice(&bytes[8..40]);
         Some(Self { port, name })
     }
 }
 
 /// Message to lookup a service by name
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct NsLookupMsg {
     /// The port to send the response back to
     pub reply_port: u64,
     /// The name of the service to lookup
-    pub name: String,
+    pub name: [u8; 32],
 }
 
 impl NsLookupMsg {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let name_bytes = self.name.as_bytes();
-        let mut bytes = Vec::with_capacity(12 + name_bytes.len());
-        bytes.extend_from_slice(&self.reply_port.to_le_bytes());
-        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(name_bytes);
+    pub const SIZE: usize = 8 + 32;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8..40].copy_from_slice(&self.name);
         bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 12 {
+        if bytes.len() < Self::SIZE {
             return None;
         }
         let reply_port = u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
-        let name_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
-        if bytes.len() < 12 + name_len {
-            return None;
-        }
-        let name = String::from(core::str::from_utf8(&bytes[12..12 + name_len]).ok()?);
+        let mut name = [0u8; 32];
+        name.copy_from_slice(&bytes[8..40]);
         Some(Self { reply_port, name })
     }
 }
