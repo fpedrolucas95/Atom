@@ -354,46 +354,37 @@ pub fn init_ps2_mouse_full() {
     }
 
     // 5. Tell mouse to use default settings
-    send_mouse_command(0xF6);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    send_mouse_command(0xF6); // ACK consumed by send_mouse_command
 
     // 6. Set scaling 1:1 (0xE6) - LINEAR movement, no acceleration
-    send_mouse_command(0xE6);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    send_mouse_command(0xE6); // ACK consumed by send_mouse_command
     log_info!("input", "PS/2 mouse: Scaling set to 1:1 (linear)");
 
     // 7. Set resolution to 8 count/mm (0x03) for higher precision
-    send_mouse_command(0xE8);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
-    wait_for_input_buffer();
-    write_command(0xD4);
-    wait_for_input_buffer();
-    write_data(0x03); // 8 count/mm
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    // E8 is a two-byte command: first E8 (ACK), then data byte (ACK)
+    send_mouse_command(0xE8); // Set Resolution command, ACK consumed
+    send_mouse_command(0x03); // Resolution value: 8 count/mm, ACK consumed
     log_info!("input", "PS/2 mouse: Resolution set to 8 count/mm");
 
     // 8. Set sample rate to 100 samples/sec
-    send_mouse_command(0xF3);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
-    wait_for_input_buffer();
-    write_command(0xD4);
-    wait_for_input_buffer();
-    write_data(100);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    // F3 is a two-byte command: first F3 (ACK), then data byte (ACK)
+    send_mouse_command(0xF3); // Set Sample Rate command, ACK consumed
+    send_mouse_command(100);  // Sample rate value: 100, ACK consumed
     log_info!("input", "PS/2 mouse: Sample rate set to 100/sec");
 
     // 9. Enable the mouse (start streaming packets)
-    send_mouse_command(0xF4);
-    wait_for_output_buffer();
-    let _ = read_data(); // Acknowledge
+    send_mouse_command(0xF4); // Enable Data Reporting, ACK consumed
 
-    // 10. Verify final controller configuration
+    // 10. CRITICAL: Re-write controller configuration byte.
+    // The mouse initialization sequence can corrupt the PS/2 controller
+    // config byte (observed: 0x47 → 0x00), disabling both IRQ1 and IRQ12.
+    // We must restore the config to ensure interrupts are delivered.
+    wait_for_input_buffer();
+    write_command(0x60); // Write controller configuration byte
+    wait_for_input_buffer();
+    write_data(new_status); // Restore: IRQ1 + IRQ12 + Translation enabled
+
+    // 11. Verify final controller configuration
     wait_for_input_buffer();
     write_command(0x20); // Read controller status byte
     wait_for_output_buffer();
@@ -404,7 +395,7 @@ pub fn init_ps2_mouse_full() {
         if final_status & 0x02 != 0 { "enabled" } else { "DISABLED" }
     );
 
-    // 11. Clear any leftover ACK bytes from the buffer
+    // 12. Clear any leftover ACK bytes from the buffer
     // (some ACKs may have been captured by IRQ12 during init)
     {
         let mut buf = MOUSE_BUFFER.lock();
