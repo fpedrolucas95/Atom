@@ -477,9 +477,11 @@ impl Compositor {
         log("Desktop: Entering event loop");
 
         let mut reg_buffer = [0u8; 64];
-        let ports = [self.register_port, self.event_port];
 
         loop {
+            // Build list of ports to wait on (avoiding Vec to prevent memory leaks in BumpAllocator)
+            let ports = [self.register_port, self.event_port];
+
             // Poll for application registrations
             while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
                 log("Compositor: Received message on register_port");

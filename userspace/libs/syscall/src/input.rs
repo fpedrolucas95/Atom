@@ -15,12 +15,13 @@ use crate::raw::{syscall0, numbers::*};
 /// This is a non-blocking call.
 #[inline]
 pub fn mouse_poll_byte() -> Option<u8> {
-    let result = unsafe { syscall0(SYS_MOUSE_POLL) };
+    let mut byte = 0u8;
+    let result = unsafe { crate::raw::syscall1(SYS_MOUSE_POLL, &mut byte as *mut u8 as u64) };
 
-    if result == EWOULDBLOCK {
-        None
+    if result == crate::error::ESUCCESS {
+        Some(byte)
     } else {
-        Some(result as u8)
+        None
     }
 }
 
@@ -155,12 +156,13 @@ pub fn mouse_poll() -> Option<(i32, i32)> {
 /// This is a non-blocking call.
 #[inline]
 pub fn keyboard_poll() -> Option<u8> {
-    let result = unsafe { syscall0(SYS_KEYBOARD_POLL) };
+    let mut scancode = 0u8;
+    let result = unsafe { crate::raw::syscall1(SYS_KEYBOARD_POLL, &mut scancode as *mut u8 as u64) };
 
-    if result == EWOULDBLOCK {
-        None
+    if result == crate::error::ESUCCESS {
+        Some(scancode)
     } else {
-        Some(result as u8)
+        None
     }
 }
 
