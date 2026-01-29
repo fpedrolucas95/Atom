@@ -117,6 +117,7 @@ pub const SYS_GET_MEMORY_INFO: u64 = 46; // Get system memory information
 pub const SYS_LIST_PROCESSES: u64 = 47; // List all processes/threads
 pub const SYS_GET_PROCESS_COUNT: u64 = 48; // Get total number of processes
 pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
+pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 
 pub const ESUCCESS: u64 = 0;
 pub const ENOTFOUND: u64 = u64::MAX - 10;
@@ -323,6 +324,7 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_LIST_PROCESSES => sys_list_processes(arg0 as *mut crate::thread::ProcessInfo, arg1 as usize),
         SYS_GET_PROCESS_COUNT => sys_get_process_count(),
         SYS_READ_KLOG => sys_read_klog(arg0 as *mut u8, arg1 as usize),
+        SYS_MOUSE_GET_ID => sys_mouse_get_id(),
 
         _ => {
             log_warn!(
@@ -345,13 +347,17 @@ fn sys_mouse_poll(out_ptr: *mut u8) -> u64 {
     // Return next raw mouse byte for userspace driver to process
     if let Some(byte) = crate::input::poll_mouse_byte() {
         unsafe {
-            // Write directly to userspace memory
-            // Note: In a production microkernel, we would use safer accessors
             *out_ptr = byte;
         }
         return ESUCCESS;
     }
     EWOULDBLOCK
+}
+
+/// Return the detected PS/2 mouseID (0, 3, or 4).
+/// Userspace uses this to determine packet size and feature support.
+fn sys_mouse_get_id() -> u64 {
+    crate::input::get_mouse_id() as u64
 }
 
 /// Read a byte from an IO port (privileged operation for drivers)
