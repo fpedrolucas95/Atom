@@ -3138,6 +3138,10 @@ fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSection
 /// Map driver name to static string for Thread struct
 fn get_static_driver_name(name: &str) -> &'static str {
     match name {
+        "init" => "init",
+        "namesvc" => "namesvc",
+        "service_manager" => "service_manager",
+        "ui_shell" => "ui_shell",
         "terminal" => "terminal",
         "keyboard" => "keyboard",
         "mouse" => "mouse",
