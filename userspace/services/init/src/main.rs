@@ -149,32 +149,6 @@ fn wait_for_namesvc() -> bool {
     false
 }
 
-/// Wait for a service to register, with a timeout to prevent blocking forever.
-/// Returns true if the service was found, false if timed out.
-fn wait_for_service(name: &str) -> bool {
-    log("init: waiting for service '");
-    log(name);
-    log("'...");
-
-    // Timeout: 500 iterations * 10ms = 5 seconds max wait
-    const MAX_WAIT_ITERATIONS: u32 = 500;
-
-    for _ in 0..MAX_WAIT_ITERATIONS {
-        if libipc::protocol::lookup_service(name).is_ok() {
-            log("init: service '");
-            log(name);
-            log("' is registered and ready");
-            return true;
-        }
-        atom_syscall::thread::sleep_ms(10);
-    }
-
-    log("init: WARNING - timed out waiting for service '");
-    log(name);
-    log("', continuing boot sequence anyway");
-    false
-}
-
 fn boot_sequence() {
     log("===========================================");
     log("Atom Init Process (PID 1)");
@@ -206,14 +180,6 @@ fn boot_sequence() {
     log("[Phase 2] Spawning UI shell (compositor)...");
 
     let _ui_pid = spawn_service("ui_shell");
-
-    // Wait for compositor to be registered before drivers.
-    // Input drivers depend on the compositor's IPC port.
-    // Uses a timeout so boot continues even if compositor is slow.
-    let compositor_ready = wait_for_service("compositor");
-    if !compositor_ready {
-        log("[Phase 2] WARNING: Compositor not ready, drivers will retry lookup themselves");
-    }
 
     log("[Phase 2] UI shell phase complete");
 

@@ -46,5 +46,6 @@ efi/drivers/
 # Tool build logs
 tools/elf2atxf/build.log
 
-# Userspace driver build logs
+# Userspace driver and service build logs
 userspace/drivers/*/build.log
+userspace/services/*/build.log

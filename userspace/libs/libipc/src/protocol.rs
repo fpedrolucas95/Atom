@@ -111,7 +111,7 @@ pub fn lookup_service(name: &str) -> SyscallResult<PortId> {
     // Simple retry loop with yield
     let mut result = Err(atom_syscall::SyscallError::TimedOut);
 
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if let Ok(Some((header, len))) = try_recv_message(reply_port, &mut buffer) {
             if header.msg_type == MessageType::NsResponse {
                 let payload = get_payload(&buffer, len);
