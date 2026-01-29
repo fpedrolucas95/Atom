@@ -48,6 +48,9 @@ static mut EVENT_RING: usize = 0;
 static mut ERST: usize = 0; // Event Ring Segment Table
 static mut DEVICE_CONTEXTS: [usize; 64] = [0; 64];
 
+static mut LAST_KEYBOARD_REPORT: [u8; 6] = [0; 6];
+static mut LAST_MODIFIERS: u8 = 0;
+
 static mut COMMAND_RING_INDEX: usize = 0;
 static mut COMMAND_RING_CYCLE: u8 = 1;
 
@@ -255,19 +258,81 @@ fn usb_to_ps2_scancode(usb_code: u8) -> u8 {
 
 unsafe fn poll_hid_reports(slot_id: u8) {
     log_info!("xhci", "Starting HID report polling for slot {}", slot_id);
-    // MOCK: Simulate receiving a keyboard report 'A'
-    let mock_report = [0x04, 0, 0, 0, 0, 0];
-    handle_keyboard_report(&mock_report);
+    // In a full implementation, we would poll the device's interrupt endpoint here.
 }
 
-pub unsafe fn handle_keyboard_report(usb_scancodes: &[u8; 6]) {
-    for &code in usb_scancodes.iter() {
-        if code == 0 { continue; }
-        let ps2 = usb_to_ps2_scancode(code);
-        if ps2 != 0 {
-            crate::input::push_keyboard_scancode(ps2);
+pub unsafe fn handle_keyboard_report(modifiers: u8, keys: &[u8; 6]) {
+    // 1. Handle modifiers
+    let changed_mods = modifiers ^ LAST_MODIFIERS;
+    if changed_mods != 0 {
+        let mod_ps2 = [
+            (0x1D, false), // LCtrl
+            (0x2A, false), // LShift
+            (0x38, false), // LAlt
+            (0x5B, true),  // LGUI
+            (0x1D, true),  // RCtrl
+            (0x36, false), // RShift
+            (0x38, true),  // RAlt
+            (0x5C, true),  // RGUI
+        ];
+
+        for i in 0..8 {
+            if (changed_mods >> i) & 1 != 0 {
+                let pressed = (modifiers >> i) & 1 != 0;
+                let (code, extended) = mod_ps2[i];
+                if extended {
+                    crate::input::push_keyboard_scancode(0xE0);
+                }
+                if pressed {
+                    crate::input::push_keyboard_scancode(code);
+                } else {
+                    crate::input::push_keyboard_scancode(code | 0x80);
+                }
+            }
+        }
+        LAST_MODIFIERS = modifiers;
+    }
+
+    // 2. Handle keys
+    // Break codes for keys in LAST but not in CURRENT
+    for &old_key in LAST_KEYBOARD_REPORT.iter() {
+        if old_key != 0 {
+            let mut still_pressed = false;
+            for &new_key in keys.iter() {
+                if new_key == old_key {
+                    still_pressed = true;
+                    break;
+                }
+            }
+            if !still_pressed {
+                let ps2 = usb_to_ps2_scancode(old_key);
+                if ps2 != 0 {
+                    crate::input::push_keyboard_scancode(ps2 | 0x80);
+                }
+            }
         }
     }
+
+    // Make codes for keys in CURRENT but not in LAST
+    for &new_key in keys.iter() {
+        if new_key != 0 {
+            let mut was_pressed = false;
+            for &old_key in LAST_KEYBOARD_REPORT.iter() {
+                if old_key == new_key {
+                    was_pressed = true;
+                    break;
+                }
+            }
+            if !was_pressed {
+                let ps2 = usb_to_ps2_scancode(new_key);
+                if ps2 != 0 {
+                    crate::input::push_keyboard_scancode(ps2);
+                }
+            }
+        }
+    }
+
+    LAST_KEYBOARD_REPORT.copy_from_slice(keys);
 }
 
 pub unsafe fn handle_mouse_report(usb_report: &[u8; 3]) {
@@ -499,7 +564,6 @@ unsafe fn poll_ports() {
         if portsc & 0x01 != 0 {
             log_info!("xhci", "Device detected on port {}", i + 1);
             enable_slot();
-            poll_hid_reports(1);
         }
     }
 
