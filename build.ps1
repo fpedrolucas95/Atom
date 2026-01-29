@@ -1,17 +1,21 @@
 # build.ps1
 # Script de build para o kernel Atom no Windows
 # Uso:
-#   .\build.ps1              # Build completo (kernel + userspace)
-#   .\build.ps1 --clean      # Limpar e rebuildar
-#   .\build.ps1 --run        # Build e executar no QEMU
-#   .\build.ps1 --userspace  # Build apenas drivers userspace
-#   .\build.ps1 --kernel     # Build apenas kernel
+#   .\build.ps1                    # Build completo (kernel + userspace)
+#   .\build.ps1 --clean            # Limpar e rebuildar
+#   .\build.ps1 --run              # Build e executar no QEMU
+#   .\build.ps1 --userspace        # Build apenas drivers + services userspace
+#   .\build.ps1 --kernel           # Build apenas kernel
+#   .\build.ps1 --rust-only        # Apenas compilar Rust (sem assembly/linking)
+#   .\build.ps1 --setup            # Configurar dependências Rust
 
 param(
     [switch]$Run,
     [switch]$Clean,
     [switch]$Userspace,
-    [switch]$Kernel
+    [switch]$Kernel,
+    [switch]$RustOnly,
+    [switch]$Setup
 )
 
 # -------------------------------------------------------------------------
@@ -20,41 +24,30 @@ param(
 
 $NASM_PATH  = "C:\Program Files\NASM\nasm.exe"
 $REPO_PATH  = $PSScriptRoot
-$RUST_LLD   = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
 $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
-# Userspace drivers: directory name -> binary name mapping
-# The binary name comes from the "name" field in each driver's Cargo.toml
-$USERSPACE_DRIVERS = @{
-    "keyboard"  = "keyboard_driver"
-    "mouse"     = "mouse_driver"
-    "display"   = "display_driver"
-    "terminal"  = "terminal"
-    "ui_shell"  = "atom_desktop"
-}
+# Apenas as pastas dos drivers (não precisamos mais do nome do binário aqui)
+$USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell")
+
+# Services (incluindo init = PID 1)
+$USERSPACE_SERVICES = @(
+    "init",
+    "namesvc",
+    "service_manager"
+)
 
 # -------------------------------------------------------------------------
 # Funções auxiliares
 # -------------------------------------------------------------------------
 
-function Write-Step {
-    param([string]$Message)
-    Write-Host "[*] $Message" -ForegroundColor Cyan
-}
-
-function Write-Success {
-    param([string]$Message)
-    Write-Host "[OK] $Message" -ForegroundColor Green
-}
-
-function Write-ErrorMsg {
-    param([string]$Message)
-    Write-Host "[X] $Message" -ForegroundColor Red
-}
-
-function Write-Warning {
-    param([string]$Message)
-    Write-Host "[!] $Message" -ForegroundColor Yellow
+function Write-Step    { param([string]$Message) Write-Host "[*] $Message" -ForegroundColor Cyan }
+function Write-Success { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
+function Write-ErrorMsg{ param([string]$Message) Write-Host "[X] $Message" -ForegroundColor Red; exit 1 }
+function Write-Warning { param([string]$Message) Write-Host "[!] $Message" -ForegroundColor Yellow }
+function Header        { param([string]$Title) 
+    Write-Host ""
+    Write-Host "========== $Title ==========" -ForegroundColor Magenta
+    Write-Host ""
 }
 
 # -------------------------------------------------------------------------
@@ -63,7 +56,45 @@ function Write-Warning {
 
 if (-not (Test-Path "kernel\Cargo.toml")) {
     Write-ErrorMsg "Este script deve ser executado na raiz do repositório Atom"
-    exit 1
+}
+
+# -------------------------------------------------------------------------
+# SETUP (instalar componentes Rust)
+# -------------------------------------------------------------------------
+
+if ($Setup) {
+    Header "SETUP"
+
+    Write-Step "Configurando toolchain Rust..."
+
+    if (-not (Test-Path "rust-toolchain.toml")) {
+        '[toolchain]' | Out-File -FilePath "rust-toolchain.toml" -Encoding utf8
+        'channel = "nightly"' | Out-File -FilePath "rust-toolchain.toml" -Append -Encoding utf8
+        Write-Success "rust-toolchain.toml criado"
+    }
+
+    $components = rustup component list --installed
+    if ($components -notmatch "rust-src") {
+        Write-Step "Adicionando rust-src..."
+        rustup component add rust-src
+        Write-Success "rust-src adicionado"
+    }
+
+    $targets = rustup target list --installed
+    if ($targets -notmatch "x86_64-unknown-uefi") {
+        Write-Step "Adicionando target x86_64-unknown-uefi..."
+        rustup target add x86_64-unknown-uefi
+        Write-Success "Target adicionado"
+    }
+
+    if ($targets -notmatch "x86_64-unknown-none") {
+        Write-Step "Adicionando target x86_64-unknown-none (para elf2atxf)..."
+        rustup +nightly target add x86_64-unknown-none
+        Write-Success "Target x86_64-unknown-none adicionado"
+    }
+
+    Write-Success "Setup concluído!"
+    exit 0
 }
 
 # -------------------------------------------------------------------------
@@ -72,9 +103,7 @@ if (-not (Test-Path "kernel\Cargo.toml")) {
 
 if ($Clean) {
     Write-Step "Limpando arquivos de build..."
-    if (Test-Path "build") {
-        Remove-Item -Recurse -Force build\*
-    }
+    if (Test-Path "build") { Remove-Item -Recurse -Force "build\*" }
     cargo clean
     Write-Success "Build limpo"
 }
@@ -83,216 +112,183 @@ if ($Clean) {
 # Preparar diretórios
 # -------------------------------------------------------------------------
 
-if (-not (Test-Path "build")) {
-    New-Item -ItemType Directory -Path "build" | Out-Null
-}
-
-if (-not (Test-Path "build\userspace")) {
-    New-Item -ItemType Directory -Path "build\userspace" | Out-Null
-}
-
-if (-not (Test-Path "efi\EFI\BOOT")) {
-    New-Item -ItemType Directory -Path "efi\EFI\BOOT" -Force | Out-Null
-}
-
-if (-not (Test-Path "efi\drivers")) {
-    New-Item -ItemType Directory -Path "efi\drivers" -Force | Out-Null
-}
+New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\drivers" -Force | Out-Null
 
 # =========================================================================
 # BUILD ELF2ATXF TOOL
 # =========================================================================
 
-Write-Host ""
-Write-Host "========== ELF2ATXF TOOL ==========" -ForegroundColor Magenta
-Write-Host ""
+Header "ELF2ATXF TOOL"
 
 $ELF2ATXF_PATH = "tools\elf2atxf"
-# On Windows, cargo builds to target\<host-triple>\release\ by default
-$ELF2ATXF_EXE = "$ELF2ATXF_PATH\target\x86_64-pc-windows-msvc\release\elf2atxf.exe"
+$ELF2ATXF_EXE  = "$ELF2ATXF_PATH\target\x86_64-pc-windows-msvc\release\elf2atxf.exe"
 
 if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
     Write-Step "Compilando elf2atxf tool..."
 
     Push-Location $ELF2ATXF_PATH
-    # Explicitly build for Windows host, not UEFI (overrides root .cargo/config.toml)
-    cargo build --release --target x86_64-pc-windows-msvc 2>&1 | Tee-Object -FilePath "build.log"
-    $buildResult = $LASTEXITCODE
+    cargo build --release --target x86_64-pc-windows-msvc *> "$REPO_PATH\build.log"
+    if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao compilar elf2atxf"; Pop-Location; exit 1 }
     Pop-Location
 
-    if ($buildResult -ne 0) {
-        Write-ErrorMsg "Falha ao compilar elf2atxf"
-        exit 1
-    }
     Write-Success "elf2atxf compilado"
 } else {
-    Write-Success "elf2atxf já existe (use --clean para recompilar)"
+    Write-Success "elf2atxf já existe (use --clean para forçar recompilação)"
 }
 
 # =========================================================================
-# BUILD USERSPACE DRIVERS (ATXF format)
+# BUILD USERSPACE (drivers + services)
 # =========================================================================
 
 if (-not $Kernel) {
-    Write-Host ""
-    Write-Host "========== USERSPACE DRIVERS ==========" -ForegroundColor Magenta
-    Write-Host ""
+    Header "USERSPACE BUILD"
 
-    # Compilar biblioteca syscall primeiro
-    Write-Step "Compilando biblioteca atom_syscall..."
-    cargo check -p atom_syscall 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-ErrorMsg "Falha ao verificar atom_syscall"
-        exit 1
-    }
-    Write-Success "atom_syscall verificada"
+    # Função auxiliar para build + conversão ATXF
+    function Build-And-Convert {
+        param([string]$Path, [string]$Type)  # $Type = "driver" ou "service"
 
-    # Compilar cada driver userspace
-    foreach ($driverDir in $USERSPACE_DRIVERS.Keys) {
-        $binaryName = $USERSPACE_DRIVERS[$driverDir]
-        $driverPath = "userspace\drivers\$driverDir"
-
-        if (-not (Test-Path "$driverPath\Cargo.toml")) {
-            Write-Warning "Driver $driverDir nao encontrado"
-            continue
+        if (-not (Test-Path "$Path\Cargo.toml")) {
+            Write-Warning "$Type em $Path não encontrado, pulando..."
+            return
         }
 
-        Write-Step "Compilando driver $driverDir ($binaryName)..."
+        $dirName = Split-Path $Path -Leaf
+        Write-Step "Compilando $Type $dirName..."
 
-        Push-Location $driverPath
-        cargo build --release 2>&1 | Tee-Object -FilePath "build.log"
-        $buildResult = $LASTEXITCODE
+        Push-Location $Path
+        cargo build --release *> "$REPO_PATH\build.log"
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-ErrorMsg "Falha ao compilar $Type $dirName"
+        }
         Pop-Location
 
-        if ($buildResult -ne 0) {
-            Write-ErrorMsg "Falha ao compilar driver $driverDir"
-            exit 1
+        # Descobrir nome do binário a partir de Cargo.toml - regex mais robusto
+        $cargoContent = Get-Content "$Path\Cargo.toml" -Raw
+
+        # Tentativa 1: procura name dentro de [[bin]]
+        if ($cargoContent -match '(?smi)\[\[bin\]\].*?name\s*=\s*"(.*?)"') {
+            $binName = $Matches[1].Trim()
+            Write-Host "   [DEBUG] Binário extraído do Cargo.toml: $binName" -ForegroundColor DarkGray
+        }
+        # Tentativa 2: fallback para qualquer name = "..." no arquivo
+        elseif ($cargoContent -match '(?smi)name\s*=\s*"(.*?)"') {
+            $binName = $Matches[1].Trim()
+            Write-Host "   [DEBUG] Binário encontrado via fallback name: $binName" -ForegroundColor DarkGray
+        }
+        # Último fallback: nome da pasta
+        else {
+            $binName = $dirName
+            Write-Warning "Nenhum nome de binário encontrado em $Path\Cargo.toml - usando fallback: $binName"
         }
 
-        # Encontrar o binário ELF gerado (use binary name from Cargo.toml)
-        $elfPath = "$driverPath\target\x86_64-unknown-none\release\$binaryName"
+        $elfPath = "$Path\target\x86_64-unknown-none\release\$binName"
         if (-not (Test-Path $elfPath)) {
-            Write-Warning "Binario ELF nao encontrado: $elfPath"
-            continue
+            Write-Warning "Binário ELF não encontrado: $elfPath (verifique se o nome em [[bin]] name é correto)"
+            return
         }
 
-        # Converter ELF para ATXF
-        $atxfPath = "efi\drivers\$driverDir.atxf"
-        Write-Step "Convertendo $binaryName para ATXF..."
+        $atxfPath = "efi\drivers\$dirName.atxf"
+        Write-Step "Convertendo $binName para ATXF..."
 
-        # Build full paths
-        $elf2atxfFullPath = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
-        if (-not $elf2atxfFullPath) {
-            Write-ErrorMsg "elf2atxf.exe nao encontrado em: $ELF2ATXF_EXE"
-            exit 1
-        }
+        $elf2atxfFull = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
+        if (-not $elf2atxfFull) { Write-ErrorMsg "elf2atxf.exe não encontrado" }
 
-        # Run elf2atxf using call operator with resolved path
-        & "$elf2atxfFullPath" "$elfPath" "$atxfPath"
-        if ($LASTEXITCODE -ne 0) {
-            Write-ErrorMsg "Falha ao converter $driverDir para ATXF (exit code: $LASTEXITCODE)"
-            exit 1
-        }
+        & $elf2atxfFull "$elfPath" "$atxfPath" *> "$REPO_PATH\build.log"
+        if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha na conversão para ATXF ($LASTEXITCODE)" }
 
-        Write-Success "$driverDir.atxf criado"
+        Write-Success "$dirName.atxf criado"
     }
 
-    # Copiar ui_shell.atxf para o diretório de boot como init.atxf
-    if (Test-Path "efi\drivers\ui_shell.atxf") {
-        Copy-Item "efi\drivers\ui_shell.atxf" "efi\EFI\BOOT\init.atxf" -Force
-        Write-Success "init.atxf criado a partir de ui_shell"
+    # Drivers - agora usando a mesma função que services
+    foreach ($driverDir in $USERSPACE_DRIVERS_DIRS) {
+        Build-And-Convert "userspace\drivers\$driverDir" "driver"
+    }
+
+    # Services
+    foreach ($service in $USERSPACE_SERVICES) {
+        Build-And-Convert "userspace\services\$service" "service"
+    }
+
+    # Instalar init.atxf como payload de boot (PID 1)
+    if (Test-Path "efi\drivers\init.atxf") {
+        Copy-Item "efi\drivers\init.atxf" "efi\EFI\BOOT\init.atxf" -Force
+        Write-Success "init.atxf instalado como payload de boot (PID 1)"
     } else {
-        Write-ErrorMsg "ui_shell.atxf nao encontrado - o kernel nao podera iniciar!"
+        Write-Warning "init.atxf não encontrado - o sistema não irá bootar corretamente!"
     }
 
-    Write-Success "Compilação de userspace concluída"
+    Write-Success "Userspace concluído"
 }
 
-# Se --userspace only, parar aqui
 if ($Userspace) {
     Write-Host ""
     Write-Success "Build userspace concluído!"
-    Write-Host ""
-    Write-Host "Arquivos gerados:" -ForegroundColor Cyan
-    Get-ChildItem "efi\drivers\*.atxf" | ForEach-Object { Write-Host "  - $($_.Name)" }
-    Write-Host "  - efi\EFI\BOOT\init.atxf" -ForegroundColor White
     exit 0
 }
 
 # =========================================================================
-# BUILD KERNEL
+# BUILD KERNEL RUST
 # =========================================================================
 
-Write-Host ""
-Write-Host "========== KERNEL BUILD ==========" -ForegroundColor Magenta
-Write-Host ""
-
-# -------------------------------------------------------------------------
-# Passo 1: Montar arquivos assembly
-# -------------------------------------------------------------------------
-
-Write-Step "Montando arquivos assembly..."
-
-if (-not (Test-Path $NASM_PATH)) {
-    Write-ErrorMsg "NASM não encontrado em: $NASM_PATH"
-    Write-Warning "Instale NASM de: https://www.nasm.us/"
-    exit 1
-}
-
-# boot.asm
-& $NASM_PATH -f win64 arch\x86_64\boot.asm -o build\boot.obj 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao montar boot.asm"
-    exit 1
-}
-
-# handlers.asm
-if (Test-Path "build\handlers.obj") { Remove-Item -Force "build\handlers.obj" }
-& $NASM_PATH -f win64 kernel\src\interrupts\handlers.asm -o build\handlers.obj 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao montar handlers.asm"
-    exit 1
-}
-
-# switch.asm
-& $NASM_PATH -f win64 kernel\src\interrupts\switch.asm -o build\switch.obj 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao montar switch.asm"
-    exit 1
-}
-
-# syscall handler.asm
-& $NASM_PATH -f win64 kernel\src\syscall\handler.asm -o build\syscall_handler.obj 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao montar syscall/handler.asm"
-    exit 1
-}
-
-Write-Success "Arquivos assembly montados"
-
-# -------------------------------------------------------------------------
-# Passo 2: Compilar kernel Rust
-# -------------------------------------------------------------------------
+Header "KERNEL BUILD"
 
 Write-Step "Compilando kernel Rust..."
+cargo build -p atom-kernel --release *> "$REPO_PATH\build.log"
+if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao compilar kernel Rust" }
 
-cargo build -p atom-kernel --release 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao compilar o kernel"
-    exit 1
+# Checar warnings (similar ao Linux)
+if (Select-String "warning:" "$REPO_PATH\build.log") {
+    Write-Warning "Build teve warnings (veja build.log)"
 }
 
-Write-Success "Kernel compilado"
+Write-Success "Kernel Rust compilado"
 
-# -------------------------------------------------------------------------
-# Passo 3: Linkar Atom.efi
-# -------------------------------------------------------------------------
+if ($RustOnly) {
+    Write-Success "Build Rust-only concluído!"
+    Write-Host "Arquivo gerado: target\x86_64-unknown-uefi\release\libatom.a"
+    exit 0
+}
+
+if (-not $Kernel -and -not $Userspace) {  # Evita rodar assembly se --kernel only sem necessidade
+    # =========================================================================
+    # MONTAR ASSEMBLY
+    # =========================================================================
+
+    Write-Step "Montando arquivos assembly..."
+
+    if (-not (Test-Path $NASM_PATH)) {
+        Write-ErrorMsg "NASM não encontrado em: $NASM_PATH"
+        Write-Warning "Instale de: https://www.nasm.us/"
+    }
+
+    $asmFiles = @(
+        @{src="arch\x86_64\boot.asm"; obj="build\boot.obj"},
+        @{src="kernel\src\interrupts\handlers.asm"; obj="build\handlers.obj"},
+        @{src="kernel\src\interrupts\switch.asm"; obj="build\switch.obj"},
+        @{src="kernel\src\syscall\handler.asm"; obj="build\syscall_handler.obj"}
+    )
+
+    foreach ($asm in $asmFiles) {
+        if ($asm.obj -like "*handlers.obj" -and (Test-Path $asm.obj)) { Remove-Item -Force $asm.obj }
+        & $NASM_PATH -f win64 $asm.src -o $asm.obj *> "$REPO_PATH\build.log"
+        if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao montar $($asm.src)" }
+        Write-Success "$(Split-Path $asm.src -Leaf).obj criado"
+    }
+}
+
+# =========================================================================
+# LINKAR ATOM.EFI
+# =========================================================================
 
 Write-Step "Linkando Atom.efi..."
 
+$RUST_LLD = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
 if (-not (Test-Path $RUST_LLD)) {
-    Write-ErrorMsg "rust-lld não encontrado em: $RUST_LLD"
-    exit 1
+    Write-Warning "rust-lld não encontrado no caminho padrão. Tentando localizar..."
+    $RUST_LLD = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains\nightly*" -Recurse -File -Name "rust-lld.exe" -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path "$env:USERPROFILE\.rustup\toolchains" $_ } | Select-Object -First 1
+    if (-not $RUST_LLD) { Write-ErrorMsg "rust-lld não encontrado" }
 }
 
 & $RUST_LLD `
@@ -305,86 +301,60 @@ if (-not (Test-Path $RUST_LLD)) {
     /OUT:build\Atom.efi `
     /SUBSYSTEM:EFI_APPLICATION `
     /ENTRY:efi_entry `
-    /NODEFAULTLIB
+    /NODEFAULTLIB *> "$REPO_PATH\build.log"
 
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorMsg "Falha ao linkar Atom.efi"
-    exit 1
-}
+if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao linkar Atom.efi" }
 
 Write-Success "Atom.efi criado"
 
-# -------------------------------------------------------------------------
-# Passo 4: Preparar imagem EFI para QEMU
-# -------------------------------------------------------------------------
-
-Write-Step "Preparando imagem EFI..."
-
+# Copiar para EFI
 Copy-Item build\Atom.efi efi\EFI\BOOT\BOOTX64.EFI -Force
-
 Write-Success "BOOTX64.EFI atualizado"
 
 # =========================================================================
-# SUMÁRIO DO BUILD
+# SUMÁRIO
 # =========================================================================
 
-Write-Host ""
-Write-Host "========== BUILD COMPLETO ==========" -ForegroundColor Green
-Write-Host ""
+Header "BUILD COMPLETO"
+
 Write-Host "Kernel:     build\Atom.efi" -ForegroundColor White
 Write-Host "EFI Image:  efi\EFI\BOOT\BOOTX64.EFI" -ForegroundColor White
 Write-Host "Init:       efi\EFI\BOOT\init.atxf" -ForegroundColor White
 Write-Host "Drivers:    efi\drivers\" -ForegroundColor White
 Write-Host ""
 
-# Lista de drivers compilados
 if (Test-Path "efi\drivers") {
-    $drivers = Get-ChildItem "efi\drivers\*.atxf" -ErrorAction SilentlyContinue
-    if ($drivers) {
-        Write-Host "Drivers userspace (ATXF):" -ForegroundColor Cyan
-        foreach ($d in $drivers) {
-            $size = [math]::Round($d.Length / 1024, 1)
-            Write-Host "  - $($d.Name) ($size KB)" -ForegroundColor White
+    $files = Get-ChildItem "efi\drivers\*.atxf" -ErrorAction SilentlyContinue
+    if ($files) {
+        Write-Host "Arquivos ATXF gerados:" -ForegroundColor Cyan
+        foreach ($f in $files) {
+            $size = [math]::Round($f.Length / 1KB, 1)
+            Write-Host "  - $($f.Name) ($size KB)" -ForegroundColor White
         }
-        Write-Host ""
     }
 }
 
-# Verificar se init.atxf existe
-if (Test-Path "efi\EFI\BOOT\init.atxf") {
-    $initSize = [math]::Round((Get-Item "efi\EFI\BOOT\init.atxf").Length / 1024, 1)
-    Write-Host "Init payload: init.atxf ($initSize KB)" -ForegroundColor Green
-} else {
-    Write-Host "AVISO: init.atxf não encontrado! O kernel não poderá iniciar o UI shell." -ForegroundColor Red
-}
-
-# -------------------------------------------------------------------------
-# Executar QEMU (opcional)
-# -------------------------------------------------------------------------
+# =========================================================================
+# QEMU
+# =========================================================================
 
 if ($Run) {
-    Write-Host "========== QEMU ==========" -ForegroundColor Magenta
-    Write-Host ""
-    
+    Header "QEMU"
+
     if (-not (Test-Path $OVMF_PATH)) {
         Write-ErrorMsg "OVMF.fd não encontrado em: $OVMF_PATH"
-        Write-Warning "Baixe OVMF de: https://github.com/tianocore/edk2"
-        exit 1
+        Write-Warning "Baixe de: https://github.com/tianocore/edk2"
     }
 
-    # Verificar se QEMU está instalado
     $qemu = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
     if (-not $qemu) {
-        Write-ErrorMsg "QEMU não encontrado no PATH"
-        Write-Warning "Instale QEMU de: https://www.qemu.org/download/"
-        exit 1
+        Write-ErrorMsg "qemu-system-x86_64 não encontrado"
+        Write-Warning "Instale QEMU: https://www.qemu.org/download/"
     }
 
     Write-Step "Iniciando QEMU..."
-    Write-Host "Pressione Ctrl+C para encerrar" -ForegroundColor Yellow
-    Write-Host ""
+    Write-Host "Pressione Ctrl+C para sair" -ForegroundColor Yellow
 
-    # Executar QEMU com suporte a mouse PS/2
     qemu-system-x86_64 `
         -machine q35 `
         -cpu qemu64 `
@@ -397,13 +367,6 @@ if ($Run) {
         -serial stdio `
         -debugcon file:serial_log.txt `
         -global isa-debugcon.iobase=0xE9
-}
-else {
-    Write-Host "Para testar no QEMU:" -ForegroundColor Yellow
-    Write-Host "  .\build.ps1 --run" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Outras opções:" -ForegroundColor Yellow  
-    Write-Host "  .\build.ps1 --clean      # Limpar e rebuildar" -ForegroundColor Yellow
-    Write-Host "  .\build.ps1 --userspace  # Apenas drivers userspace" -ForegroundColor Yellow
-    Write-Host "  .\build.ps1 --kernel     # Apenas kernel" -ForegroundColor Yellow
+} else {
+    Write-Host "Para rodar no QEMU: .\build.ps1 --run" -ForegroundColor Yellow
 }
