@@ -434,6 +434,8 @@ struct Compositor {
     event_port: PortId,
     /// Port for receiving application registration messages
     register_port: PortId,
+    /// Port for receiving mouse events from mouse driver
+    mouse_port: PortId,
     /// Windows waiting for application to register
     pending_windows: Vec<PendingWindow>,
     dirty: bool,
@@ -453,12 +455,25 @@ impl Compositor {
 
         log("Compositor: Ports created successfully");
 
+        // Look up mouse service (it's a high-frequency event source)
+        log("Compositor: Looking up mouse service...");
+        let mouse_port = loop {
+            match libipc::protocol::lookup_service("mouse") {
+                Ok(port) => {
+                    log("Compositor: Found mouse service");
+                    break port;
+                }
+                Err(_) => yield_now(),
+            }
+        };
+
         Self {
             fb,
             wm: WindowManager::new(),
             cursor: CursorState::new(width, height),
             event_port,
             register_port,
+            mouse_port,
             pending_windows: Vec::new(),
             dirty: true,
             mouse_left_down: false,
@@ -477,7 +492,7 @@ impl Compositor {
         log("Desktop: Entering event loop");
 
         let mut reg_buffer = [0u8; 64];
-        let ports = [self.register_port, self.event_port];
+        let ports = [self.register_port, self.event_port, self.mouse_port];
 
         loop {
             // Poll for application registrations
@@ -490,6 +505,12 @@ impl Compositor {
             let mut event_buffer = [0u8; 64];
             while let Ok(Some(len)) = try_recv(self.event_port, &mut event_buffer) {
                 self.handle_app_event(&event_buffer[..len]);
+            }
+
+            // Poll for mouse events from the mouse service
+            let mut mouse_buffer = [0u8; 64];
+            while let Ok(Some(len)) = try_recv(self.mouse_port, &mut mouse_buffer) {
+                self.handle_app_event(&mouse_buffer[..len]);
             }
 
             // Keyboard and Mouse events are received via IPC from drivers
