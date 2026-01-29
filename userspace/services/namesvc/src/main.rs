@@ -8,8 +8,6 @@
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 use atom_syscall::ipc::PortId;
@@ -154,18 +152,25 @@ static mut REGISTRY: NameRegistry = NameRegistry::new();
 // Main Service Loop
 // ============================================================================
 
+fn name_to_str(name: &[u8; 32]) -> &str {
+    let len = name.iter().position(|&b| b == 0).unwrap_or(32);
+    core::str::from_utf8(&name[..len]).unwrap_or("")
+}
+
 fn handle_request(header: MessageHeader, payload: &[u8]) {
     match header.msg_type {
         MessageType::NsRegister => {
             if let Some(msg) = NsRegisterMsg::from_bytes(payload) {
                 atom_syscall::debug::log("namesvc: registering service");
-                let _ = unsafe { REGISTRY.register(&msg.name, msg.port) };
+                let name = name_to_str(&msg.name);
+                let _ = unsafe { REGISTRY.register(name, msg.port) };
             }
         }
         MessageType::NsLookup => {
             if let Some(msg) = NsLookupMsg::from_bytes(payload) {
                 atom_syscall::debug::log("namesvc: lookup service");
-                let found_port = unsafe { REGISTRY.lookup(&msg.name) }.unwrap_or(0);
+                let name = name_to_str(&msg.name);
+                let found_port = unsafe { REGISTRY.lookup(name) }.unwrap_or(0);
                 let resp = NsResponseMsg { port: found_port };
                 let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
             }

@@ -75,11 +75,19 @@ pub fn is_message_type(header: &MessageHeader, expected: MessageType) -> bool {
     header.msg_type == expected
 }
 
+fn str_to_name(name: &str) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(32);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf
+}
+
 /// Register a service with the name service
 pub fn register_service(name: &str, port: PortId) -> SyscallResult<()> {
     let msg = NsRegisterMsg {
         port: port,
-        name: alloc::string::String::from(name),
+        name: str_to_name(name),
     };
     send_message(crate::well_known::NAME_SERVICE, MessageType::NsRegister, &msg.to_bytes())
 }
@@ -90,7 +98,7 @@ pub fn lookup_service(name: &str) -> SyscallResult<PortId> {
 
     let lookup_msg = NsLookupMsg {
         reply_port: reply_port,
-        name: alloc::string::String::from(name),
+        name: str_to_name(name),
     };
 
     if let Err(e) = send_message(crate::well_known::NAME_SERVICE, MessageType::NsLookup, &lookup_msg.to_bytes()) {
