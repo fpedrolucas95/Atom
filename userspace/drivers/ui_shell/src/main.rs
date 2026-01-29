@@ -435,7 +435,7 @@ struct Compositor {
     /// Port for receiving application registration messages
     register_port: PortId,
     /// Port for receiving mouse events from mouse driver
-    mouse_port: PortId,
+    mouse_port: Option<PortId>,
     /// Windows waiting for application to register
     pending_windows: Vec<PendingWindow>,
     dirty: bool,
@@ -455,25 +455,13 @@ impl Compositor {
 
         log("Compositor: Ports created successfully");
 
-        // Look up mouse service (it's a high-frequency event source)
-        log("Compositor: Looking up mouse service...");
-        let mouse_port = loop {
-            match libipc::protocol::lookup_service("mouse") {
-                Ok(port) => {
-                    log("Compositor: Found mouse service");
-                    break port;
-                }
-                Err(_) => yield_now(),
-            }
-        };
-
         Self {
             fb,
             wm: WindowManager::new(),
             cursor: CursorState::new(width, height),
             event_port,
             register_port,
-            mouse_port,
+            mouse_port: None,
             pending_windows: Vec::new(),
             dirty: true,
             mouse_left_down: false,
@@ -492,9 +480,24 @@ impl Compositor {
         log("Desktop: Entering event loop");
 
         let mut reg_buffer = [0u8; 64];
-        let ports = [self.register_port, self.event_port, self.mouse_port];
 
         loop {
+            // Lazy lookup for mouse service if not yet found
+            if self.mouse_port.is_none() {
+                if let Ok(port) = libipc::protocol::lookup_service("mouse") {
+                    log("Compositor: Found mouse service (lazy lookup)");
+                    self.mouse_port = Some(port);
+                }
+            }
+
+            // Build list of ports to wait on
+            let mut ports = Vec::new();
+            ports.push(self.register_port);
+            ports.push(self.event_port);
+            if let Some(port) = self.mouse_port {
+                ports.push(port);
+            }
+
             // Poll for application registrations
             while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
                 log("Compositor: Received message on register_port");
@@ -508,9 +511,11 @@ impl Compositor {
             }
 
             // Poll for mouse events from the mouse service
-            let mut mouse_buffer = [0u8; 64];
-            while let Ok(Some(len)) = try_recv(self.mouse_port, &mut mouse_buffer) {
-                self.handle_app_event(&mouse_buffer[..len]);
+            if let Some(mouse_port) = self.mouse_port {
+                let mut mouse_buffer = [0u8; 64];
+                while let Ok(Some(len)) = try_recv(mouse_port, &mut mouse_buffer) {
+                    self.handle_app_event(&mouse_buffer[..len]);
+                }
             }
 
             // Keyboard and Mouse events are received via IPC from drivers

@@ -158,4 +158,4 @@ warning: creating a mutable reference to mutable static
     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
 
 warning: `service_manager` (bin "service_manager") generated 14 warnings
-    Finished `release` profile [optimized] target(s) in 0.07s
+    Finished `release` profile [optimized] target(s) in 0.08s
