@@ -457,21 +457,3 @@ impl SmListResponse {
         Some(Self { services })
     }
 }
-
-// ============================================================================
-// Client Helpers
-// ============================================================================
-
-/// Helper to lookup a service port by name
-/// Returns the port if found, None otherwise
-pub fn lookup_service(_name: &str) -> Option<u64> {
-    // TODO: Implement actual IPC call to name service
-    // For now, return well-known ports for system services
-    None
-}
-
-/// Helper to register with the name service
-pub fn register_service(_name: &str, _port: u64) -> bool {
-    // TODO: Implement actual IPC call to name service
-    false
-}

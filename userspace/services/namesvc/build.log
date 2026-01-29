@@ -1,6 +1,0 @@
-error: current package believes it's in a workspace when it's not:
-current:   /app/userspace/services/namesvc/Cargo.toml
-workspace: /app/Cargo.toml
-
-this may be fixable by adding `userspace/services/namesvc` to the `workspace.members` array of the manifest located at: /app/Cargo.toml
-Alternatively, to keep it out of the workspace, add the package to the `workspace.exclude` array, or add an empty `[workspace]` table to the package's manifest.

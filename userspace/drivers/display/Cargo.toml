@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
 
 [[bin]]
 name = "display_driver"

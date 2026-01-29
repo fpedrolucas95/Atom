@@ -311,33 +311,29 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
-/// Register this service with the name service
-fn register_with_namesvc(service_name: &str, port: PortId) {
-    // Build registration message for name service
-    // Format: [msg_type: u32][port: u64][name_len: u32][name: bytes]
-    let mut msg = [0u8; 64];
-    let msg_type = 600u32; // NsRegister
-    msg[0..4].copy_from_slice(&msg_type.to_le_bytes());
-    msg[4..12].copy_from_slice(&port.to_le_bytes());
-    msg[12..16].copy_from_slice(&(service_name.len() as u32).to_le_bytes());
-    msg[16..16 + service_name.len()].copy_from_slice(service_name.as_bytes());
-
-    // Try to send to name service (best effort - name service may not be running yet)
-    let _ = send(well_known::NAME_SERVICE, &msg[..16 + service_name.len()]);
-    log("Keyboard: Registered with name service");
-}
-
 fn main() -> ! {
-    // Well-known port: compositor event_port is always port 1
-    // (created first in Compositor::new())
-    const COMPOSITOR_EVENT_PORT: PortId = 1;
+    log("Keyboard Driver: Starting");
 
     // Create our IPC port and register with name service
     if let Ok(our_port) = create_port() {
-        register_with_namesvc("keyboard", our_port);
+        let _ = libipc::protocol::register_service("keyboard", our_port);
     }
 
-    let mut driver = KeyboardDriver::new(COMPOSITOR_EVENT_PORT);
+    // Look up compositor port
+    log("Keyboard Driver: Looking up compositor...");
+    let compositor_port = loop {
+        match libipc::protocol::lookup_service("compositor") {
+            Ok(port) => {
+                log("Keyboard Driver: Found compositor");
+                break port;
+            }
+            Err(_) => {
+                yield_now();
+            }
+        }
+    };
+
+    let mut driver = KeyboardDriver::new(compositor_port);
     driver.run()
 }
 

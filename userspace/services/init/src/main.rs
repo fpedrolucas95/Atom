@@ -9,8 +9,8 @@
 //! 1. Spawn `namesvc` (service discovery)
 //! 2. Spawn `service_manager` (lifecycle management)
 //! 3. Wait for services to be ready
-//! 4. Spawn userspace drivers: keyboard, mouse, display
-//! 5. Spawn `ui_shell` (compositor / window manager)
+//! 4. Spawn `ui_shell` (compositor / window manager)
+//! 5. Spawn userspace drivers: keyboard, mouse, display
 //! 6. Spawn `terminal`
 //! 7. Enter supervision loop
 //!
@@ -145,10 +145,23 @@ fn boot_sequence() {
     log("[Phase 1] Core services ready");
 
     // -----------------------------------------------------------------------
-    // Phase 2: Userspace drivers
+    // Phase 2: UI shell (compositor)
     // -----------------------------------------------------------------------
     log("");
-    log("[Phase 2] Spawning userspace drivers...");
+    log("[Phase 2] Spawning UI shell...");
+
+    let _ui_pid = spawn_service("ui_shell");
+
+    // Give UI shell time to set up framebuffer and IPC
+    atom_syscall::thread::sleep_ms(100);
+
+    log("[Phase 2] UI shell ready");
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Userspace drivers
+    // -----------------------------------------------------------------------
+    log("");
+    log("[Phase 3] Spawning userspace drivers...");
 
     let _kbd_pid = spawn_service("keyboard");
     let _mouse_pid = spawn_service("mouse");
@@ -157,20 +170,7 @@ fn boot_sequence() {
     // Give drivers time to initialize
     atom_syscall::thread::sleep_ms(50);
 
-    log("[Phase 2] Drivers ready");
-
-    // -----------------------------------------------------------------------
-    // Phase 3: UI shell (compositor)
-    // -----------------------------------------------------------------------
-    log("");
-    log("[Phase 3] Spawning UI shell...");
-
-    let _ui_pid = spawn_service("ui_shell");
-
-    // Give UI shell time to set up framebuffer and IPC
-    atom_syscall::thread::sleep_ms(100);
-
-    log("[Phase 3] UI shell ready");
+    log("[Phase 3] Drivers ready");
 
     // -----------------------------------------------------------------------
     // Phase 4: Applications
