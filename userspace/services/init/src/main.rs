@@ -227,8 +227,8 @@ fn boot_sequence() {
     log("");
     log("[Phase 3] Spawning userspace drivers...");
 
-    let _kbd_pid = spawn_service("keyboard");
-    let _mouse_pid = spawn_service("mouse");
+    // Unified input: ui_shell handles keyboard and mouse directly.
+    // Separate drivers are no longer needed.
     let _display_pid = spawn_service("display");
 
     // Give drivers time to initialize

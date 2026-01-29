@@ -102,22 +102,28 @@ struct EndpointContext {
 pub fn init() -> bool {
     log_info!("xhci", "Initializing xHCI driver...");
 
-    if let Some(base) = find_xhci_controller() {
+    if let Some(phys_base) = find_xhci_controller() {
         unsafe {
-            // Map MMIO to a high virtual address to avoid clobbering low memory
-            let virt_base = vm::HIGHER_HALF_BASE + 0x4000_0000 + base; // Offset into high half
-            XHCI_BASE = virt_base;
-            log_info!("xhci", "Found xHCI controller at Phys 0x{:X}, mapping to Virt 0x{:X}", base, virt_base);
+            // Use a safe virtual address in the higher half
+            // We use a fixed offset from HIGHER_HALF_BASE that is likely unused
+            // 0xFFFF800040000000 is 1GB above the kernel, let's use 2GB above
+            let virt_base = vm::HIGHER_HALF_BASE + 0x8000_0000 + (phys_base % 0x1_0000_0000);
+            // Wait, phys_base could be 32GB. 0x8000_0000 is 2GB.
+            // Let's just use HIGHER_HALF_BASE + something fixed for MMIO
+            let xhci_virt = 0xFFFF_FFFF_A000_0000;
 
-            // Step 2: Map MMIO
-            if !map_mmio_high(base, virt_base) {
+            log_info!("xhci", "Found xHCI controller at Phys 0x{:X}, mapping to Virt 0x{:X}", phys_base, xhci_virt);
+
+            if !map_mmio_high(phys_base, xhci_virt) {
+                log_error!("xhci", "Failed to map MMIO");
                 return false;
             }
 
-            CAP_LENGTH = ptr::read_volatile(virt_base as *const u8) as usize;
+            XHCI_BASE = xhci_virt;
+            CAP_LENGTH = ptr::read_volatile(xhci_virt as *const u8) as usize;
             log_debug!("xhci", "Capability register length: {}", CAP_LENGTH);
 
-            let version = ptr::read_volatile((virt_base + XHCI_CAP_HCIVERSION) as *const u16);
+            let version = ptr::read_volatile((xhci_virt + XHCI_CAP_HCIVERSION) as *const u16);
             log_info!("xhci", "xHCI version: 0x{:04X}", version);
 
             if !reset_controller() {
@@ -146,7 +152,7 @@ unsafe fn reset_controller() -> bool {
     let op_base = XHCI_BASE + CAP_LENGTH;
 
     // 1. Stop the controller
-    let mut usbcmd = ptr::read_volatile((op_base + XHCI_OP_USBCMD) as *const u32);
+    let usbcmd = ptr::read_volatile((op_base + XHCI_OP_USBCMD) as *const u32);
     ptr::write_volatile((op_base + XHCI_OP_USBCMD) as *mut u32, usbcmd & !USBCMD_RS);
 
     // 2. Wait for HCHalted
@@ -249,9 +255,6 @@ fn usb_to_ps2_scancode(usb_code: u8) -> u8 {
 
 unsafe fn poll_hid_reports(slot_id: u8) {
     log_info!("xhci", "Starting HID report polling for slot {}", slot_id);
-    // This would involve setting up a Transfer Ring for the Interrupt IN endpoint
-    // and periodically checking for Data Stage TRBs
-
     // MOCK: Simulate receiving a keyboard report 'A'
     let mock_report = [0x04, 0, 0, 0, 0, 0];
     handle_keyboard_report(&mock_report);
@@ -274,20 +277,18 @@ pub unsafe fn handle_mouse_report(usb_report: &[u8; 3]) {
     }
 }
 
-unsafe fn get_descriptor(slot_id: u8, desc_type: u8, desc_index: u8, length: u16) {
+unsafe fn get_descriptor(slot_id: u8, desc_type: u8, _desc_index: u8, _length: u16) {
     log_info!("xhci", "Fetching descriptor type {} for slot {}", desc_type, slot_id);
-    // This would involve creating a Setup TRB, Data TRB, and Status TRB on the device's EP0 ring
 }
 
 unsafe fn set_boot_protocol(slot_id: u8, interface: u8) {
     log_info!("xhci", "Setting Boot Protocol for slot {}, interface {}", slot_id, interface);
-    // Setup Stage TRB: RequestType=0x21, Request=0x0B, Value=0, Index=interface, Length=0
 }
 
 unsafe fn configure_endpoint(slot_id: u8, endpoint_index: u8) {
     log_info!("xhci", "Configuring endpoint {} for slot {}", endpoint_index, slot_id);
     let trb = Trb {
-        data: 0, // Should be Input Context
+        data: 0,
         status: 0,
         control: (12 << 10) | ((slot_id as u32) << 24), // Configure Endpoint Command
     };
@@ -301,22 +302,19 @@ unsafe fn address_device(slot_id: u8) {
     };
     let input_ctx = phys_to_virt(input_ctx_phys) as *mut InputContext;
 
-    // Initialize Input Control Context
     (*input_ctx).control.add_flags = 0x03; // Add Slot Context and Endpoint 0 Context
 
-    // Initialize Slot Context
     let op_base = XHCI_BASE + CAP_LENGTH;
-    let portsc_addr = op_base + XHCI_OP_PORTS_BASE; // Simplify: use port 1 for now
+    let portsc_addr = op_base + XHCI_OP_PORTS_BASE;
     let portsc = ptr::read_volatile(portsc_addr as *const u32);
     let speed = (portsc >> 10) & 0x0F;
 
-    (*input_ctx).device.slot.info = (1 << 27) | (speed << 20); // 1 context, speed
-    (*input_ctx).device.slot.info2 = 1; // Root hub port 1
+    (*input_ctx).device.slot.info = (1 << 27) | (speed << 20);
+    (*input_ctx).device.slot.info2 = 1;
 
-    // Initialize Endpoint 0 Context
     let ep0_ring = pmm::alloc_pages_zeroed(1).expect("Failed EP0 ring");
-    (*input_ctx).device.endpoints[0].mult_err_type = (3 << 1) | (4 << 16); // Max burst 0, Max packet size 8 (for low speed)
-    (*input_ctx).device.endpoints[0].tr_base = ep0_ring as u64 | 1; // DCS = 1
+    (*input_ctx).device.endpoints[0].mult_err_type = (3 << 1) | (4 << 16);
+    (*input_ctx).device.endpoints[0].tr_base = ep0_ring as u64 | 1;
 
     let trb = Trb {
         data: input_ctx_phys as u64,
@@ -344,29 +342,23 @@ unsafe fn setup_device_context(slot_id: u8) -> bool {
 unsafe fn init_structures() -> bool {
     let op_base = XHCI_BASE + CAP_LENGTH;
 
-    // 1. Read MaxSlots and MaxPorts
     let hcsparams1 = ptr::read_volatile((XHCI_BASE + XHCI_CAP_HCSPARAMS1) as *const u32);
     MAX_SLOTS = (hcsparams1 & 0xFF) as u8;
     MAX_PORTS = ((hcsparams1 >> 24) & 0xFF) as u8;
     log_debug!("xhci", "Max slots: {}, Max ports: {}", MAX_SLOTS, MAX_PORTS);
 
-    // 2. Allocate DCBAAP
-    // Size = (MaxSlots + 1) * 8 bytes
     DCBAAP = match pmm::alloc_pages_zeroed(1) {
         Some(addr) => addr,
         None => return false,
     };
     ptr::write_volatile((op_base + XHCI_OP_DCBAAP) as *mut u64, DCBAAP as u64);
 
-    // 3. Allocate Command Ring (one page)
     COMMAND_RING = match pmm::alloc_pages_zeroed(1) {
         Some(addr) => addr,
         None => return false,
     };
-    // CRCR: bit 0 = RCS (Ring Cycle State), bits 6-63 = Pointer
     ptr::write_volatile((op_base + XHCI_OP_CRCR) as *mut u64, (COMMAND_RING as u64) | 1);
 
-    // 4. Allocate Event Ring and ERST
     EVENT_RING = match pmm::alloc_pages_zeroed(1) {
         Some(addr) => addr,
         None => return false,
@@ -376,21 +368,18 @@ unsafe fn init_structures() -> bool {
         None => return false,
     };
 
-    // ERST entry: 64-bit address, 32-bit size, 32-bit reserved
     let erst_entry = phys_to_virt(ERST) as *mut u64;
     ptr::write_volatile(erst_entry, EVENT_RING as u64);
-    ptr::write_volatile(erst_entry.add(1), 256); // 256 TRBs (4096 / 16)
+    ptr::write_volatile(erst_entry.add(1), 256);
 
-    // Set up Interrupter 0
     let rts_off = ptr::read_volatile((XHCI_BASE + XHCI_CAP_RTSOFF) as *const u32) as usize;
-    let int_base = XHCI_BASE + rts_off + 0x20; // Runtime Regs + Interrupter 0
+    let int_base = XHCI_BASE + rts_off + 0x20;
 
-    ptr::write_volatile((int_base + 0x08) as *mut u32, 1); // ERSTSZ = 1
-    ptr::write_volatile((int_base + 0x10) as *mut u64, ERST as u64); // ERSTBA
-    ptr::write_volatile((int_base + 0x18) as *mut u64, EVENT_RING as u64); // ERDP (Deq pointer)
+    ptr::write_volatile((int_base + 0x08) as *mut u32, 1);
+    ptr::write_volatile((int_base + 0x10) as *mut u64, ERST as u64);
+    ptr::write_volatile((int_base + 0x18) as *mut u64, EVENT_RING as u64);
 
-    // 5. Enable slots
-    let mut config = ptr::read_volatile((op_base + XHCI_OP_CONFIG) as *const u32);
+    let config = ptr::read_volatile((op_base + XHCI_OP_CONFIG) as *const u32);
     ptr::write_volatile((op_base + XHCI_OP_CONFIG) as *mut u32, (config & !0xFF) | MAX_SLOTS as u32);
 
     log_info!("xhci", "Data structures initialized");
@@ -413,32 +402,29 @@ unsafe fn handle_events() {
 
         let trb_type = (trb.control >> 10) & 0x3F;
         match trb_type {
-            33 => { // Command Completion Event
+            33 => {
                 let slot_id = (trb.control >> 24) as u8;
                 let completion_code = (trb.status >> 24) as u8;
-                log_debug!("xhci", "Command completed: code={}, slot={}", completion_code, slot_id);
 
                 let cmd_trb_ptr = phys_to_virt(trb.data as usize) as *const Trb;
                 let cmd_trb = ptr::read_volatile(cmd_trb_ptr);
                 let cmd_type = (cmd_trb.control >> 10) & 0x3F;
 
-                if cmd_type == 9 && completion_code == 1 { // Enable Slot Success
+                if cmd_type == 9 && completion_code == 1 {
                     log_info!("xhci", "Slot {} enabled", slot_id);
                     if setup_device_context(slot_id) {
                         address_device(slot_id);
                     }
-                } else if cmd_type == 11 && completion_code == 1 { // Address Device Success
+                } else if cmd_type == 11 && completion_code == 1 {
                     log_info!("xhci", "Device on slot {} addressed", slot_id);
-                    get_descriptor(slot_id, 1, 0, 18); // DEVICE Descriptor
+                    get_descriptor(slot_id, 1, 0, 18);
                 }
             }
-            34 => { // Port Status Change Event
+            34 => {
                 let port_id = (trb.data >> 24) as u8;
                 log_info!("xhci", "Port status change: port={}", port_id);
             }
-            _ => {
-                log_debug!("xhci", "Unknown event TRB type: {}", trb_type);
-            }
+            _ => {}
         }
 
         EVENT_RING_INDEX += 1;
@@ -447,10 +433,9 @@ unsafe fn handle_events() {
             EVENT_RING_CYCLE ^= 1;
         }
 
-        // Update ERDP
         let rts_off = ptr::read_volatile((XHCI_BASE + XHCI_CAP_RTSOFF) as *const u32) as usize;
         let int_base = XHCI_BASE + rts_off + 0x20;
-        ptr::write_volatile((int_base + 0x18) as *mut u64, ring.add(EVENT_RING_INDEX) as u64 | 0x08); // Clear EHB
+        ptr::write_volatile((int_base + 0x18) as *mut u64, (ring.add(EVENT_RING_INDEX) as u64).wrapping_sub(vm::HIGHER_HALF_BASE as u64) | 0x08);
     }
 }
 
@@ -458,7 +443,6 @@ unsafe fn send_command(trb: Trb) {
     let ring = phys_to_virt(COMMAND_RING) as *mut Trb;
     let mut current = trb;
 
-    // Set cycle bit
     if COMMAND_RING_CYCLE != 0 {
         current.control |= 0x01;
     } else {
@@ -468,21 +452,19 @@ unsafe fn send_command(trb: Trb) {
     ptr::write_volatile(ring.add(COMMAND_RING_INDEX), current);
 
     COMMAND_RING_INDEX += 1;
-    if COMMAND_RING_INDEX >= 255 { // Last TRB is Link TRB (simplified)
-        // Set link TRB
+    if COMMAND_RING_INDEX >= 255 {
         let link_trb = Trb {
             data: COMMAND_RING as u64,
             status: 0,
-            control: (6 << 10) | 0x02 | (COMMAND_RING_CYCLE as u32), // Link TRB type, toggle cycle
+            control: (6 << 10) | 0x02 | (COMMAND_RING_CYCLE as u32),
         };
         ptr::write_volatile(ring.add(COMMAND_RING_INDEX), link_trb);
         COMMAND_RING_INDEX = 0;
         COMMAND_RING_CYCLE ^= 1;
     }
 
-    // Ring the doorbell for host controller
     let db_off = ptr::read_volatile((XHCI_BASE + XHCI_CAP_DBOFF) as *const u32) as usize;
-    ptr::write_volatile((XHCI_BASE + db_off) as *mut u32, 0); // Doorbell 0 for Command Ring
+    ptr::write_volatile((XHCI_BASE + db_off) as *mut u32, 0);
 }
 
 unsafe fn start_controller() -> bool {
@@ -514,14 +496,13 @@ unsafe fn poll_ports() {
         let portsc_addr = op_base + XHCI_OP_PORTS_BASE + (i as usize * 0x10);
         let portsc = ptr::read_volatile(portsc_addr as *const u32);
 
-        if portsc & 0x01 != 0 { // Current Connect Status
+        if portsc & 0x01 != 0 {
             log_info!("xhci", "Device detected on port {}", i + 1);
             enable_slot();
-            poll_hid_reports(1); // MOCK: assume slot 1
+            poll_hid_reports(1);
         }
     }
 
-    // Process events to see the slot assignment
     handle_events();
 }
 
@@ -543,17 +524,15 @@ fn find_xhci_controller() -> Option<usize> {
                 let progif = ((class_info >> 8) & 0xFF) as u8;
 
                 if class == XHCI_CLASS && subclass == XHCI_SUBCLASS && progif == XHCI_PROGIF {
-                    // Found xHCI controller - get BAR0
                     let bar0_addr = pci_config_address(bus as u8, device, function, 0x10);
                     let bar0 = pci_read_config(bar0_addr);
 
                     if bar0 == 0 || (bar0 & 0x1) != 0 {
-                        continue; // Invalid or I/O BAR
+                        continue;
                     }
 
                     let mut base = (bar0 & !0xF) as u64;
 
-                    // Check if 64-bit BAR (bits 1-2 == 2)
                     if (bar0 & 0x4) != 0 {
                         let bar1_addr = pci_config_address(bus as u8, device, function, 0x14);
                         let bar1 = pci_read_config(bar1_addr);
@@ -564,7 +543,6 @@ fn find_xhci_controller() -> Option<usize> {
                         continue;
                     }
 
-                    // Enable bus mastering and memory space
                     let cmd_addr = pci_config_address(bus as u8, device, function, 0x04);
                     let cmd = pci_read_config(cmd_addr);
                     pci_write_config(cmd_addr, cmd | 0x06);
@@ -581,7 +559,6 @@ fn map_mmio_high(phys_base: usize, virt_base: usize) -> bool {
     let phys_page = phys_base & !0xFFF;
     let virt_page = virt_base & !0xFFF;
 
-    // Map 16 pages (64KB) which is usually enough for xHCI capability, operational and runtime regs
     for i in 0..16 {
         let paddr = phys_page + i * 0x1000;
         let vaddr = virt_page + i * 0x1000;

@@ -1,0 +1,82 @@
+     Locking 2 packages to latest compatible versions
+   Compiling compiler_builtins v0.1.160 (/home/jules/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/home/jules/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core)
+   Compiling alloc v0.0.0 (/home/jules/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc)
+   Compiling atom_syscall v0.1.0 (/app/userspace/libs/syscall)
+warning: unused variable: `tag`
+  --> /app/userspace/libs/syscall/src/debug.rs:16:19
+   |
+16 | pub fn log_tagged(tag: &str, message: &str) {
+   |                   ^^^ help: if this is intentional, prefix it with an underscore: `_tag`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /app/userspace/libs/syscall/src/input.rs:234:13
+    |
+234 |             DRIVER.init();
+    |             ^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /app/userspace/libs/syscall/src/input.rs:237:9
+    |
+237 |         DRIVER.poll_event().map(|e| (e.dx, e.dy))
+    |         ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+   Compiling libipc v0.1.0 (/app/userspace/libs/libipc)
+warning: `atom_syscall` (lib) generated 3 warnings (run `cargo fix --lib -p atom_syscall` to apply 1 suggestion)
+warning: unused import: `alloc::vec::Vec`
+  --> /app/userspace/libs/libipc/src/lib.rs:30:5
+   |
+30 | use alloc::vec::Vec;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `libipc` (lib) generated 1 warning (run `cargo fix --lib -p libipc` to apply 1 suggestion)
+   Compiling namesvc v0.1.0 (/app/userspace/services/namesvc)
+warning: unused import: `atom_syscall::ipc::PortId`
+  --> src/main.rs:13:5
+   |
+13 | use atom_syscall::ipc::PortId;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> src/main.rs:166:34
+    |
+166 |                 let _ = unsafe { REGISTRY.register(name, msg.port) };
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a shared reference to mutable static
+   --> src/main.rs:173:43
+    |
+173 | ...afe { REGISTRY.lookup(name) }.unwrap_or(0);
+    |          ^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a mutable reference to mutable static
+   --> src/main.rs:198:17
+    |
+198 |         let _ = REGISTRY.register("namesvc", port);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `namesvc` (bin "namesvc") generated 4 warnings (run `cargo fix --bin "namesvc" -p namesvc` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 24.74s
