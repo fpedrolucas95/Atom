@@ -1,7 +1,13 @@
-// Userspace PS/2 Mouse Driver
+// Userspace PS/2 Mouse Driver for Atom OS
 //
-// Complete implementation of PS/2 mouse protocol based on OSDev Wiki reference.
-// Provides 1:1 mouse movement with no acceleration (linear scaling).
+// This driver polls raw mouse bytes from the kernel via syscalls and
+// dispatches mouse events via IPC to the compositor.
+//
+// Architecture:
+// 1. Polls raw bytes from kernel ring buffer via mouse_poll_byte() syscall.
+// 2. Assembles 3-byte PS/2 packets.
+// 3. Looks up "compositor" service and sends events to its port.
+// 4. Also registers itself as "mouse" service.
 
 #![no_std]
 #![no_main]
@@ -14,10 +20,10 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use atom_syscall::input::mouse_poll_byte;
 use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
+use atom_syscall::input::mouse_poll_byte;
 
 use libipc::messages::{MessageType, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::{send_message_async, register_service, lookup_service};
@@ -95,8 +101,10 @@ impl MouseDriver {
     fn run(&mut self) -> ! {
         let mut prev_state = MouseState::default();
 
+        log("Mouse Driver: Entering poll loop");
+
         loop {
-            // Use kernel syscall to poll for mouse bytes instead of direct I/O
+            // Poll for raw bytes from kernel buffer
             while let Some(byte) = mouse_poll_byte() {
                 if let Some(new_state) = self.process_byte(byte) {
                     // Send move event if deltas are non-zero
@@ -136,6 +144,7 @@ impl MouseDriver {
     fn process_byte(&mut self, byte: u8) -> Option<MouseState> {
         match self.cycle {
             0 => {
+                // Bit 3 must be 1 in the first byte of a PS/2 packet
                 if byte & 0x08 != 0 {
                     self.packet[0] = byte;
                     self.cycle = 1;
@@ -150,17 +159,25 @@ impl MouseDriver {
             2 => {
                 self.packet[2] = byte;
                 self.cycle = 0;
+
                 let flags = self.packet[0];
+
+                // Check for overflow bits
                 if (flags & 0xC0) != 0 { return None; }
+
+                // Extract deltas with sign extension
                 let mut dx = self.packet[1] as i16;
                 if flags & 0x10 != 0 { dx -= 256; }
+
                 let mut dy = self.packet[2] as i16;
                 if flags & 0x20 != 0 { dy -= 256; }
+
                 self.state.delta_x = dx;
                 self.state.delta_y = dy;
                 self.state.left_button = (flags & 0x01) != 0;
                 self.state.right_button = (flags & 0x02) != 0;
                 self.state.middle_button = (flags & 0x04) != 0;
+
                 Some(self.state)
             }
             _ => { self.cycle = 0; None }
@@ -176,10 +193,13 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     log("Mouse Driver: Starting...");
 
-    if let Ok(port) = create_port() {
-        let _ = register_service("mouse", port);
+    // 1. Create our own IPC port and register as "mouse" service (as requested)
+    if let Ok(our_port) = create_port() {
+        let _ = register_service("mouse", our_port);
+        log("Mouse Driver: Service 'mouse' registered");
     }
 
+    // 2. Look up "compositor" port to send events (the proven model)
     log("Mouse Driver: Looking up compositor...");
     let compositor_port = loop {
         match lookup_service("compositor") {
@@ -192,7 +212,6 @@ fn main() -> ! {
     };
 
     let mut driver = MouseDriver::new(compositor_port);
-    log("Mouse Driver: Ready (using kernel input subsystem)");
     driver.run()
 }
 

@@ -306,10 +306,10 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_UNMAP_REGION => sys_unmap_region(arg0, arg1, arg2),
         SYS_REMAP_REGION => sys_remap_region(arg0, arg1, arg2, arg3),
         SYS_REGISTER_FAULT_HANDLER => sys_register_fault_handler(arg0),
-        SYS_MOUSE_POLL => sys_mouse_poll(),
+        SYS_MOUSE_POLL => sys_mouse_poll(arg0 as *mut u8),
         SYS_IO_PORT_READ => sys_io_port_read(arg0 as u16, arg1 as u8),
         SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u8),
-        SYS_KEYBOARD_POLL => sys_keyboard_poll(),
+        SYS_KEYBOARD_POLL => sys_keyboard_poll(arg0 as *mut u8),
         SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0 as *mut u64),
         SYS_GET_TICKS => sys_get_ticks(),
         SYS_DEBUG_LOG => sys_debug_log(arg0 as *const u8, arg1 as usize),
@@ -337,10 +337,19 @@ extern "C" fn rust_syscall_dispatcher(
     result
 }
 
-fn sys_mouse_poll() -> u64 {
+fn sys_mouse_poll(out_ptr: *mut u8) -> u64 {
+    if out_ptr.is_null() {
+        return EINVAL;
+    }
+
     // Return next raw mouse byte for userspace driver to process
     if let Some(byte) = crate::input::poll_mouse_byte() {
-        return byte as u64;
+        unsafe {
+            // Write directly to userspace memory
+            // Note: In a production microkernel, we would use safer accessors
+            *out_ptr = byte;
+        }
+        return ESUCCESS;
     }
     EWOULDBLOCK
 }
@@ -390,9 +399,16 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
 }
 
 /// Poll keyboard buffer for input (raw scancode)
-fn sys_keyboard_poll() -> u64 {
+fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
+    if out_ptr.is_null() {
+        return EINVAL;
+    }
+
     if let Some(scancode) = crate::input::poll_keyboard_byte() {
-        return scancode as u64;
+        unsafe {
+            *out_ptr = scancode;
+        }
+        return ESUCCESS;
     }
     EWOULDBLOCK
 }

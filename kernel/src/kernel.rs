@@ -143,12 +143,14 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     interrupts::init();
     interrupts::init_timer(100);
 
-    log_info!(LOG_APIC, "Enabling interrupts...");
-    interrupts::enable();
-
     // Initialize input subsystem (minimal kernel-side buffer for userspace drivers)
+    // Note: PS/2 init must happen BEFORE enabling interrupts to avoid IRQ handlers
+    // consuming command ACK bytes prematurely.
     input::init();
     input::init_ps2_mouse_full(); // Use full initialization with 1:1 scaling
+
+    log_info!(LOG_APIC, "Enabling interrupts...");
+    interrupts::enable();
 
     syscall::init();
     ipc::init();
