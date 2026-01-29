@@ -3,8 +3,11 @@
 // This driver polls raw mouse bytes from the kernel via syscalls and
 // dispatches mouse events via IPC to the compositor.
 //
-// The kernel handles low-level IRQ and hardware initialization.
-// This driver handles packet assembly and event routing.
+// Architecture:
+// 1. Polls raw bytes from kernel ring buffer via mouse_poll_byte() syscall.
+// 2. Assembles 3-byte PS/2 packets.
+// 3. Looks up "compositor" service and sends events to its port.
+// 4. Also registers itself as "mouse" service.
 
 #![no_std]
 #![no_main]
@@ -23,7 +26,7 @@ use atom_syscall::debug::log;
 use atom_syscall::input::mouse_poll_byte;
 
 use libipc::messages::{MessageType, MouseMoveEvent, MouseButtonEvent, MouseButton};
-use libipc::protocol::{send_message_async, register_service};
+use libipc::protocol::{send_message_async, register_service, lookup_service};
 
 // ============================================================================
 // Simple Bump Allocator for Userspace
@@ -82,21 +85,23 @@ struct MouseDriver {
     packet: [u8; 3],
     cycle: u8,
     state: MouseState,
-    our_port: PortId,
+    compositor_port: PortId,
 }
 
 impl MouseDriver {
-    fn new(our_port: PortId) -> Self {
+    fn new(compositor_port: PortId) -> Self {
         Self {
             packet: [0; 3],
             cycle: 0,
             state: MouseState::default(),
-            our_port,
+            compositor_port,
         }
     }
 
     fn run(&mut self) -> ! {
         let mut prev_state = MouseState::default();
+
+        log("Mouse Driver: Entering poll loop");
 
         loop {
             // Poll for raw bytes from kernel buffer
@@ -109,24 +114,24 @@ impl MouseDriver {
                             dx: new_state.delta_x,
                             dy: new_state.delta_y,
                         };
-                        let _ = send_message_async(self.our_port, MessageType::MouseMove, &move_msg.to_bytes());
+                        let _ = send_message_async(self.compositor_port, MessageType::MouseMove, &move_msg.to_bytes());
                     }
 
                     // Send button events if state changed
                     if new_state.left_button != prev_state.left_button {
                         let msg_type = if new_state.left_button { MessageType::MouseButtonDown } else { MessageType::MouseButtonUp };
                         let btn_msg = MouseButtonEvent { button: MouseButton::Left, x: 0, y: 0 };
-                        let _ = send_message_async(self.our_port, msg_type, &btn_msg.to_bytes());
+                        let _ = send_message_async(self.compositor_port, msg_type, &btn_msg.to_bytes());
                     }
                     if new_state.right_button != prev_state.right_button {
                         let msg_type = if new_state.right_button { MessageType::MouseButtonDown } else { MessageType::MouseButtonUp };
                         let btn_msg = MouseButtonEvent { button: MouseButton::Right, x: 0, y: 0 };
-                        let _ = send_message_async(self.our_port, msg_type, &btn_msg.to_bytes());
+                        let _ = send_message_async(self.compositor_port, msg_type, &btn_msg.to_bytes());
                     }
                     if new_state.middle_button != prev_state.middle_button {
                         let msg_type = if new_state.middle_button { MessageType::MouseButtonDown } else { MessageType::MouseButtonUp };
                         let btn_msg = MouseButtonEvent { button: MouseButton::Middle, x: 0, y: 0 };
-                        let _ = send_message_async(self.our_port, msg_type, &btn_msg.to_bytes());
+                        let _ = send_message_async(self.compositor_port, msg_type, &btn_msg.to_bytes());
                     }
 
                     prev_state = new_state;
@@ -188,23 +193,25 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     log("Mouse Driver: Starting...");
 
-    // Create our IPC port and register as "mouse" service
-    let our_port = match create_port() {
-        Ok(port) => port,
-        Err(_) => {
-            log("Mouse Driver: Failed to create IPC port");
-            exit(1);
+    // 1. Create our own IPC port and register as "mouse" service (as requested)
+    if let Ok(our_port) = create_port() {
+        let _ = register_service("mouse", our_port);
+        log("Mouse Driver: Service 'mouse' registered");
+    }
+
+    // 2. Look up "compositor" port to send events (the proven model)
+    log("Mouse Driver: Looking up compositor...");
+    let compositor_port = loop {
+        match lookup_service("compositor") {
+            Ok(port) => {
+                log("Mouse Driver: Found compositor");
+                break port;
+            }
+            Err(_) => yield_now(),
         }
     };
 
-    if let Err(_) = register_service("mouse", our_port) {
-        log("Mouse Driver: Failed to register service");
-        exit(1);
-    }
-
-    log("Mouse Driver: Service registered, starting poll loop");
-
-    let mut driver = MouseDriver::new(our_port);
+    let mut driver = MouseDriver::new(compositor_port);
     driver.run()
 }
 
