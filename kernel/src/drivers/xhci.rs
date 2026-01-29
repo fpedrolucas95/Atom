@@ -117,7 +117,7 @@ pub fn init() -> bool {
             CAP_LENGTH = ptr::read_volatile(virt_base as *const u8) as usize;
             log_debug!("xhci", "Capability register length: {}", CAP_LENGTH);
 
-            let version = ptr::read_volatile((base + XHCI_CAP_HCIVERSION) as *const u16);
+            let version = ptr::read_volatile((virt_base + XHCI_CAP_HCIVERSION) as *const u16);
             log_info!("xhci", "xHCI version: 0x{:04X}", version);
 
             if !reset_controller() {
@@ -299,7 +299,7 @@ unsafe fn address_device(slot_id: u8) {
         Some(addr) => addr,
         None => return,
     };
-    let input_ctx = input_ctx_phys as *mut InputContext;
+    let input_ctx = phys_to_virt(input_ctx_phys) as *mut InputContext;
 
     // Initialize Input Control Context
     (*input_ctx).control.add_flags = 0x03; // Add Slot Context and Endpoint 0 Context
@@ -336,7 +336,7 @@ unsafe fn setup_device_context(slot_id: u8) -> bool {
     };
     DEVICE_CONTEXTS[slot_id as usize] = device_ctx;
 
-    let dcbaap = DCBAAP as *mut u64;
+    let dcbaap = phys_to_virt(DCBAAP) as *mut u64;
     ptr::write_volatile(dcbaap.add(slot_id as usize), device_ctx as u64);
     true
 }
@@ -377,7 +377,7 @@ unsafe fn init_structures() -> bool {
     };
 
     // ERST entry: 64-bit address, 32-bit size, 32-bit reserved
-    let erst_entry = ERST as *mut u64;
+    let erst_entry = phys_to_virt(ERST) as *mut u64;
     ptr::write_volatile(erst_entry, EVENT_RING as u64);
     ptr::write_volatile(erst_entry.add(1), 256); // 256 TRBs (4096 / 16)
 
@@ -397,8 +397,12 @@ unsafe fn init_structures() -> bool {
     true
 }
 
+fn phys_to_virt(phys: usize) -> usize {
+    phys + vm::HIGHER_HALF_BASE
+}
+
 unsafe fn handle_events() {
-    let ring = EVENT_RING as *mut Trb;
+    let ring = phys_to_virt(EVENT_RING) as *mut Trb;
     loop {
         let trb = ptr::read_volatile(ring.add(EVENT_RING_INDEX));
         let cycle = (trb.control & 0x01) as u8;
@@ -414,7 +418,7 @@ unsafe fn handle_events() {
                 let completion_code = (trb.status >> 24) as u8;
                 log_debug!("xhci", "Command completed: code={}, slot={}", completion_code, slot_id);
 
-                let cmd_trb_ptr = trb.data as *const Trb;
+                let cmd_trb_ptr = phys_to_virt(trb.data as usize) as *const Trb;
                 let cmd_trb = ptr::read_volatile(cmd_trb_ptr);
                 let cmd_type = (cmd_trb.control >> 10) & 0x3F;
 
@@ -451,7 +455,7 @@ unsafe fn handle_events() {
 }
 
 unsafe fn send_command(trb: Trb) {
-    let ring = COMMAND_RING as *mut Trb;
+    let ring = phys_to_virt(COMMAND_RING) as *mut Trb;
     let mut current = trb;
 
     // Set cycle bit
@@ -577,8 +581,8 @@ fn map_mmio_high(phys_base: usize, virt_base: usize) -> bool {
     let phys_page = phys_base & !0xFFF;
     let virt_page = virt_base & !0xFFF;
 
-    // Map 8 pages (32KB) which is usually enough for xHCI capability and operational regs
-    for i in 0..8 {
+    // Map 16 pages (64KB) which is usually enough for xHCI capability, operational and runtime regs
+    for i in 0..16 {
         let paddr = phys_page + i * 0x1000;
         let vaddr = virt_page + i * 0x1000;
 
