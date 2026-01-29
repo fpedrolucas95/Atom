@@ -329,6 +329,16 @@ pub fn poll_mouse_byte() -> Option<u8> {
     MOUSE_BUFFER.lock().pop()
 }
 
+/// Push a scancode to the keyboard buffer (called from USB/xHCI driver).
+pub fn push_keyboard_scancode(scancode: u8) {
+    KEYBOARD_BUFFER.lock().push(scancode);
+}
+
+/// Push a byte to the mouse buffer (called from USB/xHCI driver).
+pub fn push_mouse_byte(byte: u8) {
+    MOUSE_BUFFER.lock().push(byte);
+}
+
 // ============================================================================
 // Full PS/2 Controller Initialization
 // ============================================================================

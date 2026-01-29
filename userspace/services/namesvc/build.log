@@ -1,0 +1,75 @@
+warning: unused variable: `tag`
+  --> /app/userspace/libs/syscall/src/debug.rs:16:19
+   |
+16 | pub fn log_tagged(tag: &str, message: &str) {
+   |                   ^^^ help: if this is intentional, prefix it with an underscore: `_tag`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /app/userspace/libs/syscall/src/input.rs:234:13
+    |
+234 |             DRIVER.init();
+    |             ^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /app/userspace/libs/syscall/src/input.rs:237:9
+    |
+237 |         DRIVER.poll_event().map(|e| (e.dx, e.dy))
+    |         ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `atom_syscall` (lib) generated 3 warnings (run `cargo fix --lib -p atom_syscall` to apply 1 suggestion)
+warning: unused import: `alloc::vec::Vec`
+  --> /app/userspace/libs/libipc/src/lib.rs:30:5
+   |
+30 | use alloc::vec::Vec;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `libipc` (lib) generated 1 warning (run `cargo fix --lib -p libipc` to apply 1 suggestion)
+warning: unused import: `atom_syscall::ipc::PortId`
+  --> src/main.rs:13:5
+   |
+13 | use atom_syscall::ipc::PortId;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> src/main.rs:166:34
+    |
+166 |                 let _ = unsafe { REGISTRY.register(name, msg.port) };
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a shared reference to mutable static
+   --> src/main.rs:173:43
+    |
+173 | ...afe { REGISTRY.lookup(name) }.unwrap_or(0);
+    |          ^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a mutable reference to mutable static
+   --> src/main.rs:198:17
+    |
+198 |         let _ = REGISTRY.register("namesvc", port);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `namesvc` (bin "namesvc") generated 4 warnings (run `cargo fix --bin "namesvc" -p namesvc` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.08s

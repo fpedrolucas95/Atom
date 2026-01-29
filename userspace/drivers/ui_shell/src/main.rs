@@ -105,6 +105,7 @@ use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
+use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
@@ -439,6 +440,9 @@ struct Compositor {
     dirty: bool,
     /// Mouse button state
     mouse_left_down: bool,
+    /// Unified input drivers
+    mouse_driver: MouseDriver,
+    keyboard_shift: bool,
 }
 
 impl Compositor {
@@ -453,6 +457,9 @@ impl Compositor {
 
         log("Compositor: Ports created successfully");
 
+        let mut mouse_driver = MouseDriver::new();
+        mouse_driver.init();
+
         Self {
             fb,
             wm: WindowManager::new(),
@@ -462,6 +469,8 @@ impl Compositor {
             pending_windows: Vec::new(),
             dirty: true,
             mouse_left_down: false,
+            mouse_driver,
+            keyboard_shift: false,
         }
     }
 
@@ -497,6 +506,9 @@ impl Compositor {
             // Keyboard and Mouse events are received via IPC from drivers
             // (handled in handle_app_event)
 
+            // Poll for unified input (keyboard and mouse)
+            self.poll_input();
+
             // Redraw if needed
             if self.dirty {
                 self.draw_all();
@@ -504,8 +516,75 @@ impl Compositor {
             }
 
             // Block waiting for IPC messages instead of busy-wait with yield_now()
-            // Timeout of 50ms allows for mouse polling and periodic updates
-            let _ = wait_any(&ports, 50);
+            // Timeout reduced to 10ms for more responsive local input polling
+            let _ = wait_any(&ports, 10);
+        }
+    }
+
+    /// Poll keyboard and mouse directly from kernel buffers
+    fn poll_input(&mut self) {
+        // Poll mouse
+        while let Some(event) = self.mouse_driver.poll_event() {
+            // Update cursor position
+            self.cursor.restore_region(&self.fb);
+            self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
+            self.cursor.save_region(&self.fb);
+            self.draw_cursor();
+
+            // Handle button states
+            if event.left_button {
+                if !self.mouse_left_down {
+                    self.handle_click(self.cursor.x, self.cursor.y);
+                }
+                self.mouse_left_down = true;
+            } else {
+                self.mouse_left_down = false;
+            }
+        }
+
+        // Poll keyboard
+        while let Some(scancode) = keyboard_poll() {
+            let pressed = (scancode & 0x80) == 0;
+            let code = scancode & 0x7F;
+
+            match code {
+                scancodes::LEFT_SHIFT | scancodes::RIGHT_SHIFT => {
+                    self.keyboard_shift = pressed;
+                }
+                scancodes::ESCAPE if pressed => {
+                    log("Desktop: Escape pressed, exiting");
+                    exit(0);
+                }
+                _ if pressed => {
+                    if let Some(ascii) = scancode_to_ascii(code, self.keyboard_shift) {
+                        self.dispatch_key_event(scancode, ascii as u8);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn dispatch_key_event(&mut self, scancode: u8, ascii: u8) {
+        let event = KeyEvent {
+            scancode,
+            character: ascii,
+            modifiers: KeyModifiers {
+                shift: self.keyboard_shift,
+                ctrl: false,
+                alt: false,
+                caps_lock: false,
+            },
+        };
+
+        let event_port = self.wm.focused_id
+            .and_then(|id| self.wm.get_window(id))
+            .and_then(|w| w.event_port);
+
+        if let Some(port) = event_port {
+            if port != 0 {
+                let _ = send_message_async(port, MessageType::KeyPress, &event.to_bytes());
+            }
         }
     }
 
