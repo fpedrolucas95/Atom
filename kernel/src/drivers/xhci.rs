@@ -104,15 +104,17 @@ pub fn init() -> bool {
 
     if let Some(base) = find_xhci_controller() {
         unsafe {
-            XHCI_BASE = base;
-            log_info!("xhci", "Found xHCI controller at MMIO 0x{:X}", base);
+            // Map MMIO to a high virtual address to avoid clobbering low memory
+            let virt_base = vm::HIGHER_HALF_BASE + 0x4000_0000 + base; // Offset into high half
+            XHCI_BASE = virt_base;
+            log_info!("xhci", "Found xHCI controller at Phys 0x{:X}, mapping to Virt 0x{:X}", base, virt_base);
 
             // Step 2: Map MMIO
-            if !map_mmio(base) {
+            if !map_mmio_high(base, virt_base) {
                 return false;
             }
 
-            CAP_LENGTH = ptr::read_volatile(base as *const u8) as usize;
+            CAP_LENGTH = ptr::read_volatile(virt_base as *const u8) as usize;
             log_debug!("xhci", "Capability register length: {}", CAP_LENGTH);
 
             let version = ptr::read_volatile((base + XHCI_CAP_HCIVERSION) as *const u16);
@@ -539,9 +541,22 @@ fn find_xhci_controller() -> Option<usize> {
                 if class == XHCI_CLASS && subclass == XHCI_SUBCLASS && progif == XHCI_PROGIF {
                     // Found xHCI controller - get BAR0
                     let bar0_addr = pci_config_address(bus as u8, device, function, 0x10);
-                    let bar0 = pci_read_config(bar0_addr) as usize;
+                    let bar0 = pci_read_config(bar0_addr);
 
-                    if bar0 == 0 {
+                    if bar0 == 0 || (bar0 & 0x1) != 0 {
+                        continue; // Invalid or I/O BAR
+                    }
+
+                    let mut base = (bar0 & !0xF) as u64;
+
+                    // Check if 64-bit BAR (bits 1-2 == 2)
+                    if (bar0 & 0x4) != 0 {
+                        let bar1_addr = pci_config_address(bus as u8, device, function, 0x14);
+                        let bar1 = pci_read_config(bar1_addr);
+                        base |= (bar1 as u64) << 32;
+                    }
+
+                    if base == 0 {
                         continue;
                     }
 
@@ -550,7 +565,7 @@ fn find_xhci_controller() -> Option<usize> {
                     let cmd = pci_read_config(cmd_addr);
                     pci_write_config(cmd_addr, cmd | 0x06);
 
-                    return Some(bar0 & !0xF);
+                    return Some(base as usize);
                 }
             }
         }
@@ -558,18 +573,21 @@ fn find_xhci_controller() -> Option<usize> {
     None
 }
 
-fn map_mmio(base: usize) -> bool {
-    let page_base = base & !0xFFF;
-    // xHCI MMIO space can be quite large, but 8KB (2 pages) covers standard registers
-    for i in 0..4 {
-        let addr = page_base + i * 0x1000;
-        let _ = vm::unmap_page(addr);
+fn map_mmio_high(phys_base: usize, virt_base: usize) -> bool {
+    let phys_page = phys_base & !0xFFF;
+    let virt_page = virt_base & !0xFFF;
+
+    // Map 8 pages (32KB) which is usually enough for xHCI capability and operational regs
+    for i in 0..8 {
+        let paddr = phys_page + i * 0x1000;
+        let vaddr = virt_page + i * 0x1000;
+
         if let Err(e) = vm::map_page(
-            addr,
-            addr,
+            vaddr,
+            paddr,
             PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::CACHE_DISABLE,
         ) {
-            log_error!("xhci", "Failed to map MMIO page 0x{:X}: {:?}", addr, e);
+            log_error!("xhci", "Failed to map MMIO page Phys:0x{:X} to Virt:0x{:X}: {:?}", paddr, vaddr, e);
             return false;
         }
     }
