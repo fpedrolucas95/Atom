@@ -416,6 +416,8 @@ pub enum MouseButton {
     Left = 0,
     Right = 1,
     Middle = 2,
+    Button4 = 3,
+    Button5 = 4,
 }
 
 impl MouseButton {
@@ -424,6 +426,8 @@ impl MouseButton {
             0 => Some(Self::Left),
             1 => Some(Self::Right),
             2 => Some(Self::Middle),
+            3 => Some(Self::Button4),
+            4 => Some(Self::Button5),
             _ => None,
         }
     }
@@ -490,6 +494,43 @@ impl MouseButtonEvent {
             button: MouseButton::from_u8(bytes[0])?,
             x: i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
             y: i32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+        })
+    }
+}
+
+/// Mouse scroll event (wheel movement)
+///
+/// dz values from the PS/2 spec:
+///   +1 = scroll up (vertical) or right (horizontal)
+///   -1 = scroll down (vertical) or left (horizontal)
+///   Larger magnitudes indicate faster scrolling.
+#[derive(Debug, Clone, Copy)]
+pub struct MouseScrollEvent {
+    /// Vertical scroll delta (positive = up, negative = down)
+    pub dz: i32,
+    /// Current cursor X position
+    pub x: i32,
+    /// Current cursor Y position
+    pub y: i32,
+}
+
+impl MouseScrollEvent {
+    pub fn to_bytes(&self) -> [u8; 12] {
+        let mut bytes = [0u8; 12];
+        bytes[0..4].copy_from_slice(&self.dz.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.x.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.y.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 12 {
+            return None;
+        }
+        Some(Self {
+            dz: i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            x: i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            y: i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         })
     }
 }
