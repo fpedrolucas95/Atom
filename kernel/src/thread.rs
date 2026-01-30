@@ -650,14 +650,15 @@ pub fn log_user_entry_once(thread_id: ThreadId, ctx: &CpuContext) {
             );
             
             // Check if values match expectations
-            if DEBUG_IRET_CS != 0x1B {
+            // Skip 0x0 values which occur during initial user transition before variables are set
+            if DEBUG_IRET_CS != 0 && DEBUG_IRET_CS != 0x1B {
                 log_error!(
                     "DEBUG_IRET",
                     "!!! CS is NOT 0x1B - actual value is {:#X} !!!",
                     DEBUG_IRET_CS
                 );
             }
-            if DEBUG_IRET_SS != 0x23 {
+            if DEBUG_IRET_SS != 0 && DEBUG_IRET_SS != 0x23 {
                 log_error!(
                     "DEBUG_IRET",
                     "!!! SS is NOT 0x23 - actual value is {:#X} !!!",

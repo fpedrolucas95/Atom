@@ -102,6 +102,7 @@ use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
+use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{yield_now, exit};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
@@ -460,6 +461,20 @@ impl Compositor {
         let mut mouse_driver = MouseDriver::new();
         mouse_driver.init();
 
+        // Register for IRQ notifications (Keyboard = 1, Mouse = 12)
+        // This makes the compositor interrupt-driven instead of polling
+        if let Err(e) = register_irq_handler(1, event_port) {
+            log("Compositor: Failed to register IRQ 1 handler");
+        } else {
+            log("Compositor: Registered IRQ 1 (keyboard) successfully");
+        }
+
+        if let Err(e) = register_irq_handler(12, event_port) {
+            log("Compositor: Failed to register IRQ 12 handler");
+        } else {
+            log("Compositor: Registered IRQ 12 (mouse) successfully");
+        }
+
         Self {
             fb,
             wm: WindowManager::new(),
@@ -674,6 +689,10 @@ impl Compositor {
         };
 
         match header.msg_type {
+            MessageType::IrqNotification => {
+                // IRQ notification from kernel (Keyboard = 1, Mouse = 12)
+                self.poll_input();
+            }
             MessageType::MouseMove => {
                 let payload_start = MessageHeader::SIZE;
                 if let Some(event) = MouseMoveEvent::from_bytes(&data[payload_start..]) {
