@@ -264,13 +264,15 @@ fn start_scheduling() -> ! {
 
 
 fn display_uefi_memory_map(memory_map: &MemoryMap) {
-    let mut conventional = 0u64;
+    let mut usable_ram = 0u64;
     for descriptor in memory_map.descriptors() {
-        if descriptor.typ == 7 {
-            conventional += descriptor.number_of_pages * 4096;
+        // Count all usable memory types (same logic as PMM)
+        // After ExitBootServices(): Conventional (7), BootServicesCode (3), BootServicesData (4)
+        if descriptor.typ == 3 || descriptor.typ == 4 || descriptor.typ == 7 {
+            usable_ram += descriptor.number_of_pages * 4096;
         }
     }
-    log_info!(LOG_KERNEL_INIT, "Usable RAM: {} MB", conventional / (1024 * 1024));
+    log_info!(LOG_KERNEL_INIT, "Usable RAM: {} MB", usable_ram / (1024 * 1024));
 }
 
 fn display_memory_stats() {
