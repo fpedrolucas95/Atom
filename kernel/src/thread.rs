@@ -234,6 +234,13 @@ pub struct Thread {
     pub priority: ThreadPriority,
     pub name: &'static str,
     pub capability_table: CapabilityTable,
+    /// Whether this thread executes in Ring 3 (userspace).
+    /// This flag is set at creation time and never changes.
+    /// It determines whether context switches use enter_user* (IRET to Ring 3)
+    /// or switch_context (kernel-to-kernel). This avoids fragile heuristics
+    /// based on address_space comparison or context.cs inspection (which
+    /// reflects kernel CS after a syscall save, not the thread's true CPL).
+    pub is_userspace: bool,
 }
 
 impl Thread {
@@ -280,6 +287,7 @@ impl Thread {
             priority,
             name,
             capability_table,
+            is_userspace: false,
         }
     }
 
@@ -468,6 +476,7 @@ impl ThreadList {
             priority: t.priority,
             name: t.name,
             capability_table: crate::cap::create_capability_table(t.id),
+            is_userspace: t.is_userspace,
         })
     }
 
@@ -885,6 +894,18 @@ pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
         .map(|t| t.context)
 }
 
+/// Returns true if the thread executes in Ring 3 (userspace).
+/// This is the authoritative check - it uses the immutable flag set at creation,
+/// not fragile heuristics based on address_space or saved context.cs.
+pub fn is_userspace_thread(thread_id: ThreadId) -> bool {
+    let threads = THREAD_LIST.threads.lock();
+    threads
+        .iter()
+        .find(|t| t.id == thread_id)
+        .map(|t| t.is_userspace)
+        .unwrap_or(false)
+}
+
 /// Force update a thread's userspace context (RIP, RSP, CS, SS, segments)
 /// This is critical before switching to a userspace thread because switch_context
 /// saves the KERNEL RSP into CpuContext.rsp, which would then be used as the
@@ -989,7 +1010,7 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     let userspace_return = crate::syscall::get_userspace_return_addr(from_id);
 
     // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
-    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_usermode, to_is_user_thread, to_entry_rip, to_entry_rsp, to_cr3) = {
+    let switch_info = {
         let mut threads = THREAD_LIST.threads.lock();
 
         let from_idx = threads.iter().position(|t| t.id == from_id)
@@ -1000,192 +1021,132 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         // Validate stack canary for outgoing thread
         let from_thread = &threads[from_idx];
         let bottom = from_thread.kernel_stack.wrapping_sub(from_thread.kernel_stack_size as u64);
-        let ok = unsafe {
+        unsafe {
             let canary_addr = bottom as *const u64;
             let actual = core::ptr::read_volatile(canary_addr);
-            
             if actual != STACK_CANARY {
-                // Get current RSP for diagnosis
-                let current_rsp: u64;
-                core::arch::asm!("mov {}, rsp", out(reg) current_rsp);
-                
                 log_error!(
                     LOG_ORIGIN,
                     "[CANARY_CORRUPT] tid={} name={} canary_addr={:#X} expected={:#X} actual={:#X}",
                     from_id, from_thread.name, canary_addr as u64, STACK_CANARY, actual
                 );
             }
-            
-            actual == STACK_CANARY
         };
 
-        if !ok {
-            // Changed from log_panic to log_error to allow system to continue for diagnosis
-            log_error!(
-                LOG_ORIGIN,
-                "Kernel stack canary corrupted on thread {} '{}' (continuing for diagnosis)",
-                from_id,
-                from_thread.name
-            );
-        }
-
-        // Update FROM thread's context with userspace return address
-        // This must be done BEFORE the context switch so the FROM thread
-        // can resume correctly when it's scheduled again
+        // Update FROM thread's context with userspace return address if it's a userspace thread
         if let Some((user_rip, user_rsp)) = userspace_return {
-            let from_ctx = &mut threads[from_idx].context;
-            if (from_ctx.cs & 0x3) == 0x3 {  // Only for userspace threads
-                from_ctx.rip = user_rip;
-                from_ctx.rsp = user_rsp;
+            if threads[from_idx].is_userspace {
+                threads[from_idx].context.rip = user_rip;
+                threads[from_idx].context.rsp = user_rsp;
             }
         }
 
-        // CRITICAL FIX: Force CR3 to match address_space BEFORE the switch
-        // This prevents triple fault from corrupted CR3 values
-        // The CR3 field in CpuContext may contain garbage from previous saves
+        // Force CR3 to match address_space
         let from_addr_space = threads[from_idx].address_space;
         let to_addr_space = threads[to_idx].address_space;
-        
-        // For kernel threads (address_space=0), use current CR3
         let current_cr3 = unsafe {
             let cr3: u64;
             core::arch::asm!("mov {}, cr3", out(reg) cr3);
             cr3
         };
-        
         let from_cr3 = if from_addr_space == 0 { current_cr3 } else { from_addr_space };
         let to_cr3 = if to_addr_space == 0 { current_cr3 } else { to_addr_space };
-        
         threads[from_idx].context.cr3 = from_cr3;
         threads[to_idx].context.cr3 = to_cr3;
-        
-        // Get raw pointers to contexts and kernel stack
+
+        // Use the authoritative is_userspace flag - NOT address space heuristics
+        let to_is_userspace = threads[to_idx].is_userspace;
+        let has_userspace_return = crate::syscall::get_userspace_return_addr(to_id).is_some();
+
         let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
         let to_ptr = &threads[to_idx].context as *const CpuContext;
         let kstack = threads[to_idx].kernel_stack;
-        
-        // CRITICAL: Detect usermode by checking if we have saved userspace return address
-        // DO NOT trust context.cs - it may contain garbage or kernel CS even for userspace threads
-        let has_userspace_return = crate::syscall::get_userspace_return_addr(to_id).is_some();
-        
-        // Log if switching to usermode
-        if has_userspace_return {
-            log_user_entry_once(to_id, &threads[to_idx].context);
-            log_debug!(
-                LOG_ORIGIN,
-                "Switching to user context: RIP={:#016X} CS={:#04X} SS={:#04X} CPL=3 CR3={:#016X}",
-                threads[to_idx].context.rip,
-                threads[to_idx].context.cs,
-                threads[to_idx].context.ss,
-                threads[to_idx].context.cr3
-            );
-        }
-
-        // Determine if TO thread is a userspace thread by checking address_space
-        let kernel_cr3 = unsafe {
-            let cr3: u64;
-            core::arch::asm!("mov {}, cr3", out(reg) cr3);
-            cr3
-        };
-        let to_is_user_thread = to_addr_space != kernel_cr3;
         let to_entry_rip = threads[to_idx].context.rip;
         let to_entry_rsp = threads[to_idx].context.rsp;
-        
-        (from_ptr, to_ptr, kstack, has_userspace_return, to_is_user_thread, to_entry_rip, to_entry_rsp, to_cr3)
-    }; // 🔓 LOCK RELEASED HERE, BEFORE THE SWITCH
 
-    // CRITICAL: Update TSS.RSP0 for the new thread BEFORE entering userspace
-    // This ensures interrupt frames from usermode go to the correct kernel stack
+        if to_is_userspace {
+            log_user_entry_once(to_id, &threads[to_idx].context);
+        }
+
+        (from_ptr, to_ptr, kstack, to_is_userspace, has_userspace_return, to_entry_rip, to_entry_rsp, to_cr3)
+    }; // Lock released
+
+    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_userspace, has_userspace_return, to_entry_rip, to_entry_rsp, to_cr3) = switch_info;
+
+    // Update TSS.RSP0 for the new thread BEFORE entering userspace
+    // This ensures interrupt/syscall frames from usermode go to the correct kernel stack
     gdt::set_rsp0(to_kernel_stack);
 
     // CRITICAL PATH DECISION:
-    // Use enter_user_first_time() for initial entry (zeroed registers)
-    // Use enter_user() for syscall return (preserves callee-saved registers for ABI)
-    // Only use switch_context() for kernel-to-kernel switches.
-    
-    if to_is_user_thread {
-        // Determine target RIP/RSP: use saved return address if exists, else initial context
-        let (target_rip, target_rsp) = if to_is_usermode {
-            if let Some((urip, ursp)) = crate::syscall::get_userspace_return_addr(to_id) {
-                (urip, ursp)
-            } else {
-                log_error!(
-                    LOG_ORIGIN,
-                    "Thread {} marked as usermode but no return addr - using context",
-                    to_id
-                );
-                (to_entry_rip, to_entry_rsp)
-            }
+    // - Userspace threads (is_userspace=true): Always use enter_user* functions
+    //   which build a proper 5-qword IRET frame for Ring 3 transition.
+    //   * First-time entry: enter_user_first_time (zeros all GPRs)
+    //   * Syscall resume: enter_user_resume (restores callee-saved GPRs) or enter_user
+    // - Kernel threads (is_userspace=false): Use switch_context for
+    //   kernel-to-kernel context switch (saves/restores via assembly).
+    //
+    // The is_userspace flag is set at thread creation and never changes.
+    // This avoids the previous fragile heuristic of comparing address_space to
+    // kernel CR3, which failed for the init process (shares kernel CR3 but runs
+    // in Ring 3), causing IRET with CS=0x0 and SS=0x0.
+
+    if to_is_userspace {
+        // Determine target RIP/RSP: prefer saved userspace return address (from syscall entry),
+        // fall back to initial context values (first-time entry)
+        let (target_rip, target_rsp) = if has_userspace_return {
+            crate::syscall::get_userspace_return_addr(to_id)
+                .unwrap_or((to_entry_rip, to_entry_rsp))
         } else {
             (to_entry_rip, to_entry_rsp)
         };
-        
+
         log_debug!(
             LOG_ORIGIN,
-            "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} first_time={}",
-            to_id, target_rip, target_rsp, to_cr3, !to_is_usermode
+            "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} resume={}",
+            to_id, target_rip, target_rsp, to_cr3, has_userspace_return
         );
-        
+
         // Re-enable interrupts before entering userspace
         crate::interrupts::enable();
-        
-        // Choose the right entry function based on whether this is first-time or syscall return
-        if to_is_usermode {
-            // Syscall return - restore callee-saved registers (RBX, RBP, R12-R15) from saved context
-            if let Some(_gprs) = crate::syscall::get_userspace_gprs(to_id) {
-                // CRITICAL: Pass pointer to GPRs struct (must be stable memory, not stack local)
-                // We need to ensure the USERSPACE_GPRS map entry lives long enough
-                // So we'll get the reference while the lock is held
-                let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
-                if let Some(gprs_ref) = gprs_map.get(&to_id) {
-                    let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
-                    drop(gprs_map); // Release lock before entering user
-                    unsafe {
-                        enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
-                    }
-                } else {
-                    drop(gprs_map);
-                    log_error!(
-                        LOG_ORIGIN,
-                        "Thread {} GPRs disappeared during switch - using enter_user",
-                        to_id
-                    );
-                    unsafe {
-                        enter_user(target_rip, target_rsp, to_cr3);
-                    }
+
+        if has_userspace_return {
+            // Syscall resume - restore callee-saved registers if available
+            let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
+            if let Some(gprs_ref) = gprs_map.get(&to_id) {
+                let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
+                drop(gprs_map);
+                unsafe {
+                    enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
                 }
             } else {
-                log_error!(
-                    LOG_ORIGIN,
-                    "Thread {} has return addr but no saved GPRs - using enter_user",
-                    to_id
-                );
+                drop(gprs_map);
                 unsafe {
                     enter_user(target_rip, target_rsp, to_cr3);
                 }
             }
         } else {
-            // First-time entry - zero all registers for clean state
+            // First-time entry - zero all registers for clean initial state
             unsafe {
                 enter_user_first_time(target_rip, target_rsp, to_cr3);
             }
         }
+        // enter_user* functions are divergent (-> !) so we never reach here
     }
-    
-    // Validate target context before the switch
+
+    // Kernel-to-kernel context switch path
     unsafe {
         guard_context_or_halt(&*to_ctx_ptr, "scheduled");
     }
 
-    // Perform the actual context switch with no locks held
-    // NOTE: This does NOT return in the linear sense - execution continues
-    // in the NEW thread context. When THIS thread is scheduled again in the
-    // future, it will "return" from switch_context at that point.
-    // DO NOT add code after this call expecting it to run in the old context.
+    // Perform the actual context switch with no locks held.
+    // switch_context saves callee-saved registers to FROM, restores from TO,
+    // then enters switch_to_context_internal which builds a proper 5-qword
+    // IRET frame (including SS and RSP) and does iretq.
+    // When THIS thread is scheduled again, it will "return" from switch_context.
     unsafe {
         switch_context(from_ctx_ptr, to_ctx_ptr);
     }
 
-    // Re-enable interrupts when we resume (happens when this thread is scheduled again)
+    // Re-enable interrupts when we resume
     crate::interrupts::enable();
 }

@@ -118,6 +118,7 @@ pub const SYS_LIST_PROCESSES: u64 = 47; // List all processes/threads
 pub const SYS_GET_PROCESS_COUNT: u64 = 48; // Get total number of processes
 pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
+pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
 
 pub const ESUCCESS: u64 = 0;
 pub const ENOTFOUND: u64 = u64::MAX - 10;
@@ -325,6 +326,7 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_GET_PROCESS_COUNT => sys_get_process_count(),
         SYS_READ_KLOG => sys_read_klog(arg0 as *mut u8, arg1 as usize),
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
+        SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
 
         _ => {
             log_warn!(
@@ -654,19 +656,47 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
             return ENOMEM;
         }
     };
-    let kernel_stack = kernel_stack_phys + KERNEL_STACK_SIZE;
-    
-    let thread = crate::thread::Thread::new(
+    let kernel_stack_virt = crate::mm::vm::HIGHER_HALF_BASE + kernel_stack_phys;
+    let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_SIZE) as u64;
+
+    // Get the caller's address space so the new thread shares it
+    let caller_addr_space = crate::thread::get_thread_address_space(caller).unwrap_or(0);
+
+    // Create a userspace (Ring 3) context for the child thread.
+    // sys_thread_create is only callable from userspace, so child threads
+    // must also run in Ring 3 with the caller's address space.
+    let context = crate::thread::CpuContext::new_user(
         entry_point,
-        kernel_stack as u64,
-        KERNEL_STACK_SIZE,
-        0,
-        crate::thread::ThreadPriority::Normal,
-        "user_thread",
+        stack_ptr,
+        caller_addr_space,
     );
 
-    let tid = thread.id();
-    crate::sched::add_thread(thread);
+    let tid = crate::thread::ThreadId::new();
+    let cap_table = crate::cap::create_capability_table(tid);
+
+    // Write stack canary
+    unsafe {
+        const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let bottom = kernel_stack_top - KERNEL_STACK_SIZE as u64;
+        let canary_addr = bottom as *mut u64;
+        core::ptr::write_volatile(canary_addr, STACK_CANARY);
+    }
+
+    let thread = crate::thread::Thread {
+        id: tid,
+        state: crate::thread::ThreadState::Ready,
+        context,
+        kernel_stack: kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_SIZE,
+        address_space: caller_addr_space,
+        priority: crate::thread::ThreadPriority::Normal,
+        name: "user_thread",
+        capability_table: cap_table,
+        is_userspace: true,
+    };
+
+    crate::thread::add_thread(thread);
+    crate::sched::mark_thread_ready(tid);
 
     log_info!(
         LOG_ORIGIN,
@@ -734,6 +764,75 @@ fn sys_ipc_create_port() -> u64 {
             log_error!(
                 LOG_ORIGIN,
                 "ipc_create_port: failed to create root IPC capability"
+            );
+        }
+    }
+
+    port_id.raw()
+}
+
+/// Create an IPC port with a specific reserved ID (1-255).
+/// Used by well-known system services to get deterministic port IDs.
+fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    log_debug!(
+        LOG_ORIGIN,
+        "ipc_create_port_with_id(id={})",
+        requested_id
+    );
+
+    let owner = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => {
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id rejected: no current thread"
+            );
+            return EINVAL;
+        }
+    };
+
+    let port_id = match crate::ipc::create_port_with_id(owner, requested_id) {
+        Ok(id) => id,
+        Err(e) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id failed for id={}: {}",
+                requested_id, e
+            );
+            return EINVAL;
+        }
+    };
+
+    log_info!(
+        LOG_ORIGIN,
+        "ipc_create_port_with_id succeeded: port_id={}",
+        port_id
+    );
+
+    // Auto-grant IPC capability for this port
+    let ipc_resource = crate::cap::ResourceType::IpcPort {
+        port_id: port_id.raw(),
+    };
+
+    let permissions =
+        crate::cap::CapPermissions::READ.union(crate::cap::CapPermissions::WRITE);
+
+    match crate::cap::create_root_capability(ipc_resource, owner, permissions) {
+        Ok(cap) => {
+            if let Err(_) = crate::thread::add_thread_capability(owner, cap) {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "ipc_create_port_with_id: failed to attach capability to thread {}",
+                    owner
+                );
+            }
+        }
+        Err(_) => {
+            log_error!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id: failed to create root IPC capability"
             );
         }
     }
@@ -3353,6 +3452,7 @@ fn spawn_process_internal(
         priority: ThreadPriority::Normal,
         name: static_name,
         capability_table: cap::create_capability_table(pid),
+        is_userspace: true,
     };
 
     // Grant capabilities

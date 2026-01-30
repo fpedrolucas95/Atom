@@ -14,7 +14,7 @@
 //! - ListServices() - List all managed services and their status
 //! - ServiceStatus(name) - Get status of a specific service
 //!
-//! ## Well-known port: 101 (SERVICE_MANAGER_PORT)
+//! ## Well-known port: 2 (SERVICE_MANAGER_PORT, reserved)
 
 #![no_std]
 #![no_main]
@@ -617,8 +617,8 @@ fn init_default_services() {
 // Main Service Loop
 // ============================================================================
 
-/// Well-known port for the service manager
-pub const SERVICE_MANAGER_PORT: u64 = 101;
+/// Well-known port for the service manager (reserved ID 2)
+pub const SERVICE_MANAGER_PORT: u64 = 2;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -628,13 +628,19 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     atom_syscall::debug::log("svcmgr: Service Manager starting");
 
-    // Create our IPC port
-    let port = match atom_syscall::ipc::create_port() {
+    // Create our IPC port with the reserved well-known ID (Port 2)
+    let port = match atom_syscall::ipc::create_port_with_id(SERVICE_MANAGER_PORT) {
         Ok(p) => p,
         Err(_) => {
-            atom_syscall::debug::log("svcmgr: failed to create port");
-            loop {
-                atom_syscall::thread::sleep_ms(1000);
+            atom_syscall::debug::log("svcmgr: WARN - reserved Port(2) failed, using dynamic port");
+            match atom_syscall::ipc::create_port() {
+                Ok(p) => p,
+                Err(_) => {
+                    atom_syscall::debug::log("svcmgr: failed to create port");
+                    loop {
+                        atom_syscall::thread::sleep_ms(1000);
+                    }
+                }
             }
         }
     };
