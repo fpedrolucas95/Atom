@@ -1103,3 +1103,65 @@ pub fn register_waiter(port_id: PortId, caller: ThreadId) -> Result<(), IpcError
 pub fn has_message(port_id: PortId) -> Result<bool, IpcError> {
     IPC_MANAGER.has_message(port_id)
 }
+
+/// Close all ports owned by a thread and wake up any threads waiting on those ports
+/// This should be called when a thread terminates to clean up IPC resources
+pub fn close_all_thread_ports(thread_id: ThreadId) {
+    let mut ports = IPC_MANAGER.ports.lock();
+
+    // Collect all port IDs owned by this thread
+    let owned_ports: Vec<PortId> = ports
+        .iter()
+        .filter(|(_, port)| port.owner == thread_id)
+        .map(|(id, _)| *id)
+        .collect();
+
+    log_info!(
+        LOG_ORIGIN,
+        "Closing {} ports for thread {}",
+        owned_ports.len(),
+        thread_id
+    );
+
+    // Close each port and wake up any waiting threads
+    for port_id in owned_ports {
+        if let Some(port) = ports.remove(&port_id) {
+            log_debug!(
+                LOG_ORIGIN,
+                "Closing port {} ({} queued messages, {} waiters)",
+                port_id,
+                port.messages.len(),
+                port.wait_queue.len() + port.wait_any_waiters.len()
+            );
+
+            // Wake up any threads blocked on this port
+            // They will receive an error when they wake up and try to receive
+            if let Some(receiver_id) = port.receiver_blocked {
+                drop(ports);
+                log_debug!(LOG_ORIGIN, "Waking blocked receiver {} on closed port {}", receiver_id, port_id);
+                IPC_MANAGER.waiting_threads.lock().remove(&receiver_id);
+                crate::sched::mark_thread_ready(receiver_id);
+                ports = IPC_MANAGER.ports.lock();
+            }
+
+            // Wake up threads in wait queue
+            for waiter_id in port.wait_queue {
+                log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on closed port {}", waiter_id, port_id);
+                crate::sched::mark_thread_ready(waiter_id);
+            }
+
+            // Wake up wait_any waiters
+            for waiter_id in port.wait_any_waiters {
+                log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on closed port {}", waiter_id, port_id);
+                crate::sched::mark_thread_ready(waiter_id);
+            }
+
+            // Messages are automatically dropped when the port is removed
+        }
+    }
+
+    drop(ports);
+
+    // Remove thread from waiting_threads if it was waiting
+    IPC_MANAGER.waiting_threads.lock().remove(&thread_id);
+}

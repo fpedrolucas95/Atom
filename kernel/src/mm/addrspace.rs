@@ -41,6 +41,7 @@
 // - Intended to be used by syscalls and higher-level process management code
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -648,4 +649,41 @@ pub fn remap_region(
 #[allow(dead_code)]
 pub fn pml4_of(id: AddressSpaceId) -> Option<usize> {
     ADDRESS_SPACE_MANAGER.pml4_phys(id)
+}
+
+/// Cleanup all address spaces owned by a thread
+/// This should be called when a thread terminates to free all memory resources
+pub fn cleanup_thread_address_spaces(thread_id: ThreadId) {
+    let mut spaces = ADDRESS_SPACE_MANAGER.spaces.lock();
+
+    // Collect all address space IDs owned by this thread
+    let owned_spaces: Vec<AddressSpaceId> = spaces
+        .iter()
+        .filter(|(_, space)| space.is_owned_by(thread_id))
+        .map(|(id, _)| *id)
+        .collect();
+
+    log_info!(
+        LOG_ORIGIN,
+        "Cleaning up {} address spaces for thread {}",
+        owned_spaces.len(),
+        thread_id
+    );
+
+    // Remove each address space
+    // Note: When AddressSpace is dropped, its Drop impl frees the PML4 page
+    // However, it does NOT free the mapped pages - those should be freed by
+    // the physical memory manager when the process's physical pages are reclaimed
+    for id in owned_spaces {
+        if let Some(space) = spaces.remove(&id) {
+            log_info!(
+                LOG_ORIGIN,
+                "Removed address space {} (PML4=0x{:X}, {} mappings)",
+                id,
+                space.pml4_phys(),
+                space.mapping_count()
+            );
+            // space is dropped here, which frees the PML4
+        }
+    }
 }

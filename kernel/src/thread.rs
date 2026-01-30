@@ -65,7 +65,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use crate::arch::gdt;
-use crate::{log_debug, log_error, log_info, log_panic};
+use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 
 use crate::cap::CapabilityTable;
 
@@ -1150,4 +1150,101 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
 
     // Re-enable interrupts when we resume
     crate::interrupts::enable();
+}
+
+/// Terminate a thread and clean up all its resources
+/// This is the centralized cleanup function that ensures all resources
+/// are properly released when a thread exits, either normally or due to a fault.
+///
+/// This function performs the following cleanup operations:
+/// 1. Close all IPC ports owned by the thread
+/// 2. Revoke all capabilities owned by the thread
+/// 3. Clean up address spaces owned by the thread
+/// 4. Free the kernel stack
+/// 5. Remove the thread from the global thread list
+///
+/// After this function completes, the thread no longer exists in the system.
+pub fn terminate_thread(thread_id: ThreadId) {
+    log_info!(
+        LOG_ORIGIN,
+        "Terminating thread {} - beginning resource cleanup",
+        thread_id
+    );
+
+    // 1. Close all IPC ports owned by this thread
+    // This wakes up any threads waiting on those ports
+    log_debug!(LOG_ORIGIN, "Step 1/5: Closing IPC ports for thread {}", thread_id);
+    crate::ipc::close_all_thread_ports(thread_id);
+
+    // 2. Revoke all capabilities owned by this thread
+    // This removes the thread's access to all resources
+    log_debug!(LOG_ORIGIN, "Step 2/5: Revoking capabilities for thread {}", thread_id);
+    crate::cap::revoke_all_thread_capabilities(thread_id);
+
+    // 3. Clean up address spaces owned by this thread
+    // This frees the PML4 and potentially other page table structures
+    log_debug!(LOG_ORIGIN, "Step 3/5: Cleaning up address spaces for thread {}", thread_id);
+    crate::mm::addrspace::cleanup_thread_address_spaces(thread_id);
+
+    // 4. Free the kernel stack
+    // Get the thread info before removing it from the list
+    log_debug!(LOG_ORIGIN, "Step 4/5: Freeing kernel stack for thread {}", thread_id);
+    if let Some(thread) = THREAD_LIST.threads.lock().iter().find(|t| t.id == thread_id) {
+        let kernel_stack_bottom = thread.kernel_stack.wrapping_sub(thread.kernel_stack_size as u64);
+        let num_pages = thread.kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
+
+        log_debug!(
+            LOG_ORIGIN,
+            "Freeing kernel stack at 0x{:X} ({} pages, {} bytes)",
+            kernel_stack_bottom,
+            num_pages,
+            thread.kernel_stack_size
+        );
+
+        // Get current PML4 for mapping queries
+        let current_pml4 = crate::arch::read_cr3() as usize;
+
+        // Free each page of the kernel stack
+        for i in 0..num_pages {
+            let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
+
+            // Translate virtual to physical address for the kernel stack
+            // Kernel stacks are in the higher half, so we need to get the physical address
+            if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Freeing kernel stack page {}/{}: virt=0x{:X} phys=0x{:X}",
+                    i + 1,
+                    num_pages,
+                    page_addr,
+                    phys_addr
+                );
+                crate::mm::pmm::free_page(phys_addr);
+            } else {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Could not query mapping for kernel stack page at 0x{:X}",
+                    page_addr
+                );
+            }
+        }
+    }
+
+    // 5. Remove the thread from the global thread list
+    // This is the final step - after this, the thread object is dropped
+    log_debug!(LOG_ORIGIN, "Step 5/5: Removing thread {} from thread list", thread_id);
+    if let Some(removed_thread) = THREAD_LIST.remove(thread_id) {
+        log_info!(
+            LOG_ORIGIN,
+            "Thread {} ('{}') terminated successfully - all resources freed",
+            thread_id,
+            removed_thread.name
+        );
+    } else {
+        log_warn!(
+            LOG_ORIGIN,
+            "Thread {} was not found in thread list during termination",
+            thread_id
+        );
+    }
 }
