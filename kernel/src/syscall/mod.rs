@@ -2867,11 +2867,19 @@ pub fn notify_irq_handler(irq: u8) {
         // Send notification via IPC port
         let port_id = crate::ipc::PortId::from_raw(*port);
 
-        // Create a simple IRQ notification message
+        // Create a libipc-compatible IrqNotification message (MessageType 20)
+        // Header: [msg_type (4 bytes), payload_size (4 bytes), sequence (4 bytes)]
+        // Followed by 1 byte for the IRQ number.
+        let mut payload = alloc::vec![0u8; 13];
+        payload[0..4].copy_from_slice(&20u32.to_le_bytes()); // IrqNotification
+        payload[4..8].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
+        // sequence = 0 at [8..12]
+        payload[12] = irq;
+
         let msg = crate::ipc::Message::new(
             crate::thread::ThreadId::from_raw(0), // Kernel sender
-            irq as u32, // Message type is IRQ number
-            alloc::vec![irq], // Payload is the IRQ number
+            20u32, // Message type is IrqNotification
+            payload,
         );
 
         // Non-blocking send - we're in interrupt context

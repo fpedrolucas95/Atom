@@ -76,6 +76,7 @@ pub enum MessageType {
     MouseButtonDown = 11,
     MouseButtonUp = 12,
     MouseScroll = 13,
+    IrqNotification = 20,
 
     // Window Management (100-199)
     CreateWindow = 100,
@@ -163,6 +164,7 @@ impl MessageType {
             11 => Some(Self::MouseButtonDown),
             12 => Some(Self::MouseButtonUp),
             13 => Some(Self::MouseScroll),
+            20 => Some(Self::IrqNotification),
             100 => Some(Self::CreateWindow),
             101 => Some(Self::CreateWindowResponse),
             102 => Some(Self::DestroyWindow),

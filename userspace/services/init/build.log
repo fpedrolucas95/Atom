@@ -26,6 +26,7 @@ warning: creating a mutable reference to mutable static
     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
 
 warning: `atom_syscall` (lib) generated 3 warnings (run `cargo fix --lib -p atom_syscall` to apply 1 suggestion)
+   Compiling libipc v0.1.0 (/app/userspace/libs/libipc)
 warning: unused import: `alloc::vec::Vec`
   --> /app/userspace/libs/libipc/src/lib.rs:30:5
    |
@@ -35,4 +36,5 @@ warning: unused import: `alloc::vec::Vec`
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: `libipc` (lib) generated 1 warning (run `cargo fix --lib -p libipc` to apply 1 suggestion)
-    Finished `release` profile [optimized] target(s) in 0.07s
+   Compiling init v0.1.0 (/app/userspace/services/init)
+    Finished `release` profile [optimized] target(s) in 0.63s

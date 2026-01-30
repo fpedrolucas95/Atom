@@ -15,6 +15,7 @@
 pub mod raw;
 pub mod thread;
 pub mod input;
+pub mod interrupts;
 pub mod graphics;
 pub mod io;
 pub mod ipc;
