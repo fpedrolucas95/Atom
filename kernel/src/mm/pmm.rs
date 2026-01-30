@@ -212,7 +212,9 @@ pub fn alloc_page() -> Option<usize> {
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
 
     unsafe {
-        for page in 0..total {
+        // Start from page 1 to avoid allocating the null page (page 0)
+        // This helps catch null pointer dereferences
+        for page in 1..total {
             if is_page_free(page) {
                 set_page_allocated(page);
                 FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
@@ -299,7 +301,8 @@ pub fn alloc_pages(count: usize) -> Option<usize> {
     let max_start = total.checked_sub(count)?;
 
     unsafe {
-        'outer: for start in 0..=max_start {
+        // Start from page 1 to avoid allocating the null page (page 0)
+        'outer: for start in 1..=max_start {
             for i in 0..count {
                 if !is_page_free(start + i) {
                     continue 'outer;
