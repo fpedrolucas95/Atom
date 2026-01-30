@@ -41,10 +41,10 @@
 // - Zeroed variants for safe page table and heap initialization
 // - Utility helpers for alignment and statistics reporting
 
-use crate::boot::{MemoryMap, EFI_CONVENTIONAL_MEMORY};
+use crate::boot::{MemoryMap, EFI_CONVENTIONAL_MEMORY, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 #[allow(unused_imports)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use crate::{log_info};
+use crate::{log_info, log_debug};
 
 const MAX_PAGES: usize = 256 * 1024;
 static mut BITMAP: [u8; MAX_PAGES / 8] = [0xFF; MAX_PAGES / 8];  // 32 KiB bitmap
@@ -59,6 +59,41 @@ pub const PAGE_SIZE: usize = 4096;
 #[cfg(debug_assertions)]
 #[allow(dead_code)]
 static ALLOC_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Check if an EFI memory type is usable by the kernel after ExitBootServices()
+#[inline]
+fn is_usable_memory(typ: u32) -> bool {
+    // After ExitBootServices(), these memory types become available for kernel use:
+    // - EFI_CONVENTIONAL_MEMORY (7): standard free memory
+    // - EFI_BOOT_SERVICES_CODE (3): UEFI boot services code (no longer needed)
+    // - EFI_BOOT_SERVICES_DATA (4): UEFI boot services data (no longer needed)
+    typ == EFI_CONVENTIONAL_MEMORY
+        || typ == EFI_BOOT_SERVICES_CODE
+        || typ == EFI_BOOT_SERVICES_DATA
+}
+
+/// Get human-readable name for EFI memory type (for debug logging)
+#[allow(dead_code)]
+fn memory_type_name(typ: u32) -> &'static str {
+    match typ {
+        0 => "Reserved",
+        1 => "LoaderCode",
+        2 => "LoaderData",
+        3 => "BootServicesCode",
+        4 => "BootServicesData",
+        5 => "RuntimeServicesCode",
+        6 => "RuntimeServicesData",
+        7 => "Conventional",
+        8 => "Unusable",
+        9 => "ACPIReclaim",
+        10 => "ACPINVS",
+        11 => "MemoryMappedIO",
+        12 => "MemoryMappedIOPortSpace",
+        13 => "PalCode",
+        14 => "PersistentMemory",
+        _ => "Unknown",
+    }
+}
 
 pub unsafe fn init(memory_map: &MemoryMap) {
     use core::sync::atomic::Ordering;
@@ -82,8 +117,8 @@ pub unsafe fn init(memory_map: &MemoryMap) {
             tracked_end_page = end_page;
         }
 
-        // Count all conventional memory as physical RAM
-        if d.typ == EFI_CONVENTIONAL_MEMORY {
+        // Count all usable memory as physical RAM (conventional + boot services)
+        if is_usable_memory(d.typ) {
             physical_ram_pages += num_pages;
         }
     }
@@ -96,14 +131,30 @@ pub unsafe fn init(memory_map: &MemoryMap) {
 
     let mut free_pages: usize = 0;
 
+    // Second pass: mark usable regions as free and log them
+    log_debug!("[pmm]", "Memory map regions:");
     for d in memory_map.descriptors() {
-        if d.typ != EFI_CONVENTIONAL_MEMORY {
-            continue;
-        }
-
         let start_page = (d.physical_start as usize) / PAGE_SIZE;
         let num_pages = d.number_of_pages as usize;
         let end_page = start_page.saturating_add(num_pages).min(total_pages);
+        let size_mb = (num_pages * PAGE_SIZE) / (1024 * 1024);
+
+        // Log significant memory regions (>= 1MB) for debugging
+        if size_mb > 0 && is_usable_memory(d.typ) {
+            log_debug!(
+                "[pmm]",
+                "  0x{:016X}-0x{:016X} {} MB [{}] - USABLE",
+                d.physical_start,
+                d.physical_start + (num_pages as u64 * PAGE_SIZE as u64),
+                size_mb,
+                memory_type_name(d.typ)
+            );
+        }
+
+        // Only mark usable memory regions as free
+        if !is_usable_memory(d.typ) {
+            continue;
+        }
 
         if start_page >= total_pages {
             continue;
@@ -134,10 +185,12 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     LARGEST_FREE_RUN.store(max_run, Ordering::Relaxed);
 
     let physical_ram_mb = (physical_ram_pages * PAGE_SIZE) / (1024 * 1024);
+    let free_mb = (free_pages * PAGE_SIZE) / (1024 * 1024);
     log_info!(
         "[pmm]",
-        "PMM initialized: physical_ram={}MB, tracked_pages={}, free_pages={}, largest_free_run={} pages",
+        "PMM initialized: physical_ram={}MB, free_ram={}MB, tracked_pages={}, free_pages={}, largest_free_run={} pages",
         physical_ram_mb,
+        free_mb,
         total_pages,
         free_pages,
         max_run
