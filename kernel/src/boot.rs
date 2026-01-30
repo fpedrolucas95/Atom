@@ -4,6 +4,9 @@
 //! defines the neutral data passed from the platform boot stub into the kernel
 //! proper.
 
+// EFI Memory Types - these become available after ExitBootServices()
+pub const EFI_BOOT_SERVICES_CODE: u32 = 3;
+pub const EFI_BOOT_SERVICES_DATA: u32 = 4;
 pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 
 #[repr(C)]
