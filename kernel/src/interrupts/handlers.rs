@@ -186,12 +186,12 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
     let error_code = frame.error_code;
 
     if (exception_number as usize) >= EXCEPTION_NAMES.len() {
-            log_panic!(
+        log_panic!(
             LOG_ORIGIN,
             "Bad exception vector: {} (frame corruption)",
             exception_number
         );
-            log_panic!(
+        log_panic!(
             LOG_ORIGIN,
             "Raw frame: RIP={:#016X} CS={:#016X} RSP={:#016X} SS={:#016X}",
             frame.rip,
@@ -199,14 +199,18 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
             frame.rsp,
             frame.ss
         );
-            loop { halt(); }
-        }
-    
-        log_panic!(
+        loop { halt(); }
+    }
+
+    // Check if exception came from user space (CPL=3)
+    let from_userspace = (frame.cs & 0x3) == 0x3;
+
+    log_panic!(
         LOG_ORIGIN,
-        "CPU exception: {} (vector={})",
+        "CPU exception: {} (vector={}, from_userspace={})",
         EXCEPTION_NAMES[exception_number as usize],
-        exception_number
+        exception_number,
+        from_userspace
     );
 
     log_panic!(LOG_ORIGIN, "Error code: {:#X}", error_code);
@@ -265,24 +269,36 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 error_code & 0x10 != 0
             );
 
-            if error_code & 0x4 != 0 {
+            // If from userspace, kill the thread instead of halting the system
+            if from_userspace {
                 if let Some(tid) = sched::current_thread() {
-                    match mm::policy::notify_page_fault(tid, cr2, error_code, frame.rip) {
-                        Ok(()) => log_debug!(
-                            LOG_ORIGIN,
-                            "Page fault notification delivered to user-space policy handler"
-                        ),
-                        Err(e) => log_warn!(
-                            LOG_ORIGIN,
-                            "Failed to notify user-space policy handler about page fault: {:?}",
-                            e
-                        ),
-                    }
-                } else {
-                    log_warn!(
+                    log_panic!(
                         LOG_ORIGIN,
-                        "Page fault from user space but no current thread; notification skipped"
+                        "User-space page fault - terminating thread {}",
+                        tid
                     );
+
+                    // Attempt notification first
+                    let _ = mm::policy::notify_page_fault(tid, cr2, error_code, frame.rip);
+
+                    // Terminate the faulting thread
+                    crate::thread::terminate_entity(
+                        tid,
+                        crate::thread::TerminationReason::PageFault {
+                            address: cr2,
+                            error_code,
+                            rip: frame.rip,
+                        }
+                    );
+
+                    // Switch to next thread
+                    let (_, next) = sched::on_timer_tick();
+                    if let Some(next_id) = next {
+                        log_info!(LOG_ORIGIN, "Switching to thread {}", next_id);
+                        crate::sched::perform_context_switch(tid, next_id);
+                    }
+
+                    log_panic!(LOG_ORIGIN, "No threads available after killing faulting thread");
                 }
             }
         }
@@ -300,39 +316,98 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                     error_code
                 );
             }
-            
-            // Dump kernel stack to see the IRET frame
-            log_panic!(LOG_ORIGIN, "Dumping kernel stack from RSP={:#016X}:", frame.rsp);
-            unsafe {
-                let stack_ptr = frame.rsp as *const u64;
-                for i in 0..10 {
-                    let addr = stack_ptr.offset(i as isize);
-                    if let Some(val) = (addr as *const u64).as_ref() {
-                        log_panic!(
-                            LOG_ORIGIN,
-                            "  [RSP+{:#04X}] = {:#016X}{}",
-                            i * 8,
-                            *val,
-                            match i {
-                                0 => " (should be RIP if this is IRET frame)",
-                                1 => " (should be CS=0x1B if IRET frame)",
-                                2 => " (should be RFLAGS if IRET frame)",
-                                3 => " (should be user RSP if IRET frame)",
-                                4 => " (should be SS=0x23 if IRET frame)",
-                                _ => ""
-                            }
-                        );
+
+            // If from userspace, kill the thread instead of halting the system
+            if from_userspace {
+                if let Some(tid) = sched::current_thread() {
+                    log_panic!(
+                        LOG_ORIGIN,
+                        "User-space general protection fault - terminating thread {}",
+                        tid
+                    );
+
+                    // Terminate the faulting thread
+                    crate::thread::terminate_entity(
+                        tid,
+                        crate::thread::TerminationReason::GeneralProtectionFault {
+                            error_code,
+                            rip: frame.rip,
+                        }
+                    );
+
+                    // Switch to next thread
+                    let (_, next) = sched::on_timer_tick();
+                    if let Some(next_id) = next {
+                        log_info!(LOG_ORIGIN, "Switching to thread {}", next_id);
+                        crate::sched::perform_context_switch(tid, next_id);
+                    }
+
+                    log_panic!(LOG_ORIGIN, "No threads available after killing faulting thread");
+                }
+            } else {
+                // Kernel GP fault - dump stack and halt
+                log_panic!(LOG_ORIGIN, "Dumping kernel stack from RSP={:#016X}:", frame.rsp);
+                unsafe {
+                    let stack_ptr = frame.rsp as *const u64;
+                    for i in 0..10 {
+                        let addr = stack_ptr.offset(i as isize);
+                        if let Some(val) = (addr as *const u64).as_ref() {
+                            log_panic!(
+                                LOG_ORIGIN,
+                                "  [RSP+{:#04X}] = {:#016X}{}",
+                                i * 8,
+                                *val,
+                                match i {
+                                    0 => " (should be RIP if this is IRET frame)",
+                                    1 => " (should be CS=0x1B if IRET frame)",
+                                    2 => " (should be RFLAGS if IRET frame)",
+                                    3 => " (should be user RSP if IRET frame)",
+                                    4 => " (should be SS=0x23 if IRET frame)",
+                                    _ => ""
+                                }
+                            );
+                        }
                     }
                 }
             }
         }
 
-        _ => {}
+        _ => {
+            // For other exceptions, kill userspace threads but halt on kernel exceptions
+            if from_userspace {
+                if let Some(tid) = sched::current_thread() {
+                    log_panic!(
+                        LOG_ORIGIN,
+                        "User-space exception - terminating thread {}",
+                        tid
+                    );
+
+                    // Terminate the faulting thread
+                    crate::thread::terminate_entity(
+                        tid,
+                        crate::thread::TerminationReason::Exception {
+                            vector: exception_number,
+                            error_code,
+                            rip: frame.rip,
+                        }
+                    );
+
+                    // Switch to next thread
+                    let (_, next) = sched::on_timer_tick();
+                    if let Some(next_id) = next {
+                        log_info!(LOG_ORIGIN, "Switching to thread {}", next_id);
+                        crate::sched::perform_context_switch(tid, next_id);
+                    }
+
+                    log_panic!(LOG_ORIGIN, "No threads available after killing faulting thread");
+                }
+            }
+        }
     }
 
     log_panic!(
         LOG_ORIGIN,
-        "System halted due to fatal exception"
+        "System halted due to fatal exception in kernel space"
     );
 
     loop {

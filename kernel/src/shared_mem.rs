@@ -553,3 +553,77 @@ pub fn get_region_info(region_id: RegionId) -> Result<RegionInfo, SharedMemError
 pub fn get_stats() -> SharedMemStats {
     SHARED_MEM_MANAGER.get_stats()
 }
+
+/// Cleanup all shared memory regions owned by or mapped by a thread
+/// This should be called when a thread terminates to ensure proper resource cleanup
+///
+/// Cleanup policy:
+/// 1. Unmap all regions that the thread has mapped (regardless of ownership)
+/// 2. Destroy all regions owned by the thread (if ref_count == 0)
+/// 3. Mark owned regions for deferred cleanup if still in use by other threads
+pub fn cleanup_thread_shared_memory(thread_id: ThreadId) {
+    let mut regions = SHARED_MEM_MANAGER.regions.lock();
+
+    // Collect all regions that need cleanup
+    let mut regions_to_unmap = Vec::new();
+    let mut regions_to_destroy = Vec::new();
+
+    for (region_id, region) in regions.iter() {
+        // Check if thread has this region mapped
+        if region.mappings.iter().any(|m| m.thread_id == thread_id) {
+            regions_to_unmap.push(*region_id);
+        }
+
+        // Check if thread owns this region
+        if region.owner == thread_id {
+            if region.ref_count == 0 || region.mappings.is_empty() {
+                regions_to_destroy.push(*region_id);
+            } else {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Region {} owned by thread {} still has {} mappings - will be destroyed when last mapping is removed",
+                    region_id,
+                    thread_id,
+                    region.ref_count
+                );
+            }
+        }
+    }
+
+    log_info!(
+        LOG_ORIGIN,
+        "Cleaning up shared memory for thread {}: {} mappings, {} regions to destroy",
+        thread_id,
+        regions_to_unmap.len(),
+        regions_to_destroy.len()
+    );
+
+    // Unmap all regions mapped by this thread
+    for region_id in regions_to_unmap {
+        if let Some(region) = regions.get_mut(&region_id) {
+            if let Err(e) = region.unmap(thread_id) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Failed to unmap region {} from thread {}: {:?}",
+                    region_id,
+                    thread_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Destroy all regions owned by this thread that have no remaining references
+    for region_id in regions_to_destroy {
+        if let Some(mut region) = regions.remove(&region_id) {
+            log_debug!(
+                LOG_ORIGIN,
+                "Destroying region {} owned by thread {} ({} physical pages)",
+                region_id,
+                thread_id,
+                region.physical_pages.len()
+            );
+            region.destroy();
+        }
+    }
+}

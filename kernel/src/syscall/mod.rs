@@ -509,17 +509,17 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
 
     log_info!(
         LOG_ORIGIN,
-        "thread_exit(code={})",
+        "thread_exit(code=0x{:X})",
         exit_code
     );
 
     if let Some(tid) = crate::sched::current_thread() {
-        // Mark thread as exited BEFORE cleanup to prevent scheduler from selecting it
-        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Exited);
-
-        // Perform comprehensive resource cleanup
-        // This frees IPC ports, capabilities, address spaces, and kernel stack
-        crate::thread::terminate_thread(tid);
+        // Terminate entity with comprehensive cleanup
+        // This is the unified termination path for normal exits
+        crate::thread::terminate_entity(
+            tid,
+            crate::thread::TerminationReason::NormalExit { exit_code }
+        );
 
         // Schedule next thread - this should never return since our thread is gone
         let (prev, next) = crate::sched::on_timer_tick();
