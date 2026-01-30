@@ -638,3 +638,48 @@ pub fn derive_capability(
 pub fn lookup_capability(handle: CapHandle) -> Option<Capability> {
     CAPABILITY_MANAGER.lookup(handle)
 }
+
+/// Revoke all capabilities owned by a thread
+/// This should be called when a thread terminates to clean up all its capabilities
+pub fn revoke_all_thread_capabilities(thread_id: ThreadId) {
+    let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+
+    // Collect all capability handles owned by this thread
+    let owned_caps: Vec<CapHandle> = caps
+        .iter()
+        .filter(|(_, cap)| cap.is_owned_by(thread_id))
+        .map(|(handle, _)| *handle)
+        .collect();
+
+    log_info!(
+        LOG_ORIGIN,
+        "Revoking {} capabilities for thread {}",
+        owned_caps.len(),
+        thread_id
+    );
+
+    // Remove all capabilities owned by this thread
+    // Note: We do NOT recursively revoke children here because those
+    // may belong to other threads. The capability graph may have
+    // dangling parent references after this, but that's acceptable
+    // since the parent capability is gone.
+    for handle in owned_caps {
+        if let Some(_cap) = caps.remove(&handle) {
+            log_debug!(
+                LOG_ORIGIN,
+                "Revoked capability {} from thread {}",
+                handle,
+                thread_id
+            );
+
+            // Log audit entry for revocation
+            drop(caps);
+            CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
+                AuditEventType::Revoke,
+                thread_id,
+                handle,
+            ));
+            caps = CAPABILITY_MANAGER.global_caps.lock();
+        }
+    }
+}

@@ -509,12 +509,19 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
 
     log_info!(
         LOG_ORIGIN,
-        "thread_exit(code={})",
+        "thread_exit(code=0x{:X})",
         exit_code
     );
 
     if let Some(tid) = crate::sched::current_thread() {
-        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Exited);
+        // Terminate entity with comprehensive cleanup
+        // This is the unified termination path for normal exits
+        crate::thread::terminate_entity(
+            tid,
+            crate::thread::TerminationReason::NormalExit { exit_code }
+        );
+
+        // Schedule next thread - this should never return since our thread is gone
         let (prev, next) = crate::sched::on_timer_tick();
 
         if let (Some(prev_id), Some(next_id)) = (prev, next) {
@@ -525,7 +532,7 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
 
         log_panic!(
             LOG_ORIGIN,
-            "thread_exit returned unexpectedly (tid={})",
+            "thread_exit returned unexpectedly (tid={}) - no threads to switch to!",
             tid
         );
     }

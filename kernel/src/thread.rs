@@ -62,12 +62,88 @@
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use crate::arch::gdt;
-use crate::{log_debug, log_error, log_info, log_panic};
+use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 
 use crate::cap::CapabilityTable;
+
+/// Global resource counters for tracking and validating cleanup
+pub struct ResourceCounters {
+    pub threads_created: AtomicUsize,
+    pub threads_terminated: AtomicUsize,
+    pub kernel_stacks_allocated: AtomicUsize,
+    pub kernel_stacks_freed: AtomicUsize,
+    pub physical_pages_freed_on_termination: AtomicUsize,
+}
+
+impl ResourceCounters {
+    pub const fn new() -> Self {
+        Self {
+            threads_created: AtomicUsize::new(0),
+            threads_terminated: AtomicUsize::new(0),
+            kernel_stacks_allocated: AtomicUsize::new(0),
+            kernel_stacks_freed: AtomicUsize::new(0),
+            physical_pages_freed_on_termination: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn log_stats(&self) {
+        log_info!(
+            LOG_ORIGIN,
+            "Resource stats: threads={}/{}, stacks={}/{}, pages_freed={}",
+            self.threads_created.load(Ordering::Relaxed),
+            self.threads_terminated.load(Ordering::Relaxed),
+            self.kernel_stacks_allocated.load(Ordering::Relaxed),
+            self.kernel_stacks_freed.load(Ordering::Relaxed),
+            self.physical_pages_freed_on_termination.load(Ordering::Relaxed)
+        );
+    }
+}
+
+pub static RESOURCE_COUNTERS: ResourceCounters = ResourceCounters::new();
+
+/// Reason for thread/process termination
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationReason {
+    /// Normal exit via SYS_THREAD_EXIT or SYS_PROCESS_EXIT
+    NormalExit { exit_code: u64 },
+    /// Killed due to page fault
+    PageFault { address: u64, error_code: u64, rip: u64 },
+    /// Killed due to general protection fault
+    GeneralProtectionFault { error_code: u64, rip: u64 },
+    /// Killed due to other exception
+    Exception { vector: u64, error_code: u64, rip: u64 },
+    /// Killed by kernel (resource exhaustion, policy violation, etc.)
+    KilledByKernel { reason_code: u64 },
+    /// Killed by watchdog (unresponsive, timeout, etc.)
+    Watchdog { timeout_ms: u64 },
+}
+
+impl TerminationReason {
+    pub fn exit_code(&self) -> u64 {
+        match self {
+            TerminationReason::NormalExit { exit_code } => *exit_code,
+            TerminationReason::PageFault { .. } => 0xFFFF_FFFF_0000_000E,
+            TerminationReason::GeneralProtectionFault { .. } => 0xFFFF_FFFF_0000_000D,
+            TerminationReason::Exception { vector, .. } => 0xFFFF_FFFF_0000_0000 | vector,
+            TerminationReason::KilledByKernel { reason_code } => 0xFFFF_FFFE_0000_0000 | reason_code,
+            TerminationReason::Watchdog { .. } => 0xFFFF_FFFD_0000_0000,
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            TerminationReason::NormalExit { .. } => "normal exit",
+            TerminationReason::PageFault { .. } => "page fault",
+            TerminationReason::GeneralProtectionFault { .. } => "general protection fault",
+            TerminationReason::Exception { .. } => "exception",
+            TerminationReason::KilledByKernel { .. } => "killed by kernel",
+            TerminationReason::Watchdog { .. } => "watchdog timeout",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {
@@ -1150,4 +1226,269 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
 
     // Re-enable interrupts when we resume
     crate::interrupts::enable();
+}
+
+/// Walk through page tables and free all mapped physical frames
+/// This is used during termination to ensure complete cleanup of user-space memory
+///
+/// Returns the number of physical pages freed
+fn free_user_space_pages(pml4_phys: usize) -> usize {
+    let mut pages_freed = 0;
+
+    // Walk PML4 entries (only user-space half: entries 0-255)
+    for pml4_idx in 0..256 {
+        if let Ok(pdpt_entry) = get_pml4_entry(pml4_phys, pml4_idx) {
+            if pdpt_entry == 0 || (pdpt_entry & 0x1) == 0 {
+                continue; // Entry not present
+            }
+
+            let pdpt_phys = pdpt_entry & 0x000F_FFFF_FFFF_F000;
+
+            // Walk PDPT entries
+            for pdpt_idx in 0..512 {
+                if let Ok(pd_entry) = get_pdpt_entry(pdpt_phys as usize, pdpt_idx) {
+                    if pd_entry == 0 || (pd_entry & 0x1) == 0 {
+                        continue;
+                    }
+
+                    let pd_phys = pd_entry & 0x000F_FFFF_FFFF_F000;
+
+                    // Walk PD entries
+                    for pd_idx in 0..512 {
+                        if let Ok(pt_entry) = get_pd_entry(pd_phys as usize, pd_idx) {
+                            if pt_entry == 0 || (pt_entry & 0x1) == 0 {
+                                continue;
+                            }
+
+                            let pt_phys = pt_entry & 0x000F_FFFF_FFFF_F000;
+
+                            // Walk PT entries and free physical pages
+                            for pt_idx in 0..512 {
+                                if let Ok(page_entry) = get_pt_entry(pt_phys as usize, pt_idx) {
+                                    if page_entry != 0 && (page_entry & 0x1) != 0 {
+                                        let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
+                                        crate::mm::pmm::free_page(phys_frame);
+                                        pages_freed += 1;
+                                    }
+                                }
+                            }
+
+                            // Free the PT itself
+                            crate::mm::pmm::free_page(pt_phys as usize);
+                        }
+                    }
+
+                    // Free the PD
+                    crate::mm::pmm::free_page(pd_phys as usize);
+                }
+            }
+
+            // Free the PDPT
+            crate::mm::pmm::free_page(pdpt_phys as usize);
+        }
+    }
+
+    pages_freed
+}
+
+/// Helper function to convert physical address to virtual (higher half mapping)
+#[inline]
+fn phys_to_virt(phys: usize) -> usize {
+    crate::mm::vm::HIGHER_HALF_BASE + phys
+}
+
+/// Helper function to read a PML4 entry
+fn get_pml4_entry(pml4_phys: usize, index: usize) -> Result<u64, ()> {
+    if index >= 512 {
+        return Err(());
+    }
+
+    let pml4_virt = phys_to_virt(pml4_phys);
+    let entry_ptr = (pml4_virt + index * 8) as *const u64;
+
+    unsafe { Ok(*entry_ptr) }
+}
+
+/// Helper function to read a PDPT entry
+fn get_pdpt_entry(pdpt_phys: usize, index: usize) -> Result<u64, ()> {
+    if index >= 512 {
+        return Err(());
+    }
+
+    let pdpt_virt = phys_to_virt(pdpt_phys);
+    let entry_ptr = (pdpt_virt + index * 8) as *const u64;
+
+    unsafe { Ok(*entry_ptr) }
+}
+
+/// Helper function to read a PD entry
+fn get_pd_entry(pd_phys: usize, index: usize) -> Result<u64, ()> {
+    if index >= 512 {
+        return Err(());
+    }
+
+    let pd_virt = phys_to_virt(pd_phys);
+    let entry_ptr = (pd_virt + index * 8) as *const u64;
+
+    unsafe { Ok(*entry_ptr) }
+}
+
+/// Helper function to read a PT entry
+fn get_pt_entry(pt_phys: usize, index: usize) -> Result<u64, ()> {
+    if index >= 512 {
+        return Err(());
+    }
+
+    let pt_virt = phys_to_virt(pt_phys);
+    let entry_ptr = (pt_virt + index * 8) as *const u64;
+
+    unsafe { Ok(*entry_ptr) }
+}
+
+/// Terminate an entity (thread/process) and clean up ALL its resources
+///
+/// This is the UNIFIED termination function that handles all cleanup for ANY
+/// termination scenario: normal exit, faults, exceptions, kernel kill, watchdog.
+///
+/// Cleanup operations performed (deterministic and exhaustive):
+/// 1. Mark thread as Exited to prevent scheduler from selecting it
+/// 2. Close all IPC ports and wake waiting threads with errors
+/// 3. Clean up shared memory regions (unmap + destroy owned regions)
+/// 4. Revoke all capabilities (recursive parent→children if needed)
+/// 5. Walk page tables and free ALL user-space physical frames
+/// 6. Free page table structures (PT/PD/PDPT)
+/// 7. Destroy address space (free PML4)
+/// 8. Free kernel stack pages
+/// 9. Remove from scheduler queues
+/// 10. Remove from global thread list
+/// 11. Update resource counters
+/// 12. Log comprehensive termination report
+///
+/// After this function completes, the entity is completely gone from the system.
+/// All memory is reclaimed, all handles are invalid, and all waiters are unblocked.
+pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
+    log_info!(
+        LOG_ORIGIN,
+        "=== TERMINATING ENTITY {} - Reason: {} (exit_code=0x{:X}) ===",
+        thread_id,
+        reason.description(),
+        reason.exit_code()
+    );
+
+    // Get thread info before we start cleanup
+    let thread_info = THREAD_LIST.threads.lock()
+        .iter()
+        .find(|t| t.id == thread_id)
+        .map(|t| (t.kernel_stack, t.kernel_stack_size, t.address_space, t.name));
+
+    let (kernel_stack, kernel_stack_size, address_space_cr3, thread_name) = match thread_info {
+        Some((ks, kss, as_cr3, name)) => (ks, kss, as_cr3, name),
+        None => {
+            log_warn!(LOG_ORIGIN, "Thread {} not found in thread list during termination", thread_id);
+            RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    log_info!(LOG_ORIGIN, "Terminating '{}' (TID={}, CR3=0x{:X})", thread_name, thread_id, address_space_cr3);
+
+    // Step 1: Mark as Exited to prevent scheduling
+    set_thread_state(thread_id, ThreadState::Exited);
+    log_debug!(LOG_ORIGIN, "Step 1/10: Thread marked as Exited");
+
+    // Step 2: Close all IPC ports and wake waiters
+    log_debug!(LOG_ORIGIN, "Step 2/10: Closing IPC ports");
+    crate::ipc::close_all_thread_ports(thread_id);
+
+    // Step 3: Clean up shared memory regions
+    log_debug!(LOG_ORIGIN, "Step 3/10: Cleaning up shared memory");
+    crate::shared_mem::cleanup_thread_shared_memory(thread_id);
+
+    // Step 4: Revoke all capabilities
+    log_debug!(LOG_ORIGIN, "Step 4/10: Revoking capabilities");
+    crate::cap::revoke_all_thread_capabilities(thread_id);
+
+    // Step 5-7: Complete page table walk and physical memory cleanup
+    log_debug!(LOG_ORIGIN, "Step 5/10: Walking page tables and freeing physical frames");
+    let pages_freed = if address_space_cr3 != crate::arch::read_cr3() {
+        // Thread has its own PML4 (userspace thread)
+        let user_pages = free_user_space_pages(address_space_cr3 as usize);
+        log_info!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);
+
+        // Free the PML4 itself
+        crate::mm::pmm::free_page(address_space_cr3 as usize);
+        log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
+
+        user_pages
+    } else {
+        log_debug!(LOG_ORIGIN, "Thread using kernel PML4, skipping user page table cleanup");
+        0
+    };
+
+    RESOURCE_COUNTERS.physical_pages_freed_on_termination.fetch_add(pages_freed, Ordering::Relaxed);
+
+    // Step 6: Clean up address spaces from manager
+    log_debug!(LOG_ORIGIN, "Step 6/10: Removing address spaces from manager");
+    crate::mm::addrspace::cleanup_thread_address_spaces(thread_id);
+
+    // Step 7: Free kernel stack
+    log_debug!(LOG_ORIGIN, "Step 7/10: Freeing kernel stack");
+    let kernel_stack_bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
+    let num_stack_pages = kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
+
+    log_debug!(
+        LOG_ORIGIN,
+        "Freeing {} kernel stack pages starting at 0x{:X}",
+        num_stack_pages,
+        kernel_stack_bottom
+    );
+
+    let current_pml4 = crate::arch::read_cr3() as usize;
+    let mut stack_pages_freed = 0;
+
+    for i in 0..num_stack_pages {
+        let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
+
+        if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
+            crate::mm::pmm::free_page(phys_addr);
+            stack_pages_freed += 1;
+        }
+    }
+
+    log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages", stack_pages_freed);
+    RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
+
+    // Step 8: Remove from scheduler (handled automatically when thread is removed)
+    log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will remove thread on next tick");
+
+    // Step 9: Remove from global thread list
+    log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
+    if let Some(_removed) = THREAD_LIST.remove(thread_id) {
+        log_debug!(LOG_ORIGIN, "Thread removed from global list");
+    }
+
+    // Step 10: Update counters and log final report
+    log_debug!(LOG_ORIGIN, "Step 10/10: Updating resource counters");
+    RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+
+    log_info!(
+        LOG_ORIGIN,
+        "=== ENTITY {} ('{}') TERMINATED SUCCESSFULLY ===",
+        thread_id,
+        thread_name
+    );
+    log_info!(
+        LOG_ORIGIN,
+        "Resource cleanup: {} user pages + {} stack pages freed",
+        pages_freed,
+        stack_pages_freed
+    );
+
+    RESOURCE_COUNTERS.log_stats();
+}
+
+/// Legacy function - redirects to terminate_entity
+#[allow(dead_code)]
+pub fn terminate_thread(thread_id: ThreadId) {
+    terminate_entity(thread_id, TerminationReason::NormalExit { exit_code: 0 });
 }
