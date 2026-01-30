@@ -226,7 +226,15 @@ impl Scheduler {
         previous: Option<ThreadId>,
         next: Option<ThreadId>,
     ) -> Option<ThreadId> {
-        let chosen = next.or(previous).or_else(|| self.idle_id());
+        // Only use previous as fallback if it is still a runnable thread.
+        // A terminated/exited thread must never be selected as the fallback;
+        // fall through to the idle thread instead.
+        let valid_previous = previous.filter(|&id| {
+            thread::get_thread_state(id)
+                .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
+                .unwrap_or(false)
+        });
+        let chosen = next.or(valid_previous).or_else(|| self.idle_id());
 
         if let Some(prev) = previous {
             if Some(prev) != chosen {
@@ -294,6 +302,48 @@ impl Scheduler {
     fn current_thread(&self) -> Option<ThreadId> {
         *self.current.lock()
     }
+
+    /// Remove all scheduler state for a terminated thread.
+    /// Clears it from the ready queues, priority maps, and current thread slot.
+    fn remove_thread_state(&self, id: ThreadId) {
+        // Remove from priority maps
+        self.base_priorities.lock().remove(&id);
+        self.effective_priorities.lock().remove(&id);
+
+        // Remove from ready queues
+        let mut ready = self.ready.lock();
+        for queue in ready.queues.iter_mut() {
+            queue.retain(|tid| *tid != id);
+        }
+
+        // If it was the current thread, clear the current slot
+        let mut current = self.current.lock();
+        if *current == Some(id) {
+            *current = None;
+        }
+    }
+
+    /// Schedule the next thread after the current thread has exited.
+    /// Clears the terminated thread from the scheduler, picks the next
+    /// runnable thread from the ready queues, and falls back to the idle
+    /// thread if no other thread is available.
+    fn schedule_after_exit_impl(&self, terminated_id: ThreadId) -> Option<ThreadId> {
+        self.remove_thread_state(terminated_id);
+
+        let next = {
+            let mut ready = self.ready.lock();
+            ready.pop_next()
+        };
+
+        let chosen = next.or_else(|| self.idle_id());
+
+        if let Some(id) = chosen {
+            thread::set_thread_state(id, ThreadState::Running);
+            *self.current.lock() = Some(id);
+        }
+
+        chosen
+    }
 }
 
 static SCHEDULER: Scheduler = Scheduler::new();
@@ -322,6 +372,21 @@ pub fn drive_cooperative_tick() {
             perform_context_switch(prev_id, next_id);
         }
     }
+}
+
+/// Remove all scheduler state for a terminated thread.
+/// Must be called during thread termination to prevent the scheduler
+/// from referencing a destroyed thread.
+pub fn remove_thread(id: ThreadId) {
+    SCHEDULER.remove_thread_state(id);
+}
+
+/// Schedule the next thread after a thread has exited/been terminated.
+/// Cleans up the terminated thread from the scheduler and returns the
+/// next runnable thread, falling back to the idle thread.
+/// The caller is responsible for actually switching to the returned thread.
+pub fn schedule_after_exit(terminated_id: ThreadId) -> Option<ThreadId> {
+    SCHEDULER.schedule_after_exit_impl(terminated_id)
 }
 
 pub fn mark_thread_ready(id: ThreadId) {

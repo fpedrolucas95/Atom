@@ -291,11 +291,10 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                         }
                     );
 
-                    // Switch to next thread
-                    let (_, next) = sched::on_timer_tick();
-                    if let Some(next_id) = next {
-                        log_info!(LOG_ORIGIN, "Switching to thread {}", next_id);
-                        crate::sched::perform_context_switch(tid, next_id);
+                    // Schedule next thread (falls back to idle if no other thread is ready)
+                    if let Some(next_id) = sched::schedule_after_exit(tid) {
+                        log_info!(LOG_ORIGIN, "Switching to thread {} after page fault kill", next_id);
+                        crate::thread::jump_to_thread(next_id);
                     }
 
                     log_panic!(LOG_ORIGIN, "No threads available after killing faulting thread");
@@ -335,11 +334,10 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                         }
                     );
 
-                    // Switch to next thread
-                    let (_, next) = sched::on_timer_tick();
-                    if let Some(next_id) = next {
-                        log_info!(LOG_ORIGIN, "Switching to thread {}", next_id);
-                        crate::sched::perform_context_switch(tid, next_id);
+                    // Schedule next thread (falls back to idle if no other thread is ready)
+                    if let Some(next_id) = sched::schedule_after_exit(tid) {
+                        log_info!(LOG_ORIGIN, "Switching to thread {} after GPF kill", next_id);
+                        crate::thread::jump_to_thread(next_id);
                     }
 
                     log_panic!(LOG_ORIGIN, "No threads available after killing faulting thread");
@@ -392,11 +390,10 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                         }
                     );
 
-                    // Switch to next thread
-                    let (_, next) = sched::on_timer_tick();
-                    if let Some(next_id) = next {
-                        log_info!(LOG_ORIGIN, "Switching to thread {}", next_id);
-                        crate::sched::perform_context_switch(tid, next_id);
+                    // Schedule next thread (falls back to idle if no other thread is ready)
+                    if let Some(next_id) = sched::schedule_after_exit(tid) {
+                        log_info!(LOG_ORIGIN, "Switching to thread {} after exception kill", next_id);
+                        crate::thread::jump_to_thread(next_id);
                     }
 
                     log_panic!(LOG_ORIGIN, "No threads available after killing faulting thread");

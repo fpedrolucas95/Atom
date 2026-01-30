@@ -1458,8 +1458,9 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages", stack_pages_freed);
     RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
 
-    // Step 8: Remove from scheduler (handled automatically when thread is removed)
-    log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will remove thread on next tick");
+    // Step 8: Remove from scheduler queues, priority maps, and current-thread slot
+    log_debug!(LOG_ORIGIN, "Step 8/10: Removing from scheduler");
+    crate::sched::remove_thread(thread_id);
 
     // Step 9: Remove from global thread list
     log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");

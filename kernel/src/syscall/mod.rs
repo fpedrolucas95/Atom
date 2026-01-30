@@ -521,20 +521,22 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
             crate::thread::TerminationReason::NormalExit { exit_code }
         );
 
-        // Schedule next thread - this should never return since our thread is gone
-        let (prev, next) = crate::sched::on_timer_tick();
-
-        if let (Some(prev_id), Some(next_id)) = (prev, next) {
-            if prev_id != next_id {
-                crate::sched::perform_context_switch(prev_id, next_id);
-            }
+        // Schedule the next thread after the current one has been destroyed.
+        // schedule_after_exit cleans up the scheduler state for the terminated
+        // thread and returns the next runnable thread (falls back to idle).
+        if let Some(next_id) = crate::sched::schedule_after_exit(tid) {
+            log_info!(LOG_ORIGIN, "thread_exit: switching to thread {}", next_id);
+            // jump_to_thread never returns - it directly enters the target thread
+            crate::thread::jump_to_thread(next_id);
         }
 
+        // No thread available at all (not even idle) - should never happen
         log_panic!(
             LOG_ORIGIN,
-            "thread_exit returned unexpectedly (tid={}) - no threads to switch to!",
+            "thread_exit: no runnable thread after exit (tid={}) - system halted",
             tid
         );
+        loop { crate::arch::halt(); }
     }
 
     ESUCCESS
