@@ -192,19 +192,35 @@ fn create_init_process(
     pid: ThreadId,
     sections: &executable::ExecutableSections,
 ) -> Result<InitProcess, InitError> {
-    // Use kernel's page table for now (simplified approach)
-    let kernel_cr3 = crate::arch::read_cr3() as usize;
+    // Create a new address space for init (no longer shares kernel_cr3)
+    let init_pml4_phys = pmm::alloc_pages_zeroed(1)
+        .ok_or(InitError::MemoryAllocationFailed)?;
 
-    // Load executable into memory
-    let executable = load_executable(sections)?;
-    let user_stack_top = allocate_user_stack()?;
+    log_info!(
+        LOG_ORIGIN,
+        "Allocated new PML4 for init: 0x{:X}",
+        init_pml4_phys
+    );
+
+    // Clone kernel mappings to the new address space
+    vm::clone_kernel_mappings(init_pml4_phys)
+        .map_err(|_| InitError::MemoryAllocationFailed)?;
+
+    log_info!(
+        LOG_ORIGIN,
+        "Cloned kernel mappings to init's PML4"
+    );
+
+    // Load executable into memory (using init's own PML4)
+    let executable = load_executable(init_pml4_phys, sections)?;
+    let user_stack_top = allocate_user_stack(init_pml4_phys)?;
     let kernel_stack_top = allocate_kernel_stack()?;
 
-    // Create CPU context for Ring 3 execution
+    // Create CPU context for Ring 3 execution with init's own PML4
     let context = CpuContext::new_user(
         executable.entry_point as u64,
         user_stack_top as u64,
-        kernel_cr3 as u64,
+        init_pml4_phys as u64,
     );
 
     log_info!(
@@ -239,7 +255,7 @@ fn create_init_process(
         }
     }
 
-    // Create the thread with its own capability table
+    // Create the thread with its own capability table and isolated address space
     // Init gets High priority as it orchestrates the entire boot
     let thread = Thread {
         id: pid,
@@ -247,7 +263,7 @@ fn create_init_process(
         context,
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
-        address_space: kernel_cr3 as u64,
+        address_space: init_pml4_phys as u64,
         priority: ThreadPriority::High,
         name: "init",
         capability_table: cap::create_capability_table(pid),
@@ -257,6 +273,51 @@ fn create_init_process(
     thread::add_thread(thread);
     sched::mark_thread_ready(pid);
 
+    // Verification: Log init's CR3 and confirm it differs from kernel CR3
+    let kernel_cr3 = crate::arch::read_cr3() as usize;
+    log_info!(
+        LOG_ORIGIN,
+        "ISOLATION VERIFICATION: Init PML4=0x{:X}, Kernel CR3=0x{:X} (isolated={})",
+        init_pml4_phys,
+        kernel_cr3,
+        init_pml4_phys != kernel_cr3
+    );
+
+    if init_pml4_phys == kernel_cr3 {
+        log_panic!(
+            LOG_ORIGIN,
+            "CRITICAL: Init is using kernel CR3! Isolation failed!"
+        );
+        return Err(InitError::ThreadCreationFailed);
+    }
+
+    // Verify that kernel pages in init's PML4 are supervisor-only (no USER bit)
+    // Check a kernel address (the kernel code at higher half)
+    let kernel_test_addr = vm::HIGHER_HALF_BASE;
+    if let Ok((_phys, flags)) = vm::query_mapping_in_pml4(init_pml4_phys, kernel_test_addr) {
+        let has_user_bit = (flags.bits() & PageFlags::USER.bits()) != 0;
+        log_info!(
+            LOG_ORIGIN,
+            "Kernel mapping check: addr=0x{:X}, flags=0x{:X}, USER_bit={}",
+            kernel_test_addr,
+            flags.bits(),
+            has_user_bit
+        );
+
+        if has_user_bit {
+            log_panic!(
+                LOG_ORIGIN,
+                "CRITICAL: Kernel pages have USER bit! Init can access kernel memory!"
+            );
+            return Err(InitError::ThreadCreationFailed);
+        }
+    }
+
+    log_info!(
+        LOG_ORIGIN,
+        "✓ Isolation verified: Init has own PML4 and kernel pages are supervisor-only"
+    );
+
     Ok(InitProcess {
         pid,
         entry_point: executable.entry_point,
@@ -265,8 +326,9 @@ fn create_init_process(
     })
 }
 
-/// Load executable sections into memory
+/// Load executable sections into memory (in the specified PML4)
 fn load_executable(
+    pml4_phys: usize,
     sections: &executable::ExecutableSections,
 ) -> Result<LoadedExecutable, InitError> {
     let text_base = executable::USER_EXEC_LOAD_BASE;
@@ -294,16 +356,11 @@ fn load_executable(
         );
     }
 
-    // Unmap any existing mappings and map text section
-    for i in 0..text_pages {
-        let virt = text_base + i * PAGE_SIZE;
-        let _ = vm::unmap_page(virt);
-    }
-
+    // Map text section into init's PML4
     for i in 0..text_pages {
         let virt = text_base + i * PAGE_SIZE;
         let phys = text_phys + i * PAGE_SIZE;
-        vm::map_page(virt, phys, PageFlags::PRESENT | PageFlags::USER)
+        vm::remap_page_in_pml4(pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
             .map_err(|_| InitError::MemoryAllocationFailed)?;
     }
 
@@ -336,8 +393,8 @@ fn load_executable(
         for i in 0..data_pages {
             let virt = data_base + i * PAGE_SIZE;
             let phys = data_phys + i * PAGE_SIZE;
-            let _ = vm::unmap_page(virt);
-            vm::map_page(
+            vm::remap_page_in_pml4(
+                pml4_phys,
                 virt,
                 phys,
                 PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
@@ -365,8 +422,8 @@ fn load_executable(
     for i in 0..bss_pages {
         let virt = bss_base + i * PAGE_SIZE;
         let phys = bss_phys + i * PAGE_SIZE;
-        let _ = vm::unmap_page(virt);
-        vm::map_page(
+        vm::remap_page_in_pml4(
+            pml4_phys,
             virt,
             phys,
             PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
@@ -393,8 +450,8 @@ fn load_executable(
     })
 }
 
-/// Allocate user stack for the init process
-fn allocate_user_stack() -> Result<usize, InitError> {
+/// Allocate user stack for the init process (in the specified PML4)
+fn allocate_user_stack(pml4_phys: usize) -> Result<usize, InitError> {
     let virt_base = USER_STACK_TOP - USER_STACK_SIZE;
     let phys_base = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
         .ok_or(InitError::MemoryAllocationFailed)?;
@@ -402,7 +459,8 @@ fn allocate_user_stack() -> Result<usize, InitError> {
     for i in 0..USER_STACK_PAGES {
         let virt = virt_base + i * PAGE_SIZE;
         let phys = phys_base + i * PAGE_SIZE;
-        vm::map_page(
+        vm::remap_page_in_pml4(
+            pml4_phys,
             virt,
             phys,
             PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
