@@ -19,158 +19,154 @@ Atom Kernel is built to explore and validate OS principles in a practical, incre
 > The diagram below reflects the current structure and the planned migration of drivers/services to user space.
 
 ```mermaid
----
-config:
-  layout: dagre
-  look: classic
-  theme: neutral
----
 flowchart TB
- subgraph Firmware["Firmware / Boot"]
-    direction TB
+    %% ============================================================================
+    %% FIRMWARE & BOOT LAYER
+    %% ============================================================================
+    subgraph Firmware["🔌 Firmware & Boot Layer"]
+        direction LR
         FW["UEFI Firmware"]
-        BootEntry["Boot Entry"]
-        BootInfo["Boot Information"]
-  end
+        BootEntry["Boot Entry Point"]
+        BootInfo["Boot Information<br/>(Memory Map, Devices)"]
+        
+        FW --> BootEntry --> BootInfo
+    end
 
- subgraph Memory["Memory Management"]
-    direction TB
-        PhysMem["Physical Memory"]
-        VirtMem["Virtual Memory"]
-        KHeap["Kernel Heap"]
-        AddrSpace["Address Spaces"]
-  end
+    %% ============================================================================
+    %% MICROKERNEL CORE
+    %% ============================================================================
+    subgraph Kernel["⚙️ Microkernel Core (Ring 0)"]
+        direction TB
+        
+        %% Memory Management Subsystem
+        subgraph Memory["💾 Memory Management"]
+            direction TB
+            PhysMem["Physical Memory Manager<br/>(Bitmap Allocator)"]
+            VirtMem["Virtual Memory Manager<br/>(4-Level Paging)"]
+            AddrSpace["Isolated Address Spaces<br/>(Per-Process PML4)"]
+            KHeap["Kernel Heap<br/>(Bump Allocator)"]
+            
+            PhysMem --> VirtMem
+            VirtMem --> AddrSpace
+            VirtMem --> KHeap
+        end
+        
+        %% CPU & Privilege Control
+        subgraph Execution["🔐 CPU & Privilege Control"]
+            direction TB
+            CPU["CPU Primitives<br/>(MSRs, CR3, Segments)"]
+            Priv["Privilege Levels<br/>(Ring 0/3)"]
+            TSS["Task State Segments<br/>(Stack Switching)"]
+            IDT["Interrupt Descriptor Table<br/>(Exceptions & IRQs)"]
+            APIC["APIC Controller<br/>(Local & I/O)"]
+            Timer["Timer & IRQ Handlers<br/>(Preemption)"]
+            
+            CPU --> Priv
+            Priv --> TSS
+            TSS --> IDT
+            IDT --> APIC
+            APIC --> Timer
+        end
+        
+        %% Scheduling Subsystem
+        subgraph Scheduling["⏱️ Scheduling & Threading"]
+            direction TB
+            Threads["Thread Control Blocks<br/>(TCBs)"]
+            Context["Context Switching<br/>(Assembly Routines)"]
+            Scheduler["Preemptive Scheduler<br/>(Priority + Round-Robin)"]
+            
+            Threads --> Context
+            Context --> Scheduler
+            Timer -.-> Scheduler
+        end
+        
+        %% Kernel Interfaces
+        subgraph Interfaces["🔗 Kernel Interfaces"]
+            direction TB
+            Syscalls["System Call Handler<br/>(SYSCALL/SYSRET)"]
+            IPC["IPC Core<br/>(Ports, Messages, Batching)"]
+            Shm["Shared Memory<br/>(Zero-Copy)"]
+            Caps["Capability System<br/>(Access Control)"]
+            IRQCaps["Device & IRQ Capabilities<br/>(Hardware Access)"]
+            
+            Syscalls --> IPC
+            Syscalls --> Shm
+            Syscalls --> Caps
+            Caps --> IRQCaps
+        end
+    end
 
- subgraph Execution["Execution & CPU"]
-    direction TB
-        CPU["CPU Primitives"]
-        Priv["Privilege & Task State"]
-        IDT["Interrupt Table"]
-        IntCtrl["Interrupt Controller"]
-        Handlers["Interrupt Handlers & Timer"]
-  end
+    %% ============================================================================
+    %% USER SPACE LAYER
+    %% ============================================================================
+    subgraph UserSpace["👥 User Space (Ring 3)"]
+        direction TB
+        
+        %% Core System Processes
+        subgraph CoreProc["Core System Processes"]
+            direction LR
+            Init["Init Process<br/>(PID 1, Isolated)"]
+            ServiceMgr["Service Manager<br/>(Lifecycle & Discovery)"]
+            NameSvc["Name Service<br/>(Service Lookup)"]
+        end
+        
+        %% System Services & Drivers
+        subgraph SystemLayer["System Services & Drivers"]
+            direction LR
+            UI["UI Shell / Compositor<br/>(Graphics, Input)"]
+            UserDrivers["User-Space Drivers<br/>(Disk, USB, Network)"]
+            Services["System Services<br/>(Filesystem, Network)"]
+        end
+        
+        %% Applications
+        Apps["📱 Applications<br/>(Terminal, Browser, etc.)"]
+        
+        Init --> ServiceMgr
+        ServiceMgr --> NameSvc
+        ServiceMgr --> UI
+        ServiceMgr --> UserDrivers
+        ServiceMgr --> Services
+        ServiceMgr --> Apps
+    end
 
- subgraph Scheduling["Process Control"]
-        Context["Threads & Context Switching"]
-        Scheduler["Preemptive Scheduler (Kernel Threads)"]
-        Proc["Process Abstraction (Planned)"]
-  end
+    %% ============================================================================
+    %% CROSS-LAYER CONNECTIONS
+    %% ============================================================================
+    
+    %% Boot Flow
+    BootInfo ==> Kernel
+    
+    %% Kernel to User Space
+    Scheduler -.schedules.-> Init
+    Scheduler -.schedules.-> SystemLayer
+    Scheduler -.schedules.-> Apps
+    
+    %% IPC Connections
+    IPC <===> Init
+    IPC <===> SystemLayer
+    IPC <===> Apps
+    
+    %% Capability Distribution
+    Caps ==> Init
+    Init -.delegates.-> SystemLayer
+    Init -.delegates.-> Apps
+    
+    %% UI to Applications
+    UI <-.input/output.-> Apps
+    UI <-.rendering.-> Services
 
- subgraph KServices["System Interfaces"]
-        Syscalls["System Calls"]
-        IPC["Inter-Process Communication"]
-        Shm["Shared Memory"]
-        Caps["Capabilities"]
-        IRQCaps["IRQ / Device Caps (Planned)"]
-  end
-
- subgraph KDrivers["Internal Drivers"]
-        Graphics["Graphics Output"]
-        Input["Keyboard Input"]
-  end
-
- subgraph Kernel["Kernel Core"]
-        KernelInit["Kernel Entry"]
-        Memory
-        Execution
-        Scheduling
-        KServices
-        KDrivers
-  end
-
- subgraph UserSpace["User Space (Planned)"]
-        Init["Init Process"]
-        UserDrivers["User-Space Drivers"]
-        Services["System Services (FS, Net, Storage)"]
-        VFS["VFS / FS Server"]
-  end
-
-    %% Boot flow
-    FW --> BootEntry --> BootInfo --> KernelInit
-
-    %% Memory
-    PhysMem --> VirtMem
-    VirtMem --> KHeap & AddrSpace
-
-    %% CPU / Interrupts
-    CPU --> Priv --> IDT --> IntCtrl --> Handlers
-
-    %% Kernel init fan-out
-    KernelInit --> PhysMem
-    KernelInit --> CPU
-    KernelInit --> Graphics
-
-    %% Scheduling
-    KHeap --> Context
-    AddrSpace --> Context
-    Context --> Scheduler
-    Handlers --> Scheduler
-    Handlers --> Input
-    Scheduler -. schedules .-> Init
-    Scheduler -. schedules .-> Services
-
-    %% Syscalls & IPC
-    Syscalls --> Scheduler
-    Syscalls --> IPC
-    Syscalls --> Shm
-    Syscalls --> Caps
-    Caps -.-> IRQCaps
-
-    Handlers -- timer tick --> IPC
-
-    %% User space (future)
-    IPC ==> Init
-    Caps -.-> Init
-    Init --> Services
-    Services -.-> VFS
-
-    Graphics -. future migration to .-> UserDrivers
-    Input -. future migration to .-> UserDrivers
-    UserDrivers -. IPC + Caps .-> Services
-
-    %% Classes
-     BootInfo:::firmware
-     BootEntry:::firmware
-     FW:::firmware
-
-     PhysMem:::memory
-     VirtMem:::memory
-     KHeap:::memory
-     AddrSpace:::memory
-
-     CPU:::execution
-     Priv:::execution
-     IDT:::execution
-     IntCtrl:::execution
-     Handlers:::execution
-     Context:::execution
-     Scheduler:::execution
-
-     Syscalls:::services
-     IPC:::services
-     Shm:::services
-     Caps:::services
-
-     Graphics:::drivers
-     Input:::drivers
-
-     KernelInit:::kernel
-
-     Init:::user
-     UserDrivers:::user
-     Services:::user
-     VFS:::user
-     Proc:::planned
-     IRQCaps:::planned
-
-    classDef firmware fill:#fde2ff,stroke:#6b2c91,stroke-width:1.5px
-    classDef kernel fill:#f8faff,stroke:#2c4f91,stroke-width:2px
-    classDef memory fill:#e8f6ff,stroke:#1f6fa5,stroke-width:1.5px
-    classDef execution fill:#eef3ff,stroke:#3a4a8f,stroke-width:1.5px
-    classDef services fill:#eef7ee,stroke:#2f7a2f,stroke-width:1.5px
-    classDef drivers fill:#fff4e6,stroke:#a65b1f,stroke-width:1.5px
-    classDef user fill:#e9f7ef,stroke:#2e8b57,stroke-width:1.5px
-    classDef planned opacity:0.7,stroke-dasharray: 5 5
+    %% ============================================================================
+    %% STYLING
+    %% ============================================================================
+    classDef firmwareStyle fill:#2c3e50,stroke:#34495e,stroke-width:2px,color:#ecf0f1
+    classDef kernelStyle fill:#27ae60,stroke:#229954,stroke-width:2px,color:#ecf0f1
+    classDef userStyle fill:#3498db,stroke:#2980b9,stroke-width:2px,color:#ecf0f1
+    classDef coreStyle fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#ecf0f1
+    
+    class Firmware,FW,BootEntry,BootInfo firmwareStyle
+    class Kernel,Memory,Execution,Scheduling,Interfaces kernelStyle
+    class UserSpace,SystemLayer userStyle
+    class CoreProc,Init,ServiceMgr,NameSvc coreStyle
 ````
 
 ### Current status (high level)
