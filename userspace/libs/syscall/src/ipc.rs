@@ -19,6 +19,21 @@ pub fn create_port() -> SyscallResult<PortId> {
     }
 }
 
+/// Create an IPC port with a specific reserved ID (1-255).
+///
+/// Used by well-known system services (e.g., namesvc on Port 1) to get
+/// deterministic, pre-assigned port IDs instead of sequentially allocated ones.
+pub fn create_port_with_id(id: PortId) -> SyscallResult<PortId> {
+    use crate::raw::{syscall1, numbers::SYS_IPC_CREATE_PORT_WITH_ID};
+    let result = unsafe { syscall1(SYS_IPC_CREATE_PORT_WITH_ID, id) };
+
+    if result == 0 || result >= u64::MAX - 10 {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(result)
+    }
+}
+
 /// Close an IPC port
 pub fn close_port(port: PortId) -> SyscallResult<()> {
     let result = unsafe { syscall1(SYS_IPC_CLOSE_PORT, port) };

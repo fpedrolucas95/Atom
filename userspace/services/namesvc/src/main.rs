@@ -185,10 +185,19 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    // Create our service port - this MUST be the first port created in the system to be Port(1)
-    let port = match atom_syscall::ipc::create_port() {
+    // Create our service port with the reserved well-known ID (Port 1).
+    // This uses create_port_with_id() for deterministic assignment instead of
+    // relying on being the first process to call create_port().
+    let port = match atom_syscall::ipc::create_port_with_id(1) {
         Ok(p) => p,
-        Err(_) => loop { atom_syscall::thread::sleep_ms(1000); }
+        Err(_) => {
+            // Fallback: try regular create_port if reserved allocation fails
+            atom_syscall::debug::log("namesvc: WARN - reserved Port(1) failed, using dynamic port");
+            match atom_syscall::ipc::create_port() {
+                Ok(p) => p,
+                Err(_) => loop { atom_syscall::thread::sleep_ms(1000); }
+            }
+        }
     };
 
     atom_syscall::debug::log("namesvc: started on Port(1)");

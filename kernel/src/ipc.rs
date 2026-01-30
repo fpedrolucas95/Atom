@@ -82,12 +82,26 @@ fn current_time_ms() -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortId(u64);
 
+/// Port IDs 1-255 are reserved for well-known system services.
+/// Dynamic allocation starts at 256.
+const RESERVED_PORT_RANGE: u64 = 256;
+
 impl PortId {
     pub fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        static NEXT_ID: AtomicU64 = AtomicU64::new(RESERVED_PORT_RANGE);
         PortId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
-    
+
+    /// Create a PortId with a specific reserved ID (1-255).
+    /// Returns None if the ID is outside the reserved range or is 0.
+    pub fn new_reserved(id: u64) -> Option<Self> {
+        if id == 0 || id >= RESERVED_PORT_RANGE {
+            None
+        } else {
+            Some(PortId(id))
+        }
+    }
+
     pub fn from_raw(raw: u64) -> Self {
         PortId(raw)
     }
@@ -449,6 +463,21 @@ impl IpcManager {
 
         self.ports.lock().insert(port_id, port);
         port_id
+    }
+
+    /// Create a port with a specific reserved ID (1-255).
+    /// Returns the PortId on success, or IpcError if the ID is invalid or already in use.
+    fn create_port_with_id(&self, owner: ThreadId, id: u64) -> Result<PortId, IpcError> {
+        let port_id = PortId::new_reserved(id).ok_or(IpcError::InvalidPort)?;
+
+        let mut ports = self.ports.lock();
+        if ports.contains_key(&port_id) {
+            return Err(IpcError::PortBusy);
+        }
+
+        let port = PortState::new(port_id, owner);
+        ports.insert(port_id, port);
+        Ok(port_id)
     }
 
     fn port_owner(&self, port_id: PortId) -> Option<ThreadId> {
@@ -992,6 +1021,12 @@ pub fn init() {
 
 pub fn create_port(owner: ThreadId) -> PortId {
     IPC_MANAGER.create_port(owner)
+}
+
+/// Create a port with a specific reserved ID (1-255).
+/// Used for well-known system service ports (e.g., namesvc on Port 1).
+pub fn create_port_with_id(owner: ThreadId, id: u64) -> Result<PortId, IpcError> {
+    IPC_MANAGER.create_port_with_id(owner, id)
 }
 
 pub fn get_port_owner(port_id: PortId) -> Option<ThreadId> {

@@ -9,10 +9,13 @@
 //! 1. Spawn `namesvc` (service discovery)
 //! 2. Spawn `service_manager` (lifecycle management)
 //! 3. Wait for services to be ready
-//! 4. Spawn `ui_shell` (compositor / window manager)
-//! 5. Spawn userspace drivers: keyboard, mouse, display
+//! 4. Spawn `ui_shell` (compositor / window manager with unified input)
+//! 5. Spawn `display` driver
 //! 6. Spawn `terminal`
 //! 7. Enter supervision loop
+//!
+//! Note: Keyboard and mouse input are handled directly by ui_shell via kernel
+//! buffer polling. Separate keyboard/mouse driver processes are not spawned.
 //!
 //! ## Design
 //!

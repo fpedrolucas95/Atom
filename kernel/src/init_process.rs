@@ -9,8 +9,8 @@
 // The init process (init.atxf) is responsible for:
 // - Spawning namesvc (service discovery)
 // - Spawning service_manager (lifecycle management)
-// - Spawning userspace drivers (keyboard, mouse, display)
-// - Spawning ui_shell (compositor / window manager)
+// - Spawning ui_shell (compositor / window manager with unified input)
+// - Spawning display driver
 // - Spawning applications (terminal)
 //
 // Key responsibilities of this module:
@@ -251,6 +251,7 @@ fn create_init_process(
         priority: ThreadPriority::High,
         name: "init",
         capability_table: cap::create_capability_table(pid),
+        is_userspace: true,
     };
 
     thread::add_thread(thread);

@@ -311,6 +311,34 @@ switch_to_context_internal:
 
     ; ========== IRET to KERNEL (CPL 0) ==========
 .iret_to_kernel:
+    ; In x86_64 long mode, IRETQ ALWAYS pops 5 qwords:
+    ;   RIP, CS, RFLAGS, RSP, SS
+    ; This is true even for CPL0->CPL0 transitions (unlike 32-bit protected mode).
+    ; We must build a full 5-qword IRET frame.
+
+    ; Build full IRET frame (5 qwords = 40 bytes)
+    sub rsp, 40
+
+    ; [rsp+0]  = RIP
+    mov rax, [r15 + OFF_RIP]
+    mov [rsp + 0], rax
+
+    ; [rsp+8]  = CS (kernel code selector)
+    movzx eax, word [r15 + OFF_CS]
+    mov [rsp + 8], rax
+
+    ; [rsp+16] = RFLAGS
+    mov rax, [r15 + OFF_RFLAGS]
+    mov [rsp + 16], rax
+
+    ; [rsp+24] = RSP (restored kernel stack pointer)
+    mov rax, [r15 + OFF_RSP]
+    mov [rsp + 24], rax
+
+    ; [rsp+32] = SS (kernel data selector)
+    movzx eax, word [r15 + OFF_SS]
+    mov [rsp + 32], rax
+
     ; Restore GP registers (except r15)
     mov rax, [r15 + OFF_RAX]
     mov rbx, [r15 + OFF_RBX]
@@ -326,14 +354,8 @@ switch_to_context_internal:
     mov r12, [r15 + OFF_R12]
     mov r13, [r15 + OFF_R13]
     mov r14, [r15 + OFF_R14]
-
-    ; For kernel CPL0->CPL0, IRETQ only pops 3 slots: RIP, CS, RFLAGS
-    ; (no stack switch, so SS:RSP are NOT popped)
-    push qword [r15 + OFF_RFLAGS]
-    push qword [r15 + OFF_CS]
-    push qword [r15 + OFF_RIP]
-
     mov r15, [r15 + OFF_R15]
+
     iretq
 
     ; ========== IRET to USER (CPL 3) ==========

@@ -12,11 +12,13 @@ use alloc::vec::Vec;
 // Well-Known Service Ports
 // ============================================================================
 
-/// Well-known port for the name service
-pub const NAME_SERVICE_PORT: u64 = 100;
+/// Well-known port for the name service.
+/// Must match the reserved port ID used by namesvc (see ports.rs well_known::NAME_SERVICE).
+pub const NAME_SERVICE_PORT: u64 = 1;
 
-/// Well-known port for the service manager
-pub const SERVICE_MANAGER_PORT: u64 = 101;
+/// Well-known port for the service manager.
+/// Must match the reserved port ID used by service_manager (see ports.rs well_known::SERVICE_MANAGER).
+pub const SERVICE_MANAGER_PORT: u64 = 2;
 
 // ============================================================================
 // Name Service Messages (600-699)
