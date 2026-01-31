@@ -1661,8 +1661,8 @@ impl Compositor {
             self.fb.draw_rect(ix + 12, iy + 12, 24, 24, Color::WHITE);
 
             // Label
-            let label_len = icon.label.len() as u32 * 8;
-            let lx = ix + (size as i32 - label_len as i32) / 2;
+            let label_len = icon.label.len() as i32 * 8;
+            let lx = (ix as i32 + (size as i32 - label_len) / 2).max(0) as u32;
             self.fb.draw_string(lx as u32, iy + size + 8, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
         }
     }
