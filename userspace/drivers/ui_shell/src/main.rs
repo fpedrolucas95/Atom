@@ -917,6 +917,28 @@ impl Compositor {
         match header.msg_type {
             MessageType::AppRegister => self.handle_app_registration(data),
             MessageType::WmRequest => self.handle_wm_request(&data[MessageHeader::SIZE..]),
+            MessageType::WmCommitFrame => {
+                if let Some(msg) = libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..]) {
+                    let log_msg = alloc::format!("WM: Frame Committed - ID={}", msg.window_id);
+                    log(&log_msg);
+                    if let Some(window) = self.wm.get_window_mut(msg.window_id) {
+                        window.content_dirty = true;
+                        self.dirty = true;
+                    }
+                }
+            }
+            MessageType::SurfacePresent => {
+                let payload_start = MessageHeader::SIZE;
+                if data.len() >= payload_start + libipc::messages::SurfacePresentMsg::SIZE {
+                    if let Some(msg) = libipc::messages::SurfacePresentMsg::from_bytes(&data[payload_start..]) {
+                        log("Compositor: Received SurfacePresent, triggering redraw");
+                        if let Some(window) = self.wm.get_window_mut(msg.window_id) {
+                            window.content_dirty = true;
+                            self.dirty = true;
+                        }
+                    }
+                }
+            }
             _ => {
                 log("Compositor: Unexpected message type on register_port");
             }
@@ -1482,14 +1504,16 @@ impl Compositor {
         let width = self.fb.width();
         let height = self.fb.height();
 
-        let dock_w = 300u32;
-        let dock_h = 48u32;
+        let dock_w = 320u32;
+        let dock_h = 56u32;
         let dock_x = (width / 2).saturating_sub(dock_w / 2) as i32;
-        let dock_y = height.saturating_sub(dock_h + 10) as i32;
+        let dock_y = height.saturating_sub(dock_h + 12) as i32;
 
-        let icon_size = 32i32;
-        let padding = 16i32;
-        let start_x = dock_x + padding;
+        let icon_size = 36i32;
+        let padding = 20i32;
+        let num_icons = 4; // Matches draw_dock
+        let total_icons_width = num_icons * icon_size + (num_icons - 1) * padding;
+        let start_x = dock_x + (dock_w as i32 - total_icons_width) / 2;
         let icon_y = dock_y + (dock_h as i32 - icon_size) / 2;
 
         // Check if click is within dock vertical bounds
