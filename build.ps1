@@ -27,7 +27,7 @@ $REPO_PATH  = $PSScriptRoot
 $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
 # Apenas as pastas dos drivers (não precisamos mais do nome do binário aqui)
-$USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell")
+$USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell", "demo_rects", "demo_text")
 
 # Services (incluindo init = PID 1)
 $USERSPACE_SERVICES = @(
