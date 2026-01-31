@@ -357,10 +357,10 @@ impl WindowManager {
                         x: w.x, y: w.y, width: w.width, height: w.height,
                     };
                     let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                    let mut full_msg = [0u8; 48];
-                    full_msg[..16].copy_from_slice(&header.to_bytes());
-                    full_msg[16..16 + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                    let _ = send(port, &full_msg[..16 + libipc::messages::WmWindowEventMsg::SIZE]);
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
                 }
             }
         }
@@ -383,10 +383,10 @@ impl WindowManager {
                     x: window.x, y: window.y, width: window.width, height: window.height,
                 };
                 let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                let mut full_msg = [0u8; 48];
-                full_msg[..16].copy_from_slice(&header.to_bytes());
-                full_msg[16..16 + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                let _ = send(port, &full_msg[..16 + libipc::messages::WmWindowEventMsg::SIZE]);
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
             }
 
             self.windows.push(window);
@@ -1181,10 +1181,10 @@ impl Compositor {
 
                     // Send response back to the application
                     let header = MessageHeader::new(MessageType::WmResponse, libipc::messages::WmCreateWindowResponse::SIZE as u32);
-                    let mut full_msg = [0u8; 48];
-                    full_msg[..16].copy_from_slice(&header.to_bytes());
-                    full_msg[16..16 + libipc::messages::WmCreateWindowResponse::SIZE].copy_from_slice(&resp.to_bytes());
-                    let _ = send(req.reply_port as PortId, &full_msg[..16 + libipc::messages::WmCreateWindowResponse::SIZE]);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE].copy_from_slice(&resp.to_bytes());
+                    let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
                     log("Compositor: Sent WmCreateWindowResponse");
                 }
             }
@@ -1206,10 +1206,10 @@ impl Compositor {
                 reason: 0,
             };
             let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
-            let mut full_msg = [0u8; 32];
-            full_msg[..16].copy_from_slice(&header.to_bytes());
-            full_msg[16..16 + 8].copy_from_slice(&msg.to_bytes());
-            let _ = send(port, &full_msg[..16 + 8]);
+            let mut full_msg = [0u8; 64];
+            full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+            full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
+            let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
         }
 
         self.wm.close_window(id);

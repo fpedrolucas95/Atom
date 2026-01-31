@@ -35,4 +35,4 @@ warning: unused import: `alloc::vec::Vec`
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: `libipc` (lib) generated 1 warning (run `cargo fix --lib -p libipc` to apply 1 suggestion)
-    Finished `release` profile [optimized] target(s) in 0.12s
+    Finished `release` profile [optimized] target(s) in 0.07s
