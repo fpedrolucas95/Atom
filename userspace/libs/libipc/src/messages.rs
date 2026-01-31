@@ -16,6 +16,8 @@ use alloc::vec::Vec;
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct MessageHeader {
+    /// Protocol version
+    pub version: u32,
     /// Message type identifier
     pub msg_type: MessageType,
     /// Message payload size in bytes
@@ -26,10 +28,12 @@ pub struct MessageHeader {
 
 impl MessageHeader {
     pub const SIZE: usize = core::mem::size_of::<Self>();
+    pub const CURRENT_VERSION: u32 = 1;
 
     pub fn new(msg_type: MessageType, payload_size: u32) -> Self {
         static SEQUENCE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         Self {
+            version: Self::CURRENT_VERSION,
             msg_type,
             payload_size,
             sequence: SEQUENCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
@@ -38,9 +42,10 @@ impl MessageHeader {
 
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut bytes = [0u8; Self::SIZE];
-        bytes[0..4].copy_from_slice(&(self.msg_type as u32).to_le_bytes());
-        bytes[4..8].copy_from_slice(&self.payload_size.to_le_bytes());
-        bytes[8..12].copy_from_slice(&self.sequence.to_le_bytes());
+        bytes[0..4].copy_from_slice(&self.version.to_le_bytes());
+        bytes[4..8].copy_from_slice(&(self.msg_type as u32).to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.payload_size.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.sequence.to_le_bytes());
         bytes
     }
 
@@ -48,14 +53,172 @@ impl MessageHeader {
         if bytes.len() < Self::SIZE {
             return None;
         }
-        let msg_type = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let payload_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        let sequence = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let msg_type = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let payload_size = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let sequence = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
 
         Some(Self {
+            version,
             msg_type: MessageType::from_u32(msg_type)?,
             payload_size,
             sequence,
+        })
+    }
+}
+
+// ============================================================================
+// Modern Window Manager Protocol (Wm*)
+// ============================================================================
+
+/// Window Manager request types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum WmRequestType {
+    CreateWindow = 1,
+    DestroyWindow = 2,
+    MoveWindow = 3,
+    ResizeWindow = 4,
+    SetTitle = 5,
+}
+
+impl WmRequestType {
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(Self::CreateWindow),
+            2 => Some(Self::DestroyWindow),
+            3 => Some(Self::MoveWindow),
+            4 => Some(Self::ResizeWindow),
+            5 => Some(Self::SetTitle),
+            _ => None,
+        }
+    }
+}
+
+/// Request to create a window
+#[derive(Debug, Clone)]
+pub struct WmCreateWindowRequest {
+    pub reply_port: u64,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+}
+
+impl WmCreateWindowRequest {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let title_bytes = self.title.as_bytes();
+        let mut bytes = Vec::with_capacity(24 + title_bytes.len());
+        bytes.extend_from_slice(&(WmRequestType::CreateWindow as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.reply_port.to_le_bytes());
+        bytes.extend_from_slice(&self.width.to_le_bytes());
+        bytes.extend_from_slice(&self.height.to_le_bytes());
+        bytes.extend_from_slice(&(title_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(title_bytes);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 24 { return None; }
+        let reply_port = u64::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let width = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+        let height = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let title_len = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]) as usize;
+        if bytes.len() < 24 + title_len { return None; }
+        let title = core::str::from_utf8(&bytes[24..24 + title_len]).ok()?;
+        Some(Self { reply_port, width, height, title: String::from(title) })
+    }
+}
+
+/// Window Manager response with surface info
+#[derive(Debug, Clone, Copy)]
+pub struct WmCreateWindowResponse {
+    pub window_id: WindowId,
+    pub region_id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+}
+
+impl WmCreateWindowResponse {
+    pub const SIZE: usize = 24;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.window_id.to_le_bytes());
+        bytes[4..12].copy_from_slice(&self.region_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.width.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.height.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.stride.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            region_id: u64::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11]]),
+            width: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            height: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+            stride: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+        })
+    }
+}
+
+/// Window event notification
+#[derive(Debug, Clone, Copy)]
+pub struct WmWindowEventMsg {
+    pub window_id: WindowId,
+    pub event_type: WindowEventType,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WmWindowEventMsg {
+    pub const SIZE: usize = 21;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.window_id.to_le_bytes());
+        bytes[4] = self.event_type as u8;
+        bytes[5..9].copy_from_slice(&self.x.to_le_bytes());
+        bytes[9..13].copy_from_slice(&self.y.to_le_bytes());
+        bytes[13..17].copy_from_slice(&self.width.to_le_bytes());
+        bytes[17..21].copy_from_slice(&self.height.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            event_type: WindowEventType::from_u8(bytes[4])?,
+            x: i32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+            y: i32::from_le_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]),
+            width: u32::from_le_bytes([bytes[13], bytes[14], bytes[15], bytes[16]]),
+            height: u32::from_le_bytes([bytes[17], bytes[18], bytes[19], bytes[20]]),
+        })
+    }
+}
+
+/// Commit frame message
+#[derive(Debug, Clone, Copy)]
+pub struct WmCommitFrameMsg {
+    pub window_id: WindowId,
+}
+
+impl WmCommitFrameMsg {
+    pub const SIZE: usize = 4;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.window_id.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
         })
     }
 }
@@ -86,6 +249,12 @@ pub enum MessageType {
     MoveWindow = 104,
     FocusWindow = 105,
     WindowEvent = 106,
+
+    // Modern Window Manager Protocol (800-899)
+    WmRequest = 800,
+    WmResponse = 801,
+    WmEvent = 802,
+    WmCommitFrame = 803,
 
     // Graphics (200-299)
     GetFramebuffer = 200,
@@ -208,6 +377,10 @@ impl MessageType {
             705 => Some(Self::SmRegisterPort),
             710 => Some(Self::SmResponse),
             711 => Some(Self::SmError),
+            800 => Some(Self::WmRequest),
+            801 => Some(Self::WmResponse),
+            802 => Some(Self::WmEvent),
+            803 => Some(Self::WmCommitFrame),
             _ => None,
         }
     }

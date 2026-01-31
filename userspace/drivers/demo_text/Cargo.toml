@@ -1,0 +1,14 @@
+[package]
+name = "demo_text"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+libgui = { path = "../../libs/libgui" }
+
+[[bin]]
+name = "demo_text"
+path = "src/main.rs"

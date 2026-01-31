@@ -9,16 +9,20 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::surface::Surface;
-use crate::event::Event;
-use atom_syscall::ipc::PortId;
+use crate::event::{Event, MouseEvent};
+use atom_syscall::ipc::{PortId, create_port};
 use atom_syscall::SyscallResult;
+use libipc::protocol::{lookup_service, send_message, get_payload};
+use libipc::messages::{MessageType, WmCreateWindowRequest, WmCreateWindowResponse};
 
 /// Application state and context
 pub struct Application {
     /// Application name
     name: String,
     /// IPC port for receiving events from compositor
-    event_port: Option<PortId>,
+    event_port: PortId,
+    /// Compositor WM port
+    wm_port: PortId,
     /// Pending events queue
     event_queue: Vec<Event>,
     /// Whether application should quit
@@ -27,15 +31,14 @@ pub struct Application {
 
 impl Application {
     /// Create a new application
-    ///
-    /// In the full implementation, this would:
-    /// 1. Register with the desktop compositor
-    /// 2. Create an IPC port for receiving events
-    /// 3. Request initial window/surface allocation
     pub fn new(name: &str) -> SyscallResult<Self> {
+        let event_port = create_port()?;
+        let wm_port = lookup_service("compositor.wm")?;
+
         Ok(Self {
             name: String::from(name),
-            event_port: None,
+            event_port,
+            wm_port,
             event_queue: Vec::new(),
             quit_requested: false,
         })
@@ -46,50 +49,46 @@ impl Application {
         &self.name
     }
 
+    /// Create a window and get its drawing surface
+    pub fn create_window(&mut self, title: &str, width: u32, height: u32) -> SyscallResult<Surface> {
+        let req = WmCreateWindowRequest {
+            reply_port: self.event_port,
+            width,
+            height,
+            title: String::from(title),
+        };
+
+        send_message(self.wm_port, MessageType::WmRequest, &req.to_bytes())?;
+
+        // Wait for response
+        let mut buffer = [0u8; 256];
+        loop {
+            if let Ok(Some((header, len))) = libipc::protocol::try_recv_message(self.event_port, &mut buffer) {
+                if header.msg_type == MessageType::WmResponse {
+                    let payload = get_payload(&buffer, len);
+                    if let Some(resp) = WmCreateWindowResponse::from_bytes(payload) {
+                        // Create surface from shared region
+                        let surface = Surface::from_wm_response(resp, self.wm_port)?;
+                        return Ok(surface);
+                    }
+                }
+            }
+            atom_syscall::thread::yield_now();
+        }
+    }
+
     /// Create a surface for rendering
-    ///
-    /// In the full implementation, this would request a surface
-    /// from the desktop compositor via IPC.
     pub fn create_surface(&mut self, width: u32, height: u32) -> SyscallResult<Surface> {
-        // For now, directly use the framebuffer
-        use atom_syscall::graphics::get_framebuffer_info;
-
-        let info = get_framebuffer_info()?;
-
-        // Calculate effective dimensions (clamp to framebuffer size)
-        let effective_width = width.min(info.1);
-        let effective_height = height.min(info.2);
-
-        Ok(Surface::new(
-            1, // Surface ID
-            effective_width,
-            effective_height,
-            info.3, // stride
-            info.4 as usize, // bpp
-            info.0 as *mut u8, // buffer address
-        ))
+        self.create_window("New Window", width, height)
     }
 
     /// Create a full-screen surface
     pub fn create_fullscreen_surface(&mut self) -> SyscallResult<Surface> {
-        use atom_syscall::graphics::get_framebuffer_info;
-
-        let info = get_framebuffer_info()?;
-
-        Ok(Surface::new(
-            0, // Surface ID 0 = fullscreen
-            info.1, // width
-            info.2, // height
-            info.3, // stride
-            info.4 as usize, // bpp
-            info.0 as *mut u8, // buffer address
-        ))
+        // Fullscreen is just a very large window for now
+        self.create_window("Fullscreen", 1024, 768)
     }
 
     /// Poll for the next event
-    ///
-    /// Returns None if no events are pending.
-    /// In the full implementation, this would check the IPC port.
     pub fn poll_event(&mut self) -> Event {
         if self.quit_requested {
             return Event::Quit;
@@ -99,18 +98,91 @@ impl Application {
             return event;
         }
 
-        // Check for keyboard input
-        if let Some(scancode) = atom_syscall::input::keyboard_poll() {
-            return Event::Key(crate::event::KeyEvent {
-                scancode,
-                character: scancode_to_ascii(scancode),
-                pressed: scancode & 0x80 == 0,
-                modifiers: crate::event::KeyModifiers::default(),
-            });
+        // Poll IPC port for messages
+        let mut buffer = [0u8; 256];
+        while let Ok(Some((header, len))) = libipc::protocol::try_recv_message(self.event_port, &mut buffer) {
+            let payload = get_payload(&buffer, len);
+            match header.msg_type {
+                MessageType::KeyPress => {
+                    if let Some(key_event) = libipc::messages::KeyEvent::from_bytes(payload) {
+                        return Event::Key(crate::event::KeyEvent {
+                            scancode: key_event.scancode,
+                            character: key_event.character,
+                            pressed: (key_event.scancode & 0x80) == 0,
+                            modifiers: crate::event::KeyModifiers {
+                                shift: key_event.modifiers.shift,
+                                ctrl: key_event.modifiers.ctrl,
+                                alt: key_event.modifiers.alt,
+                                caps_lock: key_event.modifiers.caps_lock,
+                            },
+                        });
+                    }
+                }
+                MessageType::MouseMove => {
+                    if let Some(mouse_event) = libipc::messages::MouseMoveEvent::from_bytes(payload) {
+                        return Event::Mouse(MouseEvent::Move {
+                            x: mouse_event.x,
+                            y: mouse_event.y,
+                            dx: mouse_event.dx,
+                            dy: mouse_event.dy,
+                        });
+                    }
+                }
+                MessageType::MouseButtonDown => {
+                    if let Some(mouse_event) = libipc::messages::MouseButtonEvent::from_bytes(payload) {
+                        let button = match mouse_event.button {
+                            libipc::messages::MouseButton::Left => crate::event::MouseButton::Left,
+                            libipc::messages::MouseButton::Right => crate::event::MouseButton::Right,
+                            libipc::messages::MouseButton::Middle => crate::event::MouseButton::Middle,
+                            _ => crate::event::MouseButton::Left,
+                        };
+                        return Event::Mouse(MouseEvent::ButtonDown {
+                            button,
+                            x: mouse_event.x,
+                            y: mouse_event.y,
+                        });
+                    }
+                }
+                MessageType::MouseButtonUp => {
+                    if let Some(mouse_event) = libipc::messages::MouseButtonEvent::from_bytes(payload) {
+                        let button = match mouse_event.button {
+                            libipc::messages::MouseButton::Left => crate::event::MouseButton::Left,
+                            libipc::messages::MouseButton::Right => crate::event::MouseButton::Right,
+                            libipc::messages::MouseButton::Middle => crate::event::MouseButton::Middle,
+                            _ => crate::event::MouseButton::Left,
+                        };
+                        return Event::Mouse(MouseEvent::ButtonUp {
+                            button,
+                            x: mouse_event.x,
+                            y: mouse_event.y,
+                        });
+                    }
+                }
+                MessageType::TerminateRequest => {
+                    self.quit_requested = true;
+                    return Event::Quit;
+                }
+                MessageType::WmEvent => {
+                    if let Some(wm_event) = libipc::messages::WmWindowEventMsg::from_bytes(payload) {
+                        match wm_event.event_type {
+                            libipc::messages::WindowEventType::Close => {
+                                self.quit_requested = true;
+                                return Event::Quit;
+                            }
+                            libipc::messages::WindowEventType::Focus => {
+                                return Event::Window(crate::event::WindowEvent::Focus);
+                            }
+                            libipc::messages::WindowEventType::Unfocus => {
+                                return Event::Window(crate::event::WindowEvent::Unfocus);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
-        // Check for mouse input
-        // Note: This would need proper packet assembly in real implementation
         Event::None
     }
 

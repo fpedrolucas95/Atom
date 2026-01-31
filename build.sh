@@ -99,6 +99,8 @@ USERSPACE_DRIVERS=(
     "display"
     "terminal"
     "ui_shell"
+    "demo_rects"
+    "demo_text"
 )
 
 # System services (init is PID 1 - spawns everything else)
