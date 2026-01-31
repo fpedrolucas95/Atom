@@ -119,17 +119,19 @@ use libipc::well_known;
 mod theme {
     use atom_syscall::graphics::Color;
 
-    pub const DESKTOP_BG: Color = Color::new(46, 52, 64);
-    pub const PANEL_BG: Color = Color::new(36, 41, 51);
-    pub const PANEL_TEXT: Color = Color::new(236, 239, 244);
+    pub const DESKTOP_BG_DEFAULT: Color = Color::new(46, 52, 64);
+    pub const PANEL_BG: Color = Color::new(26, 30, 38);
+    pub const PANEL_TEXT: Color = Color::new(216, 222, 233);
     pub const ACCENT: Color = Color::new(136, 192, 208);
-    pub const WINDOW_BG: Color = Color::new(46, 52, 64);
-    pub const WINDOW_HEADER: Color = Color::new(59, 66, 82);
-    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(76, 86, 106);
-    pub const WINDOW_BORDER: Color = Color::new(67, 76, 94);
-    pub const DOCK_BG: Color = Color::new(36, 41, 51);
+    pub const WINDOW_BG: Color = Color::new(43, 48, 59);
+    pub const WINDOW_HEADER: Color = Color::new(46, 52, 64);
+    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(59, 66, 82);
+    pub const WINDOW_BORDER: Color = Color::new(76, 86, 106);
+    pub const DOCK_BG: Color = Color::new(26, 30, 38);
     pub const CURSOR_FILL: Color = Color::WHITE;
     pub const CURSOR_OUTLINE: Color = Color::BLACK;
+
+    pub const SHADOW: Color = Color::new(10, 12, 16);
 }
 
 // ============================================================================
@@ -576,6 +578,30 @@ struct PendingWindow {
     window_id: WindowId,
 }
 
+struct DesktopIcon {
+    label: String,
+    executable: String,
+    x: i32,
+    y: i32,
+    color: Color,
+}
+
+struct ContextMenu {
+    x: i32,
+    y: i32,
+    visible: bool,
+    items: Vec<String>,
+}
+
+struct WallpaperPicker {
+    visible: bool,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    colors: Vec<Color>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragOperation {
     None,
@@ -595,6 +621,7 @@ struct Compositor {
     dirty: bool,
     /// Mouse button state
     mouse_left_down: bool,
+    mouse_right_down: bool,
     /// Current drag operation
     drag_op: DragOperation,
     /// Window that currently has mouse capture
@@ -602,6 +629,19 @@ struct Compositor {
     /// Unified input drivers
     mouse_driver: MouseDriver,
     keyboard_shift: bool,
+    /// Background color
+    desktop_bg: Color,
+    /// Desktop icons
+    icons: Vec<DesktopIcon>,
+    /// Global tick counter
+    ticks: u32,
+    /// Last click info for double-click
+    last_click_tick: u32,
+    last_click_icon: Option<usize>,
+    /// Context menu
+    context_menu: ContextMenu,
+    /// Wallpaper picker
+    wallpaper_picker: WallpaperPicker,
 }
 
 impl Compositor {
@@ -633,6 +673,22 @@ impl Compositor {
             log("Compositor: Registered IRQ 12 (mouse) successfully");
         }
 
+        let mut icons = Vec::new();
+        icons.push(DesktopIcon {
+            label: String::from("Rect Demo"),
+            executable: String::from("demo_rects"),
+            x: 20,
+            y: 48,
+            color: Color::new(136, 192, 208),
+        });
+        icons.push(DesktopIcon {
+            label: String::from("Text Demo"),
+            executable: String::from("demo_text"),
+            x: 20,
+            y: 128,
+            color: Color::new(163, 190, 140),
+        });
+
         Self {
             fb,
             wm: WindowManager::new(),
@@ -642,10 +698,45 @@ impl Compositor {
             pending_windows: Vec::new(),
             dirty: true,
             mouse_left_down: false,
+            mouse_right_down: false,
             drag_op: DragOperation::None,
             captured_window: None,
             mouse_driver,
             keyboard_shift: false,
+            desktop_bg: theme::DESKTOP_BG_DEFAULT,
+            icons,
+            ticks: 0,
+            last_click_tick: 0,
+            last_click_icon: None,
+            context_menu: ContextMenu {
+                x: 0,
+                y: 0,
+                visible: false,
+                items: {
+                    let mut v = Vec::new();
+                    v.push(String::from("Change Wallpaper"));
+                    v
+                },
+            },
+            wallpaper_picker: WallpaperPicker {
+                visible: false,
+                x: (width as i32 - 300) / 2,
+                y: (height as i32 - 200) / 2,
+                width: 300,
+                height: 200,
+                colors: {
+                    let mut v = Vec::new();
+                    v.push(Color::new(46, 52, 64));   // Nord Night
+                    v.push(Color::new(59, 66, 82));   // Nord Night Light
+                    v.push(Color::new(76, 86, 106));  // Nord Grey
+                    v.push(Color::new(136, 192, 208)); // Nord Frost Blue
+                    v.push(Color::new(143, 188, 187)); // Nord Frost Teal
+                    v.push(Color::new(163, 190, 140)); // Nord Green
+                    v.push(Color::new(191, 97, 106));  // Nord Red
+                    v.push(Color::new(208, 135, 112)); // Nord Orange
+                    v
+                },
+            },
         }
     }
 
@@ -693,6 +784,7 @@ impl Compositor {
             // Block waiting for IPC messages instead of busy-wait with yield_now()
             // Timeout reduced to 10ms for more responsive local input polling
             let _ = wait_any(&ports, 10);
+            self.ticks = self.ticks.wrapping_add(1);
         }
     }
 
@@ -720,6 +812,11 @@ impl Compositor {
                 }
 
                 self.mouse_left_down = true;
+            } else if event.right_button {
+                if !self.mouse_right_down {
+                    self.handle_right_click(self.cursor.x, self.cursor.y);
+                }
+                self.mouse_right_down = true;
             } else {
                 if self.mouse_left_down {
                     self.handle_mouse_up(self.cursor.x, self.cursor.y);
@@ -728,6 +825,7 @@ impl Compositor {
                     self.dispatch_mouse_move(self.cursor.x, self.cursor.y, event.dx as i16, event.dy as i16);
                 }
                 self.mouse_left_down = false;
+                self.mouse_right_down = false;
             }
         }
 
@@ -997,13 +1095,35 @@ impl Compositor {
     }
 
     fn handle_click(&mut self, x: i32, y: i32) {
-        // Check if clicking on a dock icon first
-        if let Some(icon_index) = self.dock_icon_at(x, y) {
-            self.handle_dock_click(icon_index);
-            return;
+        // 1. If wallpaper picker is visible, check for clicks on it (highest priority modal)
+        if self.wallpaper_picker.visible {
+            if self.handle_wallpaper_picker_click(x, y) {
+                self.wallpaper_picker.visible = false;
+                self.dirty = true;
+                return;
+            }
+            // If click was outside the picker, close it
+            if x < self.wallpaper_picker.x || x >= self.wallpaper_picker.x + self.wallpaper_picker.width as i32 ||
+               y < self.wallpaper_picker.y || y >= self.wallpaper_picker.y + self.wallpaper_picker.height as i32 {
+                self.wallpaper_picker.visible = false;
+                self.dirty = true;
+                return;
+            }
+            return; // Click was inside but didn't hit a color or close button
         }
 
-        // Check if clicking on a window
+        // 2. If context menu is visible, check for clicks on it
+        if self.context_menu.visible {
+            if self.handle_context_menu_click(x, y) {
+                self.context_menu.visible = false;
+                self.dirty = true;
+                return;
+            }
+            self.context_menu.visible = false;
+            self.dirty = true;
+        }
+
+        // 3. Check if clicking on a window (z-order priority)
         if let Some(id) = self.wm.window_at(x, y) {
             if self.wm.focused_id != Some(id) {
                 self.wm.focus_window(id);
@@ -1078,6 +1198,28 @@ impl Compositor {
                     }
                 }
             }
+            return;
+        }
+
+        // 4. Check if clicking on a dock icon
+        if let Some(icon_index) = self.dock_icon_at(x, y) {
+            self.handle_dock_click(icon_index);
+            return;
+        }
+
+        // 5. Check if clicking on a desktop icon
+        if let Some(icon_idx) = self.icon_at(x, y) {
+            let current_tick = self.ticks;
+            if self.last_click_icon == Some(icon_idx) && current_tick.wrapping_sub(self.last_click_tick) < 50 {
+                // Double click! (roughly < 500ms if tick is 10ms)
+                let exe = self.icons[icon_idx].executable.clone();
+                self.spawn_app(&exe);
+                self.last_click_icon = None;
+            } else {
+                self.last_click_icon = Some(icon_idx);
+                self.last_click_tick = current_tick;
+            }
+            return;
         }
     }
 
@@ -1102,6 +1244,73 @@ impl Compositor {
             }
             DragOperation::None => {}
         }
+    }
+
+    fn handle_right_click(&mut self, x: i32, y: i32) {
+        // Hide context menu if already visible
+        self.context_menu.visible = false;
+
+        // If clicking on desktop (no window, no dock, no icon), show context menu
+        if self.wm.window_at(x, y).is_none() && self.dock_icon_at(x, y).is_none() && self.icon_at(x, y).is_none() {
+            self.context_menu.x = x;
+            self.context_menu.y = y;
+            self.context_menu.visible = true;
+            self.dirty = true;
+        }
+    }
+
+    fn handle_context_menu_click(&mut self, x: i32, y: i32) -> bool {
+        let menu_w = 150u32;
+        let item_h = 24u32;
+        let menu_h = self.context_menu.items.len() as u32 * item_h;
+
+        if x >= self.context_menu.x && x < self.context_menu.x + menu_w as i32 &&
+           y >= self.context_menu.y && y < self.context_menu.y + menu_h as i32 {
+            let item_idx = (y - self.context_menu.y) as u32 / item_h;
+            if (item_idx as usize) < self.context_menu.items.len() {
+                let action = &self.context_menu.items[item_idx as usize];
+                if action == "Change Wallpaper" {
+                    log("Compositor: Change Wallpaper clicked");
+                    self.show_wallpaper_picker();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn show_wallpaper_picker(&mut self) {
+        self.wallpaper_picker.visible = true;
+        self.dirty = true;
+    }
+
+    fn handle_wallpaper_picker_click(&mut self, x: i32, y: i32) -> bool {
+        let px = self.wallpaper_picker.x;
+        let py = self.wallpaper_picker.y;
+
+        // Close button check
+        if x >= px + self.wallpaper_picker.width as i32 - 24 && x < px + self.wallpaper_picker.width as i32 - 8 &&
+           y >= py + 8 && y < py + 24 {
+            return true;
+        }
+
+        // Color tiles check
+        let start_x = px + 20;
+        let start_y = py + 48;
+        let tile_size = 40u32;
+        let spacing = 16u32;
+
+        for (i, color) in self.wallpaper_picker.colors.iter().enumerate() {
+            let tx = start_x + (i as i32 % 4) * (tile_size as i32 + spacing as i32);
+            let ty = start_y + (i as i32 / 4) * (tile_size as i32 + spacing as i32);
+
+            if x >= tx && x < tx + tile_size as i32 && y >= ty && y < ty + tile_size as i32 {
+                self.desktop_bg = *color;
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
     }
 
     fn handle_mouse_up(&mut self, x: i32, y: i32) {
@@ -1264,9 +1473,24 @@ impl Compositor {
             }
             3 => {
                 // Terminal - spawn terminal process with managed window
-                self.spawn_terminal();
+                self.spawn_app("terminal");
             }
             _ => {}
+        }
+    }
+
+    fn spawn_app(&mut self, name: &str) {
+        log(&alloc::format!("Compositor: Spawning {}", name));
+
+        // Special case for terminal which uses managed surface protocol
+        if name == "terminal" {
+            self.spawn_terminal();
+            return;
+        }
+
+        match spawn_process(name) {
+            Ok(_) => log(&alloc::format!("Compositor: Successfully spawned {}", name)),
+            Err(_) => log(&alloc::format!("Compositor: Failed to spawn {}", name)),
         }
     }
 
@@ -1325,7 +1549,10 @@ impl Compositor {
         self.cursor.restore_region(&self.fb);
 
         // Desktop background
-        self.fb.fill_rect(0, 0, self.fb.width(), self.fb.height(), theme::DESKTOP_BG);
+        self.fb.fill_rect(0, 0, self.fb.width(), self.fb.height(), self.desktop_bg);
+
+        // Desktop Icons
+        self.draw_desktop_icons();
 
         // Top panel
         self.draw_panel();
@@ -1340,9 +1567,104 @@ impl Compositor {
         // Bottom dock
         self.draw_dock();
 
+        // Context Menu
+        if self.context_menu.visible {
+            self.draw_context_menu();
+        }
+
+        // Wallpaper Picker
+        if self.wallpaper_picker.visible {
+            self.draw_wallpaper_picker();
+        }
+
         // Cursor
         self.cursor.save_region(&self.fb);
         self.draw_cursor();
+    }
+
+    fn draw_wallpaper_picker(&self) {
+        let px = self.wallpaper_picker.x as u32;
+        let py = self.wallpaper_picker.y as u32;
+        let pw = self.wallpaper_picker.width;
+        let ph = self.wallpaper_picker.height;
+
+        // Shadow
+        self.fb.fill_rect(px + 4, py + 4, pw, ph, theme::SHADOW);
+
+        // Background
+        self.fb.fill_rect(px, py, pw, ph, theme::WINDOW_BG);
+        self.fb.draw_rect(px, py, pw, ph, theme::WINDOW_BORDER);
+
+        // Header
+        self.fb.fill_rect(px + 1, py + 1, pw - 2, 32, theme::WINDOW_HEADER_FOCUSED);
+        self.fb.draw_string(px + 12, py + 8, "Change Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
+
+        // Close button (X)
+        self.fb.fill_rect(px + pw - 24, py + 8, 16, 16, Color::new(191, 97, 106));
+        self.fb.draw_string(px + pw - 20, py + 8, "x", Color::WHITE, Color::new(191, 97, 106));
+
+        // Color tiles
+        let start_x = px + 20;
+        let start_y = py + 48;
+        let tile_size = 40u32;
+        let spacing = 16u32;
+
+        for (i, color) in self.wallpaper_picker.colors.iter().enumerate() {
+            let tx = start_x + (i as u32 % 4) * (tile_size + spacing);
+            let ty = start_y + (i as u32 / 4) * (tile_size + spacing);
+
+            self.fb.fill_rect(tx, ty, tile_size, tile_size, *color);
+            self.fb.draw_rect(tx, ty, tile_size, tile_size, theme::WINDOW_BORDER);
+        }
+    }
+
+    fn draw_context_menu(&self) {
+        let menu_w = 150u32;
+        let item_h = 24u32;
+        let menu_h = self.context_menu.items.len() as u32 * item_h;
+
+        // Shadow
+        self.fb.fill_rect(self.context_menu.x as u32 + 2, self.context_menu.y as u32 + 2, menu_w, menu_h, theme::SHADOW);
+
+        // Background
+        self.fb.fill_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::PANEL_BG);
+        self.fb.draw_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::WINDOW_BORDER);
+
+        for (i, item) in self.context_menu.items.iter().enumerate() {
+            let iy = self.context_menu.y as u32 + (i as u32 * item_h);
+            self.fb.draw_string(self.context_menu.x as u32 + 8, iy + 4, item, theme::PANEL_TEXT, theme::PANEL_BG);
+        }
+    }
+
+    fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
+        for (i, icon) in self.icons.iter().enumerate() {
+            if x >= icon.x && x < icon.x + 48 && y >= icon.y && y < icon.y + 48 {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    fn draw_desktop_icons(&self) {
+        for icon in &self.icons {
+            let ix = icon.x as u32;
+            let iy = icon.y as u32;
+            let size = 48u32;
+
+            // Icon box shadow
+            self.fb.fill_rect(ix + 2, iy + 2, size, size, theme::SHADOW);
+            // Icon box
+            self.fb.fill_rect(ix, iy, size, size, icon.color);
+            self.fb.draw_rect(ix, iy, size, size, theme::WINDOW_BORDER);
+
+            // Icon symbol (generic square for now)
+            self.fb.draw_rect(ix + 12, iy + 12, 24, 24, Color::WHITE);
+
+            // Label
+            let label_len = icon.label.len() as i32 * 8;
+            let lx = (ix as i32 + (size as i32 - label_len) / 2).max(0) as u32;
+            self.fb.draw_string(lx as u32, iy + size + 8, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
+        }
     }
 
     fn draw_panel(&self) {
@@ -1350,15 +1672,17 @@ impl Compositor {
 
         // Panel background
         self.fb.fill_rect(0, 0, width, 28, theme::PANEL_BG);
+        // Bottom border for panel
+        self.fb.fill_rect(0, 27, width, 1, theme::WINDOW_BORDER);
 
         // Logo
-        self.fb.draw_string(12, 6, "Atom", theme::ACCENT, theme::PANEL_BG);
+        self.fb.draw_string(16, 6, "ATOM", theme::ACCENT, theme::PANEL_BG);
 
         // Status
-        self.fb.draw_string(70, 6, "|  Desktop Environment", theme::PANEL_TEXT, theme::PANEL_BG);
+        self.fb.draw_string(70, 6, "|  OS", theme::PANEL_TEXT, theme::PANEL_BG);
 
         // Clock (right side)
-        let clock_x = width.saturating_sub(80);
+        let clock_x = width.saturating_sub(64);
         self.fb.draw_string(clock_x, 6, "12:00", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
@@ -1374,7 +1698,7 @@ impl Compositor {
 
         // Shadow (only if not maximized)
         if window.state != WindowState::Maximized {
-            self.fb.fill_rect(x + 4, y + 4, w, h, Color::new(20, 20, 30));
+            self.fb.fill_rect(x + 2, y + 2, w + 2, h + 2, theme::SHADOW);
         }
 
         // Outer Border
@@ -1391,14 +1715,14 @@ impl Compositor {
                          header_color);
 
         // Title
-        self.fb.draw_string(x + 10, y + 8, &window.title, theme::PANEL_TEXT, header_color);
+        self.fb.draw_string(x + 12, y + 8, &window.title, theme::PANEL_TEXT, header_color);
 
         // Window controls (buttons)
         let btn_y = y + 8;
         let btn_size = 12;
-        let close_x = x + w - 22;
-        let max_x = close_x - 20;
-        let min_x = max_x - 20;
+        let close_x = x + w - 24;
+        let max_x = close_x - 22;
+        let min_x = max_x - 22;
 
         // Close button (Red)
         self.fb.fill_rect(close_x, btn_y, btn_size, btn_size, Color::new(191, 97, 106));
@@ -1429,31 +1753,43 @@ impl Compositor {
         let width = self.fb.width();
         let height = self.fb.height();
 
-        let dock_w = 300u32;
-        let dock_h = 48u32;
+        let dock_w = 320u32;
+        let dock_h = 56u32;
         let dock_x = (width / 2).saturating_sub(dock_w / 2);
-        let dock_y = height.saturating_sub(dock_h + 10);
+        let dock_y = height.saturating_sub(dock_h + 12);
 
-        // Dock background with rounded appearance
+        // Dock shadow
+        self.fb.fill_rect(dock_x + 2, dock_y + 2, dock_w, dock_h, theme::SHADOW);
+
+        // Dock background
         self.fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
+        self.fb.draw_rect(dock_x, dock_y, dock_w, dock_h, theme::WINDOW_BORDER);
 
         // Dock icons
         let icons = [
-            (Color::new(191, 97, 106), "F"),  // Files
-            (Color::new(163, 190, 140), "S"),  // Settings
-            (Color::new(94, 129, 172), "B"),   // Browser
-            (Color::new(80, 80, 80), ">_"),    // Terminal
+            (Color::new(136, 192, 208), "FL"),  // Files
+            (Color::new(129, 161, 193), "ST"),  // Settings
+            (Color::new(94, 129, 172), "BR"),   // Browser
+            (Color::new(76, 86, 106), ">_"),    // Terminal
         ];
 
-        let icon_size = 32u32;
-        let padding = 16u32;
-        let start_x = dock_x + padding;
+        let icon_size = 36u32;
+        let padding = 20u32;
+        let total_icons_width = icons.len() as u32 * icon_size + (icons.len() as u32 - 1) * padding;
+        let start_x = dock_x + (dock_w - total_icons_width) / 2;
         let icon_y = dock_y + (dock_h - icon_size) / 2;
 
         for (i, (color, label)) in icons.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + padding));
+
+            // Icon background
             self.fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
-            self.fb.draw_string(ix + 8, icon_y + 10, label, Color::WHITE, *color);
+
+            // Icon label (centered)
+            let label_len = label.len() as u32 * 8;
+            let lx = ix + (icon_size - label_len) / 2;
+            let ly = icon_y + (icon_size - 16) / 2;
+            self.fb.draw_string(lx, ly, label, Color::WHITE, *color);
         }
     }
 
