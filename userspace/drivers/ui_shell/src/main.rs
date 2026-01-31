@@ -635,6 +635,8 @@ struct Compositor {
     icons: Vec<DesktopIcon>,
     /// Global tick counter
     ticks: u32,
+    /// Counter for mouse clicks
+    click_counter: u32,
     /// Last click info for double-click
     last_click_tick: u32,
     last_click_icon: Option<usize>,
@@ -706,6 +708,7 @@ impl Compositor {
             desktop_bg: theme::DESKTOP_BG_DEFAULT,
             icons,
             ticks: 0,
+            click_counter: 0,
             last_click_tick: 0,
             last_click_icon: None,
             context_menu: ContextMenu {
@@ -757,10 +760,9 @@ impl Compositor {
             // Build list of ports to wait on (avoiding Vec to prevent memory leaks in BumpAllocator)
             let ports = [self.register_port, self.event_port];
 
-            // Poll for application registrations
+            // Poll for application registrations and WM requests
             while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
-                log("Compositor: Received message on register_port");
-                self.handle_app_registration(&reg_buffer[..len]);
+                self.handle_register_message(&reg_buffer[..len]);
             }
 
             // Poll for application events (e.g., SurfacePresent, Mouse, Keyboard)
@@ -801,6 +803,7 @@ impl Compositor {
             // Handle button states
             if event.left_button {
                 if !self.mouse_left_down {
+                    self.click_counter = self.click_counter.wrapping_add(1);
                     self.handle_click(self.cursor.x, self.cursor.y);
                 } else {
                     self.handle_mouse_drag(self.cursor.x, self.cursor.y);
@@ -896,6 +899,26 @@ impl Compositor {
         if let Some(port) = event_port {
             if port != 0 {
                 let _ = send_message_async(port, MessageType::KeyPress, &event.to_bytes());
+            }
+        }
+    }
+
+    /// Handle messages received on the registration port (AppRegister, WmRequest)
+    fn handle_register_message(&mut self, data: &[u8]) {
+        if data.len() < MessageHeader::SIZE {
+            return;
+        }
+
+        let header = match MessageHeader::from_bytes(data) {
+            Some(h) => h,
+            None => return,
+        };
+
+        match header.msg_type {
+            MessageType::AppRegister => self.handle_app_registration(data),
+            MessageType::WmRequest => self.handle_wm_request(&data[MessageHeader::SIZE..]),
+            _ => {
+                log("Compositor: Unexpected message type on register_port");
             }
         }
     }
@@ -1017,6 +1040,7 @@ impl Compositor {
                 if let Some(event) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
                     if event.button == MouseButton::Left {
                         if !self.mouse_left_down {
+                            self.click_counter = self.click_counter.wrapping_add(1);
                             self.handle_click(self.cursor.x, self.cursor.y);
                         }
                         self.mouse_left_down = true;
@@ -1209,15 +1233,15 @@ impl Compositor {
 
         // 5. Check if clicking on a desktop icon
         if let Some(icon_idx) = self.icon_at(x, y) {
-            let current_tick = self.ticks;
-            if self.last_click_icon == Some(icon_idx) && current_tick.wrapping_sub(self.last_click_tick) < 50 {
-                // Double click! (roughly < 500ms if tick is 10ms)
+            let current = self.click_counter;
+            if self.last_click_icon == Some(icon_idx) && current.wrapping_sub(self.last_click_tick) < 2 {
+                // Double click! (2 consecutive clicks)
                 let exe = self.icons[icon_idx].executable.clone();
                 self.spawn_app(&exe);
                 self.last_click_icon = None;
             } else {
                 self.last_click_icon = Some(icon_idx);
-                self.last_click_tick = current_tick;
+                self.last_click_tick = current;
             }
             return;
         }
@@ -1246,17 +1270,45 @@ impl Compositor {
         }
     }
 
+    fn is_on_panel(&self, y: i32) -> bool {
+        y >= 0 && y < 28
+    }
+
+    fn is_on_dock(&self, x: i32, y: i32) -> bool {
+        self.dock_icon_at(x, y).is_some()
+            || {
+                let width = self.fb.width();
+                let height = self.fb.height();
+                let dock_h = 56;
+                y >= (height as i32 - dock_h - 12)
+            }
+    }
+
     fn handle_right_click(&mut self, x: i32, y: i32) {
         // Hide context menu if already visible
         self.context_menu.visible = false;
 
-        // If clicking on desktop (no window, no dock, no icon), show context menu
-        if self.wm.window_at(x, y).is_none() && self.dock_icon_at(x, y).is_none() && self.icon_at(x, y).is_none() {
-            self.context_menu.x = x;
-            self.context_menu.y = y;
-            self.context_menu.visible = true;
-            self.dirty = true;
+        if self.wm.window_at(x, y).is_some() {
+            return;
         }
+
+        if self.is_on_panel(y) {
+            return;
+        }
+
+        if self.is_on_dock(x, y) {
+            return;
+        }
+
+        if self.icon_at(x, y).is_some() {
+            return;
+        }
+
+        // ✅ somente desktop vazio
+        self.context_menu.x = x;
+        self.context_menu.y = y;
+        self.context_menu.visible = true;
+        self.dirty = true;
     }
 
     fn handle_context_menu_click(&mut self, x: i32, y: i32) -> bool {
