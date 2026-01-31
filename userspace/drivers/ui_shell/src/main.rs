@@ -136,6 +136,18 @@ mod theme {
 // Window Management
 // ============================================================================
 
+const WINDOW_HEADER_HEIGHT: u32 = 28;
+const WINDOW_BORDER_WIDTH: u32 = 1;
+const WINDOW_MIN_WIDTH: u32 = 100;
+const WINDOW_MIN_HEIGHT: u32 = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowState {
+    Normal,
+    Minimized,
+    Maximized,
+}
+
 /// Window state in the compositor
 struct Window {
     id: WindowId,
@@ -144,6 +156,7 @@ struct Window {
     y: i32,
     width: u32,
     height: u32,
+    state: WindowState,
     visible: bool,
     focused: bool,
     /// IPC port for sending events to the owning application
@@ -156,6 +169,11 @@ struct Window {
     surface_region_id: Option<SharedRegionId>,
     /// Whether the content is dirty and needs compositing
     content_dirty: bool,
+    /// Previous geometry before maximization
+    saved_x: i32,
+    saved_y: i32,
+    saved_width: u32,
+    saved_height: u32,
 }
 
 impl Window {
@@ -165,8 +183,9 @@ impl Window {
             title: String::from(title),
             x,
             y,
-            width,
-            height,
+            width: width.max(WINDOW_MIN_WIDTH),
+            height: height.max(WINDOW_MIN_HEIGHT),
+            state: WindowState::Normal,
             visible: true,
             focused: false,
             event_port: None,
@@ -174,6 +193,10 @@ impl Window {
             surface: None,
             surface_region_id: None,
             content_dirty: false,
+            saved_x: x,
+            saved_y: y,
+            saved_width: width,
+            saved_height: height,
         }
     }
 
@@ -188,9 +211,12 @@ impl Window {
         process_id: ProcessId,
         event_port: PortId,
     ) -> Option<Self> {
+        let width = width.max(WINDOW_MIN_WIDTH);
+        let height = height.max(WINDOW_MIN_HEIGHT);
+
         // Calculate content area dimensions (subtract header and borders)
-        let content_width = width.saturating_sub(2);  // 1px border each side
-        let content_height = height.saturating_sub(24 + 1); // 24px header + 1px bottom border
+        let content_width = width.saturating_sub(WINDOW_BORDER_WIDTH * 2);
+        let content_height = height.saturating_sub(WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH);
 
         // Create shared surface for the content area
         let surface = match SharedSurface::create(content_width, content_height) {
@@ -207,6 +233,7 @@ impl Window {
             y,
             width,
             height,
+            state: WindowState::Normal,
             visible: true,
             focused: false,
             event_port: Some(event_port),
@@ -214,24 +241,28 @@ impl Window {
             surface_region_id: Some(region_id),
             surface: Some(surface),
             content_dirty: true,
+            saved_x: x,
+            saved_y: y,
+            saved_width: width,
+            saved_height: height,
         })
     }
 
     /// Get content area position (inside window chrome)
     fn content_x(&self) -> u32 {
-        (self.x + 1) as u32 // 1px border
+        (self.x as u32).wrapping_add(WINDOW_BORDER_WIDTH)
     }
 
     fn content_y(&self) -> u32 {
-        (self.y + 24) as u32 // 24px header
+        (self.y as u32).wrapping_add(WINDOW_HEADER_HEIGHT)
     }
 
     fn content_width(&self) -> u32 {
-        self.width.saturating_sub(2)
+        self.width.saturating_sub(WINDOW_BORDER_WIDTH * 2)
     }
 
     fn content_height(&self) -> u32 {
-        self.height.saturating_sub(24 + 1)
+        self.height.saturating_sub(WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH)
     }
 
     fn contains(&self, px: i32, py: i32) -> bool {
@@ -243,12 +274,13 @@ impl Window {
     fn header_contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && py >= self.y
             && px < self.x + self.width as i32
-            && py < self.y + 24 // Header height
+            && py < self.y + WINDOW_HEADER_HEIGHT as i32
     }
 }
 
 /// Window manager state
 struct WindowManager {
+    /// Windows in z-order (back to front)
     windows: Vec<Window>,
     next_id: WindowId,
     focused_id: Option<WindowId>,
@@ -306,15 +338,57 @@ impl WindowManager {
     fn focus_window(&mut self, id: WindowId) {
         // Unfocus previous
         if let Some(prev_id) = self.focused_id {
+            if prev_id == id {
+                // Already focused, move to top anyway
+                if let Some(pos) = self.windows.iter().position(|w| w.id == id) {
+                    let window = self.windows.remove(pos);
+                    self.windows.push(window);
+                }
+                return;
+            }
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == prev_id) {
                 w.focused = false;
+            let log_msg = alloc::format!("WM: Window Unfocused - ID={}", prev_id);
+            log(&log_msg);
+                if let Some(port) = w.event_port {
+                    let msg = libipc::messages::WmWindowEventMsg {
+                        window_id: prev_id,
+                        event_type: libipc::messages::WindowEventType::Unfocus,
+                        x: w.x, y: w.y, width: w.width, height: w.height,
+                    };
+                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                }
             }
         }
 
-        // Focus new and move to top
+        // Focus new and move to top (end of vector)
         if let Some(pos) = self.windows.iter().position(|w| w.id == id) {
             let mut window = self.windows.remove(pos);
             window.focused = true;
+            window.visible = true; // Ensure it's visible if focused
+            if window.state == WindowState::Minimized {
+                window.state = WindowState::Normal;
+            }
+
+            let log_msg = alloc::format!("WM: Window Focused - ID={}", id);
+            log(&log_msg);
+            if let Some(port) = window.event_port {
+                let msg = libipc::messages::WmWindowEventMsg {
+                    window_id: id,
+                    event_type: libipc::messages::WindowEventType::Focus,
+                    x: window.x, y: window.y, width: window.width, height: window.height,
+                };
+                let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+            }
+
             self.windows.push(window);
             self.focused_id = Some(id);
         }
@@ -323,7 +397,7 @@ impl WindowManager {
     fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Check from top to bottom (reverse order)
         for window in self.windows.iter().rev() {
-            if window.visible && window.contains(x, y) {
+            if window.visible && window.state != WindowState::Minimized && window.contains(x, y) {
                 return Some(window.id);
             }
         }
@@ -333,7 +407,80 @@ impl WindowManager {
     fn close_window(&mut self, id: WindowId) {
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
-            self.focused_id = self.windows.last().map(|w| w.id);
+            self.focused_id = self.windows.iter().filter(|w| w.visible && w.state != WindowState::Minimized).last().map(|w| w.id);
+            if let Some(new_focus) = self.focused_id {
+                self.focus_window(new_focus);
+            }
+        }
+    }
+
+    fn move_window(&mut self, id: WindowId, dx: i32, dy: i32) {
+        if let Some(window) = self.get_window_mut(id) {
+            if window.state == WindowState::Maximized {
+                return; // Can't move maximized window
+            }
+            window.x += dx;
+            window.y += dy;
+        }
+    }
+
+    fn resize_window(&mut self, id: WindowId, width: u32, height: u32) {
+        if let Some(window) = self.get_window_mut(id) {
+            if window.state == WindowState::Maximized {
+                return;
+            }
+            let new_width = width.max(WINDOW_MIN_WIDTH);
+            let new_height = height.max(WINDOW_MIN_HEIGHT);
+
+            if window.width != new_width || window.height != new_height {
+                window.width = new_width;
+                window.height = new_height;
+
+                // Reallocate shared surface if size changed significantly
+                // For now, we just mark content dirty and assume app handles resize event
+                // In a full implementation, we'd negotiate a new surface here.
+                window.content_dirty = true;
+            }
+        }
+    }
+
+    fn toggle_maximize(&mut self, id: WindowId, screen_width: u32, screen_height: u32) {
+        if let Some(window) = self.get_window_mut(id) {
+            match window.state {
+                WindowState::Maximized => {
+                    window.state = WindowState::Normal;
+                    window.x = window.saved_x;
+                    window.y = window.saved_y;
+                    window.width = window.saved_width;
+                    window.height = window.saved_height;
+                }
+                _ => {
+                    window.saved_x = window.x;
+                    window.saved_y = window.y;
+                    window.saved_width = window.width;
+                    window.saved_height = window.height;
+
+                    window.state = WindowState::Maximized;
+                    window.x = 0;
+                    window.y = 28; // Below panel
+                    window.width = screen_width;
+                    window.height = screen_height - 28; // Subtract panel height
+                }
+            }
+            window.content_dirty = true;
+        }
+    }
+
+    fn minimize_window(&mut self, id: WindowId) {
+        if let Some(window) = self.get_window_mut(id) {
+            window.state = WindowState::Minimized;
+            window.focused = false;
+        }
+        if self.focused_id == Some(id) {
+            self.focused_id = self.windows.iter().filter(|w| w.visible && w.state != WindowState::Minimized).last().map(|w| w.id);
+            if let Some(new_focus) = self.focused_id {
+                self.focus_window(new_focus);
+            }
         }
     }
 }
@@ -429,6 +576,13 @@ struct PendingWindow {
     window_id: WindowId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragOperation {
+    None,
+    Move { window_id: WindowId, start_mouse_x: i32, start_mouse_y: i32, start_win_x: i32, start_win_y: i32 },
+    Resize { window_id: WindowId, start_mouse_x: i32, start_mouse_y: i32, start_win_w: u32, start_win_h: u32 },
+}
+
 struct Compositor {
     fb: Framebuffer,
     wm: WindowManager,
@@ -441,6 +595,10 @@ struct Compositor {
     dirty: bool,
     /// Mouse button state
     mouse_left_down: bool,
+    /// Current drag operation
+    drag_op: DragOperation,
+    /// Window that currently has mouse capture
+    captured_window: Option<WindowId>,
     /// Unified input drivers
     mouse_driver: MouseDriver,
     keyboard_shift: bool,
@@ -484,6 +642,8 @@ impl Compositor {
             pending_windows: Vec::new(),
             dirty: true,
             mouse_left_down: false,
+            drag_op: DragOperation::None,
+            captured_window: None,
             mouse_driver,
             keyboard_shift: false,
         }
@@ -550,9 +710,23 @@ impl Compositor {
             if event.left_button {
                 if !self.mouse_left_down {
                     self.handle_click(self.cursor.x, self.cursor.y);
+                } else {
+                    self.handle_mouse_drag(self.cursor.x, self.cursor.y);
                 }
+
+                // If not dragging shell elements, still dispatch move to app
+                if matches!(self.drag_op, DragOperation::None) {
+                    self.dispatch_mouse_move(self.cursor.x, self.cursor.y, event.dx as i16, event.dy as i16);
+                }
+
                 self.mouse_left_down = true;
             } else {
+                if self.mouse_left_down {
+                    self.handle_mouse_up(self.cursor.x, self.cursor.y);
+                } else {
+                    // Just mouse movement, route to window under cursor
+                    self.dispatch_mouse_move(self.cursor.x, self.cursor.y, event.dx as i16, event.dy as i16);
+                }
                 self.mouse_left_down = false;
             }
         }
@@ -576,6 +750,31 @@ impl Compositor {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn dispatch_mouse_move(&mut self, x: i32, y: i32, dx: i16, dy: i16) {
+        // If we have a captured window, use it. Otherwise find window under cursor (hover)
+        let target_id = self.captured_window.or_else(|| self.wm.window_at(x, y));
+
+        if let Some(id) = target_id {
+            if let Some(w) = self.wm.get_window(id) {
+                if let Some(port) = w.event_port {
+                    if port != 0 {
+                        // Relative coordinates to content area
+                        let rel_x = x - w.content_x() as i32;
+                        let rel_y = y - w.content_y() as i32;
+
+                        let event = MouseMoveEvent {
+                            x: rel_x,
+                            y: rel_y,
+                            dx,
+                            dy,
+                        };
+                        let _ = send_message_async(port, MessageType::MouseMove, &event.to_bytes());
+                    }
+                }
             }
         }
     }
@@ -662,7 +861,7 @@ impl Compositor {
                     let header_bytes = header.to_bytes();
                     let payload_bytes = msg.to_bytes();
 
-                    let mut full_msg = [0u8; 48];
+                    let mut full_msg = [0u8; 64];
                     full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
                     full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]
                         .copy_from_slice(&payload_bytes);
@@ -692,6 +891,19 @@ impl Compositor {
             MessageType::IrqNotification => {
                 // IRQ notification from kernel (Keyboard = 1, Mouse = 12)
                 self.poll_input();
+            }
+            MessageType::WmRequest => {
+                self.handle_wm_request(&data[MessageHeader::SIZE..]);
+            }
+            MessageType::WmCommitFrame => {
+                if let Some(msg) = libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..]) {
+                    let log_msg = alloc::format!("WM: Frame Committed - ID={}", msg.window_id);
+                    log(&log_msg);
+                    if let Some(window) = self.wm.get_window_mut(msg.window_id) {
+                        window.content_dirty = true;
+                        self.dirty = true;
+                    }
+                }
             }
             MessageType::MouseMove => {
                 let payload_start = MessageHeader::SIZE;
@@ -798,44 +1010,210 @@ impl Compositor {
                 self.dirty = true;
             }
 
-            // Check for close button click
-            let mut should_close = false;
-            let mut event_port = None;
+            // Capture this window for subsequent moves and release
+            self.captured_window = Some(id);
 
-            if let Some(w) = self.wm.windows.iter().find(|w| w.id == id) {
-                let close_x = w.x + w.width as i32 - 20;
-                let close_y = w.y + 6;
-                if x >= close_x && x < close_x + 12 && y >= close_y && y < close_y + 12 {
-                    should_close = true;
-                    event_port = w.event_port;
+            if let Some(w) = self.wm.get_window(id) {
+                // Check for window controls
+                let btn_y = w.y + 8;
+                let btn_size = 12;
+                let close_x = w.x + w.width as i32 - 22;
+                let max_x = close_x - 20;
+                let min_x = max_x - 20;
+
+                if y >= btn_y && y < btn_y + btn_size {
+                    if x >= close_x && x < close_x + btn_size {
+                        self.handle_close_window(id);
+                        return;
+                    } else if x >= max_x && x < max_x + btn_size {
+                        let sw = self.fb.width();
+                        let sh = self.fb.height();
+                        self.wm.toggle_maximize(id, sw, sh);
+                        self.dirty = true;
+                        return;
+                    } else if x >= min_x && x < min_x + btn_size {
+                        self.wm.minimize_window(id);
+                        self.dirty = true;
+                        return;
+                    }
                 }
-            }
 
-            if should_close {
-                // Send terminate request to the application if it has an IPC port
-                if let Some(port) = event_port {
-                    let msg = TerminateRequestMsg {
+                // Check for title bar drag
+                if w.header_contains(x, y) {
+                    self.drag_op = DragOperation::Move {
                         window_id: id,
-                        reason: 0, // User requested close
+                        start_mouse_x: x,
+                        start_mouse_y: y,
+                        start_win_x: w.x,
+                        start_win_y: w.y,
                     };
-                    let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
-                    let header_bytes = header.to_bytes();
-                    let payload_bytes = msg.to_bytes();
-
-                    let mut full_msg = [0u8; 24];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE]
-                        .copy_from_slice(&payload_bytes);
-
-                    let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
-                    log("Compositor: Sent terminate request to application");
+                    return;
                 }
 
-                // Close the window (surface will be cleaned up via Drop)
-                self.wm.close_window(id);
-                self.dirty = true;
+                // Check for resize (bottom-right corner)
+                if x >= w.x + w.width as i32 - 12 && y >= w.y + w.height as i32 - 12 {
+                    self.drag_op = DragOperation::Resize {
+                        window_id: id,
+                        start_mouse_x: x,
+                        start_mouse_y: y,
+                        start_win_w: w.width,
+                        start_win_h: w.height,
+                    };
+                    return;
+                }
+
+                // If not decorations, forward to application
+                if let Some(port) = w.event_port {
+                    if port != 0 {
+                        let rel_x = x - w.content_x() as i32;
+                        let rel_y = y - w.content_y() as i32;
+                        if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                            let event = MouseButtonEvent {
+                                button: MouseButton::Left,
+                                x: rel_x,
+                                y: rel_y,
+                            };
+                            let _ = send_message_async(port, MessageType::MouseButtonDown, &event.to_bytes());
+                        }
+                    }
+                }
             }
         }
+    }
+
+    fn handle_mouse_drag(&mut self, x: i32, y: i32) {
+        match self.drag_op {
+            DragOperation::Move { window_id, start_mouse_x, start_mouse_y, start_win_x, start_win_y } => {
+                let dx = x - start_mouse_x;
+                let dy = y - start_mouse_y;
+                if let Some(w) = self.wm.get_window_mut(window_id) {
+                    w.x = start_win_x + dx;
+                    w.y = start_win_y + dy;
+                    self.dirty = true;
+                }
+            }
+            DragOperation::Resize { window_id, start_mouse_x, start_mouse_y, start_win_w, start_win_h } => {
+                let dx = x - start_mouse_x;
+                let dy = y - start_mouse_y;
+                let new_w = (start_win_w as i32 + dx).max(WINDOW_MIN_WIDTH as i32) as u32;
+                let new_h = (start_win_h as i32 + dy).max(WINDOW_MIN_HEIGHT as i32) as u32;
+                self.wm.resize_window(window_id, new_w, new_h);
+                self.dirty = true;
+            }
+            DragOperation::None => {}
+        }
+    }
+
+    fn handle_mouse_up(&mut self, x: i32, y: i32) {
+        let captured = self.captured_window.take();
+
+        // If we were dragging, just end it
+        if !matches!(self.drag_op, DragOperation::None) {
+            self.drag_op = DragOperation::None;
+            return;
+        }
+
+        // Use captured window if any, otherwise find one
+        let target_id = captured.or_else(|| self.wm.window_at(x, y));
+
+        if let Some(id) = target_id {
+            if let Some(w) = self.wm.get_window(id) {
+                if let Some(port) = w.event_port {
+                    if port != 0 {
+                        let rel_x = x - w.content_x() as i32;
+                        let rel_y = y - w.content_y() as i32;
+                        if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                            let event = MouseButtonEvent {
+                                button: MouseButton::Left,
+                                x: rel_x,
+                                y: rel_y,
+                            };
+                            let _ = send_message_async(port, MessageType::MouseButtonUp, &event.to_bytes());
+                        }
+                    }
+                }
+            }
+        }
+
+        self.drag_op = DragOperation::None;
+    }
+
+    fn handle_wm_request(&mut self, payload: &[u8]) {
+        if payload.len() < 4 { return; }
+        let req_type_raw = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let req_type = match libipc::messages::WmRequestType::from_u32(req_type_raw) {
+            Some(t) => t,
+            None => return,
+        };
+
+        match req_type {
+            libipc::messages::WmRequestType::CreateWindow => {
+                if let Some(req) = libipc::messages::WmCreateWindowRequest::from_bytes(payload) {
+                    log("Compositor: Received WmCreateWindowRequest");
+
+                    let win_x = 150 + (self.wm.windows.len() as i32 * 30);
+                    let win_y = 120 + (self.wm.windows.len() as i32 * 30);
+
+                    let id = self.wm.next_id;
+                    self.wm.next_id += 1;
+
+                    let window = match Window::new_with_process(
+                        id, &req.title, win_x, win_y, req.width, req.height,
+                        0 as ProcessId, req.reply_port as PortId
+                    ) {
+                        Some(w) => w,
+                        None => return,
+                    };
+
+                    let resp = libipc::messages::WmCreateWindowResponse {
+                        window_id: id,
+                        region_id: window.surface_region_id.unwrap_or(0),
+                        width: window.content_width(),
+                        height: window.content_height(),
+                        stride: window.content_width(),
+                    };
+
+                    let log_msg = alloc::format!("WM: Window Created - ID={} Title='{}'", id, req.title);
+                    log(&log_msg);
+                    self.wm.windows.push(window);
+                    self.wm.focus_window(id);
+                    self.dirty = true;
+
+                    // Send response back to the application
+                    let header = MessageHeader::new(MessageType::WmResponse, libipc::messages::WmCreateWindowResponse::SIZE as u32);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE].copy_from_slice(&resp.to_bytes());
+                    let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
+                    log("Compositor: Sent WmCreateWindowResponse");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_close_window(&mut self, id: WindowId) {
+        let log_msg = alloc::format!("WM: Window Closing - ID={}", id);
+        log(&log_msg);
+        let mut event_port = None;
+        if let Some(w) = self.wm.get_window(id) {
+            event_port = w.event_port;
+        }
+
+        if let Some(port) = event_port {
+            let msg = TerminateRequestMsg {
+                window_id: id,
+                reason: 0,
+            };
+            let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
+            let mut full_msg = [0u8; 64];
+            full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+            full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
+            let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+        }
+
+        self.wm.close_window(id);
+        self.dirty = true;
     }
 
     /// Check if a point is on a dock icon and return its index
@@ -985,44 +1363,66 @@ impl Compositor {
     }
 
     fn draw_window(&self, window: &Window) {
+        if !window.visible || window.state == WindowState::Minimized {
+            return;
+        }
+
         let x = window.x as u32;
         let y = window.y as u32;
         let w = window.width;
         let h = window.height;
 
-        // Shadow
-        self.fb.fill_rect(x + 3, y + 3, w, h, Color::new(20, 20, 30));
-
-        // Border
-        self.fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
-
-        // Window content background (only if no surface)
-        if window.surface.is_none() {
-            self.fb.fill_rect(x + 1, y + 1, w - 2, h - 2, theme::WINDOW_BG);
+        // Shadow (only if not maximized)
+        if window.state != WindowState::Maximized {
+            self.fb.fill_rect(x + 4, y + 4, w, h, Color::new(20, 20, 30));
         }
 
-        // Header
+        // Outer Border
+        self.fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
+
+        // Header (Title Bar)
         let header_color = if window.focused {
             theme::WINDOW_HEADER_FOCUSED
         } else {
             theme::WINDOW_HEADER
         };
-        self.fb.fill_rect(x + 1, y + 1, w - 2, 22, header_color);
+        self.fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
+                         w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
+                         header_color);
 
         // Title
-        self.fb.draw_string(x + 8, y + 5, &window.title, theme::PANEL_TEXT, header_color);
+        self.fb.draw_string(x + 10, y + 8, &window.title, theme::PANEL_TEXT, header_color);
 
-        // Window controls
-        let btn_x = x + w - 18;
-        let btn_y = y + 6;
-        self.fb.fill_rect(btn_x, btn_y, 10, 10, Color::new(255, 95, 86)); // Close
-        self.fb.fill_rect(btn_x - 14, btn_y, 10, 10, Color::new(255, 189, 46)); // Minimize
-        self.fb.fill_rect(btn_x - 28, btn_y, 10, 10, Color::new(39, 201, 63)); // Maximize
+        // Window controls (buttons)
+        let btn_y = y + 8;
+        let btn_size = 12;
+        let close_x = x + w - 22;
+        let max_x = close_x - 20;
+        let min_x = max_x - 20;
+
+        // Close button (Red)
+        self.fb.fill_rect(close_x, btn_y, btn_size, btn_size, Color::new(191, 97, 106));
+        // Maximize button (Green)
+        self.fb.fill_rect(max_x, btn_y, btn_size, btn_size, Color::new(163, 190, 140));
+        // Minimize button (Yellow)
+        self.fb.fill_rect(min_x, btn_y, btn_size, btn_size, Color::new(235, 203, 139));
+
+        // Window content area background
+        if window.surface.is_none() {
+            self.fb.fill_rect(window.content_x(), window.content_y(),
+                             window.content_width(), window.content_height(),
+                             theme::WINDOW_BG);
+        }
 
         // Composite shared surface content into window
         if let Some(ref surface) = window.surface {
             surface.blit_to_framebuffer(&self.fb, window.content_x(), window.content_y());
         }
+
+        // Inner border around content
+        self.fb.draw_rect(window.content_x() - 1, window.content_y() - 1,
+                         window.content_width() + 2, window.content_height() + 2,
+                         theme::WINDOW_BORDER);
     }
 
     fn draw_dock(&self) {
@@ -1129,6 +1529,7 @@ fn main() -> ! {
     // Register with name service so other processes can find us
     let _ = libipc::protocol::register_service("compositor", compositor.event_port);
     let _ = libipc::protocol::register_service("compositor.register", compositor.register_port);
+    let _ = libipc::protocol::register_service("compositor.wm", compositor.register_port);
 
     // NOTE: Drivers (keyboard, mouse, display) are spawned by the init process.
     // ui_shell only receives events via IPC from already-running drivers.

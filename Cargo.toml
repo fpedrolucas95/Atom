@@ -2,6 +2,8 @@
 members = [
     "kernel",
     "userspace/libs/syscall",
+    "userspace/libs/libipc",
+    "userspace/libs/libgui",
 ]
 # Os drivers userspace serao compilados separadamente como binarios ATXF
 # quando o loader de executaveis estiver pronto.
@@ -12,6 +14,8 @@ exclude = [
     "userspace/drivers/display",
     "userspace/drivers/terminal",
     "userspace/drivers/ui_shell",
+    "userspace/drivers/demo_rects",
+    "userspace/drivers/demo_text",
     "userspace/services/init",
     "userspace/services/namesvc",
     "userspace/services/service_manager",

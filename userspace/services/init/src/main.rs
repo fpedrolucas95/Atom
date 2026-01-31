@@ -246,6 +246,8 @@ fn boot_sequence() {
     log("[Phase 4] Spawning applications...");
 
     let _terminal_pid = spawn_service("terminal");
+    let _rects_pid = spawn_service("demo_rects");
+    let _text_pid = spawn_service("demo_text");
 
     log("[Phase 4] Applications ready");
 

@@ -877,18 +877,19 @@ fn main() -> ! {
     };
 
     // Build registration message
-    let mut full_msg = [0u8; 32];
+    let mut full_msg = [0u8; 48];
 
-    // Create header manually
+    // Create header
     let header = MessageHeader::new(MessageType::AppRegister, 16);
     let header_bytes = header.to_bytes();
-    full_msg[0..12].copy_from_slice(&header_bytes);
+    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
 
-    // Create payload manually (app_port + pid)
-    full_msg[12..20].copy_from_slice(&local_port.to_le_bytes());
-    full_msg[20..28].copy_from_slice(&0u64.to_le_bytes()); // pid = 0
+    // Create payload (app_port + pid)
+    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + 8].copy_from_slice(&local_port.to_le_bytes());
+    full_msg[MessageHeader::SIZE + 8..MessageHeader::SIZE + 16].copy_from_slice(&0u64.to_le_bytes()); // pid = 0
 
-    let msg_slice = &full_msg[0..28]; // 12 bytes header + 16 bytes payload
+    let msg_len = MessageHeader::SIZE + 16;
+    let msg_slice = &full_msg[..msg_len];
 
     log("Terminal: Sending registration to compositor");
     let _ = send(register_port, msg_slice);
