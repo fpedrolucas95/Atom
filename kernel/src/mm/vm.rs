@@ -772,7 +772,16 @@ fn map_page_internal(
     entry.set(phys, flags);
     MAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
 
-    if created_table {
+    // Always invalidate the page if we are mapping into the current address space
+    // to ensure the CPU sees the new translation immediately, regardless of
+    // whether a new page table was created.
+    let current_cr3 = unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        cr3 as usize
+    };
+
+    if pml4_phys == current_cr3 || created_table {
         invalidate_page(virt);
     }
 
@@ -855,6 +864,8 @@ fn ensure_table_user(
     if entry.is_present() {
         if user_access && (entry.0 & PageFlags::USER.bits()) == 0 {
             entry.0 |= PageFlags::USER.bits();
+            // Promoting a table is a structural change that must trigger invalidation
+            *created_flag = true;
         }
         let table = unsafe { &mut *(entry.addr() as *mut PageTable) };
         return Ok(table);

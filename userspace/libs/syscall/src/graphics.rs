@@ -507,6 +507,13 @@ pub fn shared_region_destroy(region_id: SharedRegionId) -> SyscallResult<()> {
     }
 }
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global counter for allocating virtual addresses for shared regions in each process.
+/// This allows a single process (like the compositor) to map multiple shared surfaces
+/// without address conflicts.
+static NEXT_SHARED_MAP_ADDR: AtomicUsize = AtomicUsize::new(0x2000_0000);
+
 /// A shared surface that can be passed between processes for rendering
 ///
 /// This represents a render target that is backed by shared memory,
@@ -540,8 +547,9 @@ impl SharedSurface {
 
         let region_id = shared_region_create(size)?;
 
-        // Map into our address space
-        let map_addr = Self::DEFAULT_MAP_ADDR;
+        // Map into our address space at a unique address
+        // We reserve 16MB per surface (0x0100_0000)
+        let map_addr = NEXT_SHARED_MAP_ADDR.fetch_add(0x0100_0000, Ordering::Relaxed);
         shared_region_map(region_id, map_addr, SharedMemFlags::READ_WRITE)?;
 
         let surface = Self {
@@ -565,8 +573,8 @@ impl SharedSurface {
         let bytes_per_pixel = 4u32;
         let stride = width;
 
-        // Map into our address space at a different location for clients
-        let map_addr = Self::DEFAULT_MAP_ADDR + 0x0100_0000; // Offset for client
+        // Map into our address space at a unique address
+        let map_addr = NEXT_SHARED_MAP_ADDR.fetch_add(0x0100_0000, Ordering::Relaxed);
         shared_region_map(region_id, map_addr, SharedMemFlags::READ_WRITE)?;
 
         Ok(Self {
