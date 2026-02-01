@@ -65,7 +65,7 @@ fn alloc_error(_layout: Layout) -> ! {
 
 use core::panic::PanicInfo;
 use alloc::string::String;
-use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::thread::{sleep_ms, exit};
 use atom_syscall::debug::log;
 use libgui::application::Application;
 use libgui::color::Color;
@@ -94,11 +94,13 @@ fn main() -> ! {
 
     let mut text = String::from("Type something: ");
     let mut focused = false;
+    let mut needs_redraw = true;
 
     loop {
         // Poll for events
         while let event = app.poll_event() {
             if let Event::None = event { break; }
+            needs_redraw = true;
             match event {
                 Event::Quit => exit(0),
                 Event::Key(key) => {
@@ -112,27 +114,29 @@ fn main() -> ! {
                 }
                 Event::Window(WindowEvent::Focus) => focused = true,
                 Event::Window(WindowEvent::Unfocus) => focused = false,
-                Event::None => break,
                 _ => {}
             }
         }
 
-        // Render
-        let bg_color = if focused { Color::rgb(59, 66, 82) } else { Color::rgb(46, 52, 64) };
-        surface.clear(bg_color);
+        if needs_redraw {
+            // Render
+            let bg_color = if focused { Color::rgb(59, 66, 82) } else { Color::rgb(46, 52, 64) };
+            surface.clear(bg_color);
 
-        surface.draw_string(10, 10, "Welcome to Atom OS Window Manager", Color::rgb(136, 192, 208), bg_color);
-        surface.draw_string(10, 30, &text, Color::WHITE, bg_color);
+            surface.draw_string(10, 10, "Welcome to Atom OS Window Manager", Color::rgb(136, 192, 208), bg_color);
+            surface.draw_string(10, 30, &text, Color::WHITE, bg_color);
 
-        if focused {
-            surface.draw_string(10, 380, "Status: FOCUSED", Color::rgb(163, 190, 140), bg_color);
-        } else {
-            surface.draw_string(10, 380, "Status: Click to focus", Color::rgb(191, 97, 106), bg_color);
+            if focused {
+                surface.draw_string(10, 380, "Status: FOCUSED", Color::rgb(163, 190, 140), bg_color);
+            } else {
+                surface.draw_string(10, 380, "Status: Click to focus", Color::rgb(191, 97, 106), bg_color);
+            }
+
+            surface.present();
+            needs_redraw = false;
         }
 
-        surface.present();
-
-        yield_now();
+        sleep_ms(16);
     }
 }
 

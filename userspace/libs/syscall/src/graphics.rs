@@ -148,6 +148,20 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    /// Create a new framebuffer handle pointing to a custom memory region
+    pub fn new_custom(address: usize, width: u32, height: u32, stride: u32, bpp: u32) -> Self {
+        Self {
+            info: FramebufferInfo {
+                address,
+                width,
+                height,
+                stride,
+                bytes_per_pixel: bpp,
+                size: (stride * height * bpp) as usize,
+            },
+        }
+    }
+
     /// Create a new framebuffer handle
     pub fn new() -> Option<Self> {
         // Explicit match to avoid closure that could cause indirect calls
@@ -273,6 +287,23 @@ impl Framebuffer {
         self.draw_hline(x, y + height - 1, width, color);
         self.draw_vline(x, y, height, color);
         self.draw_vline(x + width - 1, y, height, color);
+    }
+
+    /// Blit the entire framebuffer to another one
+    pub fn blit(&self, dest: &Framebuffer) {
+        let rows = self.height().min(dest.height());
+        let cols = self.width().min(dest.width());
+        let src_stride = self.stride() as usize * self.bytes_per_pixel();
+        let dst_stride = dest.stride() as usize * dest.bytes_per_pixel();
+        let copy_size = cols as usize * self.bytes_per_pixel();
+
+        for y in 0..rows {
+            let src_ptr = (self.address() + y as usize * src_stride) as *const u8;
+            let dst_ptr = (dest.address() + y as usize * dst_stride) as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_size);
+            }
+        }
     }
 }
 
@@ -677,22 +708,20 @@ impl SharedSurface {
                 break;
             }
 
-            for sx in 0..self.width {
-                let dx = dest_x + sx;
-                if dx >= fb.width() {
-                    break;
-                }
+            // Calculate horizontal bounds
+            let copy_width = if dest_x + self.width > fb.width() {
+                fb.width().saturating_sub(dest_x)
+            } else {
+                self.width
+            };
 
-                // Read from surface
-                let src_offset = self.pixel_offset(sx, sy);
-                let src_ptr = (src_addr + src_offset) as *const u32;
-                let pixel = unsafe { src_ptr.read_volatile() };
+            if copy_width > 0 {
+                let src_ptr = (src_addr + self.pixel_offset(0, sy)) as *const u8;
+                let dst_offset = (dy * fb_stride + dest_x) as usize * fb_bpp;
+                let dst_ptr = (fb_addr + dst_offset) as *mut u8;
 
-                // Write to framebuffer
-                let dst_offset = (dy * fb_stride + dx) as usize * fb_bpp;
-                let dst_ptr = (fb_addr + dst_offset) as *mut u32;
                 unsafe {
-                    dst_ptr.write_volatile(pixel);
+                    core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize * fb_bpp);
                 }
             }
         }
