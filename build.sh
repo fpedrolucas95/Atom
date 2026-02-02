@@ -449,17 +449,23 @@ if [ "$ARCH" = "x86_64" ]; then
         fi
     fi
 elif [ "$ARCH" = "aarch64" ]; then
-    # For AArch64, we rely on the rust-generated EFI binary for now
-    # or use a specialized linker script.
-    # Since we are using target aarch64-unknown-uefi, cargo already produces a PE file.
-    step "Extracting EFI binary for AArch64..."
-    # Cargo name for the staticlib is libatom.a, but for uefi target it might produce .efi if configured as cdylib
-    # In our case it's staticlib. We might need to change crate-type or use a custom build step.
-    # For now, let's assume we just need the lib for further linking if we had assembly.
-    # Since we don't have AArch64 assembly yet, we'll just note that.
-    warning "Full linking for AArch64 is not yet implemented in this script."
-    warning "Only the Rust static library was built."
-    # TODO: Implement AArch64 EFI linking
+    step "Linkando Atom.efi (AArch64)..."
+    RUST_LLD=$(find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
+    if [ -z "$RUST_LLD" ]; then RUST_LLD="lld-link"; fi
+
+    if "$RUST_LLD" -flavor link \
+        target/$TARGET/release/libatom.a \
+        /OUT:build/Atom.efi \
+        /SUBSYSTEM:EFI_APPLICATION \
+        /ENTRY:efi_main \
+        /MACHINE:ARM64 \
+        /NODEFAULTLIB 2>build/link.log; then
+        success "Atom.efi criado"
+    else
+        error "Falha ao linkar Atom.efi"
+        cat build/link.log
+        exit 1
+    fi
 fi
 
 # =========================================================================

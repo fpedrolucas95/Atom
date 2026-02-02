@@ -302,7 +302,22 @@ if ($Arch -eq "x86_64") {
         }
     }
 } elseif ($Arch -eq "aarch64") {
-    Write-Warning "Full linking for AArch64 is not yet implemented in this script."
+    Write-Step "Linkando Atom.efi (AArch64)..."
+    # Try to find rust-lld
+    $RUST_LLD = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains\nightly*" -Recurse -Filter "rust-lld.exe" | Select-Object -First 1
+    if (-not $RUST_LLD) { Write-ErrorMsg "rust-lld não encontrado" }
+
+    & $RUST_LLD.FullName `
+        -flavor link `
+        target\$TARGET\release\libatom.a `
+        /OUT:build\Atom.efi `
+        /SUBSYSTEM:EFI_APPLICATION `
+        /ENTRY:efi_main `
+        /MACHINE:ARM64 `
+        /NODEFAULTLIB *> "$REPO_PATH\build.log"
+
+    if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao linkar Atom.efi" }
+    Write-Success "Atom.efi criado"
 }
 
 # =========================================================================

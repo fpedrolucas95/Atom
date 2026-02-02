@@ -214,3 +214,7 @@ pub fn current_privilege_level() -> u8 {
 
 #[cfg(target_arch = "x86_64")]
 pub mod gdt;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "../../../arch/aarch64/stubs.rs"]
+pub mod stubs;

@@ -7,6 +7,7 @@
 use core::arch::asm;
 
 pub mod uefi;
+pub mod stubs;
 
 #[inline(always)]
 pub fn halt() {

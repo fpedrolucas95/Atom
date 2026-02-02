@@ -9,7 +9,7 @@ repository = "https://github.com/fpedrolucas95/Atom"
 [lib]
 name = "atom"
 path = "src/kernel.rs"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "cdylib"]
 test = false
 bench = false
 doctest = false
