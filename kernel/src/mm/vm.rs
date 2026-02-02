@@ -382,10 +382,7 @@ pub fn ensure_current_stack_mapped(pages: usize) -> bool {
         return true;
     }
 
-    let rsp: usize;
-    unsafe {
-        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
-    }
+    let rsp = crate::arch::current_rsp() as usize;
 
     let rsp_translation = translate(rsp);
     let top = pmm::align_down(rsp);
@@ -946,12 +943,26 @@ fn split_indices(virt: usize) -> (usize, usize, usize, usize) {
 
 #[inline(always)]
 fn invalidate_page(addr: usize) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        asm!("tlbi vaae1is, {}", in(reg) addr >> 12);
+        asm!("dsb ish", "isb");
     }
 }
 
 #[inline(always)]
 unsafe fn load_cr3(pml4_phys: u64) {
+    #[cfg(target_arch = "x86_64")]
     asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        asm!("msr ttbr0_el1, {}", in(reg) pml4_phys);
+        asm!("tlbi vmalle1is", "dsb ish", "isb");
+    }
 }

@@ -47,17 +47,28 @@
 // This driver favors robustness and debuggability over abstraction,
 // making it suitable as a last-resort output mechanism.
 
+#![allow(dead_code)]
+
 use core::fmt;
 use core::ptr;
 use spin::Mutex;
 
+#[cfg(target_arch = "x86_64")]
 const VGA_BUFFER: *mut u16 = 0xB8000 as *mut u16;
+#[cfg(target_arch = "x86_64")]
 const VGA_WIDTH: usize = 80;
+#[cfg(target_arch = "x86_64")]
+const VGA_HEIGHT: usize = 25;
+
+#[cfg(not(target_arch = "x86_64"))]
+const VGA_BUFFER: *mut u16 = core::ptr::null_mut();
+#[cfg(not(target_arch = "x86_64"))]
+const VGA_WIDTH: usize = 80;
+#[cfg(not(target_arch = "x86_64"))]
 const VGA_HEIGHT: usize = 25;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Color {
     Black = 0,
     Blue = 1,
@@ -110,12 +121,15 @@ impl VgaWriter {
     }
 
     pub fn clear_screen(&mut self) {
-        let color = make_color(self.fg_color, self.bg_color);
-        let blank = make_vga_entry(b' ', color);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let color = make_color(self.fg_color, self.bg_color);
+            let blank = make_vga_entry(b' ', color);
 
-        unsafe {
-            for i in 0..(VGA_WIDTH * VGA_HEIGHT) {
-                ptr::write_volatile(VGA_BUFFER.add(i), blank);
+            unsafe {
+                for i in 0..(VGA_WIDTH * VGA_HEIGHT) {
+                    ptr::write_volatile(VGA_BUFFER.add(i), blank);
+                }
             }
         }
 
@@ -136,9 +150,13 @@ impl VgaWriter {
                 let offset = self.row * VGA_WIDTH + self.col;
                 let entry = make_vga_entry(byte, color);
 
+                #[cfg(target_arch = "x86_64")]
                 unsafe {
                     ptr::write_volatile(VGA_BUFFER.add(offset), entry);
                 }
+
+                #[cfg(not(target_arch = "x86_64"))]
+                let _ = entry;
 
                 self.col += 1;
             }
@@ -165,31 +183,34 @@ impl VgaWriter {
     }
 
     fn scroll(&mut self) {
-        let color = make_color(self.fg_color, self.bg_color);
-        let blank = make_vga_entry(b' ', color);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let color = make_color(self.fg_color, self.bg_color);
+            let blank = make_vga_entry(b' ', color);
 
-        unsafe {
-            for row in 1..VGA_HEIGHT {
-                for col in 0..VGA_WIDTH {
-                    let src = row * VGA_WIDTH + col;
-                    let dst = (row - 1) * VGA_WIDTH + col;
-                    let entry = ptr::read_volatile(VGA_BUFFER.add(src));
-                    ptr::write_volatile(VGA_BUFFER.add(dst), entry);
+            unsafe {
+                for row in 1..VGA_HEIGHT {
+                    for col in 0..VGA_WIDTH {
+                        let src = row * VGA_WIDTH + col;
+                        let dst = (row - 1) * VGA_WIDTH + col;
+                        let entry = ptr::read_volatile(VGA_BUFFER.add(src));
+                        ptr::write_volatile(VGA_BUFFER.add(dst), entry);
+                    }
                 }
-            }
 
-            for col in 0..VGA_WIDTH {
-                let offset = (VGA_HEIGHT - 1) * VGA_WIDTH + col;
-                ptr::write_volatile(VGA_BUFFER.add(offset), blank);
+                for col in 0..VGA_WIDTH {
+                    let offset = (VGA_HEIGHT - 1) * VGA_WIDTH + col;
+                    ptr::write_volatile(VGA_BUFFER.add(offset), blank);
+                }
             }
         }
     }
 
-    #[allow(dead_code)]
     pub fn write_string_at(&self, s: &str, row: usize, col: usize, fg: Color, bg: Color) {
         let color = make_color(fg, bg);
         let offset = row * VGA_WIDTH + col;
 
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             for (i, byte) in s.bytes().enumerate() {
                 if col + i >= VGA_WIDTH {
@@ -199,9 +220,13 @@ impl VgaWriter {
                 ptr::write_volatile(VGA_BUFFER.add(offset + i), entry);
             }
         }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (s, color, offset);
+        }
     }
 
-    #[allow(dead_code)]
     pub fn get_position(&self) -> (usize, usize) {
         (self.row, self.col)
     }
@@ -221,7 +246,6 @@ pub fn init() {
     writer.clear_screen();
 }
 
-#[allow(dead_code)]
 pub fn display_boot_message() {
     let mut writer = WRITER.lock();
     writer.clear_screen();
@@ -233,8 +257,8 @@ pub fn display_boot_message() {
     writer.set_color(Color::White, Color::Black);
 }
 
-#[allow(dead_code)]
 pub fn clear_screen(bg_color: Color) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
@@ -245,6 +269,7 @@ pub fn clear_screen(bg_color: Color) {
         writer.clear_screen();
     }
 
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -262,6 +287,7 @@ macro_rules! vga_println {
 }
 
 pub fn write_colored(s: &str, fg: Color, bg: Color) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
@@ -275,6 +301,7 @@ pub fn write_colored(s: &str, fg: Color, bg: Color) {
         writer.set_color(old_fg, old_bg);
     }
 
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }

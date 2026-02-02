@@ -29,6 +29,32 @@
 // - Intended primarily for kernel initialization, diagnostics, and debugging
 
 #[inline(always)]
+pub fn irq_enable() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline(always)]
+pub fn irq_disable() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daifset, #2", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline(always)]
 pub fn halt() {
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -54,15 +80,32 @@ pub fn current_rsp() -> u64 {
         core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
         rsp
     }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let rsp: u64;
+        core::arch::asm!("mov {}, sp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+        rsp
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    0
 }
 
 #[inline(always)]
 #[allow(dead_code)]
 pub fn rflags() -> u64 {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let flags: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
+        return flags;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let flags: u64;
+        core::arch::asm!("mrs {}, daif", out(reg) flags, options(nomem, preserves_flags));
         return flags;
     }
 
@@ -79,6 +122,13 @@ pub fn read_cr3() -> u64 {
         return cr3;
     }
 
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let ttbr0: u64;
+        core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0, options(nomem, preserves_flags));
+        return ttbr0;
+    }
+
     #[allow(unreachable_code)]
     0
 }
@@ -90,42 +140,55 @@ pub fn read_tr() -> u16 {
     unsafe {
         let tr: u16;
         core::arch::asm!("str ax", out("ax") tr, options(nomem, preserves_flags));
-        tr
+        return tr;
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    0
 }
 
 #[inline(always)]
 #[allow(dead_code)]
 pub fn read_gdt() -> (u16, u64) {
-    #[repr(C, packed)]
-    struct Descriptor {
-        limit: u16,
-        base: u64,
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[repr(C, packed)]
+        struct Descriptor {
+            limit: u16,
+            base: u64,
+        }
+
+        unsafe {
+            let mut desc = Descriptor { limit: 0, base: 0 };
+            core::arch::asm!("sgdt [{}]", in(reg) &mut desc, options(nostack, preserves_flags));
+            return (desc.limit, desc.base);
+        }
     }
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let mut desc = Descriptor { limit: 0, base: 0 };
-        core::arch::asm!("sgdt [{}]", in(reg) &mut desc, options(nostack, preserves_flags));
-        (desc.limit, desc.base)
-    }
+    #[cfg(not(target_arch = "x86_64"))]
+    (0, 0)
 }
 
 #[inline(always)]
 #[allow(dead_code)]
 pub fn read_idt() -> (u16, u64) {
-    #[repr(C, packed)]
-    struct Descriptor {
-        limit: u16,
-        base: u64,
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[repr(C, packed)]
+        struct Descriptor {
+            limit: u16,
+            base: u64,
+        }
+
+        unsafe {
+            let mut desc = Descriptor { limit: 0, base: 0 };
+            core::arch::asm!("sidt [{}]", in(reg) &mut desc, options(nostack, preserves_flags));
+            return (desc.limit, desc.base);
+        }
     }
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let mut desc = Descriptor { limit: 0, base: 0 };
-        core::arch::asm!("sidt [{}]", in(reg) &mut desc, options(nostack, preserves_flags));
-        (desc.limit, desc.base)
-    }
+    #[cfg(not(target_arch = "x86_64"))]
+    (0, 0)
 }
 
 #[inline(always)]
@@ -137,6 +200,17 @@ pub fn current_privilege_level() -> u8 {
         core::arch::asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags));
         (cs & 0x3) as u8
     }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let el: u64;
+        core::arch::asm!("mrs {}, CurrentEL", out(reg) el, options(nomem, nostack, preserves_flags));
+        ((el >> 2) & 0x3) as u8
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub mod gdt;

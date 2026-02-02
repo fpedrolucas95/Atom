@@ -151,6 +151,7 @@ static MOUSE_ID: AtomicU8 = AtomicU8::new(0);
 /// Read the PS/2 status register (port 0x64)
 #[inline]
 fn read_status() -> u8 {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let status: u8;
         core::arch::asm!(
@@ -161,11 +162,15 @@ fn read_status() -> u8 {
         );
         status
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    0
 }
 
 /// Read a byte from the PS/2 data port (port 0x60)
 #[inline]
 fn read_data() -> u8 {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let data: u8;
         core::arch::asm!(
@@ -176,10 +181,14 @@ fn read_data() -> u8 {
         );
         data
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    0
 }
 
 /// Write a command byte to the PS/2 command port (port 0x64)
 fn write_command(cmd: u8) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, al",
@@ -188,10 +197,14 @@ fn write_command(cmd: u8) {
             options(nomem, nostack, preserves_flags)
         );
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = cmd;
 }
 
 /// Write a data byte to the PS/2 data port (port 0x60)
 fn write_data(data: u8) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, al",
@@ -200,6 +213,9 @@ fn write_data(data: u8) {
             options(nomem, nostack, preserves_flags)
         );
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = data;
 }
 
 /// Wait until the PS/2 input buffer is empty (ready to accept writes).

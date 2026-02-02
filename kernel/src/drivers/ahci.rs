@@ -164,9 +164,6 @@ pub fn init() -> bool {
 }
 
 fn find_ahci_controller() -> Option<usize> {
-    // Scan PCI bus for AHCI controller
-    // For Q35 machine, AHCI is typically at bus 0, device 0x1f, function 2
-
     for bus in 0..256u16 {
         for device in 0..32u8 {
             for function in 0..8u8 {
@@ -177,7 +174,6 @@ fn find_ahci_controller() -> Option<usize> {
                     continue;
                 }
 
-                // Read class code
                 let class_addr = pci_config_address(bus as u8, device, function, 0x08);
                 let class_info = pci_read_config(class_addr);
                 let class = ((class_info >> 24) & 0xFF) as u8;
@@ -185,11 +181,9 @@ fn find_ahci_controller() -> Option<usize> {
                 let progif = ((class_info >> 8) & 0xFF) as u8;
 
                 if class == AHCI_CLASS && subclass == AHCI_SUBCLASS && progif == AHCI_PROGIF {
-                    // Found AHCI controller - get BAR5 (ABAR)
                     let bar5_addr = pci_config_address(bus as u8, device, function, 0x24);
                     let bar5 = pci_read_config(bar5_addr) as usize;
 
-                    // Enable bus mastering
                     let cmd_addr = pci_config_address(bus as u8, device, function, 0x04);
                     let cmd = pci_read_config(cmd_addr);
                     pci_write_config(cmd_addr, cmd | 0x06); // Enable memory space + bus master
@@ -211,6 +205,7 @@ fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 }
 
 fn pci_read_config(address: u32) -> u32 {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, eax",
@@ -225,9 +220,13 @@ fn pci_read_config(address: u32) -> u32 {
         );
         value
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = address; 0xFFFFFFFF }
 }
 
 fn pci_write_config(address: u32, value: u32) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, eax",
@@ -240,6 +239,8 @@ fn pci_write_config(address: u32, value: u32) {
             in("eax") value,
         );
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = (address, value); }
 }
 
 unsafe fn read_reg(offset: usize) -> u32 {
@@ -261,50 +262,39 @@ unsafe fn write_port_reg(port: u32, offset: usize, value: u32) {
 }
 
 unsafe fn init_port(port: u32) -> bool {
-    // Check if device is present
     let ssts = read_port_reg(port, PORT_SSTS);
     let det = ssts & 0x0F;
     let ipm = (ssts >> 8) & 0x0F;
 
     if det != 3 || ipm != 1 {
-        return false; // No device or not active
-    }
-
-    // Check device signature
-    let sig = read_port_reg(port, PORT_SIG);
-    if sig != SATA_SIG_ATA {
-        crate::log_debug!("ahci", "Port {} has non-ATA device (sig=0x{:X})", port, sig);
         return false;
     }
 
-    // Stop command engine
+    let sig = read_port_reg(port, PORT_SIG);
+    if sig != SATA_SIG_ATA {
+        return false;
+    }
+
     stop_cmd(port);
 
-    // Allocate memory for command structures
-    // We need: Command List (1KB), FIS (256B), Command Table (256B), Data Buffer (64KB)
     let pages = pmm::alloc_pages_zeroed(32).expect("Failed to allocate AHCI memory");
     CMD_LIST_BASE = pages;
     FIS_BASE = pages + 1024;
     CMD_TABLE_BASE = pages + 2048;
     DATA_BUFFER = pages + 4096;
 
-    // Set up command list and FIS base
     write_port_reg(port, PORT_CLB, CMD_LIST_BASE as u32);
     write_port_reg(port, PORT_CLBU, 0);
     write_port_reg(port, PORT_FB, FIS_BASE as u32);
     write_port_reg(port, PORT_FBU, 0);
 
-    // Clear interrupt status
     write_port_reg(port, PORT_IS, 0xFFFFFFFF);
 
-    // Set up command header 0
     let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
     (*cmd_header).ctba = CMD_TABLE_BASE as u32;
     (*cmd_header).ctbau = 0;
 
-    // Start command engine
     start_cmd(port);
-
     true
 }
 
@@ -312,7 +302,6 @@ unsafe fn stop_cmd(port: u32) {
     let cmd = read_port_reg(port, PORT_CMD);
     write_port_reg(port, PORT_CMD, cmd & !(PORT_CMD_ST | PORT_CMD_FRE));
 
-    // Wait for command engine to stop
     for _ in 0..1000000 {
         let cmd = read_port_reg(port, PORT_CMD);
         if (cmd & (PORT_CMD_FR | PORT_CMD_CR)) == 0 {
@@ -322,7 +311,6 @@ unsafe fn stop_cmd(port: u32) {
 }
 
 unsafe fn start_cmd(port: u32) {
-    // Wait until CR is cleared
     for _ in 0..1000000 {
         if (read_port_reg(port, PORT_CMD) & PORT_CMD_CR) == 0 {
             break;
@@ -333,36 +321,28 @@ unsafe fn start_cmd(port: u32) {
     write_port_reg(port, PORT_CMD, cmd | PORT_CMD_FRE | PORT_CMD_ST);
 }
 
-/// Read sectors from the disk
-/// lba: Starting sector number
-/// count: Number of sectors to read (max 128)
-/// Returns: Pointer to data buffer on success
 pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
     unsafe {
         let port = ACTIVE_PORT?;
-        let count = count.min(128); // Max 64KB at a time
+        let count = count.min(128);
 
-        // Set up command header
         let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
-        (*cmd_header).flags = 5 | (1 << 6); // 5 DWORDs in FIS, clear busy on ok
+        (*cmd_header).flags = 5 | (1 << 6);
         (*cmd_header).prdtl = 1;
         (*cmd_header).prdbc = 0;
 
-        // Set up command table
         let cmd_table = CMD_TABLE_BASE as *mut CommandTable;
         ptr::write_bytes(cmd_table, 0, 1);
 
-        // Set up PRDT entry
         (*cmd_table).prdt[0].dba = DATA_BUFFER as u32;
         (*cmd_table).prdt[0].dbau = 0;
         (*cmd_table).prdt[0].dbc = ((count as u32) * 512 - 1) | (1 << 31);
 
-        // Build FIS
         let fis = &mut (*cmd_table).cfis as *mut [u8; 64] as *mut FisRegH2D;
         (*fis).fis_type = FIS_TYPE_REG_H2D;
-        (*fis).flags = 0x80; // Command
+        (*fis).flags = 0x80;
         (*fis).command = ATA_CMD_READ_DMA_EX;
-        (*fis).device = 0x40; // LBA mode
+        (*fis).device = 0x40;
 
         (*fis).lba0 = (lba & 0xFF) as u8;
         (*fis).lba1 = ((lba >> 8) & 0xFF) as u8;
@@ -374,17 +354,13 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
         (*fis).count_lo = (count & 0xFF) as u8;
         (*fis).count_hi = ((count >> 8) & 0xFF) as u8;
 
-        // Issue command
         write_port_reg(port, PORT_CI, 1);
 
-        // Wait for completion
         for _ in 0..10000000 {
             let ci = read_port_reg(port, PORT_CI);
             if ci == 0 {
-                // Check for errors
                 let is = read_port_reg(port, PORT_IS);
                 if is & 0x40000000 != 0 {
-                    crate::log_error!("ahci", "Read error on port {}", port);
                     write_port_reg(port, PORT_IS, is);
                     return None;
                 }
@@ -394,13 +370,10 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
                 return Some(core::slice::from_raw_parts(DATA_BUFFER as *const u8, size));
             }
         }
-
-        crate::log_error!("ahci", "Read timeout on port {}", port);
         None
     }
 }
 
-/// Check if AHCI is initialized and available
 pub fn is_available() -> bool {
     unsafe { ACTIVE_PORT.is_some() }
 }

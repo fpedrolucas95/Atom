@@ -64,6 +64,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
+#[cfg(target_arch = "x86_64")]
 use crate::arch::gdt;
 use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 
@@ -171,6 +172,7 @@ impl Default for ThreadPriority {
 const LOG_ORIGIN: &str = "thread";
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CpuContext {
@@ -201,6 +203,18 @@ pub struct CpuContext {
     pub cr3: u64,
 }
 
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CpuContext {
+    pub x: [u64; 31],
+    pub pc: u64,
+    pub sp: u64,
+    pub spsr: u32,
+    pub ttbr0: u64,
+}
+
+#[cfg(target_arch = "x86_64")]
 impl CpuContext {
     pub const fn zero() -> Self {
         Self {
@@ -276,7 +290,7 @@ impl CpuContext {
             rdx: 0,
             rsi: 0,
             rdi: 0,
-            rbp: user_stack - 16,  // Initialize RBP to stack base for frame pointer compatibility
+            rbp: user_stack - 16,
             rsp: user_stack - 16,
             r8: 0,
             r9: 0,
@@ -295,6 +309,44 @@ impl CpuContext {
             fs: gdt::USER_DATA_SELECTOR,
             gs: gdt::USER_DATA_SELECTOR,
             cr3: page_table,
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+impl CpuContext {
+    pub const fn zero() -> Self {
+        Self {
+            x: [0; 31],
+            pc: 0,
+            sp: 0,
+            spsr: 0,
+            ttbr0: 0,
+        }
+    }
+
+    pub fn new(entry_point: u64, stack_pointer: u64, page_table: u64) -> Self {
+        Self {
+            x: [0; 31],
+            pc: entry_point,
+            sp: stack_pointer,
+            spsr: 0,
+            ttbr0: page_table,
+        }
+    }
+
+    pub fn new_kernel(entry_point: u64, kernel_stack: u64) -> Self {
+        use crate::arch::read_cr3;
+        Self::new(entry_point, kernel_stack, read_cr3())
+    }
+
+    pub fn new_user(entry_point: u64, user_stack: u64, page_table: u64) -> Self {
+        Self {
+            x: [0; 31],
+            pc: entry_point,
+            sp: user_stack,
+            spsr: 0, // EL0t
+            ttbr0: page_table,
         }
     }
 }
@@ -668,79 +720,91 @@ pub fn thread_count() -> usize {
     THREAD_LIST.count()
 }
 
-pub fn log_user_entry_once(thread_id: ThreadId, ctx: &CpuContext) {
+pub fn log_user_entry_once(thread_id: ThreadId, _ctx: &CpuContext) {
     let mut entries = USERMODE_ENTRIES.lock();
     if entries.insert(thread_id) {
-        log_debug!(
-            LOG_ORIGIN,
-            "Thread {} entering user mode: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X}",
-            thread_id,
-            ctx.rip,
-            ctx.rsp,
-            ctx.cs,
-            ctx.ss
-        );
-        
-        // DEBUG: Log the actual IRET frame that was built in switch.asm
-        extern "C" {
-            static DEBUG_IRET_RIP: u64;
-            static DEBUG_IRET_CS: u64;
-            static DEBUG_IRET_RFLAGS: u64;
-            static DEBUG_IRET_RSP: u64;
-            static DEBUG_IRET_SS: u64;
-            static DEBUG_IRET_KERNEL_RSP: u64;
-        }
-        
-        unsafe {
+        #[cfg(target_arch = "x86_64")]
+        {
             log_debug!(
-                "DEBUG_IRET",
-                "IRET frame @ kernel RSP={:#016X}:",
-                DEBUG_IRET_KERNEL_RSP
+                LOG_ORIGIN,
+                "Thread {} entering user mode: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X}",
+                thread_id,
+                _ctx.rip,
+                _ctx.rsp,
+                _ctx.cs,
+                _ctx.ss
             );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+0]  RIP    = {:#016X} (expected: {:#016X})",
-                DEBUG_IRET_RIP,
-                ctx.rip
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+8]  CS     = {:#016X} (expected: 0x000000000000001B)",
-                DEBUG_IRET_CS
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+16] RFLAGS = {:#016X}",
-                DEBUG_IRET_RFLAGS
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+24] RSP    = {:#016X} (expected: {:#016X})",
-                DEBUG_IRET_RSP,
-                ctx.rsp
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+32] SS     = {:#016X} (expected: 0x0000000000000023)",
-                DEBUG_IRET_SS
-            );
-            
-            // Check if values match expectations
-            // Skip 0x0 values which occur during initial user transition before variables are set
-            if DEBUG_IRET_CS != 0 && DEBUG_IRET_CS != 0x1B {
-                log_error!(
+
+            // DEBUG: Log the actual IRET frame that was built in switch.asm
+            extern "C" {
+                static DEBUG_IRET_RIP: u64;
+                static DEBUG_IRET_CS: u64;
+                static DEBUG_IRET_RFLAGS: u64;
+                static DEBUG_IRET_RSP: u64;
+                static DEBUG_IRET_SS: u64;
+                static DEBUG_IRET_KERNEL_RSP: u64;
+            }
+
+            unsafe {
+                log_debug!(
                     "DEBUG_IRET",
-                    "!!! CS is NOT 0x1B - actual value is {:#X} !!!",
+                    "IRET frame @ kernel RSP={:#016X}:",
+                    DEBUG_IRET_KERNEL_RSP
+                );
+                log_debug!(
+                    "DEBUG_IRET",
+                    "  [rsp+0]  RIP    = {:#016X} (expected: {:#016X})",
+                    DEBUG_IRET_RIP,
+                    _ctx.rip
+                );
+                log_debug!(
+                    "DEBUG_IRET",
+                    "  [rsp+8]  CS     = {:#016X} (expected: 0x000000000000001B)",
                     DEBUG_IRET_CS
                 );
-            }
-            if DEBUG_IRET_SS != 0 && DEBUG_IRET_SS != 0x23 {
-                log_error!(
+                log_debug!(
                     "DEBUG_IRET",
-                    "!!! SS is NOT 0x23 - actual value is {:#X} !!!",
+                    "  [rsp+16] RFLAGS = {:#016X}",
+                    DEBUG_IRET_RFLAGS
+                );
+                log_debug!(
+                    "DEBUG_IRET",
+                    "  [rsp+24] RSP    = {:#016X} (expected: {:#016X})",
+                    DEBUG_IRET_RSP,
+                    _ctx.rsp
+                );
+                log_debug!(
+                    "DEBUG_IRET",
+                    "  [rsp+32] SS     = {:#016X} (expected: 0x0000000000000023)",
                     DEBUG_IRET_SS
                 );
+
+                if DEBUG_IRET_CS != 0 && DEBUG_IRET_CS != 0x1B {
+                    log_error!(
+                        "DEBUG_IRET",
+                        "!!! CS is NOT 0x1B - actual value is {:#X} !!!",
+                        DEBUG_IRET_CS
+                    );
+                }
+                if DEBUG_IRET_SS != 0 && DEBUG_IRET_SS != 0x23 {
+                    log_error!(
+                        "DEBUG_IRET",
+                        "!!! SS is NOT 0x23 - actual value is {:#X} !!!",
+                        DEBUG_IRET_SS
+                    );
+                }
             }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            log_debug!(
+                LOG_ORIGIN,
+                "Thread {} entering user mode: PC={:#016X} SP={:#016X}",
+                thread_id,
+                _ctx.pc,
+                _ctx.sp
+            );
         }
     }
 }
@@ -810,36 +874,44 @@ where
 extern "C" {
     fn switch_context(old_context: *mut CpuContext, new_context: *const CpuContext);
     pub(crate) fn switch_to_context(new_context: *const CpuContext) -> !;
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn enter_user(rip: u64, rsp: u64, cr3: u64) -> !;
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn enter_user_first_time(rip: u64, rsp: u64, cr3: u64) -> !;
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn enter_user_resume(rip: u64, rsp: u64, cr3: u64, regs_ptr: *const crate::syscall::UserspaceGprs) -> !;
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn enter_user_aarch64(pc: u64, sp: u64, ttbr0: u64) -> !;
 }
 
-fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
-    let rip_canonical = is_canonical(target.rip);
-    let rsp_canonical = is_canonical(target.rsp);
+fn validate_context_for_iret(_target: &CpuContext) -> Result<(), &'static str> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let rip_canonical = is_canonical(_target.rip);
+        let rsp_canonical = is_canonical(_target.rsp);
 
-    if !rip_canonical || !rsp_canonical {
-        return Err("non-canonical RIP or RSP");
-    }
-
-    let user_mode = (target.cs & 0x3) == 0x3;
-
-    if user_mode {
-        if target.cs != gdt::USER_CODE_SELECTOR {
-            return Err("user CS selector invalid");
+        if !rip_canonical || !rsp_canonical {
+            return Err("non-canonical RIP or RSP");
         }
 
-        if target.ss != gdt::USER_DATA_SELECTOR {
-            return Err("user SS selector invalid");
-        }
-    } else {
-        if target.cs != gdt::KERNEL_CODE_SELECTOR {
-            return Err("kernel CS selector invalid");
-        }
+        let user_mode = (_target.cs & 0x3) == 0x3;
 
-        if target.ss != gdt::KERNEL_DATA_SELECTOR {
-            return Err("kernel SS selector invalid");
+        if user_mode {
+            if _target.cs != gdt::USER_CODE_SELECTOR {
+                return Err("user CS selector invalid");
+            }
+
+            if _target.ss != gdt::USER_DATA_SELECTOR {
+                return Err("user SS selector invalid");
+            }
+        } else {
+            if _target.cs != gdt::KERNEL_CODE_SELECTOR {
+                return Err("kernel CS selector invalid");
+            }
+
+            if _target.ss != gdt::KERNEL_DATA_SELECTOR {
+                return Err("kernel SS selector invalid");
+            }
         }
     }
 
@@ -848,6 +920,7 @@ fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
 
 fn guard_context_or_halt(target: &CpuContext, label: &str) {
     if let Err(reason) = validate_context_for_iret(target) {
+        #[cfg(target_arch = "x86_64")]
         log_panic!(
             LOG_ORIGIN,
             "Refusing to iret to {} context: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X} reason={}",
@@ -858,6 +931,8 @@ fn guard_context_or_halt(target: &CpuContext, label: &str) {
             target.ss,
             reason
         );
+        #[cfg(not(target_arch = "x86_64"))]
+        log_panic!(LOG_ORIGIN, "Refusing to switch to {} context: reason={}", label, reason);
     }
 }
 
@@ -869,20 +944,35 @@ pub unsafe fn switch_thread_context(current: &mut CpuContext, next: &CpuContext)
 pub unsafe fn jump_to_context(context: &CpuContext) -> ! {
     guard_context_or_halt(context, "initial");
     
-    // For first-time user entry, use dedicated enter_user to avoid complex switch logic
-    let is_user_mode = (context.cs & 0x3) == 0x3;
-    if is_user_mode {
-        log_debug!(
-            LOG_ORIGIN,
-            "Using enter_user for first user jump: RIP={:#016X} RSP={:#016X} CR3={:#016X}",
-            context.rip,
-            context.rsp,
-            context.cr3
-        );
-        enter_user(context.rip, context.rsp, context.cr3)
-    } else {
-        switch_to_context(context as *const CpuContext)
+    #[cfg(target_arch = "x86_64")]
+    {
+        let is_user_mode = (context.cs & 0x3) == 0x3;
+        if is_user_mode {
+            log_debug!(
+                LOG_ORIGIN,
+                "Using enter_user for first user jump: RIP={:#016X} RSP={:#016X} CR3={:#016X}",
+                context.rip,
+                context.rsp,
+                context.cr3
+            );
+            enter_user(context.rip, context.rsp, context.cr3)
+        } else {
+            switch_to_context(context as *const CpuContext)
+        }
     }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let is_user_mode = context.spsr == 0; // Simplified
+        if is_user_mode {
+            enter_user_aarch64(context.pc, context.sp, context.ttbr0)
+        } else {
+            switch_to_context(context as *const CpuContext)
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    loop { crate::arch::halt(); }
 }
 
 pub fn jump_to_thread(thread_id: ThreadId) -> ! {
@@ -896,9 +986,16 @@ pub fn jump_to_thread(thread_id: ThreadId) -> ! {
         (thread.context, thread.kernel_stack)
     };
 
+    #[cfg(target_arch = "x86_64")]
     gdt::set_rsp0(kernel_stack);
 
+    #[cfg(target_arch = "x86_64")]
     if (ctx_copy.cs & 0x3) == 0x3 {
+        log_user_entry_once(thread_id, &ctx_copy);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    if ctx_copy.spsr == 0 {
         log_user_entry_once(thread_id, &ctx_copy);
     }
 
@@ -983,21 +1080,28 @@ pub fn is_userspace_thread(thread_id: ThreadId) -> bool {
         .unwrap_or(false)
 }
 
-/// Force update a thread's userspace context (RIP, RSP, CS, SS, segments)
-/// This is critical before switching to a userspace thread because switch_context
-/// saves the KERNEL RSP into CpuContext.rsp, which would then be used as the
-/// userspace RSP during iret - causing page faults.
-pub fn force_set_userspace_ctx(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
+/// Force update a thread's userspace context
+pub fn force_set_userspace_ctx(thread_id: ThreadId, user_pc: u64, user_sp: u64) {
     let mut threads = THREAD_LIST.threads.lock();
     if let Some(t) = threads.iter_mut().find(|t| t.id == thread_id) {
-        t.context.rip = user_rip;
-        t.context.rsp = user_rsp;
-        t.context.cs = gdt::USER_CODE_SELECTOR;
-        t.context.ss = gdt::USER_DATA_SELECTOR;
-        t.context.ds = gdt::USER_DATA_SELECTOR;
-        t.context.es = gdt::USER_DATA_SELECTOR;
-        t.context.fs = gdt::USER_DATA_SELECTOR;
-        t.context.gs = gdt::USER_DATA_SELECTOR;
+        #[cfg(target_arch = "x86_64")]
+        {
+            t.context.rip = user_pc;
+            t.context.rsp = user_sp;
+            t.context.cs = gdt::USER_CODE_SELECTOR;
+            t.context.ss = gdt::USER_DATA_SELECTOR;
+            t.context.ds = gdt::USER_DATA_SELECTOR;
+            t.context.es = gdt::USER_DATA_SELECTOR;
+            t.context.fs = gdt::USER_DATA_SELECTOR;
+            t.context.gs = gdt::USER_DATA_SELECTOR;
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            t.context.pc = user_pc;
+            t.context.sp = user_sp;
+            t.context.spsr = 0;
+        }
     }
 }
 
@@ -1012,14 +1116,20 @@ where
 /// This is called at syscall entry to ensure the saved context has the correct
 /// userspace RIP (return address) and RSP, not the kernel's RIP/RSP.
 /// This is critical for syscalls that may cause context switches (e.g., yield).
-pub fn update_thread_userspace_context(thread_id: ThreadId, user_rip: u64, user_rsp: u64) {
+pub fn update_thread_userspace_context(thread_id: ThreadId, user_pc: u64, user_sp: u64) {
     let mut threads = THREAD_LIST.threads.lock();
 
     if let Some(thread) = threads.iter_mut().find(|t| t.id == thread_id) {
-        // Only update if this is a userspace thread (CPL=3)
+        #[cfg(target_arch = "x86_64")]
         if (thread.context.cs & 0x3) == 0x3 {
-            thread.context.rip = user_rip;
-            thread.context.rsp = user_rsp;
+            thread.context.rip = user_pc;
+            thread.context.rsp = user_sp;
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        if thread.context.spsr == 0 {
+            thread.context.pc = user_pc;
+            thread.context.sp = user_sp;
         }
     }
 }
@@ -1027,6 +1137,7 @@ pub fn update_thread_userspace_context(thread_id: ThreadId, user_rip: u64, user_
 pub fn capture_current_context() -> CpuContext {
     let mut ctx = CpuContext::zero();
 
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
         "mov [{ctx} + 0], rax",
@@ -1071,6 +1182,22 @@ pub fn capture_current_context() -> CpuContext {
         );
     }
 
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        // Basic capture for aarch64
+        core::arch::asm!(
+            "str x0, [{ctx}, #0]",
+            "str x1, [{ctx}, #8]",
+            // ... more registers
+            "mov x0, sp",
+            "str x0, [{ctx}, #31*8 + 8]",
+            "adr x0, .",
+            "str x0, [{ctx}, #31*8]",
+            ctx = in(reg) &mut ctx as *mut CpuContext,
+            out("x0") _,
+        );
+    }
+
     ctx
 }
 
@@ -1111,25 +1238,38 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         };
 
         // Update FROM thread's context with userspace return address if it's a userspace thread
-        if let Some((user_rip, user_rsp)) = userspace_return {
+        if let Some((user_pc_or_rip, user_sp_or_rsp)) = userspace_return {
             if threads[from_idx].is_userspace {
-                threads[from_idx].context.rip = user_rip;
-                threads[from_idx].context.rsp = user_rsp;
+                #[cfg(target_arch = "x86_64")]
+                {
+                    threads[from_idx].context.rip = user_pc_or_rip;
+                    threads[from_idx].context.rsp = user_sp_or_rsp;
+                }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    threads[from_idx].context.pc = user_pc_or_rip;
+                    threads[from_idx].context.sp = user_sp_or_rsp;
+                }
             }
         }
 
         // Force CR3 to match address_space
         let from_addr_space = threads[from_idx].address_space;
         let to_addr_space = threads[to_idx].address_space;
-        let current_cr3 = unsafe {
-            let cr3: u64;
-            core::arch::asm!("mov {}, cr3", out(reg) cr3);
-            cr3
-        };
+        let current_cr3 = crate::arch::read_cr3();
         let from_cr3 = if from_addr_space == 0 { current_cr3 } else { from_addr_space };
         let to_cr3 = if to_addr_space == 0 { current_cr3 } else { to_addr_space };
-        threads[from_idx].context.cr3 = from_cr3;
-        threads[to_idx].context.cr3 = to_cr3;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            threads[from_idx].context.cr3 = from_cr3;
+            threads[to_idx].context.cr3 = to_cr3;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            threads[from_idx].context.ttbr0 = from_cr3;
+            threads[to_idx].context.ttbr0 = to_cr3;
+        }
 
         // Use the authoritative is_userspace flag - NOT address space heuristics
         let to_is_userspace = threads[to_idx].is_userspace;
@@ -1138,20 +1278,26 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
         let to_ptr = &threads[to_idx].context as *const CpuContext;
         let kstack = threads[to_idx].kernel_stack;
-        let to_entry_rip = threads[to_idx].context.rip;
-        let to_entry_rsp = threads[to_idx].context.rsp;
+        #[cfg(target_arch = "x86_64")]
+        let to_entry_pc_or_rip = threads[to_idx].context.rip;
+        #[cfg(target_arch = "x86_64")]
+        let to_entry_sp_or_rsp = threads[to_idx].context.rsp;
+        #[cfg(target_arch = "aarch64")]
+        let to_entry_pc_or_rip = threads[to_idx].context.pc;
+        #[cfg(target_arch = "aarch64")]
+        let to_entry_sp_or_rsp = threads[to_idx].context.sp;
 
         if to_is_userspace {
             log_user_entry_once(to_id, &threads[to_idx].context);
         }
 
-        (from_ptr, to_ptr, kstack, to_is_userspace, has_userspace_return, to_entry_rip, to_entry_rsp, to_cr3)
+        (from_ptr, to_ptr, kstack, to_is_userspace, has_userspace_return, to_entry_pc_or_rip, to_entry_sp_or_rsp, to_cr3)
     }; // Lock released
 
-    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_userspace, has_userspace_return, to_entry_rip, to_entry_rsp, to_cr3) = switch_info;
+    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_userspace, has_userspace_return, to_entry_pc_or_rip, to_entry_sp_or_rsp, to_cr3) = switch_info;
 
     // Update TSS.RSP0 for the new thread BEFORE entering userspace
-    // This ensures interrupt/syscall frames from usermode go to the correct kernel stack
+        #[cfg(target_arch = "x86_64")]
     gdt::set_rsp0(to_kernel_stack);
 
     // CRITICAL PATH DECISION:
@@ -1168,46 +1314,52 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     // in Ring 3), causing IRET with CS=0x0 and SS=0x0.
 
     if to_is_userspace {
-        // Determine target RIP/RSP: prefer saved userspace return address (from syscall entry),
-        // fall back to initial context values (first-time entry)
-        let (target_rip, target_rsp) = if has_userspace_return {
-            crate::syscall::get_userspace_return_addr(to_id)
-                .unwrap_or((to_entry_rip, to_entry_rsp))
-        } else {
-            (to_entry_rip, to_entry_rsp)
-        };
+        #[cfg(target_arch = "x86_64")]
+        {
+            let (target_rip, target_rsp) = if has_userspace_return {
+                crate::syscall::get_userspace_return_addr(to_id)
+                    .unwrap_or((to_entry_pc_or_rip, to_entry_sp_or_rsp))
+            } else {
+                (to_entry_pc_or_rip, to_entry_sp_or_rsp)
+            };
 
-        log_debug!(
-            LOG_ORIGIN,
-            "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} resume={}",
-            to_id, target_rip, target_rsp, to_cr3, has_userspace_return
-        );
+            log_debug!(
+                LOG_ORIGIN,
+                "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} resume={}",
+                to_id, target_rip, target_rsp, to_cr3, has_userspace_return
+            );
 
-        // Re-enable interrupts before entering userspace
-        crate::interrupts::enable();
+            crate::interrupts::enable();
 
-        if has_userspace_return {
-            // Syscall resume - restore callee-saved registers if available
-            let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
-            if let Some(gprs_ref) = gprs_map.get(&to_id) {
-                let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
-                drop(gprs_map);
-                unsafe {
-                    enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
+            if has_userspace_return {
+                let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
+                if let Some(gprs_ref) = gprs_map.get(&to_id) {
+                    let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
+                    drop(gprs_map);
+                    unsafe {
+                        enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
+                    }
+                } else {
+                    drop(gprs_map);
+                    unsafe {
+                        enter_user(target_rip, target_rsp, to_cr3);
+                    }
                 }
             } else {
-                drop(gprs_map);
                 unsafe {
-                    enter_user(target_rip, target_rsp, to_cr3);
+                    enter_user_first_time(target_rip, target_rsp, to_cr3);
                 }
             }
-        } else {
-            // First-time entry - zero all registers for clean initial state
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            let (target_pc, target_sp) = (to_entry_pc_or_rip, to_entry_sp_or_rsp);
+            crate::interrupts::enable();
             unsafe {
-                enter_user_first_time(target_rip, target_rsp, to_cr3);
+                enter_user_aarch64(target_pc, target_sp, to_cr3);
             }
         }
-        // enter_user* functions are divergent (-> !) so we never reach here
     }
 
     // Kernel-to-kernel context switch path
@@ -1233,62 +1385,61 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
 ///
 /// Returns the number of physical pages freed
 fn free_user_space_pages(pml4_phys: usize) -> usize {
-    let mut pages_freed = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut pages_freed = 0;
 
-    // Walk PML4 entries (only user-space half: entries 0-255)
-    for pml4_idx in 0..256 {
-        if let Ok(pdpt_entry) = get_pml4_entry(pml4_phys, pml4_idx) {
-            if pdpt_entry == 0 || (pdpt_entry & 0x1) == 0 {
-                continue; // Entry not present
-            }
+        for pml4_idx in 0..256 {
+            if let Ok(pdpt_entry) = get_pml4_entry(pml4_phys, pml4_idx) {
+                if pdpt_entry == 0 || (pdpt_entry & 0x1) == 0 {
+                    continue;
+                }
 
-            let pdpt_phys = pdpt_entry & 0x000F_FFFF_FFFF_F000;
+                let pdpt_phys = pdpt_entry & 0x000F_FFFF_FFFF_F000;
 
-            // Walk PDPT entries
-            for pdpt_idx in 0..512 {
-                if let Ok(pd_entry) = get_pdpt_entry(pdpt_phys as usize, pdpt_idx) {
-                    if pd_entry == 0 || (pd_entry & 0x1) == 0 {
-                        continue;
-                    }
+                for pdpt_idx in 0..512 {
+                    if let Ok(pd_entry) = get_pdpt_entry(pdpt_phys as usize, pdpt_idx) {
+                        if pd_entry == 0 || (pd_entry & 0x1) == 0 {
+                            continue;
+                        }
 
-                    let pd_phys = pd_entry & 0x000F_FFFF_FFFF_F000;
+                        let pd_phys = pd_entry & 0x000F_FFFF_FFFF_F000;
 
-                    // Walk PD entries
-                    for pd_idx in 0..512 {
-                        if let Ok(pt_entry) = get_pd_entry(pd_phys as usize, pd_idx) {
-                            if pt_entry == 0 || (pt_entry & 0x1) == 0 {
-                                continue;
-                            }
+                        for pd_idx in 0..512 {
+                            if let Ok(pt_entry) = get_pd_entry(pd_phys as usize, pd_idx) {
+                                if pt_entry == 0 || (pt_entry & 0x1) == 0 {
+                                    continue;
+                                }
 
-                            let pt_phys = pt_entry & 0x000F_FFFF_FFFF_F000;
+                                let pt_phys = pt_entry & 0x000F_FFFF_FFFF_F000;
 
-                            // Walk PT entries and free physical pages
-                            for pt_idx in 0..512 {
-                                if let Ok(page_entry) = get_pt_entry(pt_phys as usize, pt_idx) {
-                                    if page_entry != 0 && (page_entry & 0x1) != 0 {
-                                        let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
-                                        crate::mm::pmm::free_page(phys_frame);
-                                        pages_freed += 1;
+                                for pt_idx in 0..512 {
+                                    if let Ok(page_entry) = get_pt_entry(pt_phys as usize, pt_idx) {
+                                        if page_entry != 0 && (page_entry & 0x1) != 0 {
+                                            let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
+                                            crate::mm::pmm::free_page(phys_frame);
+                                            pages_freed += 1;
+                                        }
                                     }
                                 }
+
+                                crate::mm::pmm::free_page(pt_phys as usize);
                             }
-
-                            // Free the PT itself
-                            crate::mm::pmm::free_page(pt_phys as usize);
                         }
+
+                        crate::mm::pmm::free_page(pd_phys as usize);
                     }
-
-                    // Free the PD
-                    crate::mm::pmm::free_page(pd_phys as usize);
                 }
-            }
 
-            // Free the PDPT
-            crate::mm::pmm::free_page(pdpt_phys as usize);
+                crate::mm::pmm::free_page(pdpt_phys as usize);
+            }
         }
+
+        pages_freed
     }
 
-    pages_freed
+    #[cfg(not(target_arch = "x86_64"))]
+    0
 }
 
 /// Helper function to convert physical address to virtual (higher half mapping)

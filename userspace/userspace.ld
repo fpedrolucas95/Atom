@@ -6,8 +6,6 @@
  * The kernel's USER_EXEC_LOAD_BASE is 0x0040_0000 (4 MiB).
  */
 
-OUTPUT_FORMAT("elf64-x86-64")
-OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
 /* Base address must match kernel's USER_EXEC_LOAD_BASE */

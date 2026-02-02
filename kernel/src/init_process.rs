@@ -223,6 +223,7 @@ fn create_init_process(
         init_pml4_phys as u64,
     );
 
+    #[cfg(target_arch = "x86_64")]
     log_info!(
         LOG_ORIGIN,
         "User context: RIP=0x{:016X} RSP=0x{:016X} CS=0x{:04X} SS=0x{:04X}",
@@ -230,6 +231,14 @@ fn create_init_process(
         context.rsp,
         context.cs,
         context.ss
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    log_info!(
+        LOG_ORIGIN,
+        "User context: PC=0x{:016X} SP=0x{:016X}",
+        context.pc,
+        context.sp
     );
 
     // CRITICAL: Write stack canary (init_process creates Thread manually, bypassing Thread::new)

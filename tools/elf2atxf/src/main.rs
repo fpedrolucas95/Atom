@@ -23,6 +23,7 @@ const USER_BASE: u64 = 0x400000; // Expected userspace load address
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 0x1;
 const PF_W: u32 = 0x2;
@@ -144,8 +145,8 @@ fn main() -> io::Result<()> {
 
     // Parse ELF header manually
     let e_machine = read_u16_le(&elf_data, 18);
-    if e_machine != EM_X86_64 {
-        eprintln!("Error: ELF is not x86_64 (machine type: {})", e_machine);
+    if e_machine != EM_X86_64 && e_machine != EM_AARCH64 {
+        eprintln!("Error: ELF is not x86_64 or AArch64 (machine type: {})", e_machine);
         std::process::exit(1);
     }
 

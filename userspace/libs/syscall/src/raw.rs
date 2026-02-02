@@ -68,6 +68,7 @@ pub mod numbers {
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -81,6 +82,20 @@ pub unsafe fn syscall0(num: u64) -> u64 {
         lateout("r10") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = num;
+        result = 0;
+    }
+
     result
 }
 
@@ -88,6 +103,7 @@ pub unsafe fn syscall0(num: u64) -> u64 {
 #[inline(always)]
 pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -101,6 +117,21 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
         lateout("r10") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        inlateout("x0") arg0 => _,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (num, arg0);
+        result = 0;
+    }
+
     result
 }
 
@@ -108,6 +139,7 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
 #[inline(always)]
 pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -121,6 +153,22 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
         lateout("r10") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        inlateout("x0") arg0 => _,
+        inlateout("x1") arg1 => _,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (num, arg0, arg1);
+        result = 0;
+    }
+
     result
 }
 
@@ -128,6 +176,7 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
 #[inline(always)]
 pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -141,6 +190,23 @@ pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
         lateout("r10") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        inlateout("x0") arg0 => _,
+        inlateout("x1") arg1 => _,
+        inlateout("x2") arg2 => _,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (num, arg0, arg1, arg2);
+        result = 0;
+    }
+
     result
 }
 
@@ -148,6 +214,7 @@ pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 #[inline(always)]
 pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -161,6 +228,24 @@ pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> 
         lateout("r9") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        inlateout("x0") arg0 => _,
+        inlateout("x1") arg1 => _,
+        inlateout("x2") arg2 => _,
+        inlateout("x3") arg3 => _,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (num, arg0, arg1, arg2, arg3);
+        result = 0;
+    }
+
     result
 }
 
@@ -168,6 +253,7 @@ pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> 
 #[inline(always)]
 pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -181,6 +267,25 @@ pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
         lateout("r9") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        inlateout("x0") arg0 => _,
+        inlateout("x1") arg1 => _,
+        inlateout("x2") arg2 => _,
+        inlateout("x3") arg3 => _,
+        inlateout("x4") arg4 => _,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (num, arg0, arg1, arg2, arg3, arg4);
+        result = 0;
+    }
+
     result
 }
 
@@ -188,6 +293,7 @@ pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
 #[inline(always)]
 pub unsafe fn syscall6(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     let result: u64;
+    #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "syscall",
         inlateout("rax") num => result,
@@ -201,5 +307,25 @@ pub unsafe fn syscall6(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
         out("r11") _,
         options(nostack, preserves_flags)
     );
+
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        inlateout("x8") num => result,
+        inlateout("x0") arg0 => _,
+        inlateout("x1") arg1 => _,
+        inlateout("x2") arg2 => _,
+        inlateout("x3") arg3 => _,
+        inlateout("x4") arg4 => _,
+        inlateout("x5") arg5 => _,
+        options(nostack, preserves_flags)
+    );
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (num, arg0, arg1, arg2, arg3, arg4, arg5);
+        result = 0;
+    }
+
     result
 }

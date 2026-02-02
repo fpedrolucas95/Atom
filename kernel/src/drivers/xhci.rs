@@ -568,6 +568,7 @@ fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 }
 
 fn pci_read_config(address: u32) -> u32 {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, eax",
@@ -582,9 +583,16 @@ fn pci_read_config(address: u32) -> u32 {
         );
         value
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = address;
+        0xFFFFFFFF
+    }
 }
 
 fn pci_write_config(address: u32, value: u32) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, eax",
@@ -596,5 +604,10 @@ fn pci_write_config(address: u32, value: u32) {
             in("dx") 0xCFCu16,
             in("eax") value,
         );
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (address, value);
     }
 }

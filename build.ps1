@@ -2,6 +2,7 @@
 # Script de build para o kernel Atom no Windows
 # Uso:
 #   .\build.ps1                    # Build completo (kernel + userspace)
+#   .\build.ps1 -Arch aarch64      # Build para ARM64
 #   .\build.ps1 --clean            # Limpar e rebuildar
 #   .\build.ps1 --run              # Build e executar no QEMU
 #   .\build.ps1 --userspace        # Build apenas drivers + services userspace
@@ -10,6 +11,7 @@
 #   .\build.ps1 --setup            # Configurar dependências Rust
 
 param(
+    [string]$Arch = "x86_64",
     [switch]$Run,
     [switch]$Clean,
     [switch]$Userspace,
@@ -24,12 +26,29 @@ param(
 
 $NASM_PATH  = "C:\Program Files\NASM\nasm.exe"
 $REPO_PATH  = $PSScriptRoot
-$OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
-# Apenas as pastas dos drivers (não precisamos mais do nome do binário aqui)
+# Configurar alvos baseados na arquitetura
+if ($Arch -eq "x86_64") {
+    $TARGET = "x86_64-unknown-uefi"
+    $USER_TARGET = "x86_64-unknown-none"
+    $EFI_FILE = "BOOTX64.EFI"
+    $QEMU = "qemu-system-x86_64"
+    $OVMF_PATH = "$REPO_PATH\ovmf\OVMF.fd"
+} elseif ($Arch -eq "aarch64") {
+    $TARGET = "aarch64-unknown-uefi"
+    $USER_TARGET = "aarch64-unknown-none"
+    $EFI_FILE = "BOOTAA64.EFI"
+    $QEMU = "qemu-system-aarch64"
+    $OVMF_PATH = "$REPO_PATH\ovmf\QEMU_EFI.fd"
+} else {
+    Write-Error "Arquitetura não suportada: $Arch"
+    exit 1
+}
+
+# Apenas as pastas dos drivers
 $USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell", "demo_rects", "demo_text")
 
-# Services (incluindo init = PID 1)
+# Services
 $USERSPACE_SERVICES = @(
     "init",
     "namesvc",
@@ -44,7 +63,7 @@ function Write-Step    { param([string]$Message) Write-Host "[*] $Message" -Fore
 function Write-Success { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
 function Write-ErrorMsg{ param([string]$Message) Write-Host "[X] $Message" -ForegroundColor Red; exit 1 }
 function Write-Warning { param([string]$Message) Write-Host "[!] $Message" -ForegroundColor Yellow }
-function Header        { param([string]$Title) 
+function Header        { param([string]$Title)
     Write-Host ""
     Write-Host "========== $Title ==========" -ForegroundColor Magenta
     Write-Host ""
@@ -63,7 +82,7 @@ if (-not (Test-Path "kernel\Cargo.toml")) {
 # -------------------------------------------------------------------------
 
 if ($Setup) {
-    Header "SETUP"
+    Header "SETUP ($Arch)"
 
     Write-Step "Configurando toolchain Rust..."
 
@@ -81,16 +100,16 @@ if ($Setup) {
     }
 
     $targets = rustup target list --installed
-    if ($targets -notmatch "x86_64-unknown-uefi") {
-        Write-Step "Adicionando target x86_64-unknown-uefi..."
-        rustup target add x86_64-unknown-uefi
-        Write-Success "Target adicionado"
+    if ($targets -notmatch $TARGET) {
+        Write-Step "Adicionando target $TARGET..."
+        rustup target add $TARGET
+        Write-Success "Target $TARGET adicionado"
     }
 
-    if ($targets -notmatch "x86_64-unknown-none") {
-        Write-Step "Adicionando target x86_64-unknown-none (para elf2atxf)..."
-        rustup +nightly target add x86_64-unknown-none
-        Write-Success "Target x86_64-unknown-none adicionado"
+    if ($targets -notmatch $USER_TARGET) {
+        Write-Step "Adicionando target $USER_TARGET..."
+        rustup +nightly target add $USER_TARGET
+        Write-Success "Target $USER_TARGET adicionado"
     }
 
     Write-Success "Setup concluído!"
@@ -121,13 +140,15 @@ New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi
 Header "ELF2ATXF TOOL"
 
 $ELF2ATXF_PATH = "tools\elf2atxf"
-$ELF2ATXF_EXE  = "$ELF2ATXF_PATH\target\x86_64-pc-windows-msvc\release\elf2atxf.exe"
+# Find the host target directory
+$HOST_TARGET = rustc -vV | Select-String "host: " | ForEach-Object { $_.ToString().Split(" ")[1] }
+$ELF2ATXF_EXE  = "$ELF2ATXF_PATH\target\$HOST_TARGET\release\elf2atxf.exe"
 
 if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
     Write-Step "Compilando elf2atxf tool..."
 
     Push-Location $ELF2ATXF_PATH
-    cargo build --release --target x86_64-pc-windows-msvc *> "$REPO_PATH\build.log"
+    cargo build --release *> "$REPO_PATH\build.log"
     if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao compilar elf2atxf"; Pop-Location; exit 1 }
     Pop-Location
 
@@ -141,11 +162,11 @@ if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
 # =========================================================================
 
 if (-not $Kernel) {
-    Header "USERSPACE BUILD"
+    Header "USERSPACE BUILD ($Arch)"
 
     # Função auxiliar para build + conversão ATXF
     function Build-And-Convert {
-        param([string]$Path, [string]$Type)  # $Type = "driver" ou "service"
+        param([string]$Path, [string]$Type)
 
         if (-not (Test-Path "$Path\Cargo.toml")) {
             Write-Warning "$Type em $Path não encontrado, pulando..."
@@ -156,35 +177,25 @@ if (-not $Kernel) {
         Write-Step "Compilando $Type $dirName..."
 
         Push-Location $Path
-        cargo build --release *> "$REPO_PATH\build.log"
+        cargo build --target $USER_TARGET --release *> "$REPO_PATH\build.log"
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             Write-ErrorMsg "Falha ao compilar $Type $dirName"
         }
         Pop-Location
 
-        # Descobrir nome do binário a partir de Cargo.toml - regex mais robusto
         $cargoContent = Get-Content "$Path\Cargo.toml" -Raw
-
-        # Tentativa 1: procura name dentro de [[bin]]
         if ($cargoContent -match '(?smi)\[\[bin\]\].*?name\s*=\s*"(.*?)"') {
             $binName = $Matches[1].Trim()
-            Write-Host "   [DEBUG] Binário extraído do Cargo.toml: $binName" -ForegroundColor DarkGray
-        }
-        # Tentativa 2: fallback para qualquer name = "..." no arquivo
-        elseif ($cargoContent -match '(?smi)name\s*=\s*"(.*?)"') {
+        } elseif ($cargoContent -match '(?smi)name\s*=\s*"(.*?)"') {
             $binName = $Matches[1].Trim()
-            Write-Host "   [DEBUG] Binário encontrado via fallback name: $binName" -ForegroundColor DarkGray
-        }
-        # Último fallback: nome da pasta
-        else {
+        } else {
             $binName = $dirName
-            Write-Warning "Nenhum nome de binário encontrado em $Path\Cargo.toml - usando fallback: $binName"
         }
 
-        $elfPath = "$Path\target\x86_64-unknown-none\release\$binName"
+        $elfPath = "$Path\target\$USER_TARGET\release\$binName"
         if (-not (Test-Path $elfPath)) {
-            Write-Warning "Binário ELF não encontrado: $elfPath (verifique se o nome em [[bin]] name é correto)"
+            Write-Warning "Binário ELF não encontrado: $elfPath"
             return
         }
 
@@ -192,25 +203,20 @@ if (-not $Kernel) {
         Write-Step "Convertendo $binName para ATXF..."
 
         $elf2atxfFull = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
-        if (-not $elf2atxfFull) { Write-ErrorMsg "elf2atxf.exe não encontrado" }
-
         & $elf2atxfFull "$elfPath" "$atxfPath" *> "$REPO_PATH\build.log"
         if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha na conversão para ATXF ($LASTEXITCODE)" }
 
         Write-Success "$dirName.atxf criado"
     }
 
-    # Drivers - agora usando a mesma função que services
     foreach ($driverDir in $USERSPACE_DRIVERS_DIRS) {
         Build-And-Convert "userspace\drivers\$driverDir" "driver"
     }
 
-    # Services
     foreach ($service in $USERSPACE_SERVICES) {
         Build-And-Convert "userspace\services\$service" "service"
     }
 
-    # Instalar init.atxf como payload de boot (PID 1)
     if (Test-Path "efi\drivers\init.atxf") {
         Copy-Item "efi\drivers\init.atxf" "efi\EFI\BOOT\init.atxf" -Force
         Write-Success "init.atxf instalado como payload de boot (PID 1)"
@@ -231,13 +237,12 @@ if ($Userspace) {
 # BUILD KERNEL RUST
 # =========================================================================
 
-Header "KERNEL BUILD"
+Header "KERNEL BUILD ($Arch)"
 
 Write-Step "Compilando kernel Rust..."
-cargo build -p atom-kernel --release *> "$REPO_PATH\build.log"
+cargo build -p atom-kernel --target $TARGET --release *> "$REPO_PATH\build.log"
 if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao compilar kernel Rust" }
 
-# Checar warnings (similar ao Linux)
 if (Select-String "warning:" "$REPO_PATH\build.log") {
     Write-Warning "Build teve warnings (veja build.log)"
 }
@@ -246,127 +251,108 @@ Write-Success "Kernel Rust compilado"
 
 if ($RustOnly) {
     Write-Success "Build Rust-only concluído!"
-    Write-Host "Arquivo gerado: target\x86_64-unknown-uefi\release\libatom.a"
+    Write-Host "Arquivo gerado: target\$TARGET\release\libatom.a"
     exit 0
 }
 
-if (-not $Kernel -and -not $Userspace) {  # Evita rodar assembly se --kernel only sem necessidade
-    # =========================================================================
-    # MONTAR ASSEMBLY
-    # =========================================================================
+# =========================================================================
+# ASSEMBLY AND LINKING
+# =========================================================================
 
-    Write-Step "Montando arquivos assembly..."
+if ($Arch -eq "x86_64") {
+    if (-not $Kernel -and -not $Userspace) {
+        Write-Step "Montando arquivos assembly..."
 
-    if (-not (Test-Path $NASM_PATH)) {
-        Write-ErrorMsg "NASM não encontrado em: $NASM_PATH"
-        Write-Warning "Instale de: https://www.nasm.us/"
+        if (-not (Test-Path $NASM_PATH)) {
+            Write-Warning "NASM não encontrado em: $NASM_PATH"
+        } else {
+            $asmFiles = @(
+                @{src="arch\x86_64\boot.asm"; obj="build\boot.obj"},
+                @{src="kernel\src\interrupts\handlers.asm"; obj="build\handlers.obj"},
+                @{src="kernel\src\interrupts\switch.asm"; obj="build\switch.obj"},
+                @{src="kernel\src\syscall\handler.asm"; obj="build\syscall_handler.obj"}
+            )
+
+            foreach ($asm in $asmFiles) {
+                if ($asm.obj -like "*handlers.obj" -and (Test-Path $asm.obj)) { Remove-Item -Force $asm.obj }
+                & $NASM_PATH -f win64 $asm.src -o $asm.obj *> "$REPO_PATH\build.log"
+                if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao montar $($asm.src)" }
+                Write-Success "$(Split-Path $asm.src -Leaf).obj criado"
+            }
+
+            Write-Step "Linkando Atom.efi..."
+            # Try to find rust-lld
+            $RUST_LLD = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains\nightly*" -Recurse -Filter "rust-lld.exe" | Select-Object -First 1
+            if (-not $RUST_LLD) { Write-ErrorMsg "rust-lld não encontrado" }
+
+            & $RUST_LLD.FullName `
+                -flavor link `
+                build\boot.obj `
+                build\handlers.obj `
+                build\switch.obj `
+                build\syscall_handler.obj `
+                target\$TARGET\release\libatom.a `
+                /OUT:build\Atom.efi `
+                /SUBSYSTEM:EFI_APPLICATION `
+                /ENTRY:efi_entry `
+                /NODEFAULTLIB *> "$REPO_PATH\build.log"
+
+            if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao linkar Atom.efi" }
+            Write-Success "Atom.efi criado"
+        }
     }
-
-    $asmFiles = @(
-        @{src="arch\x86_64\boot.asm"; obj="build\boot.obj"},
-        @{src="kernel\src\interrupts\handlers.asm"; obj="build\handlers.obj"},
-        @{src="kernel\src\interrupts\switch.asm"; obj="build\switch.obj"},
-        @{src="kernel\src\syscall\handler.asm"; obj="build\syscall_handler.obj"}
-    )
-
-    foreach ($asm in $asmFiles) {
-        if ($asm.obj -like "*handlers.obj" -and (Test-Path $asm.obj)) { Remove-Item -Force $asm.obj }
-        & $NASM_PATH -f win64 $asm.src -o $asm.obj *> "$REPO_PATH\build.log"
-        if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao montar $($asm.src)" }
-        Write-Success "$(Split-Path $asm.src -Leaf).obj criado"
-    }
+} elseif ($Arch -eq "aarch64") {
+    Write-Warning "Full linking for AArch64 is not yet implemented in this script."
 }
 
 # =========================================================================
-# LINKAR ATOM.EFI
+# COPIAR PARA EFI BOOT
 # =========================================================================
 
-Write-Step "Linkando Atom.efi..."
-
-$RUST_LLD = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
-if (-not (Test-Path $RUST_LLD)) {
-    Write-Warning "rust-lld não encontrado no caminho padrão. Tentando localizar..."
-    $RUST_LLD = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains\nightly*" -Recurse -File -Name "rust-lld.exe" -ErrorAction SilentlyContinue |
-                ForEach-Object { Join-Path "$env:USERPROFILE\.rustup\toolchains" $_ } | Select-Object -First 1
-    if (-not $RUST_LLD) { Write-ErrorMsg "rust-lld não encontrado" }
+if (Test-Path "build\Atom.efi") {
+    Copy-Item build\Atom.efi efi\EFI\BOOT\$EFI_FILE -Force
+    Write-Success "$EFI_FILE atualizado"
 }
-
-& $RUST_LLD `
-    -flavor link `
-    build\boot.obj `
-    build\handlers.obj `
-    build\switch.obj `
-    build\syscall_handler.obj `
-    target\x86_64-unknown-uefi\release\libatom.a `
-    /OUT:build\Atom.efi `
-    /SUBSYSTEM:EFI_APPLICATION `
-    /ENTRY:efi_entry `
-    /NODEFAULTLIB *> "$REPO_PATH\build.log"
-
-if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao linkar Atom.efi" }
-
-Write-Success "Atom.efi criado"
-
-# Copiar para EFI
-Copy-Item build\Atom.efi efi\EFI\BOOT\BOOTX64.EFI -Force
-Write-Success "BOOTX64.EFI atualizado"
 
 # =========================================================================
 # SUMÁRIO
 # =========================================================================
 
-Header "BUILD COMPLETO"
+Header "BUILD COMPLETO ($Arch)"
 
-Write-Host "Kernel:     build\Atom.efi" -ForegroundColor White
-Write-Host "EFI Image:  efi\EFI\BOOT\BOOTX64.EFI" -ForegroundColor White
-Write-Host "Init:       efi\EFI\BOOT\init.atxf" -ForegroundColor White
-Write-Host "Drivers:    efi\drivers\" -ForegroundColor White
-Write-Host ""
-
-if (Test-Path "efi\drivers") {
-    $files = Get-ChildItem "efi\drivers\*.atxf" -ErrorAction SilentlyContinue
-    if ($files) {
-        Write-Host "Arquivos ATXF gerados:" -ForegroundColor Cyan
-        foreach ($f in $files) {
-            $size = [math]::Round($f.Length / 1KB, 1)
-            Write-Host "  - $($f.Name) ($size KB)" -ForegroundColor White
-        }
-    }
+Write-Host "Kernel Lib:  target\$TARGET\release\libatom.a" -ForegroundColor White
+if (Test-Path "build\Atom.efi") {
+    Write-Host "EFI Image:   efi\EFI\BOOT\$EFI_FILE" -ForegroundColor White
 }
+Write-Host "Drivers:     efi\drivers\" -ForegroundColor White
+Write-Host ""
 
 # =========================================================================
 # QEMU
 # =========================================================================
 
 if ($Run) {
-    Header "QEMU"
+    Header "QEMU ($Arch)"
 
-    if (-not (Test-Path $OVMF_PATH)) {
-        Write-ErrorMsg "OVMF.fd não encontrado em: $OVMF_PATH"
-        Write-Warning "Baixe de: https://github.com/tianocore/edk2"
+    if ($Arch -eq "x86_64") {
+        if (-not (Test-Path $OVMF_PATH)) { Write-ErrorMsg "OVMF.fd não encontrado em: $OVMF_PATH" }
+
+        qemu-system-x86_64 `
+            -machine q35 -cpu qemu64 -m 512M `
+            -bios "$OVMF_PATH" `
+            -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
+            -device VGA -usb -device usb-mouse -serial stdio `
+            -debugcon file:serial_log.txt -global isa-debugcon.iobase=0xE9
+    } elseif ($Arch -eq "aarch64") {
+        # For AArch64, we need QEMU_EFI.fd
+        if (-not (Test-Path $OVMF_PATH)) { Write-Warning "AAVMF_CODE.fd (ARM64 UEFI) não encontrado." }
+
+        qemu-system-aarch64 `
+            -machine virt -cpu cortex-a57 -m 512M `
+            -bios "$OVMF_PATH" `
+            -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
+            -device virtio-gpu-pci -usb -device usb-mouse -serial stdio
     }
-
-    $qemu = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
-    if (-not $qemu) {
-        Write-ErrorMsg "qemu-system-x86_64 não encontrado"
-        Write-Warning "Instale QEMU: https://www.qemu.org/download/"
-    }
-
-    Write-Step "Iniciando QEMU..."
-    Write-Host "Pressione Ctrl+C para sair" -ForegroundColor Yellow
-
-    qemu-system-x86_64 `
-        -machine q35 `
-        -cpu qemu64 `
-        -m 512M `
-        -bios "$OVMF_PATH" `
-        -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
-        -device VGA `
-        -usb `
-        -device usb-mouse `
-        -serial stdio `
-        -debugcon file:serial_log.txt `
-        -global isa-debugcon.iobase=0xE9
 } else {
-    Write-Host "Para rodar no QEMU: .\build.ps1 --run" -ForegroundColor Yellow
+    Write-Host "Para rodar no QEMU: .\build.ps1 -Arch $Arch --run" -ForegroundColor Yellow
 }

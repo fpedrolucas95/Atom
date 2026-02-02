@@ -5,66 +5,20 @@
 // Implements the x86_64 syscall entry, dispatch, and high-level syscall logic
 // for the kernel. This module is the primary boundary between user space and
 // kernel space, enforcing privilege separation and capability-based security.
-//
-// Key responsibilities:
-// - Configure the CPU syscall mechanism using MSRs (STAR, LSTAR, SFMASK, EFER)
-// - Define the global syscall ABI and numeric syscall identifiers
-// - Dispatch syscalls from user space to Rust kernel handlers
-// - Translate kernel/domain errors into stable user-visible error codes
-//
-// Architecture and entry setup:
-// - Uses the `SYSCALL/SYSRET` fast path (x86_64)
-// - `MSR_STAR` defines user ↔ kernel code segment transitions
-// - `MSR_LSTAR` points to the assembly-level syscall entry stub
-// - `MSR_SFMASK` masks IF/TF on entry to prevent user-controlled flags
-// - Enables syscall support by setting EFER.SCE
-//
-// Dispatch model:
-// - All syscalls funnel through `rust_syscall_dispatcher`
-// - Syscall number and up to 6 arguments are passed in registers
-// - A single `match` statement provides explicit, auditable routing
-// - Unknown syscalls return `ENOSYS`
-// - Extensive serial logging aids early debugging and tracing
-//
-// Design principles:
-// - Capability-oriented security: most syscalls validate ownership and
-//   permissions via thread-bound capabilities
-// - Explicit error handling with POSIX-like error codes
-// - Clear separation between syscall glue and subsystem logic
-// - Fail-safe defaults: invalid input typically yields `EINVAL` or `EPERM`
-//
-// Subsystem coverage:
-// - Thread management (yield, exit, sleep, create)
-// - IPC (ports, send/recv, async, batching, tracing, stats)
-// - Capability lifecycle (create, check, revoke, derive, transfer, query)
-// - Shared memory regions (create/map/unmap/destroy)
-// - Address space management and virtual memory region mapping
-//
-// Capability semantics:
-// - Capabilities are validated per-thread at syscall time
-// - WRITE/READ/GRANT permissions are enforced where applicable
-// - Delegation via IPC supports both MOVE and GRANT-with-reduction
-// - Many checks are marked MVP-friendly, allowing gradual hardening
-//
-// Correctness and safety notes:
-// - User pointers are copied explicitly into kernel-owned buffers
-// - Blocking syscalls interact carefully with the scheduler and timer ticks
-// - Misconfiguration of syscall MSRs can cause fatal faults, making `init()`
-//   strictly early-boot only
-// - This module assumes interrupts and GDT are already initialized
-//
-// Future considerations:
-// - Stricter validation of user pointers and memory regions
-// - Reduction of logging in production builds
-// - Per-process syscall filtering or sandboxing
 
 #![allow(dead_code)]
 
+#[cfg(target_arch = "x86_64")]
 use crate::arch::gdt::{KERNEL_CODE_SELECTOR, USER_CODE_SELECTOR};
 use crate::{log_debug, log_info, log_warn, log_error, log_panic};
+use spin::Mutex;
+use alloc::collections::BTreeMap;
 
+#[cfg(target_arch = "x86_64")]
 const MSR_STAR: u32 = 0xC000_0081;
+#[cfg(target_arch = "x86_64")]
 const MSR_LSTAR: u32 = 0xC000_0082;
+#[cfg(target_arch = "x86_64")]
 const MSR_SFMASK: u32 = 0xC000_0084;
 
 pub const SYS_THREAD_YIELD: u64 = 0;
@@ -132,6 +86,7 @@ pub const ETIMEDOUT: u64 = u64::MAX - 7;
 pub const EWOULDBLOCK: u64 = u64::MAX - 8;
 pub const EDEADLK: u64 = u64::MAX - 9;
 
+#[cfg(target_arch = "x86_64")]
 extern "C" {
     fn syscall_entry();
 }
@@ -139,6 +94,7 @@ extern "C" {
 pub fn init() {
     const LOG_ORIGIN: &str = "syscall";
 
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let star_value =
             ((USER_CODE_SELECTOR as u64 & !3) << 48) |
@@ -157,25 +113,34 @@ pub fn init() {
         wrmsr(efer_msr, efer);
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // On AArch64, syscalls use 'svc' which doesn't need MSR setup
+    }
+
     log_info!(
         LOG_ORIGIN,
         "Syscall subsystem initialized"
     );
 
-    log_debug!(
-        LOG_ORIGIN,
-        "STAR configured: user_cs=0x{:02X}, kernel_cs=0x{:02X}",
-        USER_CODE_SELECTOR & !3,
-        KERNEL_CODE_SELECTOR
-    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        log_debug!(
+            LOG_ORIGIN,
+            "STAR configured: user_cs=0x{:02X}, kernel_cs=0x{:02X}",
+            USER_CODE_SELECTOR & !3,
+            KERNEL_CODE_SELECTOR
+        );
 
-    log_debug!(
-        LOG_ORIGIN,
-        "LSTAR entry point: {:#X}",
-        syscall_entry as *const () as u64
-    );
+        log_debug!(
+            LOG_ORIGIN,
+            "LSTAR entry point: {:#X}",
+            syscall_entry as *const () as u64
+        );
+    }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
@@ -189,6 +154,7 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
@@ -243,8 +209,8 @@ extern "C" fn rust_syscall_dispatcher(
     arg3: u64,
     arg4: u64,
     arg5: u64,
-    user_rip: u64,
-    user_rsp: u64,
+    user_pc_or_rip: u64,
+    user_sp_or_rsp: u64,
     user_rbx: u64,
     user_rbp: u64,
     user_r12: u64,
@@ -263,7 +229,7 @@ extern "C" fn rust_syscall_dispatcher(
     // Store userspace return address and GPRs for this thread without acquiring THREAD_LIST lock
     // This avoids deadlock when context switching
     if let Some(current_tid) = crate::sched::current_thread() {
-        USERSPACE_RETURN_ADDRS.lock().insert(current_tid, (user_rip, user_rsp));
+        USERSPACE_RETURN_ADDRS.lock().insert(current_tid, (user_pc_or_rip, user_sp_or_rsp));
         USERSPACE_GPRS.lock().insert(current_tid, UserspaceGprs {
             rbx: user_rbx,
             rbp: user_rbp,
@@ -371,18 +337,7 @@ fn sys_io_port_read(port: u16, _size: u8) -> u64 {
         return EPERM;
     }
     
-    let value: u8 = unsafe {
-        let mut val: u8;
-        core::arch::asm!(
-            "in al, dx",
-            out("al") val,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags)
-        );
-        val
-    };
-    
-    value as u64
+    sys_io_port_read_impl(port)
 }
 
 /// Write a byte to an IO port (privileged operation for drivers)
@@ -394,16 +349,7 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
         return EPERM;
     }
     
-    unsafe {
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") port,
-            in("al") value,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    
-    ESUCCESS
+    sys_io_port_write_impl(port, value)
 }
 
 /// Poll keyboard buffer for input (raw scancode)
@@ -572,25 +518,15 @@ fn sys_thread_sleep(milliseconds: u64) -> u64 {
                 crate::sched::perform_context_switch(prev_id, next_id);
             } else {
                 // No other thread - halt and wait for timer interrupt
-                unsafe {
-                    core::arch::asm!(
-                        "sti",
-                        "hlt",
-                        "cli",
-                        options(nomem, nostack)
-                    );
-                }
+                crate::arch::irq_enable();
+                crate::arch::halt();
+                crate::arch::irq_disable();
             }
         } else {
             // No threads - halt
-            unsafe {
-                core::arch::asm!(
-                    "sti",
-                    "hlt",
-                    "cli",
-                    options(nomem, nostack)
-                );
-            }
+            crate::arch::irq_enable();
+            crate::arch::halt();
+            crate::arch::irq_disable();
         }
 
         crate::thread::set_thread_state(tid, crate::thread::ThreadState::Ready);
@@ -2286,11 +2222,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     };
 
     // Log current CR3 vs caller's address space (debug the bug!)
-    let current_cr3 = unsafe {
-        let cr3: u64;
-        core::arch::asm!("mov {}, cr3", out(reg) cr3);
-        cr3
-    };
+    let current_cr3 = crate::arch::read_cr3();
     
     log_info!(
         "syscall",
@@ -2791,9 +2723,6 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
 // IRQ Handler Registration for Userspace Drivers
 // ============================================================================
 
-use spin::Mutex;
-use alloc::collections::BTreeMap;
-
 /// Registered IRQ handlers - maps IRQ number to (ThreadId, port for notification)
 static IRQ_HANDLERS: Mutex<BTreeMap<u8, (crate::thread::ThreadId, u64)>> = Mutex::new(BTreeMap::new());
 
@@ -3096,31 +3025,59 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
             } else {
                 // No other thread to run - wait for interrupt (avoid busy-loop)
                 // Enable interrupts and halt until next interrupt
-                unsafe {
-                    core::arch::asm!(
-                        "sti",      // Enable interrupts
-                        "hlt",      // Halt until interrupt
-                        "cli",      // Disable interrupts again
-                        options(nomem, nostack)
-                    );
-                }
+                crate::arch::irq_enable();
+                crate::arch::halt();
+                crate::arch::irq_disable();
             }
         } else {
             // No threads available - halt and wait
-            unsafe {
-                core::arch::asm!(
-                    "sti",
-                    "hlt",
-                    "cli",
-                    options(nomem, nostack)
-                );
-            }
+            crate::arch::irq_enable();
+            crate::arch::halt();
+            crate::arch::irq_disable();
         }
 
         // Back from blocking - mark as ready and unregister
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
         // Note: We'll re-register on the next iteration if we loop again
     }
+}
+
+/// Read a byte from an IO port (privileged operation for drivers)
+fn sys_io_port_read_impl(port: u16) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let value: u8 = unsafe {
+            let mut val: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") val,
+                in("dx") port,
+                options(nomem, nostack, preserves_flags)
+            );
+            val
+        };
+        return value as u64;
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = port; 0 }
+}
+
+/// Write a byte to an IO port (privileged operation for drivers)
+fn sys_io_port_write_impl(port: u16, value: u8) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") port,
+            in("al") value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = (port, value); }
+
+    ESUCCESS
 }
 
 /// Spawn a new process from a registered driver
@@ -3233,7 +3190,7 @@ fn spawn_from_image(data: &[u8], name: &str) -> u64 {
 }
 
 /// Load driver from boot-loaded registry
-fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections, u64> {
+fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections<'_>, u64> {
     let driver_image = crate::driver_registry::get_driver_image(name)
         .ok_or(ENOTFOUND)?;
 

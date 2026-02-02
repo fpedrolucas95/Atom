@@ -3,6 +3,7 @@
 # Script de build para o kernel Atom no Linux/macOS
 # Uso:
 #   ./build.sh              # Build completo (kernel + userspace)
+#   ./build.sh --arch=aarch64 # Build para ARM64
 #   ./build.sh --clean      # Limpar e rebuildar
 #   ./build.sh --run        # Build e executar no QEMU
 #   ./build.sh --userspace  # Build apenas drivers userspace
@@ -64,6 +65,7 @@ RUST_ONLY=false
 SETUP=false
 USERSPACE_ONLY=false
 KERNEL_ONLY=false
+ARCH="x86_64"
 
 for arg in "$@"; do
     case $arg in
@@ -73,10 +75,12 @@ for arg in "$@"; do
         --setup)    SETUP=true ;;
         --userspace) USERSPACE_ONLY=true ;;
         --kernel)   KERNEL_ONLY=true ;;
+        --arch=*)   ARCH="${arg#*=}" ;;
         --help|-h)
             echo "Uso: ./build.sh [opções]"
             echo ""
             echo "Opções:"
+            echo "  --arch=ARCH   Arquitetura de destino (x86_64, aarch64). Padrão: x86_64"
             echo "  --clean       Limpar arquivos de build antes de compilar"
             echo "  --run         Executar no QEMU após build"
             echo "  --userspace   Build apenas drivers userspace"
@@ -88,6 +92,22 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Configurar alvos baseados na arquitetura
+if [ "$ARCH" = "x86_64" ]; then
+    TARGET="x86_64-unknown-uefi"
+    USER_TARGET="x86_64-unknown-none"
+    EFI_FILE="BOOTX64.EFI"
+    QEMU="qemu-system-x86_64"
+elif [ "$ARCH" = "aarch64" ]; then
+    TARGET="aarch64-unknown-uefi"
+    USER_TARGET="aarch64-unknown-none"
+    EFI_FILE="BOOTAA64.EFI"
+    QEMU="qemu-system-aarch64"
+else
+    error "Arquitetura não suportada: $ARCH"
+    exit 1
+fi
 
 # -------------------------------------------------------------------------
 # Userspace drivers list
@@ -133,12 +153,12 @@ if [ "$SETUP" = true ]; then
         echo "rust-src já instalado"
     fi
 
-    if ! rustup target list --installed | grep -q "x86_64-unknown-uefi"; then
-        step "Adicionando target x86_64-unknown-uefi..."
-        rustup target add x86_64-unknown-uefi
-        success "Target x86_64-unknown-uefi adicionado"
+    if ! rustup target list --installed | grep -q "$TARGET"; then
+        step "Adicionando target $TARGET..."
+        rustup target add $TARGET
+        success "Target $TARGET adicionado"
     else
-        echo "Target x86_64-unknown-uefi já instalado"
+        echo "Target $TARGET já instalado"
     fi
 
     success "Setup concluído!"
@@ -160,9 +180,9 @@ if ! rustup component list --installed 2>/dev/null | grep -q "rust-src"; then
     rustup component add rust-src 2>/dev/null || true
 fi
 
-if ! rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-uefi"; then
-    warning "Target x86_64-unknown-uefi não encontrado, adicionando..."
-    rustup target add x86_64-unknown-uefi 2>/dev/null || true
+if ! rustup target list --installed 2>/dev/null | grep -q "$TARGET"; then
+    warning "Target $TARGET não encontrado, adicionando..."
+    rustup target add $TARGET 2>/dev/null || true
 fi
 
 # =========================================================================
@@ -190,18 +210,14 @@ mkdir -p efi/drivers
 # =========================================================================
 
 if [ "$KERNEL_ONLY" != true ]; then
-    header "USERSPACE BUILD"
+    header "USERSPACE BUILD ($ARCH)"
 
     # -------------------------------------------------------------------------
     # Build elf2atxf tool first
     # -------------------------------------------------------------------------
     step "Building elf2atxf tool..."
 
-    if ! rustup +nightly target list --installed | grep -q "x86_64-unknown-none"; then
-        step "Installing x86_64-unknown-none target..."
-        rustup +nightly target add x86_64-unknown-none
-    fi
-
+    # elf2atxf is a host tool, always build for the host
     pushd tools/elf2atxf > /dev/null
     if cargo build --release 2>build.log; then
         success "elf2atxf built"
@@ -212,12 +228,23 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
     popd > /dev/null
 
-    ELF2ATXF="tools/elf2atxf/target/x86_64-unknown-linux-gnu/release/elf2atxf"
+    # Find the host target directory
+    HOST_TARGET=$(rustc -vV | grep host | cut -d' ' -f2)
+    ELF2ATXF="tools/elf2atxf/target/$HOST_TARGET/release/elf2atxf"
+    if [ ! -f "$ELF2ATXF" ]; then
+        # Fallback if host detection fails
+        ELF2ATXF=$(find tools/elf2atxf/target -name elf2atxf | grep release | head -1)
+    fi
 
     # -------------------------------------------------------------------------
     # Build userspace drivers and convert to ATXF
     # -------------------------------------------------------------------------
     step "Building userspace drivers..."
+
+    if ! rustup target list --installed | grep -q "$USER_TARGET"; then
+        step "Installing $USER_TARGET target..."
+        rustup target add $USER_TARGET
+    fi
 
     for driver in "${USERSPACE_DRIVERS[@]}"; do
         driver_path="userspace/drivers/$driver"
@@ -230,7 +257,7 @@ if [ "$KERNEL_ONLY" != true ]; then
         step "  Building $driver driver..."
         pushd "$driver_path" > /dev/null
 
-        if cargo build --release 2>build.log; then
+        if cargo build --target $USER_TARGET --release 2>build.log; then
             popd > /dev/null
 
             # Find the ELF binary name from Cargo.toml
@@ -239,7 +266,7 @@ if [ "$KERNEL_ONLY" != true ]; then
                 bin_name="$driver"
             fi
 
-            elf_path="$driver_path/target/x86_64-unknown-none/release/$bin_name"
+            elf_path="$driver_path/target/$USER_TARGET/release/$bin_name"
             atxf_path="efi/drivers/${driver}.atxf"
 
             if [ -f "$elf_path" ]; then
@@ -276,7 +303,7 @@ if [ "$KERNEL_ONLY" != true ]; then
         step "  Building $service service..."
         pushd "$service_path" > /dev/null
 
-        if cargo build --release 2>build.log; then
+        if cargo build --target $USER_TARGET --release 2>build.log; then
             popd > /dev/null
 
             # Find the ELF binary name from Cargo.toml
@@ -285,7 +312,7 @@ if [ "$KERNEL_ONLY" != true ]; then
                 bin_name="$service"
             fi
 
-            elf_path="$service_path/target/x86_64-unknown-none/release/$bin_name"
+            elf_path="$service_path/target/$USER_TARGET/release/$bin_name"
             atxf_path="efi/drivers/${service}.atxf"
 
             if [ -f "$elf_path" ]; then
@@ -307,7 +334,6 @@ if [ "$KERNEL_ONLY" != true ]; then
     done
 
     # Copy init.atxf to EFI boot directory as the boot payload (PID 1)
-    # The init process spawns: namesvc, service_manager, drivers, ui_shell, terminal
     if [ -f "efi/drivers/init.atxf" ]; then
         cp efi/drivers/init.atxf efi/EFI/BOOT/init.atxf
         success "init.atxf installed as boot payload (PID 1)"
@@ -329,10 +355,10 @@ fi
 # BUILD KERNEL RUST
 # =========================================================================
 
-header "KERNEL BUILD"
+header "KERNEL BUILD ($ARCH)"
 
 step "Compilando kernel Rust..."
-if cargo build -p atom-kernel --release 2>&1 | tee build/cargo.log; then
+if cargo build -p atom-kernel --target $TARGET --release 2>&1 | tee build/cargo.log; then
     success "Kernel Rust compilado"
 
     if grep -q "warning:" build/cargo.log; then
@@ -347,168 +373,154 @@ fi
 if [ "$RUST_ONLY" = true ]; then
     echo ""
     success "Build Rust-only concluído!"
-    echo "Arquivo gerado: target/x86_64-unknown-uefi/release/libatom.a"
+    echo "Arquivo gerado: target/$TARGET/release/libatom.a"
     exit 0
 fi
 
 # =========================================================================
-# VERIFICAR NASM
+# ASSEMBLY AND LINKING (Architecture Specific)
 # =========================================================================
 
-if ! command -v nasm &> /dev/null; then
-    warning "NASM não encontrado - pulando assembly e linking"
-    warning "Para build completo, instale NASM: sudo apt install nasm"
-    echo ""
-    success "Build Rust concluído (sem assembly/linking)"
-    exit 0
-fi
+if [ "$ARCH" = "x86_64" ]; then
+    # -------------------------------------------------------------------------
+    # VERIFICAR NASM
+    # -------------------------------------------------------------------------
+    if ! command -v nasm &> /dev/null; then
+        warning "NASM não encontrado - pulando assembly e linking para x86_64"
+        warning "Para build completo, instale NASM: sudo apt install nasm"
+        echo ""
+        success "Build Rust concluído (sem assembly/linking)"
+    else
+        step "Montando arquivos assembly..."
 
-# =========================================================================
-# MONTAR ARQUIVOS ASSEMBLY
-# =========================================================================
+        if nasm -f win64 arch/x86_64/boot.asm -o build/boot.obj 2>build/nasm.log; then
+            success "boot.obj criado"
+        else
+            error "Falha ao montar boot.asm"
+            cat build/nasm.log
+            exit 1
+        fi
 
-step "Montando arquivos assembly..."
+        rm -f build/handlers.obj
+        if nasm -f win64 kernel/src/interrupts/handlers.asm -o build/handlers.obj 2>build/nasm_handlers.log; then
+            success "handlers.obj criado"
+        else
+            error "Falha ao montar handlers.asm"
+            cat build/nasm_handlers.log
+            exit 1
+        fi
 
-if nasm -f win64 arch/x86_64/boot.asm -o build/boot.obj 2>build/nasm.log; then
-    success "boot.obj criado"
-else
-    error "Falha ao montar boot.asm"
-    cat build/nasm.log
-    exit 1
-fi
+        if nasm -f win64 kernel/src/interrupts/switch.asm -o build/switch.obj 2>build/nasm_switch.log; then
+            success "switch.obj criado"
+        else
+            error "Falha ao montar switch.asm"
+            cat build/nasm_switch.log
+            exit 1
+        fi
 
-rm -f build/handlers.obj
-if nasm -f win64 kernel/src/interrupts/handlers.asm -o build/handlers.obj 2>build/nasm_handlers.log; then
-    success "handlers.obj criado"
-else
-    error "Falha ao montar handlers.asm"
-    cat build/nasm_handlers.log
-    exit 1
-fi
+        if nasm -f win64 kernel/src/syscall/handler.asm -o build/syscall_handler.obj 2>build/nasm_syscall.log; then
+            success "syscall_handler.obj criado"
+        else
+            error "Falha ao montar handler.asm"
+            cat build/nasm_syscall.log
+            exit 1
+        fi
 
-if nasm -f win64 kernel/src/interrupts/switch.asm -o build/switch.obj 2>build/nasm_switch.log; then
-    success "switch.obj criado"
-else
-    error "Falha ao montar switch.asm"
-    cat build/nasm_switch.log
-    exit 1
-fi
+        step "Linkando Atom.efi..."
+        RUST_LLD=$(find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
+        if [ -z "$RUST_LLD" ]; then RUST_LLD="lld-link"; fi
 
-if nasm -f win64 kernel/src/syscall/handler.asm -o build/syscall_handler.obj 2>build/nasm_syscall.log; then
-    success "syscall_handler.obj criado"
-else
-    error "Falha ao montar handler.asm"
-    cat build/nasm_syscall.log
-    exit 1
-fi
-
-# =========================================================================
-# LINKAR ATOM.EFI
-# =========================================================================
-
-step "Linkando Atom.efi..."
-
-# Find rust-lld
-RUST_LLD=$(find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
-if [ -z "$RUST_LLD" ]; then
-    warning "rust-lld não encontrado, tentando lld-link..."
-    RUST_LLD="lld-link"
-fi
-
-if "$RUST_LLD" -flavor link \
-    build/boot.obj \
-    build/handlers.obj \
-    build/switch.obj \
-    build/syscall_handler.obj \
-    target/x86_64-unknown-uefi/release/libatom.a \
-    /OUT:build/Atom.efi \
-    /SUBSYSTEM:EFI_APPLICATION \
-    /ENTRY:efi_entry \
-    /NODEFAULTLIB 2>build/link.log; then
-    success "Atom.efi criado"
-else
-    error "Falha ao linkar Atom.efi"
-    cat build/link.log
-    exit 1
+        if "$RUST_LLD" -flavor link \
+            build/boot.obj \
+            build/handlers.obj \
+            build/switch.obj \
+            build/syscall_handler.obj \
+            target/$TARGET/release/libatom.a \
+            /OUT:build/Atom.efi \
+            /SUBSYSTEM:EFI_APPLICATION \
+            /ENTRY:efi_entry \
+            /NODEFAULTLIB 2>build/link.log; then
+            success "Atom.efi criado"
+        else
+            error "Falha ao linkar Atom.efi"
+            cat build/link.log
+            exit 1
+        fi
+    fi
+elif [ "$ARCH" = "aarch64" ]; then
+    # For AArch64, we rely on the rust-generated EFI binary for now
+    # or use a specialized linker script.
+    # Since we are using target aarch64-unknown-uefi, cargo already produces a PE file.
+    step "Extracting EFI binary for AArch64..."
+    # Cargo name for the staticlib is libatom.a, but for uefi target it might produce .efi if configured as cdylib
+    # In our case it's staticlib. We might need to change crate-type or use a custom build step.
+    # For now, let's assume we just need the lib for further linking if we had assembly.
+    # Since we don't have AArch64 assembly yet, we'll just note that.
+    warning "Full linking for AArch64 is not yet implemented in this script."
+    warning "Only the Rust static library was built."
+    # TODO: Implement AArch64 EFI linking
 fi
 
 # =========================================================================
 # COPIAR PARA EFI BOOT
 # =========================================================================
 
-step "Copiando para efi/EFI/BOOT/BOOTX64.EFI..."
-cp build/Atom.efi efi/EFI/BOOT/BOOTX64.EFI
-success "BOOTX64.EFI atualizado"
+if [ -f "build/Atom.efi" ]; then
+    step "Copiando para efi/EFI/BOOT/$EFI_FILE..."
+    cp build/Atom.efi efi/EFI/BOOT/$EFI_FILE
+    success "$EFI_FILE atualizado"
+fi
 
 # =========================================================================
 # SUMÁRIO DO BUILD
 # =========================================================================
 
-header "BUILD COMPLETO"
+header "BUILD COMPLETO ($ARCH)"
 
-echo "Kernel:     build/Atom.efi"
-echo "EFI Image:  efi/EFI/BOOT/BOOTX64.EFI"
-echo "Drivers:    efi/drivers/"
-echo ""
-
-# Lista de drivers compilados
-if [ -d "efi/drivers" ]; then
-    drivers=$(ls efi/drivers/*.bin 2>/dev/null || true)
-    if [ -n "$drivers" ]; then
-        echo -e "${CYAN}Drivers userspace:${NC}"
-        for d in efi/drivers/*.bin; do
-            echo "  - $(basename $d)"
-        done
-        echo ""
-    fi
+echo "Kernel Lib:  target/$TARGET/release/libatom.a"
+if [ -f "build/Atom.efi" ]; then
+    echo "EFI Image:   efi/EFI/BOOT/$EFI_FILE"
 fi
+echo "Drivers:     efi/drivers/"
+echo ""
 
 # =========================================================================
 # EXECUTAR QEMU (OPCIONAL)
 # =========================================================================
 
 if [ "$RUN" = true ]; then
-    header "QEMU"
+    header "QEMU ($ARCH)"
 
-    # Encontrar OVMF
-    OVMF_PATH="/usr/share/OVMF/OVMF_CODE.fd"
-    if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
+    if [ "$ARCH" = "x86_64" ]; then
+        OVMF_PATH="/usr/share/OVMF/OVMF_CODE.fd"
+        if [ ! -f "$OVMF_PATH" ]; then OVMF_PATH="/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"; fi
+        if [ ! -f "$OVMF_PATH" ]; then OVMF_PATH="ovmf/OVMF.fd"; fi
+
+        if [ ! -f "$OVMF_PATH" ]; then
+            error "OVMF.fd não encontrado"
+            exit 1
+        fi
+
+        qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -m 512M \
+            -bios "$OVMF_PATH" \
+            -drive format=raw,file=fat:rw:efi \
+            -device VGA -usb -device usb-mouse -serial stdio
+    elif [ "$ARCH" = "aarch64" ]; then
+        # For AArch64, we need QEMU_EFI.fd
+        OVMF_PATH="/usr/share/AAVMF/AAVMF_CODE.fd"
+        if [ ! -f "$OVMF_PATH" ]; then OVMF_PATH="ovmf/QEMU_EFI.fd"; fi
+
+        if [ ! -f "$OVMF_PATH" ]; then
+            warning "AAVMF_CODE.fd (ARM64 UEFI) não encontrado, QEMU pode falhar."
+        fi
+
+        qemu-system-aarch64 \
+            -machine virt -cpu cortex-a57 -m 512M \
+            -bios "$OVMF_PATH" \
+            -drive format=raw,file=fat:rw:efi \
+            -device virtio-gpu-pci -usb -device usb-mouse -serial stdio
     fi
-    if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="ovmf/OVMF.fd"
-    fi
-
-    if [ ! -f "$OVMF_PATH" ]; then
-        error "OVMF.fd não encontrado"
-        warning "Instale: sudo apt install ovmf"
-        exit 1
-    fi
-
-    if ! command -v qemu-system-x86_64 &> /dev/null; then
-        error "qemu-system-x86_64 não encontrado"
-        warning "Instale: sudo apt install qemu-system-x86"
-        exit 1
-    fi
-
-    step "Iniciando QEMU..."
-    echo -e "${YELLOW}Pressione Ctrl+A X para sair do QEMU${NC}"
-    echo ""
-    echo "=========================================="
-
-    qemu-system-x86_64 \
-        -machine q35 \
-        -cpu qemu64 \
-        -m 512M \
-        -bios "$OVMF_PATH" \
-        -drive format=raw,file=fat:rw:efi \
-        -device VGA \
-        -usb \
-        -device usb-mouse \
-        -serial stdio \
-        -debugcon file:serial_log.txt \
-        -global isa-debugcon.iobase=0xE9
 else
-    echo -e "${YELLOW}Para testar no QEMU: ./build.sh --run${NC}"
-    echo -e "${YELLOW}Para build rápido:   ./build.sh --rust-only${NC}"
+    echo -e "${YELLOW}Para testar no QEMU: ./build.sh --arch=$ARCH --run${NC}"
 fi

@@ -82,7 +82,12 @@ mod util;
 #[path = "../../arch/x86_64/uefi.rs"]
 mod uefi;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "../../arch/aarch64/uefi.rs"]
+mod uefi;
+
 use crate::arch::{current_rsp, halt, read_cr3};
+#[cfg(target_arch = "x86_64")]
 use crate::arch::gdt;
 use crate::boot::{BootInfo, MemoryMap};
 use core::panic::PanicInfo;
@@ -98,6 +103,7 @@ static ALLOCATOR: mm::heap::KernelAllocator = mm::heap::KernelAllocator;
 
 #[no_mangle]
 pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let port: u16 = 0x3F8;
         core::arch::asm!(
@@ -116,6 +122,7 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     vga::init();
     mm::init(&boot_info.memory_map);
 
+    #[cfg(target_arch = "x86_64")]
     if boot_info.framebuffer_present {
         let fb = &boot_info.framebuffer;
         if mm::vm::map_framebuffer(fb.address, fb.size) {
@@ -124,7 +131,9 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     gdt::init(current_rsp());
+
     mm::vm::ensure_current_stack_mapped(64);
 
     log::init();
@@ -147,7 +156,10 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     // Note: PS/2 init must happen BEFORE enabling interrupts to avoid IRQ handlers
     // consuming command ACK bytes prematurely.
     input::init();
+
+    #[cfg(target_arch = "x86_64")]
     input::init_ps2_mouse_full(); // Use full initialization with 1:1 scaling
+
     drivers::xhci::init();        // Initialize USB xHCI controller
 
     log_info!(LOG_APIC, "Enabling interrupts...");
@@ -225,7 +237,7 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 fn init_scheduler() {
     extern "C" fn idle_thread_entry() -> ! {
         loop {
-            unsafe { core::arch::asm!("hlt"); }
+            crate::arch::halt();
         }
     }
 
@@ -249,6 +261,7 @@ fn init_scheduler() {
 fn start_scheduling() -> ! {
     log_info!(LOG_SCHED, "Starting dispatcher...");
     if let Some(first) = sched::schedule() {
+        #[cfg(target_arch = "x86_64")]
         if let Some(stack) = thread::kernel_stack_top(first) {
             gdt::set_rsp0(stack);
         }

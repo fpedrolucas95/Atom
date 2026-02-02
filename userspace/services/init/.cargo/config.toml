@@ -19,3 +19,10 @@ rustflags = [
     "-C", "link-arg=--gc-sections",
     "-C", "link-arg=-z", "-C", "link-arg=norelro"
 ]
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-T../../userspace.ld",
+    "-C", "panic=abort",
+    "-C", "link-arg=--gc-sections"
+]
