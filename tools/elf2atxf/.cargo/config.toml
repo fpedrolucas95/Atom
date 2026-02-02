@@ -1,4 +1,0 @@
-# This is a host tool, not a UEFI application
-# Build for the native host target
-[build]
-target = "x86_64-unknown-linux-gnu"

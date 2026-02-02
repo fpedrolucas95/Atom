@@ -217,9 +217,12 @@ if [ "$KERNEL_ONLY" != true ]; then
     # -------------------------------------------------------------------------
     step "Building elf2atxf tool..."
 
+    # Find the host target directory
+    HOST_TARGET=$(rustc -vV | grep host | cut -d' ' -f2)
+
     # elf2atxf is a host tool, always build for the host
     pushd tools/elf2atxf > /dev/null
-    if cargo build --release 2>build.log; then
+    if cargo build --release --target "$HOST_TARGET" 2>build.log; then
         success "elf2atxf built"
     else
         error "Failed to build elf2atxf"
@@ -228,8 +231,6 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
     popd > /dev/null
 
-    # Find the host target directory
-    HOST_TARGET=$(rustc -vV | grep host | cut -d' ' -f2)
     ELF2ATXF="tools/elf2atxf/target/$HOST_TARGET/release/elf2atxf"
     if [ ! -f "$ELF2ATXF" ]; then
         # Fallback if host detection fails

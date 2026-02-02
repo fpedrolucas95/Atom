@@ -148,7 +148,7 @@ if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
     Write-Step "Compilando elf2atxf tool..."
 
     Push-Location $ELF2ATXF_PATH
-    cargo build --release *> "$REPO_PATH\build.log"
+    cargo build --release --target $HOST_TARGET *> "$REPO_PATH\build.log"
     if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao compilar elf2atxf"; Pop-Location; exit 1 }
     Pop-Location
 
