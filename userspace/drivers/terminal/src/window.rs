@@ -9,31 +9,31 @@ use atom_syscall::graphics::{Color, Framebuffer};
 /// Terminal color theme
 pub struct Theme;
 impl Theme {
-    // Window chrome colors
-    pub const WINDOW_BG: Color = Color::new(30, 30, 30);       // Dark terminal background
-    pub const WINDOW_BORDER: Color = Color::new(60, 60, 60);   // Subtle border
-    pub const TITLE_BAR_BG: Color = Color::new(45, 45, 45);    // Title bar background
-    pub const TITLE_BAR_TEXT: Color = Color::new(200, 200, 200);
+    // Window chrome colors (Catppuccin Mocha)
+    pub const WINDOW_BG: Color = Color::new(30, 30, 46);       // Base
+    pub const WINDOW_BORDER: Color = Color::new(69, 71, 90);   // Surface1
+    pub const TITLE_BAR_BG: Color = Color::new(24, 24, 37);    // Mantle
+    pub const TITLE_BAR_TEXT: Color = Color::new(205, 214, 244); // Text
 
     // Terminal content colors
-    pub const TEXT_NORMAL: Color = Color::new(220, 220, 220);  // Default text
-    pub const TEXT_BRIGHT: Color = Color::WHITE;               // Bright/bold text
-    pub const TEXT_DIM: Color = Color::new(128, 128, 128);     // Dimmed text
-    pub const TEXT_ERROR: Color = Color::new(255, 100, 100);   // Error messages
-    pub const TEXT_SUCCESS: Color = Color::new(100, 255, 100); // Success messages
-    pub const TEXT_INFO: Color = Color::new(100, 180, 255);    // Info messages
-    pub const TEXT_WARNING: Color = Color::new(255, 200, 100); // Warning messages
+    pub const TEXT_NORMAL: Color = Color::new(205, 214, 244);  // Text
+    pub const TEXT_BRIGHT: Color = Color::new(245, 224, 220);  // Rosewater
+    pub const TEXT_DIM: Color = Color::new(108, 112, 134);     // Overlay0
+    pub const TEXT_ERROR: Color = Color::new(243, 139, 168);   // Red
+    pub const TEXT_SUCCESS: Color = Color::new(166, 227, 161); // Green
+    pub const TEXT_INFO: Color = Color::new(137, 180, 250);    // Blue
+    pub const TEXT_WARNING: Color = Color::new(249, 226, 175); // Yellow
 
     // Prompt colors
-    pub const PROMPT_USER: Color = Color::new(136, 192, 208);  // User part of prompt
-    pub const PROMPT_PATH: Color = Color::new(163, 190, 140);  // Path part of prompt
-    pub const PROMPT_SYMBOL: Color = Color::new(180, 142, 173);// $ or # symbol
+    pub const PROMPT_USER: Color = Color::new(137, 180, 250);  // Blue
+    pub const PROMPT_PATH: Color = Color::new(166, 227, 161);  // Green
+    pub const PROMPT_SYMBOL: Color = Color::new(203, 166, 247);// Mauve
 
     // Cursor
-    pub const CURSOR_BG: Color = Color::new(200, 200, 200);    // Cursor block color
+    pub const CURSOR_BG: Color = Color::new(245, 224, 220);    // Rosewater
 
-    // Selection (future use)
-    pub const SELECTION_BG: Color = Color::new(70, 100, 130);  // Selected text background
+    // Selection
+    pub const SELECTION_BG: Color = Color::new(49, 50, 68);    // Surface0
 }
 
 /// Configuration for window dimensions and layout
@@ -156,13 +156,24 @@ impl TerminalWindow {
         let button_x = cfg.x + cfg.width - cfg.padding - 12 - cfg.border_width;
 
         // Close button (red)
-        fb.fill_rect(button_x, button_y, 12, 12, Color::new(255, 95, 86));
+        let r = 5u32;
+        let cy = button_y + 6;
+        
+        // Helper for circular buttons in terminal (since we don't have the helper here)
+        let draw_circle = |fb: &Framebuffer, cx: u32, cy: u32, r: u32, color: Color| {
+            let r_i32 = r as i32;
+            for dy in -r_i32..=r_i32 {
+                for dx in -r_i32..=r_i32 {
+                    if dx * dx + dy * dy <= r_i32 * r_i32 {
+                        fb.draw_pixel((cx as i32 + dx) as u32, (cy as i32 + dy) as u32, color);
+                    }
+                }
+            }
+        };
 
-        // Minimize button (yellow)
-        fb.fill_rect(button_x - 18, button_y, 12, 12, Color::new(255, 189, 46));
-
-        // Maximize button (green)
-        fb.fill_rect(button_x - 36, button_y, 12, 12, Color::new(39, 201, 63));
+        draw_circle(fb, button_x + 6, cy, r, Color::new(243, 139, 168));
+        draw_circle(fb, button_x - 12, cy, r, Color::new(249, 226, 175));
+        draw_circle(fb, button_x - 30, cy, r, Color::new(166, 227, 161));
 
         // Content area background
         fb.fill_rect(
