@@ -119,19 +119,64 @@ use libipc::well_known;
 mod theme {
     use atom_syscall::graphics::Color;
 
-    pub const DESKTOP_BG_DEFAULT: Color = Color::new(46, 52, 64);
-    pub const PANEL_BG: Color = Color::new(26, 30, 38);
-    pub const PANEL_TEXT: Color = Color::new(216, 222, 233);
-    pub const ACCENT: Color = Color::new(136, 192, 208);
-    pub const WINDOW_BG: Color = Color::new(43, 48, 59);
-    pub const WINDOW_HEADER: Color = Color::new(46, 52, 64);
-    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(59, 66, 82);
-    pub const WINDOW_BORDER: Color = Color::new(76, 86, 106);
-    pub const DOCK_BG: Color = Color::new(26, 30, 38);
-    pub const CURSOR_FILL: Color = Color::WHITE;
-    pub const CURSOR_OUTLINE: Color = Color::BLACK;
+    // Catppuccin Mocha inspired palette
+    pub const DESKTOP_BG_DEFAULT: Color = Color::new(30, 30, 46);
+    pub const PANEL_BG: Color = Color::new(17, 17, 27);
+    pub const PANEL_TEXT: Color = Color::new(205, 214, 244);
+    pub const ACCENT: Color = Color::new(137, 180, 250); // Blue
+    pub const WINDOW_BG: Color = Color::new(30, 30, 46);
+    pub const WINDOW_HEADER: Color = Color::new(24, 24, 37);
+    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(49, 50, 68);
+    pub const WINDOW_BORDER: Color = Color::new(69, 71, 90);
+    pub const DOCK_BG: Color = Color::new(17, 17, 27);
+    pub const CURSOR_FILL: Color = Color::new(245, 224, 220); // Rosewater
+    pub const CURSOR_OUTLINE: Color = Color::new(17, 17, 27);
 
-    pub const SHADOW: Color = Color::new(10, 12, 16);
+    pub const SHADOW: Color = Color::new(10, 10, 15);
+    
+    pub const RED: Color = Color::new(243, 139, 168);
+    pub const GREEN: Color = Color::new(166, 227, 161);
+    pub const YELLOW: Color = Color::new(249, 226, 175);
+}
+
+// ============================================================================
+// Drawing Helpers
+// ============================================================================
+
+fn draw_rounded_rect(fb: &Framebuffer, x: u32, y: u32, w: u32, h: u32, r: u32, color: Color) {
+    if w < 2 * r || h < 2 * r {
+        fb.fill_rect(x, y, w, h, color);
+        return;
+    }
+
+    // Main body
+    fb.fill_rect(x + r, y, w - 2 * r, h, color);
+    fb.fill_rect(x, y + r, r, h - 2 * r, color);
+    fb.fill_rect(x + w - r, y + r, r, h - 2 * r, color);
+
+    // Corners (simple approximation)
+    for dy in 0..r {
+        for dx in 0..r {
+            let dist_sq = (r - dx) * (r - dx) + (r - dy) * (r - dy);
+            if dist_sq <= r * r {
+                fb.draw_pixel(x + dx, y + dy, color); // Top-left
+                fb.draw_pixel(x + w - 1 - dx, y + dy, color); // Top-right
+                fb.draw_pixel(x + dx, y + h - 1 - dy, color); // Bottom-left
+                fb.draw_pixel(x + w - 1 - dx, y + h - 1 - dy, color); // Bottom-right
+            }
+        }
+    }
+}
+
+fn draw_circle(fb: &Framebuffer, cx: u32, cy: u32, r: u32, color: Color) {
+    let r_i32 = r as i32;
+    for dy in -r_i32..=r_i32 {
+        for dx in -r_i32..=r_i32 {
+            if dx * dx + dy * dy <= r_i32 * r_i32 {
+                fb.draw_pixel((cx as i32 + dx) as u32, (cy as i32 + dy) as u32, color);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -1725,41 +1770,45 @@ impl Compositor {
         for icon in &self.icons {
             let ix = icon.x as u32;
             let iy = icon.y as u32;
-            let size = 48u32;
+            let size = 56u32;
 
-            // Icon box shadow
-            self.fb.fill_rect(ix + 2, iy + 2, size, size, theme::SHADOW);
-            // Icon box
-            self.fb.fill_rect(ix, iy, size, size, icon.color);
+            // Icon background - Rounded and clean
+            draw_rounded_rect(&self.fb, ix, iy, size, size, 10, icon.color);
             self.fb.draw_rect(ix, iy, size, size, theme::WINDOW_BORDER);
 
-            // Icon symbol (generic square for now)
-            self.fb.draw_rect(ix + 12, iy + 12, 24, 24, Color::WHITE);
+            // Icon symbol (minimalist)
+            let symbol_size = 24u32;
+            let sx = ix + (size - symbol_size) / 2;
+            let sy = iy + (size - symbol_size) / 2;
+            self.fb.draw_rect(sx, sy, symbol_size, symbol_size, Color::WHITE);
 
-            // Label
-            let label_len = icon.label.len() as i32 * 8;
-            let lx = (ix as i32 + (size as i32 - label_len) / 2).max(0) as u32;
-            self.fb.draw_string(lx as u32, iy + size + 8, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
+            // Label - Perfectly centered and concise
+            let label_len = icon.label.len() as u32 * 8;
+            let lx = ix + (size - label_len) / 2;
+            self.fb.draw_string(lx, iy + size + 10, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
         }
     }
 
     fn draw_panel(&self) {
         let width = self.fb.width();
+        let panel_h = 32u32;
 
-        // Panel background
-        self.fb.fill_rect(0, 0, width, 28, theme::PANEL_BG);
-        // Bottom border for panel
-        self.fb.fill_rect(0, 27, width, 1, theme::WINDOW_BORDER);
+        // Panel background with a slight "floating" feel (not touching edges if we wanted, but full width is standard)
+        self.fb.fill_rect(0, 0, width, panel_h, theme::PANEL_BG);
+        self.fb.draw_hline(0, panel_h - 1, width, theme::WINDOW_BORDER);
 
-        // Logo
-        self.fb.draw_string(16, 6, "ATOM", theme::ACCENT, theme::PANEL_BG);
+        // Logo - Modern look: just the text, well aligned
+        self.fb.draw_string(20, 10, "ATOM", theme::ACCENT, theme::PANEL_BG);
 
-        // Status
-        self.fb.draw_string(70, 6, "|  OS", theme::PANEL_TEXT, theme::PANEL_BG);
+        // Status / Separator
+        self.fb.draw_string(65, 10, "•", theme::WINDOW_BORDER, theme::PANEL_BG);
+        self.fb.draw_string(85, 10, "System", theme::PANEL_TEXT, theme::PANEL_BG);
 
-        // Clock (right side)
-        let clock_x = width.saturating_sub(64);
-        self.fb.draw_string(clock_x, 6, "12:00", theme::PANEL_TEXT, theme::PANEL_BG);
+        // Clock (right side) - Better padding
+        let clock_text = "12:00 PM";
+        let clock_w = clock_text.len() as u32 * 8;
+        let clock_x = width.saturating_sub(clock_w + 20);
+        self.fb.draw_string(clock_x, 10, clock_text, theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
     fn draw_window(&self, window: &Window) {
@@ -1772,13 +1821,14 @@ impl Compositor {
         let w = window.width;
         let h = window.height;
 
-        // Shadow (only if not maximized)
+        // Shadow (only if not maximized) - Softened
         if window.state != WindowState::Maximized {
-            self.fb.fill_rect(x + 2, y + 2, w + 2, h + 2, theme::SHADOW);
+            self.fb.fill_rect(x + 4, y + 4, w, h, theme::SHADOW);
         }
 
-        // Outer Border
+        // Outer Border / Background
         self.fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
+        self.fb.fill_rect(x + 1, y + 1, w - 2, h - 2, theme::WINDOW_BG);
 
         // Header (Title Bar)
         let header_color = if window.focused {
@@ -1786,42 +1836,39 @@ impl Compositor {
         } else {
             theme::WINDOW_HEADER
         };
-        self.fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
-                         w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
-                         header_color);
+        
+        // Draw header with slightly rounded top corners (simulated)
+        draw_rounded_rect(&self.fb, x + 1, y + 1, w - 2, WINDOW_HEADER_HEIGHT, 4, header_color);
 
-        // Title
-        self.fb.draw_string(x + 12, y + 8, &window.title, theme::PANEL_TEXT, header_color);
+        // Title - Centered for a more modern look
+        let title_len = window.title.len() as u32 * 8;
+        let title_x = x + (w - title_len) / 2;
+        self.fb.draw_string(title_x, y + 10, &window.title, theme::PANEL_TEXT, header_color);
 
-        // Window controls (buttons)
-        let btn_y = y + 8;
-        let btn_size = 12;
-        let close_x = x + w - 24;
-        let max_x = close_x - 22;
-        let min_x = max_x - 22;
+        // Window controls (circular buttons)
+        let btn_r = 5u32;
+        let btn_y = y + 14;
+        let start_btn_x = x + 16;
 
         // Close button (Red)
-        self.fb.fill_rect(close_x, btn_y, btn_size, btn_size, Color::new(191, 97, 106));
-        // Maximize button (Green)
-        self.fb.fill_rect(max_x, btn_y, btn_size, btn_size, Color::new(163, 190, 140));
+        draw_circle(&self.fb, start_btn_x, btn_y, btn_r, theme::RED);
         // Minimize button (Yellow)
-        self.fb.fill_rect(min_x, btn_y, btn_size, btn_size, Color::new(235, 203, 139));
+        draw_circle(&self.fb, start_btn_x + 20, btn_y, btn_r, theme::YELLOW);
+        // Maximize button (Green)
+        draw_circle(&self.fb, start_btn_x + 40, btn_y, btn_r, theme::GREEN);
 
-        // Window content area background
-        if window.surface.is_none() {
+        // Window content area
+        if let Some(ref surface) = window.surface {
+            surface.blit_to_framebuffer(&self.fb, window.content_x(), window.content_y());
+        } else {
             self.fb.fill_rect(window.content_x(), window.content_y(),
                              window.content_width(), window.content_height(),
                              theme::WINDOW_BG);
         }
 
-        // Composite shared surface content into window
-        if let Some(ref surface) = window.surface {
-            surface.blit_to_framebuffer(&self.fb, window.content_x(), window.content_y());
-        }
-
-        // Inner border around content
-        self.fb.draw_rect(window.content_x() - 1, window.content_y() - 1,
-                         window.content_width() + 2, window.content_height() + 2,
+        // Subtle inner border for content
+        self.fb.draw_rect(window.content_x(), window.content_y(),
+                         window.content_width(), window.content_height(),
                          theme::WINDOW_BORDER);
     }
 
@@ -1829,43 +1876,46 @@ impl Compositor {
         let width = self.fb.width();
         let height = self.fb.height();
 
-        let dock_w = 320u32;
-        let dock_h = 56u32;
+        let dock_w = 300u32;
+        let dock_h = 64u32;
         let dock_x = (width / 2).saturating_sub(dock_w / 2);
-        let dock_y = height.saturating_sub(dock_h + 12);
+        let dock_y = height.saturating_sub(dock_h + 16);
 
-        // Dock shadow
-        self.fb.fill_rect(dock_x + 2, dock_y + 2, dock_w, dock_h, theme::SHADOW);
+        // Dock shadow - Soft
+        self.fb.fill_rect(dock_x + 4, dock_y + 4, dock_w, dock_h, theme::SHADOW);
 
-        // Dock background
-        self.fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
+        // Dock background - Rounded
+        draw_rounded_rect(&self.fb, dock_x, dock_y, dock_w, dock_h, 12, theme::DOCK_BG);
+        // Subtle border
         self.fb.draw_rect(dock_x, dock_y, dock_w, dock_h, theme::WINDOW_BORDER);
 
         // Dock icons
         let icons = [
-            (Color::new(136, 192, 208), "FL"),  // Files
-            (Color::new(129, 161, 193), "ST"),  // Settings
-            (Color::new(94, 129, 172), "BR"),   // Browser
-            (Color::new(76, 86, 106), ">_"),    // Terminal
+            (theme::ACCENT, "FS"),  // Files
+            (Color::new(180, 190, 254), "ST"),  // Settings (Lavender)
+            (Color::new(166, 227, 161), "BR"),  // Browser (Green)
+            (Color::new(245, 194, 231), ">_"),  // Terminal (Pink)
         ];
 
-        let icon_size = 36u32;
-        let padding = 20u32;
+        let icon_size = 40u32;
+        let padding = 24u32;
         let total_icons_width = icons.len() as u32 * icon_size + (icons.len() as u32 - 1) * padding;
         let start_x = dock_x + (dock_w - total_icons_width) / 2;
         let icon_y = dock_y + (dock_h - icon_size) / 2;
 
         for (i, (color, label)) in icons.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + padding));
+            let cx = ix + icon_size / 2;
+            let cy = icon_y + icon_size / 2;
 
-            // Icon background
-            self.fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
+            // Icon background - Circular
+            draw_circle(&self.fb, cx, cy, icon_size / 2, *color);
 
             // Icon label (centered)
             let label_len = label.len() as u32 * 8;
-            let lx = ix + (icon_size - label_len) / 2;
-            let ly = icon_y + (icon_size - 16) / 2;
-            self.fb.draw_string(lx, ly, label, Color::WHITE, *color);
+            let lx = cx - label_len / 2;
+            let ly = cy - 4; // Center vertically (8px font height)
+            self.fb.draw_string(lx, ly, label, theme::PANEL_BG, *color);
         }
     }
 
