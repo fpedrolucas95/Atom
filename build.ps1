@@ -309,11 +309,14 @@ if ($Arch -eq "x86_64") {
 
     & $RUST_LLD.FullName `
         -flavor link `
+        /MACHINE:ARM64 `
         target\$TARGET\release\libatom.a `
         /OUT:build\Atom.efi `
         /SUBSYSTEM:EFI_APPLICATION `
         /ENTRY:efi_main `
-        /MACHINE:ARM64 `
+        /BASE:0 `
+        /ALIGN:4096 `
+        /OPT:REF,ICF `
         /NODEFAULTLIB *> "$REPO_PATH\build.log"
 
     if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao linkar Atom.efi" }

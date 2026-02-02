@@ -454,11 +454,14 @@ elif [ "$ARCH" = "aarch64" ]; then
     if [ -z "$RUST_LLD" ]; then RUST_LLD="lld-link"; fi
 
     if "$RUST_LLD" -flavor link \
+        /MACHINE:ARM64 \
         target/$TARGET/release/libatom.a \
         /OUT:build/Atom.efi \
         /SUBSYSTEM:EFI_APPLICATION \
         /ENTRY:efi_main \
-        /MACHINE:ARM64 \
+        /BASE:0 \
+        /ALIGN:4096 \
+        /OPT:REF,ICF \
         /NODEFAULTLIB 2>build/link.log; then
         success "Atom.efi criado"
     else
