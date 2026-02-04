@@ -168,8 +168,10 @@ pub unsafe fn init(memory_map: &MemoryMap) {
             );
         }
 
-        // Only mark usable memory regions as free
-        if !is_usable_memory(d.typ) {
+        // Only mark conventional memory as free for now.
+        // Boot services memory contains our driver images and other boot payloads!
+        // We'll leave it as 'allocated' for safety until the kernel is fully initialized.
+        if d.typ != 7 { // EFI_CONVENTIONAL_MEMORY
             continue;
         }
 

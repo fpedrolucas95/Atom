@@ -350,19 +350,21 @@ impl WindowManager {
             }
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == prev_id) {
                 w.focused = false;
-            let log_msg = alloc::format!("WM: Window Unfocused - ID={}", prev_id);
-            log(&log_msg);
+                let log_msg = alloc::format!("WM: Window Unfocused - ID={}", prev_id);
+                log(&log_msg);
                 if let Some(port) = w.event_port {
-                    let msg = libipc::messages::WmWindowEventMsg {
-                        window_id: prev_id,
-                        event_type: libipc::messages::WindowEventType::Unfocus,
-                        x: w.x, y: w.y, width: w.width, height: w.height,
-                    };
-                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                let mut full_msg = [0u8; 64];
-                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                    if port != 0 {
+                        let msg = libipc::messages::WmWindowEventMsg {
+                            window_id: prev_id,
+                            event_type: libipc::messages::WindowEventType::Unfocus,
+                            x: w.x, y: w.y, width: w.width, height: w.height,
+                        };
+                        let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                        let mut full_msg = [0u8; 64];
+                        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                        let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                    }
                 }
             }
         }
@@ -379,16 +381,18 @@ impl WindowManager {
             let log_msg = alloc::format!("WM: Window Focused - ID={}", id);
             log(&log_msg);
             if let Some(port) = window.event_port {
-                let msg = libipc::messages::WmWindowEventMsg {
-                    window_id: id,
-                    event_type: libipc::messages::WindowEventType::Focus,
-                    x: window.x, y: window.y, width: window.width, height: window.height,
-                };
-                let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                let mut full_msg = [0u8; 64];
-                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                if port != 0 {
+                    let msg = libipc::messages::WmWindowEventMsg {
+                        window_id: id,
+                        event_type: libipc::messages::WindowEventType::Focus,
+                        x: window.x, y: window.y, width: window.width, height: window.height,
+                    };
+                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                }
             }
 
             self.windows.push(window);
@@ -644,8 +648,8 @@ struct Compositor {
     context_menu: ContextMenu,
     /// Wallpaper picker
     wallpaper_picker: WallpaperPicker,
-    /// Last tick a terminal was spawned to prevent fork-bomb
-    last_terminal_spawn_tick: u32,
+    /// Last time a terminal was spawned to prevent fork-bomb
+    last_terminal_spawn_time: u64,
 }
 
 impl Compositor {
@@ -723,7 +727,7 @@ impl Compositor {
                     v
                 },
             },
-            last_terminal_spawn_tick: 0,
+            last_terminal_spawn_time: 0,
             wallpaper_picker: WallpaperPicker {
                 visible: false,
                 x: (width as i32 - 300) / 2,
@@ -950,7 +954,8 @@ impl Compositor {
 
     /// Handle an application registration message
     fn handle_app_registration(&mut self, data: &[u8]) {
-        log("Compositor: handle_app_registration called");
+        let log_msg = alloc::format!("Compositor: handle_app_registration called, len={}", data.len());
+        log(&log_msg);
 
         if data.len() < MessageHeader::SIZE {
             log("Compositor: Message too small for header");
@@ -1467,6 +1472,11 @@ impl Compositor {
         }
 
         if let Some(port) = event_port {
+            if port == 0 {
+                self.wm.close_window(id);
+                self.dirty = true;
+                return;
+            }
             let msg = TerminateRequestMsg {
                 window_id: id,
                 reason: 0,
@@ -1555,13 +1565,13 @@ impl Compositor {
 
     /// Spawn terminal process with a managed window and shared surface
     fn spawn_terminal(&mut self) {
-        // Anti-loop: Prevent spawning terminals too fast (cooldown of 100 ticks ~ 1 second)
-        let current_tick = self.ticks;
-        if current_tick.wrapping_sub(self.last_terminal_spawn_tick) < 100 {
+        // Anti-loop: Prevent spawning terminals too fast (cooldown of 1 second)
+        let now = atom_syscall::thread::get_time_ms();
+        if now.saturating_sub(self.last_terminal_spawn_time) < 1000 {
             log("Dock: Ignoring terminal spawn request (cooldown)");
             return;
         }
-        self.last_terminal_spawn_tick = current_tick;
+        self.last_terminal_spawn_time = now;
 
         log("Dock: Terminal icon clicked - spawning terminal");
 
