@@ -1060,26 +1060,6 @@ impl Compositor {
                     self.draw_cursor();
                 }
             }
-            MessageType::MouseButtonDown => {
-                let payload_start = MessageHeader::SIZE;
-                if let Some(event) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
-                    if event.button == MouseButton::Left {
-                        if !self.mouse_left_down {
-                            self.click_counter = self.click_counter.wrapping_add(1);
-                            self.handle_click(self.cursor.x, self.cursor.y);
-                        }
-                        self.mouse_left_down = true;
-                    }
-                }
-            }
-            MessageType::MouseButtonUp => {
-                let payload_start = MessageHeader::SIZE;
-                if let Some(event) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
-                    if event.button == MouseButton::Left {
-                        self.mouse_left_down = false;
-                    }
-                }
-            }
             MessageType::SurfacePresent => {
                 // Application has finished rendering, trigger redraw
                 let payload_start = MessageHeader::SIZE;

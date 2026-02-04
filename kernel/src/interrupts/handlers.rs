@@ -417,6 +417,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
 
 static mut TICKS: u64 = 0;
 static USER_MODE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static TIMER_SANITY_CHECK_LOGGED: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -430,18 +431,20 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
         let rsp_canonical = is_canonical(_frame.stack_pointer);
 
         if !(cs_valid && ss_valid && rip_canonical && rsp_canonical) {
-            log_warn!(
-                "interrupt",
-                "Timer frame sanity check failed: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X} canonical_rip={} canonical_rsp={} cs_ok={} ss_ok={}",
-                _frame.instruction_pointer,
-                _frame.stack_pointer,
-                _frame.code_segment,
-                _frame.stack_segment,
-                rip_canonical,
-                rsp_canonical,
-                cs_valid,
-                ss_valid
-            );
+            if TIMER_SANITY_CHECK_LOGGED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                log_warn!(
+                    "interrupt",
+                    "Timer frame sanity check failed (silencing further warnings): RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X} canonical_rip={} canonical_rsp={} cs_ok={} ss_ok={}",
+                    _frame.instruction_pointer,
+                    _frame.stack_pointer,
+                    _frame.code_segment,
+                    _frame.stack_segment,
+                    rip_canonical,
+                    rsp_canonical,
+                    cs_valid,
+                    ss_valid
+                );
+            }
         }
     }
 
@@ -464,7 +467,7 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
     unsafe {
         TICKS += 1;
     }
-    
+
     ipc::on_timer_tick(get_ticks());
 
     super::apic::send_eoi();
@@ -484,7 +487,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    
+
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();
 

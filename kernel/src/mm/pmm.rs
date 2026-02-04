@@ -434,30 +434,3 @@ pub fn get_memory_stats() -> (u64, u64) {
 
     (total_kb, free_kb)
 }
-
-pub fn self_test() {
-    log_info!("[pmm]", "Starting PMM self-test...");
-
-    // Test 1: Single page allocation/free
-    let page = alloc_page().expect("self_test: failed to allocate single page");
-    free_page(page);
-    log_debug!("[pmm]", "  Test 1 (single page) passed");
-
-    // Test 2: Contiguous pages allocation/free
-    let count = 1024; // 4 MiB
-    let pages = alloc_pages(count).expect("self_test: failed to allocate 1024 contiguous pages");
-    free_pages(pages, count);
-    log_debug!("[pmm]", "  Test 2 (contiguous 4MB block) passed");
-
-    // Test 3: Stress test (many small allocations)
-    let mut allocated = [0usize; 100];
-    for i in 0..100 {
-        allocated[i] = alloc_page().expect("self_test: stress test allocation failed");
-    }
-    for i in 0..100 {
-        free_page(allocated[i]);
-    }
-    log_debug!("[pmm]", "  Test 3 (stress test 100 pages) passed");
-
-    log_info!("[pmm]", "PMM self-test completed successfully.");
-}

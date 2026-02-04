@@ -397,7 +397,8 @@ fn get_font_glyph(ch: u8) -> &'static [u8; 8] {
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global allocator for shared memory virtual addresses in this process
-static NEXT_SHARED_MAP_ADDR: AtomicUsize = AtomicUsize::new(0x0000_2000_0000);
+/// Use a very high virtual address to avoid collision with identity-mapped physical RAM
+static NEXT_SHARED_MAP_ADDR: AtomicUsize = AtomicUsize::new(0x0000_1000_0000_0000);
 
 /// Shared memory region identifier
 pub type SharedRegionId = u64;
