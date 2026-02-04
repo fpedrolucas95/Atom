@@ -644,6 +644,8 @@ struct Compositor {
     context_menu: ContextMenu,
     /// Wallpaper picker
     wallpaper_picker: WallpaperPicker,
+    /// Last tick a terminal was spawned to prevent fork-bomb
+    last_terminal_spawn_tick: u32,
 }
 
 impl Compositor {
@@ -721,6 +723,7 @@ impl Compositor {
                     v
                 },
             },
+            last_terminal_spawn_tick: 0,
             wallpaper_picker: WallpaperPicker {
                 visible: false,
                 x: (width as i32 - 300) / 2,
@@ -1572,6 +1575,14 @@ impl Compositor {
 
     /// Spawn terminal process with a managed window and shared surface
     fn spawn_terminal(&mut self) {
+        // Anti-loop: Prevent spawning terminals too fast (cooldown of 100 ticks ~ 1 second)
+        let current_tick = self.ticks;
+        if current_tick.wrapping_sub(self.last_terminal_spawn_tick) < 100 {
+            log("Dock: Ignoring terminal spawn request (cooldown)");
+            return;
+        }
+        self.last_terminal_spawn_tick = current_tick;
+
         log("Dock: Terminal icon clicked - spawning terminal");
 
         // Spawn the terminal process

@@ -394,6 +394,11 @@ fn get_font_glyph(ch: u8) -> &'static [u8; 8] {
 // Shared Memory Surface Support
 // ============================================================================
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global allocator for shared memory virtual addresses in this process
+static NEXT_SHARED_MAP_ADDR: AtomicUsize = AtomicUsize::new(0x0000_2000_0000);
+
 /// Shared memory region identifier
 pub type SharedRegionId = u64;
 
@@ -498,9 +503,6 @@ pub struct SharedSurface {
 }
 
 impl SharedSurface {
-    /// Default virtual address for surface mapping (in userspace range)
-    const DEFAULT_MAP_ADDR: usize = 0x0000_2000_0000;
-
     /// Create a new shared surface owned by this process
     pub fn create(width: u32, height: u32) -> SyscallResult<Self> {
         let bytes_per_pixel = 4u32; // BGRA format
@@ -509,8 +511,8 @@ impl SharedSurface {
 
         let region_id = shared_region_create(size)?;
 
-        // Map into our address space
-        let map_addr = Self::DEFAULT_MAP_ADDR;
+        // Map into our address space at a unique location
+        let map_addr = NEXT_SHARED_MAP_ADDR.fetch_add(0x0100_0000, Ordering::Relaxed);
         shared_region_map(region_id, map_addr, SharedMemFlags::READ_WRITE)?;
 
         let surface = Self {
@@ -534,8 +536,8 @@ impl SharedSurface {
         let bytes_per_pixel = 4u32;
         let stride = width;
 
-        // Map into our address space at a different location for clients
-        let map_addr = Self::DEFAULT_MAP_ADDR + 0x0100_0000; // Offset for client
+        // Map into our address space at a unique location
+        let map_addr = NEXT_SHARED_MAP_ADDR.fetch_add(0x0100_0000, Ordering::Relaxed);
         shared_region_map(region_id, map_addr, SharedMemFlags::READ_WRITE)?;
 
         Ok(Self {
