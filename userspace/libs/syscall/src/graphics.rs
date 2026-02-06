@@ -431,21 +431,25 @@ pub fn shared_region_create(size: usize) -> SyscallResult<SharedRegionId> {
     }
 }
 
-/// Map a shared memory region into the current process address space
-pub fn shared_region_map(region_id: SharedRegionId, virt_addr: usize, flags: SharedMemFlags) -> SyscallResult<()> {
+/// Map a shared memory region into the current process address space.
+///
+/// If `virt_addr == 0`, the kernel automatically selects a free VA.
+/// Returns the virtual address where the region was actually mapped.
+pub fn shared_region_map(region_id: SharedRegionId, virt_addr: usize, flags: SharedMemFlags) -> SyscallResult<usize> {
     let result = unsafe {
         syscall3(SYS_SHARED_REGION_MAP, region_id, virt_addr as u64, flags.to_raw())
     };
 
-    if result == ESUCCESS {
-        Ok(())
-    } else {
+    // Error codes are near u64::MAX; valid VA addresses are well below that.
+    if result >= u64::MAX - 100 {
         match result {
             x if x == EINVAL => Err(SyscallError::InvalidArgument),
             x if x == ENOMEM => Err(SyscallError::OutOfMemory),
             x if x == EBUSY => Err(SyscallError::ResourceBusy),
             _ => Err(SyscallError::Unknown(result)),
         }
+    } else {
+        Ok(result as usize)
     }
 }
 
@@ -498,10 +502,8 @@ pub struct SharedSurface {
 }
 
 impl SharedSurface {
-    /// Default virtual address for surface mapping (in userspace range)
-    const DEFAULT_MAP_ADDR: usize = 0x0000_2000_0000;
-
-    /// Create a new shared surface owned by this process
+    /// Create a new shared surface owned by this process.
+    /// The kernel automatically assigns a free virtual address.
     pub fn create(width: u32, height: u32) -> SyscallResult<Self> {
         let bytes_per_pixel = 4u32; // BGRA format
         let stride = width;
@@ -509,9 +511,8 @@ impl SharedSurface {
 
         let region_id = shared_region_create(size)?;
 
-        // Map into our address space
-        let map_addr = Self::DEFAULT_MAP_ADDR;
-        shared_region_map(region_id, map_addr, SharedMemFlags::READ_WRITE)?;
+        // Map into our address space — let kernel pick a free VA (virt_addr = 0)
+        let map_addr = shared_region_map(region_id, 0, SharedMemFlags::READ_WRITE)?;
 
         let surface = Self {
             region_id,
@@ -529,14 +530,14 @@ impl SharedSurface {
         Ok(surface)
     }
 
-    /// Create a surface from an existing shared region (for client processes)
+    /// Create a surface from an existing shared region (for client processes).
+    /// The kernel automatically assigns a free virtual address.
     pub fn from_region(region_id: SharedRegionId, width: u32, height: u32) -> SyscallResult<Self> {
         let bytes_per_pixel = 4u32;
         let stride = width;
 
-        // Map into our address space at a different location for clients
-        let map_addr = Self::DEFAULT_MAP_ADDR + 0x0100_0000; // Offset for client
-        shared_region_map(region_id, map_addr, SharedMemFlags::READ_WRITE)?;
+        // Map into our address space — let kernel pick a free VA (virt_addr = 0)
+        let map_addr = shared_region_map(region_id, 0, SharedMemFlags::READ_WRITE)?;
 
         Ok(Self {
             region_id,

@@ -292,14 +292,19 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     // -----------------------------------------------------------------------
     let bitmap_bytes_needed = (tracked_pages + 7) / 8;
 
+    // effective_tracked_pages: the page count actually supported by the
+    // chosen bitmap.  Set exactly once and stored into TOTAL_PAGES once.
+    let effective_tracked_pages: usize;
+
     if tracked_pages <= MAX_STATIC_PAGES {
         // Static bitmap is sufficient
+        effective_tracked_pages = tracked_pages;
         log_info!(
             "[pmm]",
             "Using static bitmap: {} bytes for {} pages ({} MiB addressable)",
             bitmap_bytes_needed,
-            tracked_pages,
-            (tracked_pages * PAGE_SIZE) / (1024 * 1024)
+            effective_tracked_pages,
+            (effective_tracked_pages * PAGE_SIZE) / (1024 * 1024)
         );
         USING_DYNAMIC.store(false, Ordering::Relaxed);
     } else {
@@ -339,6 +344,9 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         }
 
         if let Some(bitmap_phys) = best_region {
+            // Dynamic bitmap allocated — track the full range
+            effective_tracked_pages = tracked_pages;
+
             log_info!(
                 "[pmm]",
                 "Dynamic bitmap at phys 0x{:X}, {} pages ({} KiB)",
@@ -357,18 +365,20 @@ pub unsafe fn init(memory_map: &MemoryMap) {
             BITMAP_OVERHEAD_PAGES.store(bitmap_pages, Ordering::Relaxed);
         } else {
             // Fallback: use static bitmap, clamp to MAX_STATIC_PAGES
+            effective_tracked_pages = tracked_pages.min(MAX_STATIC_PAGES);
+
             log_warn!(
                 "[pmm]",
-                "No region large enough for dynamic bitmap. Falling back to static ({} GiB max).",
-                (MAX_STATIC_PAGES * PAGE_SIZE) / (1024 * 1024 * 1024)
+                "No region large enough for dynamic bitmap. Falling back to static ({} GiB max, {} pages).",
+                (MAX_STATIC_PAGES * PAGE_SIZE) / (1024 * 1024 * 1024),
+                effective_tracked_pages
             );
-            let tracked_pages_clamped = tracked_pages.min(MAX_STATIC_PAGES);
-            TOTAL_PAGES.store(tracked_pages_clamped, Ordering::Relaxed);
             USING_DYNAMIC.store(false, Ordering::Relaxed);
         }
     }
 
-    TOTAL_PAGES.store(tracked_pages, Ordering::Relaxed);
+    // Store effective page count exactly once — never exceeds bitmap capacity.
+    TOTAL_PAGES.store(effective_tracked_pages, Ordering::Relaxed);
     PHYSICAL_RAM_PAGES.store(physical_ram_pages, Ordering::Relaxed);
     RESERVED_PAGES.store(reserved_pages, Ordering::Relaxed);
     NEXT_FREE_HINT.store(1, Ordering::Relaxed); // Skip page 0
@@ -382,7 +392,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     for d in memory_map.descriptors() {
         let start_page = (d.physical_start as usize) / PAGE_SIZE;
         let num_pages = d.number_of_pages as usize;
-        let end_page = start_page.saturating_add(num_pages).min(tracked_pages);
+        let end_page = start_page.saturating_add(num_pages).min(effective_tracked_pages);
         let size_mb = (num_pages * PAGE_SIZE) / (1024 * 1024);
 
         if size_mb > 0 && is_usable_memory(d.typ) {
@@ -400,22 +410,13 @@ pub unsafe fn init(memory_map: &MemoryMap) {
             continue;
         }
 
-        if start_page >= tracked_pages {
+        if start_page >= effective_tracked_pages {
             continue;
         }
 
         for page in start_page..end_page {
             set_page_free(page);
             free_pages += 1;
-        }
-    }
-
-    // Ensure page 0 is always allocated (null pointer trap).
-    // If page 0 was in a usable region, it was freed above — reclaim it now.
-    if is_page_free(0) {
-        set_page_allocated(0);
-        if free_pages > 0 {
-            free_pages -= 1;
         }
     }
 
@@ -446,7 +447,10 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         );
     }
 
-    // Ensure page 0 is not counted as free
+    // -----------------------------------------------------------------------
+    // Page 0 reservation (single consolidation point).
+    // Page 0 must never be allocatable — it serves as the null pointer trap.
+    // -----------------------------------------------------------------------
     if is_page_free(0) {
         set_page_allocated(0);
         if free_pages > 0 {
@@ -462,7 +466,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     let mut current_run = 0usize;
     let mut max_run = 0usize;
 
-    for page in 0..tracked_pages {
+    for page in 0..effective_tracked_pages {
         if is_page_free(page) {
             current_run += 1;
             if current_run > max_run {
@@ -477,16 +481,80 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     INITIALIZED.store(true, Ordering::Relaxed);
 
     // -----------------------------------------------------------------------
+    // Hardening: validate bitmap capacity vs tracked pages
+    // -----------------------------------------------------------------------
+    {
+        let bitmap_bits_capacity = if USING_DYNAMIC.load(Ordering::Relaxed) {
+            DYNAMIC_BITMAP_LEN.load(Ordering::Relaxed) * 8
+        } else {
+            STATIC_BITMAP_BYTES * 8
+        };
+
+        if bitmap_bits_capacity < effective_tracked_pages {
+            // FATAL: bitmap cannot represent all tracked pages.
+            // This would cause out-of-bounds bitmap access and memory corruption.
+            log_warn!(
+                "[pmm]",
+                "FATAL: bitmap capacity ({} bits) < effective_tracked_pages ({})! Clamping to bitmap capacity.",
+                bitmap_bits_capacity,
+                effective_tracked_pages
+            );
+            // Emergency clamp — should never happen if the above logic is correct
+            let clamped = bitmap_bits_capacity;
+            TOTAL_PAGES.store(clamped, Ordering::Relaxed);
+        }
+
+        // Validate that the bitmap slice is actually accessible
+        let bm = bitmap_slice();
+        let required_bytes = (effective_tracked_pages + 7) / 8;
+        if bm.len() < required_bytes {
+            log_warn!(
+                "[pmm]",
+                "FATAL: bitmap slice len ({}) < required bytes ({})! Clamping.",
+                bm.len(),
+                required_bytes
+            );
+            let clamped = bm.len() * 8;
+            TOTAL_PAGES.store(clamped, Ordering::Relaxed);
+        }
+
+        // If using dynamic bitmap, verify that the bitmap's own pages are
+        // allocated and won't be handed out as free memory.
+        if USING_DYNAMIC.load(Ordering::Relaxed) {
+            let bitmap_phys = DYNAMIC_BITMAP_PTR.load(Ordering::Relaxed);
+            let bitmap_pages = BITMAP_OVERHEAD_PAGES.load(Ordering::Relaxed);
+            let bitmap_start_page = bitmap_phys / PAGE_SIZE;
+
+            for page in bitmap_start_page..(bitmap_start_page + bitmap_pages) {
+                if is_page_free(page) {
+                    log_warn!(
+                        "[pmm]",
+                        "HARDENING: bitmap page {} was free after init! Force-allocating.",
+                        page
+                    );
+                    set_page_allocated(page);
+                    let fp = FREE_PAGES.load(Ordering::Relaxed);
+                    if fp > 0 {
+                        FREE_PAGES.store(fp - 1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Boot telemetry
     // -----------------------------------------------------------------------
+    let effective_total = TOTAL_PAGES.load(Ordering::Relaxed);
+    let effective_free = FREE_PAGES.load(Ordering::Relaxed);
     let physical_ram_mb = (physical_ram_pages * PAGE_SIZE) / (1024 * 1024);
-    let free_mb = (free_pages * PAGE_SIZE) / (1024 * 1024);
+    let free_mb = (effective_free * PAGE_SIZE) / (1024 * 1024);
     let reserved_mb = (reserved_pages * PAGE_SIZE) / (1024 * 1024);
-    let tracked_mb = (tracked_pages * PAGE_SIZE) / (1024 * 1024);
+    let tracked_mb = (effective_total * PAGE_SIZE) / (1024 * 1024);
     let bitmap_kb = if USING_DYNAMIC.load(Ordering::Relaxed) {
         DYNAMIC_BITMAP_LEN.load(Ordering::Relaxed) / 1024
     } else {
-        (tracked_pages / 8 + 1) / 1024
+        (effective_total / 8 + 1) / 1024
     };
 
     log_info!("[pmm]", "========================================");
@@ -494,8 +562,8 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     log_info!("[pmm]", "========================================");
     log_info!("[pmm]", "  Physical RAM:   {} MiB ({} pages)", physical_ram_mb, physical_ram_pages);
     log_info!("[pmm]", "  Reserved/MMIO:  {} MiB ({} pages)", reserved_mb, reserved_pages);
-    log_info!("[pmm]", "  Tracked range:  {} MiB ({} pages)", tracked_mb, tracked_pages);
-    log_info!("[pmm]", "  Free pages:     {} ({} MiB)", free_pages, free_mb);
+    log_info!("[pmm]", "  Tracked range:  {} MiB ({} pages)", tracked_mb, effective_total);
+    log_info!("[pmm]", "  Free pages:     {} ({} MiB)", effective_free, free_mb);
     log_info!("[pmm]", "  Bitmap type:    {}", if USING_DYNAMIC.load(Ordering::Relaxed) { "dynamic" } else { "static (.bss)" });
     log_info!("[pmm]", "  Bitmap size:    {} KiB", bitmap_kb);
     log_info!("[pmm]", "  Largest run:    {} pages ({} MiB)", max_run, (max_run * PAGE_SIZE) / (1024 * 1024));

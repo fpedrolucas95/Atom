@@ -62,6 +62,16 @@ use crate::log_debug;
 
 const LOG_ORIGIN: &str = "sharedmem";
 
+/// Start of the VA range dedicated to shared memory mappings in user space.
+/// The scanner probes page tables, so even if this falls within the
+/// identity-mapped RAM region it will skip forward automatically.
+const SHARED_MEM_VA_BASE: usize = 0x1000_0000; // 256 MiB
+
+/// End (exclusive) of the VA range for shared memory mappings.
+/// Must be ABOVE the highest RAM identity-mapped address (~2 GiB on most
+/// QEMU configs) and BELOW the framebuffer (typically 0xC000_0000).
+const SHARED_MEM_VA_LIMIT: usize = 0xBF00_0000; // 3 GiB - 16 MiB
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(u64);
 
@@ -250,13 +260,16 @@ impl SharedRegion {
         })
     }
 
+    /// Map this region into a thread's address space at `virt_addr`.
+    /// Returns the virtual address where the mapping was placed.
     fn map(&mut self, thread_id: ThreadId, virt_addr: usize, flags: RegionFlags, pml4_phys: Option<usize>)
-        -> Result<(), SharedMemError>
+        -> Result<usize, SharedMemError>
     {
         if !pmm::is_page_aligned(virt_addr) {
             return Err(SharedMemError::Unaligned);
         }
 
+        // Check: same region already mapped for this thread
         if self.mappings.iter().any(|m| m.thread_id == thread_id) {
             return Err(SharedMemError::AlreadyMapped);
         }
@@ -266,10 +279,8 @@ impl SharedRegion {
             let virt = virt_addr + (i * pmm::PAGE_SIZE);
 
             let map_result = if let Some(pml4) = pml4_phys {
-                // Map into specific PML4 (correct for syscalls!)
                 vm::map_page_in_pml4(pml4, virt, phys_page, page_flags)
             } else {
-                // Map into current PML4 (legacy path)
                 vm::map_page(virt, phys_page, page_flags)
             };
 
@@ -285,7 +296,7 @@ impl SharedRegion {
                 }
 
                 return match e {
-                    vm::VmError::AlreadyMapped => Err(SharedMemError::AlreadyMapped),
+                    vm::VmError::AlreadyMapped => Err(SharedMemError::AddressInUse),
                     vm::VmError::OutOfMemory => Err(SharedMemError::OutOfMemory),
                     _ => Err(SharedMemError::MappingFailed),
                 };
@@ -309,7 +320,7 @@ impl SharedRegion {
             pml4_phys
         );
 
-        Ok(())
+        Ok(virt_addr)
     }
 
     fn unmap(&mut self, thread_id: ThreadId) -> Result<(), SharedMemError> {
@@ -380,17 +391,99 @@ impl SharedMemManager {
         Ok(region_id)
     }
 
+    /// Find a free virtual address range for `size` bytes within the shared
+    /// memory VA range, checking both our own mapping metadata AND the actual
+    /// page tables (to avoid collisions with identity-mapped kernel RAM, ELF
+    /// segments, stack, etc.).
+    fn find_free_va(
+        regions: &BTreeMap<RegionId, SharedRegion>,
+        thread_id: ThreadId,
+        size: usize,
+        pml4_phys: Option<usize>,
+    ) -> Result<usize, SharedMemError> {
+        let aligned_size = pmm::align_up(size);
+        let num_pages = aligned_size / pmm::PAGE_SIZE;
+
+        // Collect all VA ranges used by this thread (from our own bookkeeping).
+        let mut used_ranges: Vec<(usize, usize)> = Vec::new();
+        for region in regions.values() {
+            for mapping in &region.mappings {
+                if mapping.thread_id == thread_id {
+                    used_ranges.push((mapping.virt_addr, region.size));
+                }
+            }
+        }
+        used_ranges.sort_by_key(|&(addr, _)| addr);
+
+        let mut candidate = SHARED_MEM_VA_BASE;
+
+        while candidate + aligned_size <= SHARED_MEM_VA_LIMIT {
+            // 1) Skip past any shared-memory mapping that overlaps.
+            let mut collided_with_shared = false;
+            for &(used_start, used_size) in &used_ranges {
+                let used_end = used_start.saturating_add(used_size);
+                if candidate + aligned_size > used_start && candidate < used_end {
+                    // Overlap — advance past this region.
+                    candidate = pmm::align_up(used_end);
+                    collided_with_shared = true;
+                    break;
+                }
+            }
+            if collided_with_shared {
+                continue;
+            }
+
+            // 2) Probe the actual page tables if we have a PML4.
+            //    Check first and last page of the candidate range; if either
+            //    is already mapped (e.g. identity map), skip this chunk.
+            if let Some(pml4) = pml4_phys {
+                let first_page_mapped = vm::query_mapping_in_pml4(pml4, candidate).is_ok();
+                let last_page_va = candidate + (num_pages.saturating_sub(1)) * pmm::PAGE_SIZE;
+                let last_page_mapped = if last_page_va != candidate {
+                    vm::query_mapping_in_pml4(pml4, last_page_va).is_ok()
+                } else {
+                    false
+                };
+
+                if first_page_mapped || last_page_mapped {
+                    // This range collides with existing page-table entries
+                    // (likely kernel identity mapping). Skip forward by
+                    // a 4 MiB-aligned step to get past the mapped region quickly.
+                    // On a 2 GiB system this means ~448 probes worst-case,
+                    // each being a fast 4-level page table walk.
+                    const SKIP_STEP: usize = 4 * 1024 * 1024; // 4 MiB
+                    candidate = (candidate + SKIP_STEP) & !(SKIP_STEP - 1);
+                    continue;
+                }
+            }
+
+            // Candidate range is free.
+            return Ok(candidate);
+        }
+
+        Err(SharedMemError::NoFreeVirtualAddress)
+    }
+
     fn map_region(
         &self,
         region_id: RegionId,
         thread_id: ThreadId,
         virt_addr: usize,
         flags: RegionFlags,
-    ) -> Result<(), SharedMemError> {
+    ) -> Result<usize, SharedMemError> {
         let mut regions = self.regions.lock();
-        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
 
-        region.map(thread_id, virt_addr, flags, None)
+        let effective_va = if virt_addr == 0 {
+            let size = regions.get(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?
+                .size;
+            Self::find_free_va(&regions, thread_id, size, None)?
+        } else {
+            virt_addr
+        };
+
+        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        region.map(thread_id, effective_va, flags, None)
     }
 
     fn map_region_in_pml4(
@@ -400,11 +493,20 @@ impl SharedMemManager {
         pml4_phys: usize,
         virt_addr: usize,
         flags: RegionFlags,
-    ) -> Result<(), SharedMemError> {
+    ) -> Result<usize, SharedMemError> {
         let mut regions = self.regions.lock();
-        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
 
-        region.map(thread_id, virt_addr, flags, Some(pml4_phys))
+        let effective_va = if virt_addr == 0 {
+            let size = regions.get(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?
+                .size;
+            Self::find_free_va(&regions, thread_id, size, Some(pml4_phys))?
+        } else {
+            virt_addr
+        };
+
+        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        region.map(thread_id, effective_va, flags, Some(pml4_phys))
     }
 
     fn unmap_region(&self, region_id: RegionId, thread_id: ThreadId) -> Result<(), SharedMemError> {
@@ -487,6 +589,10 @@ pub enum SharedMemError {
     NotMapped,
     MappingFailed,
     RegionInUse,
+    /// The requested VA range is occupied by another mapping (not this region).
+    AddressInUse,
+    /// No free VA range available in the shared memory region.
+    NoFreeVirtualAddress,
 }
 
 impl core::fmt::Display for SharedMemError {
@@ -501,6 +607,8 @@ impl core::fmt::Display for SharedMemError {
             SharedMemError::NotMapped => write!(f, "Not mapped"),
             SharedMemError::MappingFailed => write!(f, "Mapping failed"),
             SharedMemError::RegionInUse => write!(f, "Region in use"),
+            SharedMemError::AddressInUse => write!(f, "Address in use by another mapping"),
+            SharedMemError::NoFreeVirtualAddress => write!(f, "No free virtual address in shared range"),
         }
     }
 }
@@ -519,22 +627,28 @@ pub fn create_region(owner: ThreadId, size: usize) -> Result<RegionId, SharedMem
     SHARED_MEM_MANAGER.create_region(owner, size)
 }
 
+/// Map a shared region into a thread's address space.
+/// If `virt_addr == 0`, the kernel auto-assigns a VA from the shared memory range.
+/// Returns the virtual address where the region was mapped.
 pub fn map_region(
     region_id: RegionId,
     thread_id: ThreadId,
     virt_addr: usize,
     flags: RegionFlags,
-) -> Result<(), SharedMemError> {
+) -> Result<usize, SharedMemError> {
     SHARED_MEM_MANAGER.map_region(region_id, thread_id, virt_addr, flags)
 }
 
+/// Map a shared region into a specific PML4 (address space).
+/// If `virt_addr == 0`, the kernel auto-assigns a VA from the shared memory range.
+/// Returns the virtual address where the region was mapped.
 pub fn map_region_in_pml4(
     region_id: RegionId,
     thread_id: ThreadId,
     pml4_phys: u64,
     virt_addr: usize,
     flags: RegionFlags,
-) -> Result<(), SharedMemError> {
+) -> Result<usize, SharedMemError> {
     SHARED_MEM_MANAGER.map_region_in_pml4(region_id, thread_id, pml4_phys as usize, virt_addr, flags)
 }
 

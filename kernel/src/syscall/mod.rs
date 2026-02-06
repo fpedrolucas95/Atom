@@ -2302,14 +2302,19 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     let flags = crate::shared_mem::RegionFlags::from_raw(flags_raw);
 
     match crate::shared_mem::map_region_in_pml4(region_id, caller, caller_pml4, virt_addr as usize, flags) {
-        Ok(()) => {
+        Ok(mapped_va) => {
             log_debug!(
                 "syscall",
                 "shared_region_map: mapped region {:?} to virt=0x{:X}",
                 region_id,
-                virt_addr
+                mapped_va
             );
-            ESUCCESS
+            // Return the actual mapped VA.  For auto-assign (virt_addr==0) the
+            // caller needs this to know where the mapping ended up.  For
+            // explicit VA requests the returned value equals the requested VA.
+            // User-space VA values are always below the error-code range
+            // (u64::MAX - 100), so there is no ambiguity.
+            mapped_va as u64
         }
         Err(e) => {
             log_warn!(
@@ -2321,7 +2326,9 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
                 crate::shared_mem::SharedMemError::InvalidRegion => EINVAL,
                 crate::shared_mem::SharedMemError::Unaligned => EINVAL,
                 crate::shared_mem::SharedMemError::AlreadyMapped => EBUSY,
+                crate::shared_mem::SharedMemError::AddressInUse => EBUSY,
                 crate::shared_mem::SharedMemError::OutOfMemory => ENOMEM,
+                crate::shared_mem::SharedMemError::NoFreeVirtualAddress => ENOMEM,
                 _ => EINVAL,
             }
         }
