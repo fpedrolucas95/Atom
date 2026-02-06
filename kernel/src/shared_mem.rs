@@ -52,7 +52,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::mm::{pmm, vm};
@@ -62,15 +62,21 @@ use crate::log_debug;
 
 const LOG_ORIGIN: &str = "sharedmem";
 
-/// Start of the VA range dedicated to shared memory mappings in user space.
-/// The scanner probes page tables, so even if this falls within the
-/// identity-mapped RAM region it will skip forward automatically.
-const SHARED_MEM_VA_BASE: usize = 0x1000_0000; // 256 MiB
+/// Fallback lower bound when the identity-map ceiling is unknown.
+const SHARED_MEM_VA_FALLBACK_BASE: usize = 0x1000_0000; // 256 MiB
 
-/// End (exclusive) of the VA range for shared memory mappings.
-/// Must be ABOVE the highest RAM identity-mapped address (~2 GiB on most
-/// QEMU configs) and BELOW the framebuffer (typically 0xC000_0000).
-const SHARED_MEM_VA_LIMIT: usize = 0xBF00_0000; // 3 GiB - 16 MiB
+/// Hard upper limit for shared memory VA allocations.
+/// Stays below the framebuffer (typically 0xC000_0000) and well below the
+/// kernel higher-half base.
+const SHARED_MEM_VA_HARD_LIMIT: usize = 0xBF00_0000; // 3 GiB - 16 MiB
+
+/// Dynamic VA base, computed at init time from the identity-map ceiling.
+/// Shared memory allocations start here, always above all identity-mapped
+/// RAM.  Align to 4 MiB boundary for efficient page-table walk.
+static SHARED_MEM_VA_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// Dynamic VA limit, also set at init time.
+static SHARED_MEM_VA_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(u64);
@@ -427,37 +433,28 @@ impl SharedMemManager {
     }
 
     /// Find a free virtual address range for `size` bytes within the shared
-    /// memory VA window `[SHARED_MEM_VA_BASE, SHARED_MEM_VA_LIMIT)`.
+    /// memory VA window `[va_base, va_limit)`.
     ///
-    /// Correctness guarantees over the previous implementation:
+    /// The window is computed dynamically at init time to start **above** all
+    /// identity-mapped RAM, so the common case (no pre-existing mappings in the
+    /// window) returns in O(1) without probing.
+    ///
+    /// Key design decisions:
     ///
     /// 1. **Address-space identity**: used ranges are collected by matching
-    ///    `pml4_phys` (the physical address of the PML4 root), not
-    ///    `thread_id`.  Threads that share the same process (same PML4) share
-    ///    the same VA space; filtering by thread_id would miss sibling-thread
-    ///    mappings and hand out already-occupied VAs, causing `AlreadyMapped`
-    ///    errors or data corruption.
+    ///    `pml4_phys`, not `thread_id`.  Sibling threads within the same
+    ///    process share the same PML4 and VA space.
     ///
-    /// 2. **Window restriction**: only mappings whose VA range overlaps
-    ///    `[SHARED_MEM_VA_BASE, SHARED_MEM_VA_LIMIT)` are considered.
-    ///    Mappings outside this window (ELF segments, stack, heap, …) are
-    ///    irrelevant and were previously polluting the search, leading to
-    ///    unnecessarily fragmented or failed allocations.
+    /// 2. **Window restriction**: only mappings within `[va_base, va_limit)`
+    ///    are considered.
     ///
-    /// 3. **Consistent sizing**: the used-range size stored in bookkeeping
-    ///    (`region.size`) is always page-aligned at creation time (see
-    ///    `SharedRegion::new`), so it is consistent with the `aligned_size`
-    ///    we compute here.  We still use `aligned_size` for the *request*
-    ///    to avoid any mismatch.
+    /// 3. **Full page probing**: after the bookkeeping check, we verify
+    ///    **every** page in the candidate range against the actual page tables.
+    ///    Sampling only 3 pages (first/middle/last) was insufficient — sparse
+    ///    identity-mapped regions (RuntimeServices, ACPI, kernel stacks) in
+    ///    between the sample points caused `AddressInUse` failures at map time.
     ///
-    /// 4. **Page-table probing**: after our metadata check, we probe the
-    ///    actual PML4 at the first, middle, and last page of the candidate
-    ///    range.  This catches non-shared-memory mappings that occupy the
-    ///    window (identity-mapped RAM below ~2 GiB, framebuffer, etc.).
-    ///
-    /// 5. **Overflow safety**: all pointer arithmetic uses `checked_add` /
-    ///    `saturating_add` to avoid wrapping into kernel VA space, which
-    ///    was the root cause of triple faults on machines with >1 GiB RAM.
+    /// 4. **Overflow safety**: all arithmetic uses `checked_add`.
     fn find_free_va(
         regions: &BTreeMap<RegionId, SharedRegion>,
         _thread_id: ThreadId,
@@ -470,34 +467,39 @@ impl SharedMemManager {
         }
         let num_pages = aligned_size / pmm::PAGE_SIZE;
 
+        let va_base = SHARED_MEM_VA_BASE.load(Ordering::Relaxed);
+        let va_limit = SHARED_MEM_VA_LIMIT.load(Ordering::Relaxed);
+
+        if va_base == 0 || va_limit == 0 || va_base >= va_limit {
+            log_debug!(
+                LOG_ORIGIN,
+                "find_free_va: invalid window base=0x{:X} limit=0x{:X}",
+                va_base, va_limit
+            );
+            return Err(SharedMemError::NoFreeVirtualAddress);
+        }
+
         // ---- 1. Collect used VA ranges for this *address space* (PML4),
         //         restricted to the shared-memory window.
         let mut used_ranges: Vec<(usize, usize)> = Vec::new();
         for region in regions.values() {
             for mapping in &region.mappings {
-                // Match by address space, not by individual thread.
                 let same_address_space = match pml4_phys {
                     Some(pml4) => mapping.pml4_phys == pml4,
-                    // Fallback for kernel-PML4 callers (pml4_phys == None):
-                    // these always have pml4_phys stored as 0 in the mapping.
                     None => mapping.pml4_phys == 0,
                 };
                 if !same_address_space {
                     continue;
                 }
 
-                // region.size is already page-aligned (set in SharedRegion::new).
                 let mapping_end = mapping.virt_addr.saturating_add(region.size);
 
-                // Only consider mappings that overlap the shared-memory window.
-                if mapping_end <= SHARED_MEM_VA_BASE || mapping.virt_addr >= SHARED_MEM_VA_LIMIT {
+                if mapping_end <= va_base || mapping.virt_addr >= va_limit {
                     continue;
                 }
 
-                // Clamp to window boundaries so out-of-window tails don't
-                // push candidates beyond the window needlessly.
-                let clamped_start = mapping.virt_addr.max(SHARED_MEM_VA_BASE);
-                let clamped_end = mapping_end.min(SHARED_MEM_VA_LIMIT);
+                let clamped_start = mapping.virt_addr.max(va_base);
+                let clamped_end = mapping_end.min(va_limit);
                 let clamped_size = clamped_end.saturating_sub(clamped_start);
 
                 if clamped_size > 0 {
@@ -508,10 +510,10 @@ impl SharedMemManager {
         used_ranges.sort_by_key(|&(addr, _)| addr);
 
         // ---- 2. Scan for a free gap.
-        let mut candidate = SHARED_MEM_VA_BASE;
+        let mut candidate = va_base;
 
         while let Some(candidate_end) = candidate.checked_add(aligned_size) {
-            if candidate_end > SHARED_MEM_VA_LIMIT {
+            if candidate_end > va_limit {
                 break;
             }
 
@@ -520,7 +522,6 @@ impl SharedMemManager {
             for &(used_start, used_size) in &used_ranges {
                 let used_end = used_start.saturating_add(used_size);
                 if candidate_end > used_start && candidate < used_end {
-                    // Overlap — advance past this region (page-aligned).
                     candidate = pmm::align_up(used_end);
                     collided_with_shared = true;
                     break;
@@ -530,30 +531,38 @@ impl SharedMemManager {
                 continue;
             }
 
-            // 2b) Probe the actual page tables if we have a PML4.
-            //     Check first, middle, and last pages to catch identity-mapped
-            //     RAM, framebuffer pages, etc.
+            // 2b) Probe the actual page tables for the ENTIRE candidate range.
+            //     Since the dynamic base is above the identity-map ceiling,
+            //     this loop typically finds zero collisions and runs quickly.
+            //     In the rare case that a stray mapping (framebuffer, MMIO,
+            //     user stack) falls within the window, we skip past it.
             if let Some(pml4) = pml4_phys {
-                let pages_to_check: &[usize] = if num_pages <= 2 {
-                    &[0, num_pages.saturating_sub(1)]
-                } else {
-                    &[0, num_pages / 2, num_pages - 1]
-                };
-
                 let mut page_collision = false;
-                for &page_idx in pages_to_check {
+                let mut collision_end = candidate;
+
+                for page_idx in 0..num_pages {
                     let probe_va = candidate + page_idx * pmm::PAGE_SIZE;
                     if vm::query_mapping_in_pml4(pml4, probe_va).is_ok() {
                         page_collision = true;
+                        collision_end = probe_va + pmm::PAGE_SIZE;
+                        // Don't break — scan ahead to find the end of this
+                        // mapped region so we can skip past it entirely.
+                        // But cap the scan to avoid excessive iteration.
+                        for lookahead in (page_idx + 1)..num_pages {
+                            let la_va = candidate + lookahead * pmm::PAGE_SIZE;
+                            if vm::query_mapping_in_pml4(pml4, la_va).is_ok() {
+                                collision_end = la_va + pmm::PAGE_SIZE;
+                            } else {
+                                break;
+                            }
+                        }
                         break;
                     }
                 }
 
                 if page_collision {
-                    // Skip forward by 4 MiB to get past large mapped regions
-                    // (identity-mapped RAM) quickly.
-                    const SKIP_STEP: usize = 4 * 1024 * 1024; // 4 MiB
-                    candidate = (candidate + SKIP_STEP) & !(SKIP_STEP - 1);
+                    // Skip past the mapped region, aligned to 4 KiB.
+                    candidate = pmm::align_up(collision_end);
                     continue;
                 }
             }
@@ -750,9 +759,41 @@ impl core::fmt::Display for SharedMemError {
 static SHARED_MEM_MANAGER: SharedMemManager = SharedMemManager::new();
 
 pub fn init() {
+    // Compute the dynamic VA base from the identity-map ceiling reported by
+    // the VMM.  This ensures shared memory allocations start above all
+    // identity-mapped RAM, eliminating collisions without needing to probe
+    // every page.  Align up to 4 MiB boundary for clean PD-level alignment.
+    const ALIGN_4M: usize = 4 * 1024 * 1024;
+    let ceiling = vm::identity_map_ceiling();
+    let dynamic_base = if ceiling > 0 {
+        (ceiling + ALIGN_4M - 1) & !(ALIGN_4M - 1)
+    } else {
+        SHARED_MEM_VA_FALLBACK_BASE
+    };
+
+    // Ensure the base doesn't exceed our hard limit (below framebuffer).
+    // On a >3 GiB system the base would be very high; cap it.
+    let effective_base = if dynamic_base < SHARED_MEM_VA_HARD_LIMIT {
+        dynamic_base
+    } else {
+        // Fall back to scanning the full range with page-table probing.
+        SHARED_MEM_VA_FALLBACK_BASE
+    };
+    let effective_limit = SHARED_MEM_VA_HARD_LIMIT;
+
+    SHARED_MEM_VA_BASE.store(effective_base, Ordering::Relaxed);
+    SHARED_MEM_VA_LIMIT.store(effective_limit, Ordering::Relaxed);
+
     log_info!(
         LOG_ORIGIN,
         "Shared memory subsystem initialized (Phase 4.3)"
+    );
+    log_info!(
+        LOG_ORIGIN,
+        "VA window: 0x{:X} - 0x{:X} (identity-map ceiling: 0x{:X})",
+        effective_base,
+        effective_limit,
+        ceiling
     );
     log_info!(LOG_ORIGIN, "Zero-copy IPC via shared regions enabled");
 }

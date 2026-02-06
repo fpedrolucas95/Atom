@@ -94,6 +94,10 @@ const HIGHER_HALF_MIRROR_SIZE: usize = 16usize * 1024 * 1024 * 1024;
 static ACTIVE_PML4: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_PAGES: AtomicUsize = AtomicUsize::new(0);
 static PAGE_TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
+/// Highest physical address that was identity-mapped during init.
+/// Shared memory VA allocation uses this to start above all identity-mapped
+/// regions, avoiding costly page-table probing and collision avoidance.
+static IDENTITY_MAP_CEILING: AtomicUsize = AtomicUsize::new(0);
 const LOG_ORIGIN: &str = "vmm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,12 +332,23 @@ pub fn init(memory_map: &MemoryMap) {
         load_cr3(pml4_phys as u64);
     }
 
+    // Record the identity-map ceiling so that shared-memory VA allocation
+    // can start above all identity-mapped pages.
+    IDENTITY_MAP_CEILING.store(max_physical_addr, Ordering::Relaxed);
+
     log_info!(
         LOG_ORIGIN,
         "New address space active (PML4=0x{:X}, mapped ~{} MiB)",
         pml4_phys,
         max_physical_addr / (1024 * 1024)
     );
+}
+
+/// Return the highest physical address that was identity-mapped during
+/// `vm::init()`.  The shared memory allocator uses this to place mappings
+/// above the identity-mapped region, avoiding collisions entirely.
+pub fn identity_map_ceiling() -> usize {
+    IDENTITY_MAP_CEILING.load(Ordering::Relaxed)
 }
 
 pub fn map_framebuffer(fb_addr: u64, fb_size: usize) -> bool {
