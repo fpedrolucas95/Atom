@@ -277,7 +277,9 @@ fn display_uefi_memory_map(memory_map: &MemoryMap) {
 
 fn display_memory_stats() {
     let (total, free) = mm::pmm::get_stats();
-    log_info!(LOG_MM, "PMM: {}/{} pages free", free, total);
+    let total_mb = (total * mm::pmm::PAGE_SIZE) / (1024 * 1024);
+    let free_mb = (free * mm::pmm::PAGE_SIZE) / (1024 * 1024);
+    log_info!(LOG_MM, "PMM: {}/{} pages free ({}/{} MiB)", free, total, free_mb, total_mb);
 }
 
 #[panic_handler]

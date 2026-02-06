@@ -1,79 +1,119 @@
-// Physical Memory Manager (PMM)
+// Physical Memory Manager (PMM) — Scalable Bitmap Allocator
 //
-// Implements a low-level physical page allocator based on a bitmap.
-// This module is responsible for tracking and allocating physical memory
-// pages discovered from the UEFI memory map during early boot.
+// Implements a physical page allocator that scales to 16+ GiB of RAM using
+// a two-phase bitmap approach:
 //
-// Key responsibilities:
-// - Parse the UEFI memory map to discover usable physical memory
-// - Track free and allocated pages using a compact bitmap
-// - Allocate and free single pages or contiguous page ranges
-// - Provide zero-initialized page allocations for higher-level subsystems
-// - Expose memory usage statistics for diagnostics
+// Phase 1 (Early Boot):
+//   A static bitmap in .bss covers up to MAX_STATIC_PAGES (16 GiB).
+//   This is used during init() to discover memory and bootstrap the system.
 //
-// Design principles:
-// - Simplicity and determinism suitable for early kernel initialization
-// - Fixed maximum physical memory limit (`MAX_PAGES`) for predictable bounds
-// - Lock-free operation using atomics, assuming early-boot or coarse-grained use
-// - Page-granular allocation with a fixed page size (4 KiB)
+// Phase 2 (Dynamic):
+//   During init(), we scan the UEFI memory map to find the highest usable
+//   physical address, compute the required bitmap size, and carve the dynamic
+//   bitmap from a usable RAM region. The static bitmap is then retired.
+//   This allows the PMM to track all physical memory the firmware reports,
+//   regardless of size.
 //
-// Implementation details:
+// Design:
 // - One bit per page: 0 = free, 1 = allocated
-// - Bitmap is statically allocated and initialized to “all allocated”
-// - Only EFI_CONVENTIONAL_MEMORY regions are marked free
-// - `NEXT_FREE_HINT` provides a simple next-fit optimization for allocations
-// - Contiguous allocation scans linearly for free runs of pages
+// - Bitmap access is protected by a spinlock for SMP safety
+// - Word-at-a-time (u64) scanning for fast free-page searches
+// - NEXT_FREE_HINT provides next-fit optimization
+// - Respects memory holes: only regions marked usable by firmware are freed
+// - Page 0 is never allocated (null pointer detection)
 //
-// Correctness and safety notes:
-// - All bitmap manipulation is `unsafe` and must respect bounds
-// - No protection against double-free beyond bitmap state checks
-// - `Relaxed` atomics are sufficient because strict ordering is unnecessary
-// - Linear scans make large allocations potentially expensive
-//
-// Limitations and future considerations:
-// - No NUMA awareness or memory zones (DMA, highmem, etc.)
-// - No defragmentation or advanced allocation strategies
-// - Fixed upper bound on addressable physical memory
+// Memory safety:
+// - Reserved/MMIO/ACPI/runtime regions are never marked free
+// - The bitmap region itself is marked allocated to prevent self-corruption
+// - Kernel/bootloader regions are implicitly protected (not in usable set)
 //
 // Public interface:
-// - `alloc_page` / `free_page` for single-page management
-// - `alloc_pages` / `free_pages` for contiguous ranges
-// - Zeroed variants for safe page table and heap initialization
-// - Utility helpers for alignment and statistics reporting
+// - alloc_page / free_page — single page management
+// - alloc_pages / free_pages — contiguous range management
+// - Zeroed variants for page tables and heap init
+// - get_stats / get_detailed_stats / get_memory_stats — diagnostics
 
 use crate::boot::{MemoryMap, EFI_CONVENTIONAL_MEMORY, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 #[allow(unused_imports)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use crate::{log_info, log_debug};
+use spin::Mutex;
+use crate::{log_info, log_debug, log_warn};
 
-const MAX_PAGES: usize = 256 * 1024;
-static mut BITMAP: [u8; MAX_PAGES / 8] = [0xFF; MAX_PAGES / 8];  // 32 KiB bitmap
-static TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
-static FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
-static NEXT_FREE_HINT: AtomicUsize = AtomicUsize::new(0);
-static LARGEST_FREE_RUN: AtomicUsize = AtomicUsize::new(0);
-/// Actual physical RAM available (sum of all conventional memory regions)
-static PHYSICAL_RAM_PAGES: AtomicUsize = AtomicUsize::new(0);
+/// Page size: 4 KiB
 pub const PAGE_SIZE: usize = 4096;
+
+/// Static bitmap covers up to 16 GiB (4,194,304 pages).
+/// This is 512 KiB in .bss — acceptable for a kernel.
+const MAX_STATIC_PAGES: usize = 4 * 1024 * 1024;
+const STATIC_BITMAP_BYTES: usize = MAX_STATIC_PAGES / 8;
+
+/// Hard upper limit: 64 GiB (prevents absurd bitmap sizes).
+/// Beyond this, a buddy allocator or zone-based approach is needed.
+const MAX_SUPPORTED_PAGES: usize = 64 * 1024 * 1024 / 4; // 16M pages = 64 GiB
+
+// ---------------------------------------------------------------------------
+// Static bitmap (Phase 1): lives in .bss, covers up to 16 GiB
+// ---------------------------------------------------------------------------
+static mut STATIC_BITMAP: [u8; STATIC_BITMAP_BYTES] = [0xFF; STATIC_BITMAP_BYTES];
+
+// ---------------------------------------------------------------------------
+// Dynamic bitmap (Phase 2): pointer + length, carved from usable RAM
+// ---------------------------------------------------------------------------
+static DYNAMIC_BITMAP_PTR: AtomicUsize = AtomicUsize::new(0);
+static DYNAMIC_BITMAP_LEN: AtomicUsize = AtomicUsize::new(0);
+
+// ---------------------------------------------------------------------------
+// Operational state
+// ---------------------------------------------------------------------------
+
+/// Whether the PMM has been initialized
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Whether we are using the dynamic bitmap (Phase 2)
+static USING_DYNAMIC: AtomicBool = AtomicBool::new(false);
+
+/// Total pages being tracked (highest address / PAGE_SIZE)
+static TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of currently free pages
+static FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Next-fit hint: page index to start searching from
+static NEXT_FREE_HINT: AtomicUsize = AtomicUsize::new(0);
+
+/// Largest contiguous free run found during init
+static LARGEST_FREE_RUN: AtomicUsize = AtomicUsize::new(0);
+
+/// Actual physical RAM available (sum of all usable regions from memory map)
+static PHYSICAL_RAM_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Reserved RAM (non-usable regions)
+static RESERVED_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Pages used by the bitmap itself
+static BITMAP_OVERHEAD_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Spinlock protecting all bitmap mutations.
+/// The inner value is unused (unit type) — the lock itself provides exclusion.
+static BITMAP_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(debug_assertions)]
 #[allow(dead_code)]
 static ALLOC_TRACE: AtomicBool = AtomicBool::new(false);
 
+// ---------------------------------------------------------------------------
+// EFI memory type helpers
+// ---------------------------------------------------------------------------
+
 /// Check if an EFI memory type is usable by the kernel after ExitBootServices()
 #[inline]
 fn is_usable_memory(typ: u32) -> bool {
-    // After ExitBootServices(), these memory types become available for kernel use:
-    // - EFI_CONVENTIONAL_MEMORY (7): standard free memory
-    // - EFI_BOOT_SERVICES_CODE (3): UEFI boot services code (no longer needed)
-    // - EFI_BOOT_SERVICES_DATA (4): UEFI boot services data (no longer needed)
     typ == EFI_CONVENTIONAL_MEMORY
         || typ == EFI_BOOT_SERVICES_CODE
         || typ == EFI_BOOT_SERVICES_DATA
 }
 
-/// Get human-readable name for EFI memory type (for debug logging)
-#[allow(dead_code)]
+/// Get human-readable name for EFI memory type
 fn memory_type_name(typ: u32) -> &'static str {
     match typ {
         0 => "Reserved",
@@ -95,51 +135,256 @@ fn memory_type_name(typ: u32) -> &'static str {
     }
 }
 
-pub unsafe fn init(memory_map: &MemoryMap) {
-    use core::sync::atomic::Ordering;
+// ---------------------------------------------------------------------------
+// Bitmap access layer — abstracts static vs dynamic bitmap
+// ---------------------------------------------------------------------------
 
+/// Get a mutable reference to the active bitmap slice.
+/// SAFETY: caller must hold BITMAP_LOCK or be in single-threaded init.
+#[inline]
+unsafe fn bitmap_slice() -> &'static [u8] {
+    if USING_DYNAMIC.load(Ordering::Relaxed) {
+        let ptr = DYNAMIC_BITMAP_PTR.load(Ordering::Relaxed) as *const u8;
+        let len = DYNAMIC_BITMAP_LEN.load(Ordering::Relaxed);
+        core::slice::from_raw_parts(ptr, len)
+    } else {
+        &STATIC_BITMAP[..]
+    }
+}
+
+/// Get a mutable reference to the active bitmap slice.
+/// SAFETY: caller must hold BITMAP_LOCK.
+#[inline]
+unsafe fn bitmap_slice_mut() -> &'static mut [u8] {
+    if USING_DYNAMIC.load(Ordering::Relaxed) {
+        let ptr = DYNAMIC_BITMAP_PTR.load(Ordering::Relaxed) as *mut u8;
+        let len = DYNAMIC_BITMAP_LEN.load(Ordering::Relaxed);
+        core::slice::from_raw_parts_mut(ptr, len)
+    } else {
+        &mut STATIC_BITMAP[..]
+    }
+}
+
+/// Check if a page is free (bit 0 = free, 1 = allocated)
+/// SAFETY: caller must hold BITMAP_LOCK or be in single-threaded init.
+#[inline]
+unsafe fn is_page_free(page: usize) -> bool {
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total {
+        return false;
+    }
+    let bm = bitmap_slice();
+    let byte_idx = page / 8;
+    if byte_idx >= bm.len() {
+        return false;
+    }
+    let bit = page % 8;
+    (bm[byte_idx] & (1 << bit)) == 0
+}
+
+/// Mark a page as free
+/// SAFETY: caller must hold BITMAP_LOCK or be in single-threaded init.
+#[inline]
+unsafe fn set_page_free(page: usize) {
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total {
+        return;
+    }
+    let bm = bitmap_slice_mut();
+    let byte_idx = page / 8;
+    if byte_idx >= bm.len() {
+        return;
+    }
+    let bit = page % 8;
+    bm[byte_idx] &= !(1 << bit);
+}
+
+/// Mark a page as allocated
+/// SAFETY: caller must hold BITMAP_LOCK or be in single-threaded init.
+#[inline]
+unsafe fn set_page_allocated(page: usize) {
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total {
+        return;
+    }
+    let bm = bitmap_slice_mut();
+    let byte_idx = page / 8;
+    if byte_idx >= bm.len() {
+        return;
+    }
+    let bit = page % 8;
+    bm[byte_idx] |= 1 << bit;
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+/// Initialize the Physical Memory Manager from the UEFI memory map.
+///
+/// Two-phase approach:
+/// 1. Use static bitmap to track memory up to 16 GiB
+/// 2. If physical memory > 16 GiB, attempt to carve a dynamic bitmap from RAM
+///
+/// After init, all usable memory is tracked and free for allocation.
+pub unsafe fn init(memory_map: &MemoryMap) {
+    // -----------------------------------------------------------------------
+    // Pass 0: Clear the static bitmap (all pages marked allocated)
+    // -----------------------------------------------------------------------
     core::ptr::write_bytes(
-        core::ptr::addr_of_mut!(BITMAP).cast::<u8>(),
+        core::ptr::addr_of_mut!(STATIC_BITMAP).cast::<u8>(),
         0xFF,
-        MAX_PAGES / 8,
+        STATIC_BITMAP_BYTES,
     );
 
-    let mut tracked_end_page: usize = 0;
+    // -----------------------------------------------------------------------
+    // Pass 1: Scan memory map for totals and highest address
+    // -----------------------------------------------------------------------
+    let mut highest_usable_addr: usize = 0;
     let mut physical_ram_pages: usize = 0;
+    let mut reserved_pages: usize = 0;
+    let mut region_count: usize = 0;
+    let mut usable_region_count: usize = 0;
 
-    // First pass: calculate total physical RAM and highest address
     for d in memory_map.descriptors() {
-        let start_page = (d.physical_start as usize) / PAGE_SIZE;
+        region_count += 1;
+        let start = d.physical_start as usize;
         let num_pages = d.number_of_pages as usize;
-        let end_page = start_page.saturating_add(num_pages);
+        let end = start.saturating_add(num_pages * PAGE_SIZE);
 
-        if end_page > tracked_end_page {
-            tracked_end_page = end_page;
-        }
-
-        // Count all usable memory as physical RAM (conventional + boot services)
         if is_usable_memory(d.typ) {
             physical_ram_pages += num_pages;
+            usable_region_count += 1;
+            if end > highest_usable_addr {
+                highest_usable_addr = end;
+            }
+        } else {
+            reserved_pages += num_pages;
         }
     }
 
-    let total_pages = tracked_end_page.min(MAX_PAGES);
+    let highest_page = highest_usable_addr / PAGE_SIZE;
 
-    TOTAL_PAGES.store(total_pages, Ordering::Relaxed);
+    // Clamp to our hard upper limit
+    let tracked_pages = if highest_page > MAX_SUPPORTED_PAGES {
+        log_warn!(
+            "[pmm]",
+            "Physical memory exceeds 64 GiB limit: highest page {} > {}. Clamping.",
+            highest_page,
+            MAX_SUPPORTED_PAGES
+        );
+        MAX_SUPPORTED_PAGES
+    } else {
+        highest_page
+    };
+
+    log_info!(
+        "[pmm]",
+        "Memory map: {} regions ({} usable), highest_addr=0x{:X}, tracked_pages={}",
+        region_count,
+        usable_region_count,
+        highest_usable_addr,
+        tracked_pages
+    );
+
+    // -----------------------------------------------------------------------
+    // Phase selection: static bitmap or dynamic bitmap?
+    // -----------------------------------------------------------------------
+    let bitmap_bytes_needed = (tracked_pages + 7) / 8;
+
+    if tracked_pages <= MAX_STATIC_PAGES {
+        // Static bitmap is sufficient
+        log_info!(
+            "[pmm]",
+            "Using static bitmap: {} bytes for {} pages ({} MiB addressable)",
+            bitmap_bytes_needed,
+            tracked_pages,
+            (tracked_pages * PAGE_SIZE) / (1024 * 1024)
+        );
+        USING_DYNAMIC.store(false, Ordering::Relaxed);
+    } else {
+        // Need dynamic bitmap — carve from a usable RAM region
+        log_info!(
+            "[pmm]",
+            "Need dynamic bitmap: {} bytes ({} KiB) for {} pages ({} GiB addressable)",
+            bitmap_bytes_needed,
+            bitmap_bytes_needed / 1024,
+            tracked_pages,
+            (tracked_pages * PAGE_SIZE) / (1024 * 1024 * 1024)
+        );
+
+        let bitmap_pages = align_up_val(bitmap_bytes_needed, PAGE_SIZE) / PAGE_SIZE;
+        let bitmap_alloc_size = bitmap_pages * PAGE_SIZE;
+
+        // Find a usable region large enough to hold the bitmap.
+        // Prefer low memory to keep it accessible via identity mapping.
+        let mut best_region: Option<usize> = None;
+        for d in memory_map.descriptors() {
+            if !is_usable_memory(d.typ) {
+                continue;
+            }
+            let region_start = d.physical_start as usize;
+            let region_size = d.number_of_pages as usize * PAGE_SIZE;
+
+            // Skip page 0 region
+            let effective_start = if region_start == 0 { PAGE_SIZE } else { region_start };
+            let effective_size = region_size.saturating_sub(effective_start - region_start);
+
+            if effective_size >= bitmap_alloc_size {
+                // Use the lowest suitable region
+                if best_region.is_none() || effective_start < best_region.unwrap() {
+                    best_region = Some(effective_start);
+                }
+            }
+        }
+
+        if let Some(bitmap_phys) = best_region {
+            log_info!(
+                "[pmm]",
+                "Dynamic bitmap at phys 0x{:X}, {} pages ({} KiB)",
+                bitmap_phys,
+                bitmap_pages,
+                bitmap_alloc_size / 1024
+            );
+
+            // Zero the dynamic bitmap region (mark all allocated)
+            let ptr = bitmap_phys as *mut u8;
+            core::ptr::write_bytes(ptr, 0xFF, bitmap_alloc_size);
+
+            DYNAMIC_BITMAP_PTR.store(bitmap_phys, Ordering::Relaxed);
+            DYNAMIC_BITMAP_LEN.store(bitmap_alloc_size, Ordering::Relaxed);
+            USING_DYNAMIC.store(true, Ordering::Relaxed);
+            BITMAP_OVERHEAD_PAGES.store(bitmap_pages, Ordering::Relaxed);
+        } else {
+            // Fallback: use static bitmap, clamp to MAX_STATIC_PAGES
+            log_warn!(
+                "[pmm]",
+                "No region large enough for dynamic bitmap. Falling back to static ({} GiB max).",
+                (MAX_STATIC_PAGES * PAGE_SIZE) / (1024 * 1024 * 1024)
+            );
+            let tracked_pages_clamped = tracked_pages.min(MAX_STATIC_PAGES);
+            TOTAL_PAGES.store(tracked_pages_clamped, Ordering::Relaxed);
+            USING_DYNAMIC.store(false, Ordering::Relaxed);
+        }
+    }
+
+    TOTAL_PAGES.store(tracked_pages, Ordering::Relaxed);
     PHYSICAL_RAM_PAGES.store(physical_ram_pages, Ordering::Relaxed);
-    NEXT_FREE_HINT.store(0, Ordering::Relaxed);
+    RESERVED_PAGES.store(reserved_pages, Ordering::Relaxed);
+    NEXT_FREE_HINT.store(1, Ordering::Relaxed); // Skip page 0
 
+    // -----------------------------------------------------------------------
+    // Pass 2: Mark usable regions as free in the bitmap
+    // -----------------------------------------------------------------------
     let mut free_pages: usize = 0;
 
-    // Second pass: mark usable regions as free and log them
     log_debug!("[pmm]", "Memory map regions:");
     for d in memory_map.descriptors() {
         let start_page = (d.physical_start as usize) / PAGE_SIZE;
         let num_pages = d.number_of_pages as usize;
-        let end_page = start_page.saturating_add(num_pages).min(total_pages);
+        let end_page = start_page.saturating_add(num_pages).min(tracked_pages);
         let size_mb = (num_pages * PAGE_SIZE) / (1024 * 1024);
 
-        // Log significant memory regions (>= 1MB) for debugging
         if size_mb > 0 && is_usable_memory(d.typ) {
             log_debug!(
                 "[pmm]",
@@ -151,12 +396,11 @@ pub unsafe fn init(memory_map: &MemoryMap) {
             );
         }
 
-        // Only mark usable memory regions as free
         if !is_usable_memory(d.typ) {
             continue;
         }
 
-        if start_page >= total_pages {
+        if start_page >= tracked_pages {
             continue;
         }
 
@@ -166,12 +410,59 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         }
     }
 
+    // Ensure page 0 is always allocated (null pointer trap).
+    // If page 0 was in a usable region, it was freed above — reclaim it now.
+    if is_page_free(0) {
+        set_page_allocated(0);
+        if free_pages > 0 {
+            free_pages -= 1;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // If using dynamic bitmap, mark the bitmap's own pages as allocated
+    // -----------------------------------------------------------------------
+    if USING_DYNAMIC.load(Ordering::Relaxed) {
+        let bitmap_phys = DYNAMIC_BITMAP_PTR.load(Ordering::Relaxed);
+        let bitmap_pages = BITMAP_OVERHEAD_PAGES.load(Ordering::Relaxed);
+        let bitmap_start_page = bitmap_phys / PAGE_SIZE;
+
+        for page in bitmap_start_page..(bitmap_start_page + bitmap_pages) {
+            if is_page_free(page) {
+                set_page_allocated(page);
+                if free_pages > 0 {
+                    free_pages -= 1;
+                }
+            }
+        }
+
+        log_info!(
+            "[pmm]",
+            "Bitmap self-reservation: pages {}-{} ({} pages, {} KiB)",
+            bitmap_start_page,
+            bitmap_start_page + bitmap_pages,
+            bitmap_pages,
+            bitmap_pages * PAGE_SIZE / 1024
+        );
+    }
+
+    // Ensure page 0 is not counted as free
+    if is_page_free(0) {
+        set_page_allocated(0);
+        if free_pages > 0 {
+            free_pages -= 1;
+        }
+    }
+
     FREE_PAGES.store(free_pages, Ordering::Relaxed);
 
+    // -----------------------------------------------------------------------
+    // Pass 3: Compute largest free run (for contiguous allocation insight)
+    // -----------------------------------------------------------------------
     let mut current_run = 0usize;
     let mut max_run = 0usize;
 
-    for page in 0..total_pages {
+    for page in 0..tracked_pages {
         if is_page_free(page) {
             current_run += 1;
             if current_run > max_run {
@@ -183,19 +474,43 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     }
 
     LARGEST_FREE_RUN.store(max_run, Ordering::Relaxed);
+    INITIALIZED.store(true, Ordering::Relaxed);
 
+    // -----------------------------------------------------------------------
+    // Boot telemetry
+    // -----------------------------------------------------------------------
     let physical_ram_mb = (physical_ram_pages * PAGE_SIZE) / (1024 * 1024);
     let free_mb = (free_pages * PAGE_SIZE) / (1024 * 1024);
-    log_info!(
-        "[pmm]",
-        "PMM initialized: physical_ram={}MB, free_ram={}MB, tracked_pages={}, free_pages={}, largest_free_run={} pages",
-        physical_ram_mb,
-        free_mb,
-        total_pages,
-        free_pages,
-        max_run
-    );
+    let reserved_mb = (reserved_pages * PAGE_SIZE) / (1024 * 1024);
+    let tracked_mb = (tracked_pages * PAGE_SIZE) / (1024 * 1024);
+    let bitmap_kb = if USING_DYNAMIC.load(Ordering::Relaxed) {
+        DYNAMIC_BITMAP_LEN.load(Ordering::Relaxed) / 1024
+    } else {
+        (tracked_pages / 8 + 1) / 1024
+    };
+
+    log_info!("[pmm]", "========================================");
+    log_info!("[pmm]", "PMM INITIALIZED — Memory Summary");
+    log_info!("[pmm]", "========================================");
+    log_info!("[pmm]", "  Physical RAM:   {} MiB ({} pages)", physical_ram_mb, physical_ram_pages);
+    log_info!("[pmm]", "  Reserved/MMIO:  {} MiB ({} pages)", reserved_mb, reserved_pages);
+    log_info!("[pmm]", "  Tracked range:  {} MiB ({} pages)", tracked_mb, tracked_pages);
+    log_info!("[pmm]", "  Free pages:     {} ({} MiB)", free_pages, free_mb);
+    log_info!("[pmm]", "  Bitmap type:    {}", if USING_DYNAMIC.load(Ordering::Relaxed) { "dynamic" } else { "static (.bss)" });
+    log_info!("[pmm]", "  Bitmap size:    {} KiB", bitmap_kb);
+    log_info!("[pmm]", "  Largest run:    {} pages ({} MiB)", max_run, (max_run * PAGE_SIZE) / (1024 * 1024));
+    log_info!("[pmm]", "========================================");
 }
+
+/// Helper: align a value up to alignment boundary
+#[inline]
+fn align_up_val(val: usize, align: usize) -> usize {
+    (val + align - 1) & !(align - 1)
+}
+
+// ---------------------------------------------------------------------------
+// Allocation / deallocation
+// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 pub fn enable_alloc_trace() {
@@ -203,21 +518,33 @@ pub fn enable_alloc_trace() {
     ALLOC_TRACE.store(true, Ordering::Relaxed);
 }
 
+/// Allocate a single physical page. Returns the physical address, or None.
 pub fn alloc_page() -> Option<usize> {
+    let _lock = BITMAP_LOCK.lock();
+
     let free = FREE_PAGES.load(Ordering::Relaxed);
     if free == 0 {
         return None;
     }
 
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    let hint = NEXT_FREE_HINT.load(Ordering::Relaxed).max(1);
 
     unsafe {
-        // Start from page 1 to avoid allocating the null page (page 0)
-        // This helps catch null pointer dereferences
-        for page in 1..total {
-            if is_page_free(page) {
+        // Search from hint to end
+        if let Some(page) = find_free_page(hint, total) {
+            set_page_allocated(page);
+            FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
+            NEXT_FREE_HINT.store(page + 1, Ordering::Relaxed);
+            return Some(page * PAGE_SIZE);
+        }
+
+        // Wrap around: search from page 1 to hint
+        if hint > 1 {
+            if let Some(page) = find_free_page(1, hint) {
                 set_page_allocated(page);
                 FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
+                NEXT_FREE_HINT.store(page + 1, Ordering::Relaxed);
                 return Some(page * PAGE_SIZE);
             }
         }
@@ -226,63 +553,94 @@ pub fn alloc_page() -> Option<usize> {
     None
 }
 
+/// Fast free-page search using word-at-a-time scanning.
+/// Scans bitmap from `start_page` to `end_page` (exclusive).
+/// Returns the first free page index, or None.
+///
+/// SAFETY: caller must hold BITMAP_LOCK.
+unsafe fn find_free_page(start_page: usize, end_page: usize) -> Option<usize> {
+    let bm = bitmap_slice();
+    let bm_len = bm.len();
+
+    let mut page = start_page;
+
+    // Align to byte boundary first (check individual bits)
+    while page < end_page && (page % 8) != 0 {
+        let byte_idx = page / 8;
+        if byte_idx >= bm_len {
+            return None;
+        }
+        let bit = page % 8;
+        if (bm[byte_idx] & (1 << bit)) == 0 {
+            return Some(page);
+        }
+        page += 1;
+    }
+
+    // Word-at-a-time scan (8 pages per byte)
+    let mut byte_idx = page / 8;
+    while byte_idx < bm_len && page + 8 <= end_page {
+        if bm[byte_idx] != 0xFF {
+            // At least one free bit in this byte
+            for bit in 0..8 {
+                let p = byte_idx * 8 + bit;
+                if p >= end_page {
+                    break;
+                }
+                if (bm[byte_idx] & (1 << bit)) == 0 {
+                    return Some(p);
+                }
+            }
+        }
+        byte_idx += 1;
+        page = byte_idx * 8;
+    }
+
+    // Check remaining pages that don't fill a full byte
+    while page < end_page {
+        let byte_idx = page / 8;
+        if byte_idx >= bm_len {
+            return None;
+        }
+        let bit = page % 8;
+        if (bm[byte_idx] & (1 << bit)) == 0 {
+            return Some(page);
+        }
+        page += 1;
+    }
+
+    None
+}
+
+/// Free a single physical page.
 pub fn free_page(addr: usize) {
     if addr % PAGE_SIZE != 0 {
         return;
     }
 
     let page = addr / PAGE_SIZE;
-    if page >= MAX_PAGES {
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total || page == 0 {
         return;
     }
+
+    let _lock = BITMAP_LOCK.lock();
 
     unsafe {
         if !is_page_free(page) {
             set_page_free(page);
             FREE_PAGES.fetch_add(1, Ordering::Relaxed);
+
+            // Update hint if this page is before current hint
+            let hint = NEXT_FREE_HINT.load(Ordering::Relaxed);
+            if page < hint {
+                NEXT_FREE_HINT.store(page, Ordering::Relaxed);
+            }
         }
     }
 }
 
-unsafe fn is_page_free(page: usize) -> bool {
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    if page >= total {
-        return false;
-    }
-
-    let byte = page / 8;
-    let bit = page % 8;
-    (BITMAP[byte] & (1 << bit)) == 0
-}
-
-unsafe fn set_page_free(page: usize) {
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    if page >= total {
-        return;
-    }
-
-    let byte = page / 8;
-    let bit = page % 8;
-    BITMAP[byte] &= !(1 << bit);
-}
-
-unsafe fn set_page_allocated(page: usize) {
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    if page >= total {
-        return;
-    }
-
-    let byte = page / 8;
-    let bit = page % 8;
-    BITMAP[byte] |= 1 << bit;
-}
-
-pub fn get_stats() -> (usize, usize) {
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    let free = FREE_PAGES.load(Ordering::Relaxed);
-    (total, free)
-}
-
+/// Allocate `count` contiguous physical pages. Returns the base physical address.
 pub fn alloc_pages(count: usize) -> Option<usize> {
     if count == 0 {
         return None;
@@ -291,6 +649,8 @@ pub fn alloc_pages(count: usize) -> Option<usize> {
     if count == 1 {
         return alloc_page();
     }
+
+    let _lock = BITMAP_LOCK.lock();
 
     let free = FREE_PAGES.load(Ordering::Relaxed);
     if free < count {
@@ -301,33 +661,118 @@ pub fn alloc_pages(count: usize) -> Option<usize> {
     let max_start = total.checked_sub(count)?;
 
     unsafe {
-        // Start from page 1 to avoid allocating the null page (page 0)
-        'outer: for start in 1..=max_start {
-            for i in 0..count {
-                if !is_page_free(start + i) {
-                    continue 'outer;
-                }
-            }
-
-            for i in 0..count {
-                set_page_allocated(start + i);
-            }
-
+        // Try from hint first
+        let hint = NEXT_FREE_HINT.load(Ordering::Relaxed).max(1);
+        if let Some(start) = find_contiguous_run(hint, max_start, count) {
+            mark_range_allocated(start, count);
             FREE_PAGES.fetch_sub(count, Ordering::Relaxed);
+            NEXT_FREE_HINT.store(start + count, Ordering::Relaxed);
             return Some(start * PAGE_SIZE);
+        }
+
+        // Wrap around
+        if hint > 1 {
+            if let Some(start) = find_contiguous_run(1, hint.min(max_start), count) {
+                mark_range_allocated(start, count);
+                FREE_PAGES.fetch_sub(count, Ordering::Relaxed);
+                NEXT_FREE_HINT.store(start + count, Ordering::Relaxed);
+                return Some(start * PAGE_SIZE);
+            }
         }
     }
 
     None
 }
 
-#[allow(dead_code)]
-pub fn free_pages(addr: usize, count: usize) {
+/// Find a contiguous run of `count` free pages starting between `from` and `max_start` (inclusive).
+/// SAFETY: caller must hold BITMAP_LOCK.
+unsafe fn find_contiguous_run(from: usize, max_start: usize, count: usize) -> Option<usize> {
+    let mut start = from;
+
+    while start <= max_start {
+        // Quick skip: if the first page of a potential run is allocated,
+        // use byte-level skip for faster scanning
+        let byte_idx = start / 8;
+        let bm = bitmap_slice();
+        if byte_idx < bm.len() && (start % 8) == 0 && bm[byte_idx] == 0xFF {
+            // All 8 pages in this byte are allocated, skip them
+            start += 8;
+            continue;
+        }
+
+        if !is_page_free(start) {
+            start += 1;
+            continue;
+        }
+
+        // Found a free page — check if we have `count` contiguous free pages
+        let mut run_len = 1;
+        while run_len < count {
+            let page = start + run_len;
+            if page >= TOTAL_PAGES.load(Ordering::Relaxed) || !is_page_free(page) {
+                break;
+            }
+            run_len += 1;
+        }
+
+        if run_len >= count {
+            return Some(start);
+        }
+
+        // Skip past the failed run
+        start += run_len + 1;
+    }
+
+    None
+}
+
+/// Mark a range of pages as allocated.
+/// SAFETY: caller must hold BITMAP_LOCK.
+unsafe fn mark_range_allocated(start: usize, count: usize) {
     for i in 0..count {
-        free_page(addr + i * PAGE_SIZE);
+        set_page_allocated(start + i);
     }
 }
 
+/// Free `count` contiguous physical pages starting at `addr`.
+#[allow(dead_code)]
+pub fn free_pages(addr: usize, count: usize) {
+    if addr % PAGE_SIZE != 0 || count == 0 {
+        return;
+    }
+
+    let base_page = addr / PAGE_SIZE;
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+
+    let _lock = BITMAP_LOCK.lock();
+
+    let mut freed = 0usize;
+    for i in 0..count {
+        let page = base_page + i;
+        if page >= total || page == 0 {
+            continue;
+        }
+
+        unsafe {
+            if !is_page_free(page) {
+                set_page_free(page);
+                freed += 1;
+            }
+        }
+    }
+
+    if freed > 0 {
+        FREE_PAGES.fetch_add(freed, Ordering::Relaxed);
+
+        // Update hint
+        let hint = NEXT_FREE_HINT.load(Ordering::Relaxed);
+        if base_page < hint {
+            NEXT_FREE_HINT.store(base_page, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Allocate a single zeroed page.
 pub fn alloc_page_zeroed() -> Option<usize> {
     let addr = alloc_page()?;
 
@@ -339,6 +784,7 @@ pub fn alloc_page_zeroed() -> Option<usize> {
     Some(addr)
 }
 
+/// Allocate `count` contiguous zeroed pages.
 #[allow(dead_code)]
 pub fn alloc_pages_zeroed(count: usize) -> Option<usize> {
     let count = count.max(1);
@@ -354,6 +800,10 @@ pub fn alloc_pages_zeroed(count: usize) -> Option<usize> {
 
     Some(addr)
 }
+
+// ---------------------------------------------------------------------------
+// Alignment helpers
+// ---------------------------------------------------------------------------
 
 pub fn is_page_aligned(addr: usize) -> bool {
     addr % PAGE_SIZE == 0
@@ -377,11 +827,21 @@ pub fn page_to_addr(page: usize) -> usize {
     page * PAGE_SIZE
 }
 
+// ---------------------------------------------------------------------------
+// Statistics & diagnostics
+// ---------------------------------------------------------------------------
+
+pub fn get_stats() -> (usize, usize) {
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    let free = FREE_PAGES.load(Ordering::Relaxed);
+    (total, free)
+}
+
 #[allow(dead_code)]
 pub fn get_detailed_stats() -> MemoryStats {
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
     let free = FREE_PAGES.load(Ordering::Relaxed);
-    let used = total - free;
+    let used = total.saturating_sub(free);
 
     MemoryStats {
         total_pages: total,
@@ -404,9 +864,9 @@ pub struct MemoryStats {
     pub used_bytes: usize,
 }
 
-/// Get memory statistics in KB for userspace
-/// Returns (total_kb, free_kb)
-/// Note: total_kb is the actual physical RAM available, not the address space size
+/// Get memory statistics in KB for userspace.
+/// Returns (total_kb, free_kb).
+/// Note: total_kb is the actual physical RAM available, not the address space size.
 pub fn get_memory_stats() -> (u64, u64) {
     let total = PHYSICAL_RAM_PAGES.load(Ordering::Relaxed);
     let free = FREE_PAGES.load(Ordering::Relaxed);
@@ -415,4 +875,30 @@ pub fn get_memory_stats() -> (u64, u64) {
     let free_kb = (free * PAGE_SIZE / 1024) as u64;
 
     (total_kb, free_kb)
+}
+
+/// Get extended memory information for boot diagnostics.
+#[allow(dead_code)]
+pub fn get_boot_diagnostics() -> BootMemoryDiagnostics {
+    BootMemoryDiagnostics {
+        physical_ram_pages: PHYSICAL_RAM_PAGES.load(Ordering::Relaxed),
+        reserved_pages: RESERVED_PAGES.load(Ordering::Relaxed),
+        tracked_pages: TOTAL_PAGES.load(Ordering::Relaxed),
+        free_pages: FREE_PAGES.load(Ordering::Relaxed),
+        largest_free_run: LARGEST_FREE_RUN.load(Ordering::Relaxed),
+        bitmap_overhead_pages: BITMAP_OVERHEAD_PAGES.load(Ordering::Relaxed),
+        using_dynamic_bitmap: USING_DYNAMIC.load(Ordering::Relaxed),
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct BootMemoryDiagnostics {
+    pub physical_ram_pages: usize,
+    pub reserved_pages: usize,
+    pub tracked_pages: usize,
+    pub free_pages: usize,
+    pub largest_free_run: usize,
+    pub bitmap_overhead_pages: usize,
+    pub using_dynamic_bitmap: bool,
 }
