@@ -81,7 +81,7 @@ pub fn spawn_process(name: &str) -> SyscallResult<ProcessId> {
     };
 
     // Check for errors - error codes are high values (u64::MAX - N)
-    if result >= u64::MAX - 100 {
+    if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
         return Err(SyscallError::from_raw(result));
     }
 
@@ -110,7 +110,7 @@ pub fn list_processes(buffer: &mut [ProcessInfo]) -> usize {
     };
 
     // Check for error
-    if result >= u64::MAX - 100 {
+    if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
         return 0;
     }
 

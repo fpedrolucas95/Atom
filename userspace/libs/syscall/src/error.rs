@@ -56,5 +56,28 @@ pub const EWOULDBLOCK: u64 = u64::MAX - 8;
 pub const EDEADLK: u64 = u64::MAX - 9;
 pub const ENOTFOUND: u64 = u64::MAX - 10;
 
+/// Threshold for detecting syscall error codes in raw return values.
+///
+/// Kernel error codes are defined as `u64::MAX - N` for small N.  Any raw
+/// syscall return value at or above this threshold is an error code, never a
+/// valid user-space virtual address.
+///
+/// This replaces the previously hardcoded `u64::MAX - 100` checks scattered
+/// across the codebase.  The margin (256 slots) is generous enough to
+/// accommodate future error codes without changing this constant.
+///
+/// Must be kept in sync with `kernel::mm::addrspace::SYSCALL_ERROR_THRESHOLD`.
+pub const SYSCALL_ERROR_THRESHOLD: u64 = u64::MAX - 256;
+
+/// Check whether a raw syscall return value represents an error code.
+///
+/// This is the single authoritative way to distinguish error returns from
+/// valid addresses or counts.  Use this instead of ad-hoc `>= u64::MAX - N`
+/// comparisons.
+#[inline]
+pub fn is_syscall_error(value: u64) -> bool {
+    value >= SYSCALL_ERROR_THRESHOLD
+}
+
 /// Result type for syscall operations
 pub type SyscallResult<T> = Result<T, SyscallError>;

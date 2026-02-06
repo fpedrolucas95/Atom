@@ -12,7 +12,7 @@ pub type PortId = u64;
 pub fn create_port() -> SyscallResult<PortId> {
     let result = unsafe { syscall0(SYS_IPC_CREATE_PORT) };
 
-    if result == 0 || result >= u64::MAX - 10 {
+    if result == 0 || crate::error::is_syscall_error(result) {
         Err(SyscallError::OutOfMemory)
     } else {
         Ok(result)
@@ -27,7 +27,7 @@ pub fn create_port_with_id(id: PortId) -> SyscallResult<PortId> {
     use crate::raw::{syscall1, numbers::SYS_IPC_CREATE_PORT_WITH_ID};
     let result = unsafe { syscall1(SYS_IPC_CREATE_PORT_WITH_ID, id) };
 
-    if result == 0 || result >= u64::MAX - 10 {
+    if result == 0 || crate::error::is_syscall_error(result) {
         Err(SyscallError::InvalidArgument)
     } else {
         Ok(result)
@@ -74,7 +74,7 @@ pub fn recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<usize> {
         syscall4(SYS_IPC_RECV, port, buffer.as_mut_ptr() as u64, buffer.len() as u64, 0)
     };
 
-    if result >= u64::MAX - 10 {
+    if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
         if result == EWOULDBLOCK {
             Err(SyscallError::WouldBlock)
         } else if result == ETIMEDOUT {
@@ -99,7 +99,7 @@ pub fn try_recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<Option<usize>>
 
     if result == EWOULDBLOCK {
         Ok(None)
-    } else if result >= u64::MAX - 10 {
+    } else if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
         Err(SyscallError::InvalidArgument)
     } else {
         Ok(Some(result as usize))

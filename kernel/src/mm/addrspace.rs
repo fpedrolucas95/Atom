@@ -76,6 +76,25 @@ impl core::fmt::Display for AddressSpaceId {
 
 const KERNEL_BASE: usize = 0xFFFF_8000_0000_0000;
 pub const USER_CANONICAL_MAX: usize = 0x0000_7FFF_FFFF_FFFF;
+/// The highest virtual address that user-space code should ever use as a
+/// *valid* pointer.  On x86-64 this is the last byte of the lower-half
+/// canonical range.  Any syscall return value strictly above this threshold
+/// is guaranteed to be a kernel error code (which live near `u64::MAX`).
+///
+/// User-space libraries must compare `result > USER_VA_LIMIT` (or
+/// `result >= SYSCALL_ERROR_THRESHOLD`) to distinguish return addresses from
+/// error codes.  This replaces the previous hardcoded `u64::MAX - 100`.
+pub const USER_VA_LIMIT: u64 = USER_CANONICAL_MAX as u64;
+
+/// Threshold for detecting syscall error codes.  Error codes are defined as
+/// `u64::MAX - N` for small N.  Any raw syscall return value at or above
+/// this threshold is an error, never a valid user VA.
+///
+/// The current error-code range spans `u64::MAX - 10 ..= u64::MAX`.
+/// We use a generous margin (256 slots) so new error codes can be added
+/// without changing user-space detection logic.
+pub const SYSCALL_ERROR_THRESHOLD: u64 = u64::MAX - 256;
+
 const MAX_REGION_SIZE: usize = 256 * 1024 * 1024;
 const LOG_ORIGIN: &str = "addrspace";
 

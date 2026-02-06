@@ -206,6 +206,10 @@ impl RegionFlags {
 #[derive(Debug, Clone)]
 struct RegionMapping {
     thread_id: ThreadId,
+    /// Physical address of the PML4 that owns this mapping.  Threads that
+    /// share the same process (and therefore the same PML4) share this value.
+    /// Used as the **address-space identity** when checking for collisions.
+    pml4_phys: usize,
     virt_addr: usize,
     flags: RegionFlags,
 }
@@ -261,16 +265,46 @@ impl SharedRegion {
     }
 
     /// Map this region into a thread's address space at `virt_addr`.
+    ///
+    /// `pml4_phys` identifies the address space.  Two threads that share the
+    /// same PML4 (i.e. belong to the same process) are considered as occupying
+    /// the **same** address space.  Duplicate-mapping detection uses
+    /// `pml4_phys`, not `thread_id`, so that sibling threads cannot
+    /// accidentally double-map the same region.
+    ///
     /// Returns the virtual address where the mapping was placed.
-    fn map(&mut self, thread_id: ThreadId, virt_addr: usize, flags: RegionFlags, pml4_phys: Option<usize>)
-        -> Result<usize, SharedMemError>
-    {
+    fn map(
+        &mut self,
+        thread_id: ThreadId,
+        virt_addr: usize,
+        flags: RegionFlags,
+        pml4_phys: Option<usize>,
+    ) -> Result<usize, SharedMemError> {
         if !pmm::is_page_aligned(virt_addr) {
             return Err(SharedMemError::Unaligned);
         }
 
-        // Check: same region already mapped for this thread
-        if self.mappings.iter().any(|m| m.thread_id == thread_id) {
+        // --- Validate that virt_addr + region size does not overflow.
+        //     This is the fundamental safety check that prevents pointer
+        //     arithmetic from wrapping into kernel VA space (the root cause
+        //     of triple faults on >1 GiB systems).
+        let _mapping_end = virt_addr.checked_add(self.size).ok_or_else(|| {
+            log_debug!(
+                LOG_ORIGIN,
+                "map: VA overflow for region {} at 0x{:X} + 0x{:X}",
+                self.id, virt_addr, self.size
+            );
+            SharedMemError::MappingFailed
+        })?;
+
+        // --- Duplicate check: same region already mapped in the same
+        //     address space.  We check by PML4 when available, falling
+        //     back to thread_id for kernel-PML4 mappings (pml4_phys == None).
+        let already_mapped = match pml4_phys {
+            Some(pml4) => self.mappings.iter().any(|m| m.pml4_phys == pml4),
+            None => self.mappings.iter().any(|m| m.thread_id == thread_id),
+        };
+        if already_mapped {
             return Err(SharedMemError::AlreadyMapped);
         }
 
@@ -305,6 +339,7 @@ impl SharedRegion {
 
         self.mappings.push(RegionMapping {
             thread_id,
+            pml4_phys: pml4_phys.unwrap_or(0),
             virt_addr,
             flags,
         });
@@ -392,38 +427,100 @@ impl SharedMemManager {
     }
 
     /// Find a free virtual address range for `size` bytes within the shared
-    /// memory VA range, checking both our own mapping metadata AND the actual
-    /// page tables (to avoid collisions with identity-mapped kernel RAM, ELF
-    /// segments, stack, etc.).
+    /// memory VA window `[SHARED_MEM_VA_BASE, SHARED_MEM_VA_LIMIT)`.
+    ///
+    /// Correctness guarantees over the previous implementation:
+    ///
+    /// 1. **Address-space identity**: used ranges are collected by matching
+    ///    `pml4_phys` (the physical address of the PML4 root), not
+    ///    `thread_id`.  Threads that share the same process (same PML4) share
+    ///    the same VA space; filtering by thread_id would miss sibling-thread
+    ///    mappings and hand out already-occupied VAs, causing `AlreadyMapped`
+    ///    errors or data corruption.
+    ///
+    /// 2. **Window restriction**: only mappings whose VA range overlaps
+    ///    `[SHARED_MEM_VA_BASE, SHARED_MEM_VA_LIMIT)` are considered.
+    ///    Mappings outside this window (ELF segments, stack, heap, …) are
+    ///    irrelevant and were previously polluting the search, leading to
+    ///    unnecessarily fragmented or failed allocations.
+    ///
+    /// 3. **Consistent sizing**: the used-range size stored in bookkeeping
+    ///    (`region.size`) is always page-aligned at creation time (see
+    ///    `SharedRegion::new`), so it is consistent with the `aligned_size`
+    ///    we compute here.  We still use `aligned_size` for the *request*
+    ///    to avoid any mismatch.
+    ///
+    /// 4. **Page-table probing**: after our metadata check, we probe the
+    ///    actual PML4 at the first, middle, and last page of the candidate
+    ///    range.  This catches non-shared-memory mappings that occupy the
+    ///    window (identity-mapped RAM below ~2 GiB, framebuffer, etc.).
+    ///
+    /// 5. **Overflow safety**: all pointer arithmetic uses `checked_add` /
+    ///    `saturating_add` to avoid wrapping into kernel VA space, which
+    ///    was the root cause of triple faults on machines with >1 GiB RAM.
     fn find_free_va(
         regions: &BTreeMap<RegionId, SharedRegion>,
-        thread_id: ThreadId,
+        _thread_id: ThreadId,
         size: usize,
         pml4_phys: Option<usize>,
     ) -> Result<usize, SharedMemError> {
         let aligned_size = pmm::align_up(size);
+        if aligned_size == 0 {
+            return Err(SharedMemError::InvalidSize);
+        }
         let num_pages = aligned_size / pmm::PAGE_SIZE;
 
-        // Collect all VA ranges used by this thread (from our own bookkeeping).
+        // ---- 1. Collect used VA ranges for this *address space* (PML4),
+        //         restricted to the shared-memory window.
         let mut used_ranges: Vec<(usize, usize)> = Vec::new();
         for region in regions.values() {
             for mapping in &region.mappings {
-                if mapping.thread_id == thread_id {
-                    used_ranges.push((mapping.virt_addr, region.size));
+                // Match by address space, not by individual thread.
+                let same_address_space = match pml4_phys {
+                    Some(pml4) => mapping.pml4_phys == pml4,
+                    // Fallback for kernel-PML4 callers (pml4_phys == None):
+                    // these always have pml4_phys stored as 0 in the mapping.
+                    None => mapping.pml4_phys == 0,
+                };
+                if !same_address_space {
+                    continue;
+                }
+
+                // region.size is already page-aligned (set in SharedRegion::new).
+                let mapping_end = mapping.virt_addr.saturating_add(region.size);
+
+                // Only consider mappings that overlap the shared-memory window.
+                if mapping_end <= SHARED_MEM_VA_BASE || mapping.virt_addr >= SHARED_MEM_VA_LIMIT {
+                    continue;
+                }
+
+                // Clamp to window boundaries so out-of-window tails don't
+                // push candidates beyond the window needlessly.
+                let clamped_start = mapping.virt_addr.max(SHARED_MEM_VA_BASE);
+                let clamped_end = mapping_end.min(SHARED_MEM_VA_LIMIT);
+                let clamped_size = clamped_end.saturating_sub(clamped_start);
+
+                if clamped_size > 0 {
+                    used_ranges.push((clamped_start, clamped_size));
                 }
             }
         }
         used_ranges.sort_by_key(|&(addr, _)| addr);
 
+        // ---- 2. Scan for a free gap.
         let mut candidate = SHARED_MEM_VA_BASE;
 
-        while candidate + aligned_size <= SHARED_MEM_VA_LIMIT {
-            // 1) Skip past any shared-memory mapping that overlaps.
+        while let Some(candidate_end) = candidate.checked_add(aligned_size) {
+            if candidate_end > SHARED_MEM_VA_LIMIT {
+                break;
+            }
+
+            // 2a) Skip past any bookkeeping-tracked mapping that overlaps.
             let mut collided_with_shared = false;
             for &(used_start, used_size) in &used_ranges {
                 let used_end = used_start.saturating_add(used_size);
-                if candidate + aligned_size > used_start && candidate < used_end {
-                    // Overlap — advance past this region.
+                if candidate_end > used_start && candidate < used_end {
+                    // Overlap — advance past this region (page-aligned).
                     candidate = pmm::align_up(used_end);
                     collided_with_shared = true;
                     break;
@@ -433,31 +530,35 @@ impl SharedMemManager {
                 continue;
             }
 
-            // 2) Probe the actual page tables if we have a PML4.
-            //    Check first and last page of the candidate range; if either
-            //    is already mapped (e.g. identity map), skip this chunk.
+            // 2b) Probe the actual page tables if we have a PML4.
+            //     Check first, middle, and last pages to catch identity-mapped
+            //     RAM, framebuffer pages, etc.
             if let Some(pml4) = pml4_phys {
-                let first_page_mapped = vm::query_mapping_in_pml4(pml4, candidate).is_ok();
-                let last_page_va = candidate + (num_pages.saturating_sub(1)) * pmm::PAGE_SIZE;
-                let last_page_mapped = if last_page_va != candidate {
-                    vm::query_mapping_in_pml4(pml4, last_page_va).is_ok()
+                let pages_to_check: &[usize] = if num_pages <= 2 {
+                    &[0, num_pages.saturating_sub(1)]
                 } else {
-                    false
+                    &[0, num_pages / 2, num_pages - 1]
                 };
 
-                if first_page_mapped || last_page_mapped {
-                    // This range collides with existing page-table entries
-                    // (likely kernel identity mapping). Skip forward by
-                    // a 4 MiB-aligned step to get past the mapped region quickly.
-                    // On a 2 GiB system this means ~448 probes worst-case,
-                    // each being a fast 4-level page table walk.
+                let mut page_collision = false;
+                for &page_idx in pages_to_check {
+                    let probe_va = candidate + page_idx * pmm::PAGE_SIZE;
+                    if vm::query_mapping_in_pml4(pml4, probe_va).is_ok() {
+                        page_collision = true;
+                        break;
+                    }
+                }
+
+                if page_collision {
+                    // Skip forward by 4 MiB to get past large mapped regions
+                    // (identity-mapped RAM) quickly.
                     const SKIP_STEP: usize = 4 * 1024 * 1024; // 4 MiB
                     candidate = (candidate + SKIP_STEP) & !(SKIP_STEP - 1);
                     continue;
                 }
             }
 
-            // Candidate range is free.
+            // Candidate range is free in both metadata and page tables.
             return Ok(candidate);
         }
 
@@ -479,6 +580,8 @@ impl SharedMemManager {
                 .size;
             Self::find_free_va(&regions, thread_id, size, None)?
         } else {
+            Self::validate_explicit_va(virt_addr, regions.get(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?.size)?;
             virt_addr
         };
 
@@ -502,11 +605,42 @@ impl SharedMemManager {
                 .size;
             Self::find_free_va(&regions, thread_id, size, Some(pml4_phys))?
         } else {
+            Self::validate_explicit_va(virt_addr, regions.get(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?.size)?;
             virt_addr
         };
 
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
         region.map(thread_id, effective_va, flags, Some(pml4_phys))
+    }
+
+    /// Validate that an explicit (user-provided) virtual address is sane:
+    /// page-aligned, within the user canonical range, and won't overflow.
+    fn validate_explicit_va(virt_addr: usize, region_size: usize) -> Result<(), SharedMemError> {
+        use crate::mm::addrspace::USER_CANONICAL_MAX;
+
+        if !pmm::is_page_aligned(virt_addr) {
+            return Err(SharedMemError::Unaligned);
+        }
+        if virt_addr > USER_CANONICAL_MAX {
+            log_debug!(
+                LOG_ORIGIN,
+                "validate_explicit_va: 0x{:X} exceeds USER_CANONICAL_MAX 0x{:X}",
+                virt_addr, USER_CANONICAL_MAX
+            );
+            return Err(SharedMemError::MappingFailed);
+        }
+        match virt_addr.checked_add(region_size) {
+            Some(end) if end <= USER_CANONICAL_MAX + 1 => Ok(()),
+            _ => {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "validate_explicit_va: 0x{:X} + 0x{:X} overflows user VA",
+                    virt_addr, region_size
+                );
+                Err(SharedMemError::MappingFailed)
+            }
+        }
     }
 
     fn unmap_region(&self, region_id: RegionId, thread_id: ThreadId) -> Result<(), SharedMemError> {

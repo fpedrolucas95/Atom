@@ -2312,8 +2312,8 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
             // Return the actual mapped VA.  For auto-assign (virt_addr==0) the
             // caller needs this to know where the mapping ended up.  For
             // explicit VA requests the returned value equals the requested VA.
-            // User-space VA values are always below the error-code range
-            // (u64::MAX - 100), so there is no ambiguity.
+            // User-space VA values are always below SYSCALL_ERROR_THRESHOLD
+            // (u64::MAX - 256), so there is no ambiguity with error codes.
             mapped_va as u64
         }
         Err(e) => {
