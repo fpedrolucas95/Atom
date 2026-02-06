@@ -28,7 +28,13 @@
 use core::mem::size_of;
 
 const DOUBLE_FAULT_IST_INDEX: usize = 0;
-const DOUBLE_FAULT_STACK_SIZE: usize = 4096;
+/// 16 KiB stack for the double-fault handler.
+///
+/// The previous 4 KiB was borderline: a #DF handler that logs register state
+/// through the serial driver can easily consume >2 KiB of stack.  On systems
+/// with large RAM the exception diagnostics (PMM stats, VA dump) push deeper.
+/// 16 KiB provides ample headroom and costs negligible BSS.
+const DOUBLE_FAULT_STACK_SIZE: usize = 16384;
 
 #[repr(align(16))]
 struct AlignedStack([u8; DOUBLE_FAULT_STACK_SIZE]);

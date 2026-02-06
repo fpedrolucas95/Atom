@@ -17,3 +17,4 @@ doctest = false
 [dependencies]
 spin = "0.9"
 x86_64 = "0.14"
+atom_abi = { path = "../shared/abi" }

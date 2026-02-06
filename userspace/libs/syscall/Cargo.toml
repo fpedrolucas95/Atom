@@ -10,7 +10,7 @@ name = "atom_syscall"
 path = "src/lib.rs"
 
 [dependencies]
-# No dependencies - this is a minimal no_std library
+atom_abi = { path = "../../../shared/abi" }
 
 [features]
 default = []
