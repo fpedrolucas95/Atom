@@ -64,7 +64,7 @@ pub fn read_klog(buffer: &mut [u8]) -> usize {
     };
 
     // Check for error (high values indicate error)
-    if result >= u64::MAX - 100 {
+    if crate::error::is_syscall_error(result) {
         return 0;
     }
 
