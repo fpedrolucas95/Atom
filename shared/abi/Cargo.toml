@@ -1,0 +1,13 @@
+[package]
+name = "atom_abi"
+version = "0.1.0"
+edition = "2021"
+description = "Shared ABI constants between Atom kernel and userspace"
+authors = ["Atom OS Contributors"]
+
+[lib]
+name = "atom_abi"
+path = "src/lib.rs"
+
+# This crate is no_std and has zero dependencies so it can be
+# used by both the kernel and any userspace program.

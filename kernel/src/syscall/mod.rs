@@ -120,17 +120,11 @@ pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
 
-pub const ESUCCESS: u64 = 0;
-pub const ENOTFOUND: u64 = u64::MAX - 10;
-pub const EINVAL: u64 = u64::MAX - 1;
-pub const ENOSYS: u64 = u64::MAX - 2;
-pub const ENOMEM: u64 = u64::MAX - 3;
-pub const EPERM: u64 = u64::MAX - 4;
-pub const EBUSY: u64 = u64::MAX - 5;
-pub const EMSGSIZE: u64 = u64::MAX - 6;
-pub const ETIMEDOUT: u64 = u64::MAX - 7;
-pub const EWOULDBLOCK: u64 = u64::MAX - 8;
-pub const EDEADLK: u64 = u64::MAX - 9;
+// Error codes — re-exported from the shared ABI crate (single source of truth).
+pub use atom_abi::{
+    ESUCCESS, EINVAL, ENOSYS, ENOMEM, EPERM, EBUSY,
+    EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
+};
 
 extern "C" {
     fn syscall_entry();

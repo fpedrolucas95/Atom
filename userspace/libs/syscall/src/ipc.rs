@@ -74,7 +74,7 @@ pub fn recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<usize> {
         syscall4(SYS_IPC_RECV, port, buffer.as_mut_ptr() as u64, buffer.len() as u64, 0)
     };
 
-    if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
+    if crate::error::is_syscall_error(result) {
         if result == EWOULDBLOCK {
             Err(SyscallError::WouldBlock)
         } else if result == ETIMEDOUT {
@@ -99,7 +99,7 @@ pub fn try_recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<Option<usize>>
 
     if result == EWOULDBLOCK {
         Ok(None)
-    } else if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
+    } else if crate::error::is_syscall_error(result) {
         Err(SyscallError::InvalidArgument)
     } else {
         Ok(Some(result as usize))

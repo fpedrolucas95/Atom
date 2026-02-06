@@ -420,7 +420,7 @@ impl SharedMemFlags {
 pub fn shared_region_create(size: usize) -> SyscallResult<SharedRegionId> {
     let result = unsafe { syscall1(SYS_SHARED_REGION_CREATE, size as u64) };
 
-    if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
+    if crate::error::is_syscall_error(result) {
         match result {
             x if x == EINVAL => Err(SyscallError::InvalidArgument),
             x if x == ENOMEM => Err(SyscallError::OutOfMemory),
@@ -442,7 +442,7 @@ pub fn shared_region_map(region_id: SharedRegionId, virt_addr: usize, flags: Sha
 
     // Error codes live near u64::MAX; valid VA addresses are always below
     // SYSCALL_ERROR_THRESHOLD.
-    if result >= crate::error::SYSCALL_ERROR_THRESHOLD {
+    if crate::error::is_syscall_error(result) {
         match result {
             x if x == EINVAL => Err(SyscallError::InvalidArgument),
             x if x == ENOMEM => Err(SyscallError::OutOfMemory),
