@@ -106,6 +106,7 @@ pub struct InterruptStackFrame {
 
 #[repr(C)]
 pub struct InterruptFrame {
+    cr3: u64,
     r15: u64,
     r14: u64,
     r13: u64,
@@ -133,26 +134,40 @@ pub struct InterruptFrame {
 }
 
 const _: () = {
-    let expected_size = 22 * size_of::<u64>();
-    assert!(size_of::<InterruptFrame>() == expected_size);
+    let expected_size = 23 * core::mem::size_of::<u64>();
+    assert!(core::mem::size_of::<InterruptFrame>() == expected_size);
 };
 
 #[no_mangle]
-pub extern "C" fn rust_unexpected_interrupt_handler(
+pub extern "C" fn rust_irq_dispatcher(vector: u64, frame: *const InterruptFrame) {
+    let frame_ref = unsafe { &*frame };
+    let stack_frame = unsafe {
+        &*((&frame_ref.rip as *const u64) as *const InterruptStackFrame)
+    };
+
+    match vector as u8 {
+        crate::interrupts::TIMER_INTERRUPT_VECTOR => {
+            timer_interrupt_handler_impl(stack_frame);
+        }
+        crate::interrupts::KEYBOARD_INTERRUPT_VECTOR => {
+            keyboard_interrupt_handler_impl(stack_frame);
+        }
+        crate::interrupts::MOUSE_INTERRUPT_VECTOR => {
+            mouse_interrupt_handler_impl(stack_frame);
+        }
+        crate::interrupts::USER_TRAP_INTERRUPT_VECTOR => {
+            user_trap_interrupt_handler_impl(stack_frame);
+        }
+        _ => {
+            rust_unexpected_interrupt_handler_impl(vector, stack_frame);
+        }
+    }
+}
+
+pub fn rust_unexpected_interrupt_handler_impl(
     vector: u64,
     stack_ptr: *const InterruptStackFrame,
 ) {
-    #[cfg(debug_assertions)]
-    {
-        if vector > 255 {
-            log_panic!(
-                "interrupt",
-                "ABI MISMATCH DETECTED: vector={:#X} (expected 0-255). Check assembly calling convention!",
-                vector
-            );
-        }
-    }
-
     if vector > 255 {
         super::apic::send_eoi();
         log_warn!(LOG_ORIGIN, "Invalid vector {} received (likely ABI bug)", vector);
@@ -421,6 +436,10 @@ static USER_MODE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStackFrame) {
+    timer_interrupt_handler_impl(_frame);
+}
+
+fn timer_interrupt_handler_impl(_frame: &InterruptStackFrame) {
     let coming_from_user = (_frame.code_segment & 0x3) == 0x3;
 
     if coming_from_user {
@@ -464,14 +483,17 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
     unsafe {
         TICKS += 1;
     }
-    
+
     ipc::on_timer_tick(get_ticks());
 
     super::apic::send_eoi();
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
+    keyboard_interrupt_handler_impl(_frame);
+}
 
+fn keyboard_interrupt_handler_impl(_frame: &InterruptStackFrame) {
     // Buffer raw keyboard data for userspace driver
     input::on_keyboard_irq();
 
@@ -484,7 +506,10 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    
+    mouse_interrupt_handler_impl(_frame);
+}
+
+fn mouse_interrupt_handler_impl(_frame: &InterruptStackFrame) {
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();
 
@@ -499,6 +524,10 @@ pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStac
 pub extern "x86-interrupt" fn user_trap_interrupt_handler(
     frame: &mut InterruptStackFrame
 ) {
+    user_trap_interrupt_handler_impl(frame);
+}
+
+fn user_trap_interrupt_handler_impl(frame: &InterruptStackFrame) {
     let cpl = frame.code_segment & 0x3;
 
     log_info!(

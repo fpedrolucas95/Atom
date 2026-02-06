@@ -8,7 +8,8 @@ section .text
 
 ; External Rust handler functions
 extern rust_exception_handler
-extern rust_unexpected_interrupt_handler
+extern rust_irq_dispatcher
+extern KERNEL_PML4
 
 ; ---------------------------------------------------------------------------
 ; Catch-all interrupt stubs
@@ -24,7 +25,7 @@ unexpected_interrupt_table:
 %endrep
 
 ; ---------------------------------------------------------------------------
-; Common handler for unexpected interrupts (vectors without a dedicated stub)
+; Common handler for IRQs and unexpected interrupts
 ; ---------------------------------------------------------------------------
 unexpected_common:
     push rax
@@ -43,14 +44,25 @@ unexpected_common:
     push r14
     push r15
 
+    ; CR3 Switch: Save current and load kernel PML4
+    mov rax, cr3
+    push rax
+
+    mov rax, [rel KERNEL_PML4]
+    mov cr3, rax
+
     ; Windows x64 ABI: first arg in RCX, second in RDX
-    mov rcx, [rsp + 15*8]          ; vector
-    lea rdx, [rsp + 15*8 + 16]     ; &InterruptStackFrame
+    mov rcx, [rsp + 16*8]          ; vector (skipped saved cr3 + 15 GPRs)
+    mov rdx, rsp                   ; &InterruptFrame (points to saved cr3)
 
     ; Shadow space required by Windows x64 ABI
     sub rsp, 32
-    call rust_unexpected_interrupt_handler
+    call rust_irq_dispatcher
     add rsp, 32
+
+    ; Restore CR3
+    pop rax
+    mov cr3, rax
 
     pop r15
     pop r14
@@ -158,11 +170,22 @@ exception_common:
     push r14
     push r15
 
-    mov rcx, rsp           ; ✅ First arg in rcx (was rdi)
+    ; CR3 Switch: Save current and load kernel PML4
+    mov rax, cr3
+    push rax
+
+    mov rax, [rel KERNEL_PML4]
+    mov cr3, rax
+
+    mov rcx, rsp           ; ✅ First arg (InterruptFrame) points to saved cr3
 
     sub rsp, 32            ; Shadow space required by MS x64
     call rust_exception_handler
     add rsp, 32
+
+    ; Restore CR3
+    pop rax
+    mov cr3, rax
 
     pop r15
     pop r14

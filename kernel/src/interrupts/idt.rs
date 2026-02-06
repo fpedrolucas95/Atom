@@ -177,16 +177,24 @@ pub fn init() {
         IDT.entries[20].set_handler(exception_handler_20 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
         IDT.entries[21].set_handler(exception_handler_21 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
 
-        IDT.entries[TIMER_INTERRUPT_VECTOR as usize]
-            .set_handler(timer_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
-        IDT.entries[KEYBOARD_INTERRUPT_VECTOR as usize]
-            .set_handler(keyboard_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
-        IDT.entries[MOUSE_INTERRUPT_VECTOR as usize]
-            .set_handler(mouse_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+        // IRQ handlers are now routed through the ASM unexpected_interrupt_table
+        // to ensure CR3 switching occurs before reaching Rust code.
+        let timer_vector = TIMER_INTERRUPT_VECTOR as usize;
+        let timer_handler = *default_handlers.add(timer_vector) as usize;
+        IDT.entries[timer_vector].set_handler(timer_handler, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
 
-        IDT.entries[USER_TRAP_INTERRUPT_VECTOR as usize]
-            .set_handler(user_trap_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_TRAP | DPL_RING3);
-        
+        let kbd_vector = KEYBOARD_INTERRUPT_VECTOR as usize;
+        let kbd_handler = *default_handlers.add(kbd_vector) as usize;
+        IDT.entries[kbd_vector].set_handler(kbd_handler, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+
+        let mouse_vector = MOUSE_INTERRUPT_VECTOR as usize;
+        let mouse_handler = *default_handlers.add(mouse_vector) as usize;
+        IDT.entries[mouse_vector].set_handler(mouse_handler, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+
+        let trap_vector = USER_TRAP_INTERRUPT_VECTOR as usize;
+        let trap_handler = *default_handlers.add(trap_vector) as usize;
+        IDT.entries[trap_vector].set_handler(trap_handler, KERNEL_CS, 0, GATE_TYPE_TRAP | DPL_RING3);
+
         let idt_ptr = IdtPointer {
             limit: (size_of::<Idt>() - 1) as u16,
             base: core::ptr::addr_of!(IDT) as u64,

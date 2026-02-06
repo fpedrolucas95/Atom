@@ -51,6 +51,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use alloc::vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -855,8 +856,14 @@ pub fn get_stats() -> SharedMemStats {
 /// or matches the current kernel CR3).  Returns `Some(pml4_phys)` for
 /// user-space threads that have their own address space.
 fn resolve_thread_pml4(thread_id: ThreadId) -> Option<usize> {
+    // A thread's address space should not be resolved based on the current CR3,
+    // as cleanup can happen in different contexts.
+    if !crate::thread::is_userspace_thread(thread_id) {
+        return None;
+    }
+
     let addr_space = crate::thread::get_thread_address_space(thread_id).unwrap_or(0);
-    if addr_space == 0 || addr_space == crate::arch::read_cr3() {
+    if addr_space == 0 {
         None
     } else {
         Some(addr_space as usize)
@@ -866,11 +873,12 @@ fn resolve_thread_pml4(thread_id: ThreadId) -> Option<usize> {
 /// Check whether any other live threads share the same address space (PML4)
 /// as the given thread.
 fn other_threads_share_address_space(thread_id: ThreadId, addr_space: u64) -> bool {
-    let mut buf = [crate::thread::ProcessInfo {
+    let total_threads = crate::thread::process_count();
+    let mut buf = vec![crate::thread::ProcessInfo {
         pid: 0,
         state: 0,
         name: [0u8; 32],
-    }; 64];
+    }; total_threads];
     let count = crate::thread::list_processes(&mut buf);
 
     for i in 0..count {
@@ -903,16 +911,11 @@ fn other_threads_share_address_space(thread_id: ThreadId, addr_space: u64) -> bo
 /// 2. If this is the last thread in the address space, unmap all regions.
 /// 3. Destroy all owned regions whose ref_count has reached 0.
 pub fn cleanup_thread_shared_memory(thread_id: ThreadId) {
-    let addr_space = crate::thread::get_thread_address_space(thread_id).unwrap_or(0);
-    let pml4_opt = if addr_space == 0 || addr_space == crate::arch::read_cr3() {
-        None
-    } else {
-        Some(addr_space as usize)
-    };
+    let pml4_opt = resolve_thread_pml4(thread_id);
 
     // Check if sibling threads share this address space.
-    let siblings_alive = if addr_space != 0 && addr_space != crate::arch::read_cr3() {
-        other_threads_share_address_space(thread_id, addr_space)
+    let siblings_alive = if let Some(as_phys) = pml4_opt {
+        other_threads_share_address_space(thread_id, as_phys as u64)
     } else {
         false
     };

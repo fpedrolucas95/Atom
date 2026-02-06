@@ -92,6 +92,10 @@ pub const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
 /// kernel's higher-half virtual addresses.
 const HIGHER_HALF_MIRROR_SIZE: usize = 16usize * 1024 * 1024 * 1024;
 static ACTIVE_PML4: AtomicUsize = AtomicUsize::new(0);
+
+/// Kernel PML4 physical address exposed to assembly stubs for address space switching.
+#[no_mangle]
+pub static KERNEL_PML4: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_PAGES: AtomicUsize = AtomicUsize::new(0);
 static PAGE_TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// Highest physical address that was identity-mapped during init.
@@ -217,6 +221,7 @@ pub fn init(memory_map: &MemoryMap) {
     let pml4_phys = pmm::alloc_page_zeroed().expect("Failed to allocate PML4");
     PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
     ACTIVE_PML4.store(pml4_phys, Ordering::Relaxed);
+    KERNEL_PML4.store(pml4_phys, Ordering::Relaxed);
     log_info!(LOG_ORIGIN, "PML4 allocated at 0x{:X}", pml4_phys);
     log_info!(LOG_ORIGIN, "Starting identity mapping of RAM regions...");
     let mut max_physical_addr = 0usize;
