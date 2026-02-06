@@ -1,7 +1,18 @@
 ; kernel/src/interrupts/switch.asm
 ; Context switching for x86_64 (MS x64 ABI)
+;
+; IMPORTANT: All functions that load CR3 first jump to a higher-half
+; trampoline.  The higher-half PML4 entries (256-511) are SHARED across
+; all address spaces, so kernel code at 0xFFFF_8000_… is always reachable
+; regardless of which PML4 is in CR3.  This avoids triple-faults when
+; the target PML4 has incomplete lower-half identity mappings.
 
 [BITS 64]
+default rel
+
+; Higher-half base: virtual mirror of physical memory
+%define HIGHER_HALF_BASE  0xFFFF800000000000
+
 section .text
 
 ; Debug variables for IRET frame inspection
@@ -31,19 +42,28 @@ section .text
 global enter_user_resume
 enter_user_resume:
     cli
-    
+
+    ; ---- jump to higher-half mirror before touching CR3 ----
+    lea  rax, [rel .hh_resume]
+    mov  r10, HIGHER_HALF_BASE
+    add  rax, r10
+    jmp  rax
+.hh_resume:
+    ; Now executing from higher half - safe to switch address space
+
     ; Load CR3 if non-zero
     test r8, r8
     jz .skip_cr3_resume
     mov cr3, r8
 .skip_cr3_resume:
-    
+
     ; Set user data segments
     mov ax, 0x23
     mov ds, ax
     mov es, ax
-    
+
     ; Restore callee-saved registers from *regs_ptr (r9)
+    ; r9 points into the kernel stack (higher half) - always accessible
     ; Struct layout: [0]=rbx, [8]=rbp, [16]=r12, [24]=r13, [32]=r14, [40]=r15
     mov rbx, [r9 + 0]
     mov rbp, [r9 + 8]
@@ -51,30 +71,30 @@ enter_user_resume:
     mov r13, [r9 + 24]
     mov r14, [r9 + 32]
     mov r15, [r9 + 40]
-    
+
     ; Build IRET frame on current kernel stack
     ; Frame: RIP, CS, RFLAGS, RSP, SS
     sub rsp, 40
-    
+
     ; RIP from rcx
     mov [rsp + 0], rcx
-    
+
     ; CS = 0x1B (USER_CODE_SELECTOR)
     mov qword [rsp + 8], 0x1B
-    
+
     ; RFLAGS: get current and sanitize
     pushfq
     pop rax
     and rax, 0x3C7FD7
     or rax, 0x202        ; IF + reserved bit
     mov [rsp + 16], rax
-    
+
     ; User RSP from rdx
     mov [rsp + 24], rdx
-    
+
     ; SS = 0x23 (USER_DATA_SELECTOR)
     mov qword [rsp + 32], 0x23
-    
+
     ; Zero volatile registers for security (caller-saved, not preserved by ABI)
     xor rax, rax
     xor rdi, rdi
@@ -85,7 +105,7 @@ enter_user_resume:
     xor r9, r9
     xor r10, r10
     xor r11, r11
-    
+
     iretq
 
 ; =================================================
@@ -96,45 +116,53 @@ enter_user_resume:
 global enter_user
 enter_user:
     cli
-    
+
+    ; ---- jump to higher-half mirror before touching CR3 ----
+    lea  rax, [rel .hh_enter]
+    mov  r10, HIGHER_HALF_BASE
+    add  rax, r10
+    jmp  rax
+.hh_enter:
+    ; Now executing from higher half - safe to switch address space
+
     ; Load CR3 if non-zero
     test r8, r8
     jz .skip_cr3
     mov cr3, r8
 .skip_cr3:
-    
+
     ; Set user data segments
     mov ax, 0x23
     mov ds, ax
     mov es, ax
-    
+
     ; Build IRET frame on current kernel stack
     ; Frame: RIP, CS, RFLAGS, RSP, SS
     sub rsp, 40
-    
+
     ; RIP from rcx
     mov [rsp + 0], rcx
-    
+
     ; CS = 0x1B (USER_CODE_SELECTOR)
     mov qword [rsp + 8], 0x1B
-    
+
     ; RFLAGS: get current and sanitize
     pushfq
     pop rax
     and rax, 0x3C7FD7
     or rax, 0x202        ; IF + reserved bit
     mov [rsp + 16], rax
-    
+
     ; User RSP from rdx
     mov [rsp + 24], rdx
-    
+
     ; SS = 0x23 (USER_DATA_SELECTOR)
     mov qword [rsp + 32], 0x23
-    
+
     ; DO NOT zero registers - preserve ABI for syscall return
     ; RBX, RBP, R12-R15 must be preserved across syscalls
     ; Other registers (RAX, RDI, RSI, etc.) contain syscall return values
-    
+
     iretq
 
 ; =================================================
@@ -145,33 +173,41 @@ enter_user:
 global enter_user_first_time
 enter_user_first_time:
     cli
-    
+
+    ; ---- jump to higher-half mirror before touching CR3 ----
+    lea  rax, [rel .hh_first]
+    mov  r10, HIGHER_HALF_BASE
+    add  rax, r10
+    jmp  rax
+.hh_first:
+    ; Now executing from higher half - safe to switch address space
+
     ; Load CR3 if non-zero
     test r8, r8
     jz .skip_cr3_first
     mov cr3, r8
 .skip_cr3_first:
-    
+
     ; Set user data segments
     mov ax, 0x23
     mov ds, ax
     mov es, ax
-    
+
     ; Build IRET frame on current kernel stack
     sub rsp, 40
-    
+
     mov [rsp + 0], rcx          ; RIP
     mov qword [rsp + 8], 0x1B   ; CS
-    
+
     pushfq
     pop rax
     and rax, 0x3C7FD7
     or rax, 0x202
     mov [rsp + 16], rax         ; RFLAGS
-    
+
     mov [rsp + 24], rdx         ; RSP
     mov qword [rsp + 32], 0x23  ; SS
-    
+
     ; Zero all GPRs for clean first-time entry
     xor rax, rax
     xor rbx, rbx
@@ -188,7 +224,7 @@ enter_user_first_time:
     xor r13, r13
     xor r14, r14
     xor r15, r15
-    
+
     iretq
 
 %define OFF_RAX     0
@@ -291,15 +327,24 @@ switch_to_context:
 switch_to_context_internal:
     cli
 
+    ; ---- jump to higher-half mirror before touching CR3 ----
+    ; r15 = context pointer (in higher-half kernel heap - always accessible)
+    lea  rax, [rel .hh_switch]
+    mov  rcx, HIGHER_HALF_BASE
+    add  rax, rcx
+    jmp  rax
+.hh_switch:
+    ; Now executing from higher half - safe to switch address space
+
     ; Load CR3 if needed
     mov rax, [r15 + OFF_CR3]
     test rax, rax
-    jz .skip_cr3
+    jz .skip_cr3_sw
     mov rcx, cr3
     cmp rax, rcx
-    je .skip_cr3
+    je .skip_cr3_sw
     mov cr3, rax
-.skip_cr3:
+.skip_cr3_sw:
 
     ; Check target CPL: only go to kernel path if CS is EXACTLY kernel code selector
     ; If CS is garbage (like 0x34EC), we'll go to user path where we force valid selectors

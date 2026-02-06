@@ -531,7 +531,7 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
     }
 
     // For lower half: we need to deep-copy page tables to isolate user space.
-    // PML4[0] contains both kernel identity mapping (~0x1e24xxxx) and user code (0x400000).
+    // PML4[0] contains both kernel identity mapping and user code (0x400000).
     // We must deep-copy so each process has its own page tables for this region.
     for idx in 0..ENTRIES_PER_TABLE / 2 {
         if !src.entries[idx].is_present() {
@@ -550,7 +550,6 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
         let src_pdpt = unsafe { &*(src_pdpt_phys as *const PageTable) };
         let dst_pdpt = unsafe { &mut *(dst_pdpt_phys as *mut PageTable) };
 
-        // Copy PDPT entries - for kernel region, share PD; for user region, deep copy
         for pdpt_idx in 0..ENTRIES_PER_TABLE {
             if !src_pdpt.entries[pdpt_idx].is_present() {
                 dst_pdpt.entries[pdpt_idx].clear();
@@ -568,7 +567,6 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
             let src_pd = unsafe { &*(src_pd_phys as *const PageTable) };
             let dst_pd = unsafe { &mut *(dst_pd_phys as *mut PageTable) };
 
-            // Copy PD entries
             for pd_idx in 0..ENTRIES_PER_TABLE {
                 if !src_pd.entries[pd_idx].is_present() {
                     dst_pd.entries[pd_idx].clear();
@@ -577,7 +575,7 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
 
                 // Check if this is a 2MB huge page or points to a PT
                 if (src_pd.entries[pd_idx].0 & (1 << 7)) != 0 {
-                    // 2MB huge page - just copy the entry
+                    // 2MB huge page - just copy the entry verbatim
                     dst_pd.entries[pd_idx] = src_pd.entries[pd_idx];
                 } else {
                     // Points to a PT - deep copy it
@@ -588,30 +586,178 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
                     };
                     PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
 
-                    // Copy all PT entries
-                    let src_pt = unsafe { &*(src_pt_phys as *const PageTable) };
-                    let dst_pt = unsafe { &mut *(dst_pt_phys as *mut PageTable) };
-                    for pt_idx in 0..ENTRIES_PER_TABLE {
-                        dst_pt.entries[pt_idx] = src_pt.entries[pt_idx];
+                    // Copy all PT entries using volatile writes to prevent
+                    // the compiler from optimising away stores to hardware-
+                    // walked page-table pages.
+                    let src_pt = src_pt_phys as *const PageTableEntry;
+                    let dst_pt = dst_pt_phys as *mut PageTableEntry;
+                    unsafe {
+                        for pt_idx in 0..ENTRIES_PER_TABLE {
+                            let val = core::ptr::read_volatile(src_pt.add(pt_idx));
+                            core::ptr::write_volatile(dst_pt.add(pt_idx), val);
+                        }
                     }
 
-                    // Set PD entry to point to new PT with same flags
-                    let flags = src_pd.entries[pd_idx].0 & 0xFFF;
-                    dst_pd.entries[pd_idx].0 = (dst_pt_phys as u64) | flags;
+                    // Set PD entry: swap physical address, keep ALL flags
+                    // (low 12 bits + high bits like NX at bit 63)
+                    let raw = src_pd.entries[pd_idx].0;
+                    let flags = raw & !ADDR_MASK;
+                    unsafe {
+                        let dst_pde = &mut (*(dst_pd_phys as *mut PageTable)).entries[pd_idx];
+                        core::ptr::write_volatile(
+                            &mut dst_pde.0 as *mut u64,
+                            (dst_pt_phys as u64 & ADDR_MASK) | flags,
+                        );
+                    }
                 }
             }
 
-            // Set PDPT entry to point to new PD with same flags
-            let flags = src_pdpt.entries[pdpt_idx].0 & 0xFFF;
-            dst_pdpt.entries[pdpt_idx].0 = (dst_pd_phys as u64) | flags;
+            // Set PDPT entry: swap physical address, keep ALL flags
+            let raw = src_pdpt.entries[pdpt_idx].0;
+            let flags = raw & !ADDR_MASK;
+            unsafe {
+                let dst_pdpte = &mut (*(dst_pdpt_phys as *mut PageTable)).entries[pdpt_idx];
+                core::ptr::write_volatile(
+                    &mut dst_pdpte.0 as *mut u64,
+                    (dst_pd_phys as u64 & ADDR_MASK) | flags,
+                );
+            }
         }
 
-        // Set PML4 entry to point to new PDPT with same flags
-        let flags = src.entries[idx].0 & 0xFFF;
-        dst.entries[idx].0 = (dst_pdpt_phys as u64) | flags;
+        // Set PML4 entry: swap physical address, keep ALL flags
+        let raw = src.entries[idx].0;
+        let flags = raw & !ADDR_MASK;
+        unsafe {
+            let dst_pml4e = &mut (*(dst_pml4_phys as *mut PageTable)).entries[idx];
+            core::ptr::write_volatile(
+                &mut dst_pml4e.0 as *mut u64,
+                (dst_pdpt_phys as u64 & ADDR_MASK) | flags,
+            );
+        }
     }
 
+    // ------------------------------------------------------------------
+    // Verification pass: walk the destination PML4 for a few critical
+    // kernel addresses.  If any mapping is missing, repair it by copying
+    // the leaf PT entry from the source PML4.
+    // ------------------------------------------------------------------
+    verify_and_repair_clone(src_pml4, dst_pml4_phys);
+
     Ok(())
+}
+
+/// Walk `pml4_phys` for virtual address `virt` and return the leaf PTE,
+/// or `None` if any intermediate level is not-present.
+fn read_pte_in_pml4(pml4_phys: usize, virt: usize) -> Option<u64> {
+    let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
+
+    let pml4 = unsafe { &*(pml4_phys as *const PageTable) };
+    let e = &pml4.entries[pml4_idx];
+    if !e.is_present() { return None; }
+
+    let pdpt = unsafe { &*(e.addr() as *const PageTable) };
+    let e = &pdpt.entries[pdpt_idx];
+    if !e.is_present() { return None; }
+
+    let pd = unsafe { &*(e.addr() as *const PageTable) };
+    let e = &pd.entries[pd_idx];
+    if !e.is_present() { return None; }
+
+    // 2 MiB huge page – treat as present
+    if e.0 & (1 << 7) != 0 { return Some(e.0); }
+
+    let pt = unsafe { &*(e.addr() as *const PageTable) };
+    let e = &pt.entries[pt_idx];
+    if !e.is_present() { return None; }
+
+    Some(e.0)
+}
+
+/// Verify several critical kernel-code pages in `dst` against `src`.
+/// For every page that is mapped in `src` but missing in `dst`, walk
+/// the hierarchy and repair at the deepest missing level.
+fn verify_and_repair_clone(src_pml4: usize, dst_pml4: usize) {
+    // Get the current kernel RIP – this is the most critical address
+    // that must be identity-mapped in every process PML4, since the
+    // kernel runs from identity-mapped code after syscall entry.
+    let current_rip: usize;
+    unsafe { asm!("lea {}, [rip]", out(reg) current_rip, options(nomem, nostack)); }
+    let rip_page = current_rip & !(0xFFF);
+
+    // Sample a range of pages around the kernel binary.  Identity
+    // mappings for these pages must survive the deep copy.
+    let test_addrs: [usize; 8] = [
+        rip_page,
+        rip_page.wrapping_sub(0x1000),
+        rip_page.wrapping_add(0x1000),
+        rip_page.wrapping_add(0x10000),
+        // VGA text buffer
+        0xB8000,
+        // APIC
+        0xFEE00000,
+        // Low identity-mapped pages
+        0x1000,
+        0x100000,
+    ];
+
+    for &virt in &test_addrs {
+        let virt_page = virt & !(0xFFF);
+        let src_pte = read_pte_in_pml4(src_pml4, virt_page);
+        let dst_pte = read_pte_in_pml4(dst_pml4, virt_page);
+
+        match (src_pte, dst_pte) {
+            (Some(s), None) => {
+                // Mapping exists in source but missing in destination → repair
+                log_error!(
+                    LOG_ORIGIN,
+                    "clone_kernel_mappings: VA 0x{:X} present in src PML4 but MISSING in dst PML4 0x{:X} – repairing",
+                    virt_page,
+                    dst_pml4
+                );
+                let phys = (s & ADDR_MASK) as usize;
+                let flags = PageFlags::from_bits(s);
+                let _ = map_page_internal(dst_pml4, virt_page, phys, flags);
+            }
+            (Some(s), Some(d)) => {
+                // Both present – verify physical address matches
+                let s_phys = s & ADDR_MASK;
+                let d_phys = d & ADDR_MASK;
+                if s_phys != d_phys {
+                    log_error!(
+                        LOG_ORIGIN,
+                        "clone_kernel_mappings: VA 0x{:X} phys mismatch! src=0x{:X} dst=0x{:X} – repairing",
+                        virt_page,
+                        s_phys,
+                        d_phys
+                    );
+                    // Overwrite the leaf entry in destination
+                    repair_leaf_pte(dst_pml4, virt_page, s);
+                }
+            }
+            _ => {} // not mapped in source → nothing to do
+        }
+    }
+}
+
+/// Force the leaf PTE for `virt` in `pml4_phys` to `raw_pte`.
+/// The intermediate entries must already exist (they were deep-copied).
+fn repair_leaf_pte(pml4_phys: usize, virt: usize, raw_pte: u64) {
+    let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
+
+    let pml4 = unsafe { &*(pml4_phys as *const PageTable) };
+    if !pml4.entries[pml4_idx].is_present() { return; }
+
+    let pdpt = unsafe { &*(pml4.entries[pml4_idx].addr() as *const PageTable) };
+    if !pdpt.entries[pdpt_idx].is_present() { return; }
+
+    let pd = unsafe { &*(pdpt.entries[pdpt_idx].addr() as *const PageTable) };
+    if !pd.entries[pd_idx].is_present() { return; }
+    if pd.entries[pd_idx].0 & (1 << 7) != 0 { return; } // huge page
+
+    let pt = unsafe { &mut *(pd.entries[pd_idx].addr() as *mut PageTable) };
+    unsafe {
+        core::ptr::write_volatile(&mut pt.entries[pt_idx].0 as *mut u64, raw_pte);
+    }
 }
 
 pub fn unmap_page(virt: usize) -> Result<(), VmError> {
