@@ -16,6 +16,7 @@ default rel
 
 section .text
 extern rust_syscall_dispatcher
+extern KERNEL_PML4
 
 section .bss align=16
 temp_user_rsp:       resq 1
@@ -36,6 +37,12 @@ syscall_entry:
 
     lea     rsp, [rel temp_kernel_stack + 16384]
     and     rsp, -16
+
+    ; Switch to kernel address space
+    mov     rax, cr3
+    push    rax
+    mov     rax, [rel KERNEL_PML4]
+    mov     cr3, rax
 
     push    rbx
     push    rbp
@@ -75,19 +82,19 @@ syscall_entry:
     ; These are on the stack now (we just pushed them)
     mov     rax, [rsp + 120 + 40]  ; RBX (6th push, offset from current RSP)
     mov     [rsp + 72], rax
-    
+
     mov     rax, [rsp + 120 + 32]  ; RBP (5th push)
     mov     [rsp + 80], rax
-    
+
     mov     rax, [rsp + 120 + 24]  ; R12 (4th push)
     mov     [rsp + 88], rax
-    
+
     mov     rax, [rsp + 120 + 16]  ; R13 (3rd push)
     mov     [rsp + 96], rax
-    
+
     mov     rax, [rsp + 120 + 8]   ; R14 (2nd push)
     mov     [rsp + 104], rax
-    
+
     mov     rax, [rsp + 120]       ; R15 (1st push)
     mov     [rsp + 112], rax
 
@@ -101,6 +108,10 @@ syscall_entry:
     pop     r12
     pop     rbp
     pop     rbx
+
+    ; Restore userspace address space
+    pop     rax
+    mov     cr3, rax
 
     mov     rcx, [rel temp_user_rcx]
     mov     r11, [rel temp_user_r11]
