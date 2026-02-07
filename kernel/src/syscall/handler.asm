@@ -39,10 +39,10 @@ syscall_entry:
     and     rsp, -16
 
     ; Switch to kernel address space
-    mov     rax, cr3
-    push    rax
-    mov     rax, [rel KERNEL_PML4]
-    mov     cr3, rax
+    mov     r11, cr3
+    push    r11
+    mov     r11, [rel KERNEL_PML4]
+    mov     cr3, r11
 
     push    rbx
     push    rbp
@@ -110,8 +110,8 @@ syscall_entry:
     pop     rbx
 
     ; Restore userspace address space
-    pop     rax
-    mov     cr3, rax
+    pop     r11
+    mov     cr3, r11
 
     mov     rcx, [rel temp_user_rcx]
     mov     r11, [rel temp_user_r11]

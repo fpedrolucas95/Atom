@@ -35,12 +35,6 @@
 use core::mem::size_of;
 use crate::{log_debug, log_info};
 use super::{KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, TIMER_INTERRUPT_VECTOR, USER_TRAP_INTERRUPT_VECTOR};
-use crate::interrupts::handlers::{
-    keyboard_interrupt_handler,
-    mouse_interrupt_handler,
-    timer_interrupt_handler,
-    user_trap_interrupt_handler,
-};
 
 const IDT_SIZE: usize = 256;
 const DOUBLE_FAULT_IST: u8 = 1;
@@ -140,9 +134,10 @@ pub fn init() {
         log_debug!(LOG_ORIGIN, "Sample handler addresses:");
         log_debug!(LOG_ORIGIN, "  exception_handler_0:  0x{:X}", exception_handler_0 as *const () as usize);
         log_debug!(LOG_ORIGIN, "  exception_handler_14: 0x{:X}", exception_handler_14 as *const () as usize);
-        log_debug!(LOG_ORIGIN, "  timer_interrupt_handler: 0x{:X}", timer_interrupt_handler as *const () as usize);
 
         let default_handlers = unexpected_interrupt_table.as_ptr();
+        log_debug!(LOG_ORIGIN, "  timer_interrupt_stub: 0x{:X}", *default_handlers.add(TIMER_INTERRUPT_VECTOR as usize));
+
         let entries_ptr = core::ptr::addr_of_mut!(IDT.entries) as *mut IdtEntry ;
         let entries = core::slice::from_raw_parts_mut(entries_ptr, 256) ;
         for (index, entry) in entries.iter_mut().enumerate() {
