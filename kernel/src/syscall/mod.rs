@@ -3329,10 +3329,11 @@ fn spawn_process_internal(
     let text_phys = pmm::alloc_pages_zeroed(text_pages)
         .ok_or(ENOMEM)?;
 
+    // Copy text section content (use higher-half address to avoid broken identity mapping)
     unsafe {
         core::ptr::copy_nonoverlapping(
             sections.text.as_ptr(),
-            text_phys as *mut u8,
+            vm::phys_to_virt_ptr(text_phys) as *mut u8,
             sections.text.len(),
         );
     }
@@ -3354,10 +3355,11 @@ fn spawn_process_internal(
         let data_phys = pmm::alloc_pages_zeroed(data_pages)
             .ok_or(ENOMEM)?;
 
+        // Copy data section content (use higher-half address to avoid broken identity mapping)
         unsafe {
             core::ptr::copy_nonoverlapping(
                 sections.data.as_ptr(),
-                data_phys as *mut u8,
+                vm::phys_to_virt_ptr(data_phys) as *mut u8,
                 sections.data.len(),
             );
         }

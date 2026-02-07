@@ -845,7 +845,7 @@ pub fn alloc_page_zeroed() -> Option<usize> {
     let addr = alloc_page()?;
 
     unsafe {
-        let ptr = addr as *mut u8;
+        let ptr = crate::mm::vm::phys_to_virt_ptr(addr) as *mut u8;
         core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
     }
 
@@ -860,7 +860,7 @@ pub fn alloc_pages_zeroed(count: usize) -> Option<usize> {
 
     unsafe {
         core::ptr::write_bytes(
-            addr as *mut u8,
+            crate::mm::vm::phys_to_virt_ptr(addr) as *mut u8,
             0,
             count * PAGE_SIZE,
         );
