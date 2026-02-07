@@ -35,6 +35,12 @@ syscall_entry:
     mov     [rel temp_arg5], r9
 
     lea     rsp, [rel temp_kernel_stack + 16384]
+    ; Convert the identity-mapped BSS address to its higher-half mirror.
+    ; Higher-half PML4 entries (256-511) are shared across ALL address spaces,
+    ; so this stack remains reachable regardless of which CR3 is active.
+    ; R8 is safe to clobber here: its original value was saved to temp_arg4.
+    mov     r8, 0xFFFF800000000000
+    add     rsp, r8
     and     rsp, -16
 
     push    rbx

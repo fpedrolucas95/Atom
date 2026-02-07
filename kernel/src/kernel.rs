@@ -229,8 +229,13 @@ fn init_scheduler() {
         }
     }
 
-    let idle_stack = mm::pmm::alloc_pages(4).expect("Failed to allocate idle stack");
-    let idle_stack_top = idle_stack + (4 * mm::pmm::PAGE_SIZE);
+    let idle_stack_phys = mm::pmm::alloc_pages(4).expect("Failed to allocate idle stack");
+    // Use higher-half virtual address for the idle thread's kernel stack.
+    // During context switches from idle to a userspace thread, the switch
+    // trampoline loads the target CR3 while RSP still points here.  Higher-half
+    // PML4 entries (256-511) are shared across all address spaces, so this
+    // address remains valid regardless of which CR3 is active.
+    let idle_stack_top = mm::vm::HIGHER_HALF_BASE + idle_stack_phys + (4 * mm::pmm::PAGE_SIZE);
     let cr3 = read_cr3();
 
     let idle_thread = thread::Thread::new(

@@ -480,16 +480,26 @@ fn allocate_user_stack(pml4_phys: usize) -> Result<usize, InitError> {
 }
 
 /// Allocate kernel stack for syscall handling
+///
+/// CRITICAL: Returns a higher-half virtual address, NOT an identity-mapped address.
+/// Child processes only share the upper-half PML4 entries (256-511) with the kernel.
+/// The lower-half identity mappings are deep-copied at clone time and may diverge
+/// as user pages are remapped into the child's address space.  Using a higher-half
+/// address guarantees the kernel stack is always reachable regardless of which CR3
+/// is active (e.g., during context-switch trampolines that load a new CR3 before
+/// building the IRET frame on the current stack).
 fn allocate_kernel_stack() -> Result<u64, InitError> {
     let phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
         .ok_or(InitError::MemoryAllocationFailed)?;
     let size = KERNEL_STACK_PAGES * PAGE_SIZE;
-    let top = (phys + size) as u64;
+    let virt = vm::HIGHER_HALF_BASE + phys;
+    let top = (virt + size) as u64;
 
     log_info!(
         LOG_ORIGIN,
-        "Kernel stack allocated: phys=0x{:X}, size={} bytes",
+        "Kernel stack allocated: phys=0x{:X}, virt=0x{:X}, size={} bytes",
         phys,
+        virt,
         size
     );
 
