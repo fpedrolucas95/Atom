@@ -111,6 +111,11 @@ impl IpcClient {
         atom_syscall::process::get_process_count()
     }
 
+    /// Get CPU brand string via syscall
+    pub fn get_cpu_brand(&self, buffer: &mut [u8]) -> usize {
+        atom_syscall::debug::get_cpu_brand(buffer)
+    }
+
     /// Get system uptime formatted as string
     pub fn format_uptime(&self, buffer: &mut [u8]) -> usize {
         let ticks = get_ticks();
@@ -315,10 +320,17 @@ impl IpcClient {
     /// Read file contents
     /// For virtual files in /proc and /sys, returns system information
     pub fn read_file(&self, path: &str, buffer: &mut [u8]) -> Option<usize> {
-        let content: &[u8] = match path {
+        match path {
             "/proc/version" | "/etc/version" => {
-                b"Atom OS 0.1.0 (Helium)\nKernel: 0.1.0-microkernel\nArch: x86_64\n"
+                let content = b"OS:           Atom OS 0.1.0 (Helium)\nKernel:       0.1.0-microkernel\n";
+                let copy_len = content.len().min(buffer.len());
+                buffer[..copy_len].copy_from_slice(&content[..copy_len]);
+                return Some(copy_len);
             }
+            _ => {}
+        }
+
+        let content: &[u8] = match path {
             "/proc/meminfo" => {
                 // Get real memory info
                 let (total_kb, free_kb) = atom_syscall::debug::get_memory_info();

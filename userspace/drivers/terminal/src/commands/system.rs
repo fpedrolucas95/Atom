@@ -334,7 +334,13 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
 
     // CPU
     ctx.print("CPU:          ");
-    ctx.println("x86_64 (Atom Core)");
+    let mut cpu_buf = [0u8; 64];
+    let cpu_len = ctx.ipc.get_cpu_brand(&mut cpu_buf);
+    if cpu_len > 0 {
+        ctx.println(unsafe { core::str::from_utf8_unchecked(&cpu_buf[..cpu_len]) });
+    } else {
+        ctx.println("x86_64 (Atom Core)");
+    }
 
     // Memory
     let (total, used, _) = ctx.ipc.query_memory();

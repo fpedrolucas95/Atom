@@ -70,3 +70,28 @@ pub fn read_klog(buffer: &mut [u8]) -> usize {
 
     result as usize
 }
+
+/// Get CPU brand string
+/// Returns the number of bytes written to the buffer
+pub fn get_cpu_brand(buffer: &mut [u8]) -> usize {
+    use crate::raw::syscall2;
+
+    if buffer.is_empty() {
+        return 0;
+    }
+
+    let result = unsafe {
+        syscall2(
+            SYS_GET_CPU_BRAND,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64
+        )
+    };
+
+    // Check for error
+    if crate::error::is_syscall_error(result) {
+        return 0;
+    }
+
+    result as usize
+}

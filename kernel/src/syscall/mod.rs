@@ -119,6 +119,7 @@ pub const SYS_GET_PROCESS_COUNT: u64 = 48; // Get total number of processes
 pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
+pub const SYS_GET_CPU_BRAND: u64 = 52; // Get CPU brand string
 
 // Error codes — re-exported from the shared ABI crate (single source of truth).
 pub use atom_abi::{
@@ -321,6 +322,7 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_READ_KLOG => sys_read_klog(arg0 as *mut u8, arg1 as usize),
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
+        SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0 as *mut u8, arg1 as usize),
 
         _ => {
             log_warn!(
@@ -3594,6 +3596,29 @@ fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
 
     unsafe {
         core::ptr::copy_nonoverlapping(log_data.as_ptr(), buffer, copy_len);
+    }
+
+    copy_len as u64
+}
+
+/// Get CPU brand string
+///
+/// # Arguments
+/// * `buffer` - Pointer to buffer to write brand string
+/// * `max_len` - Maximum bytes to write
+///
+/// # Returns
+/// * Number of bytes written, or EINVAL if buffer is null
+fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
+    if buffer.is_null() || max_len == 0 {
+        return EINVAL;
+    }
+
+    let brand = crate::system::info().cpu_brand();
+    let copy_len = brand.len().min(max_len);
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(brand.as_ptr(), buffer, copy_len);
     }
 
     copy_len as u64
