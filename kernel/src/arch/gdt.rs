@@ -164,7 +164,17 @@ pub fn set_rsp0(rsp0: u64) {
     }
 }
 
+/// Return the top of the double-fault IST stack as a higher-half virtual address.
+///
+/// The static `DOUBLE_FAULT_STACK` lives in BSS at an identity-mapped (lower-half)
+/// address.  When a double fault fires inside a child process's address space the
+/// CPU loads RSP from TSS.IST[0].  If that address is in the lower half it relies
+/// on the deep-copied identity mapping, which may have been partially overwritten
+/// by user-page remaps.  Converting to the higher-half mirror guarantees the IST
+/// stack is reachable regardless of which PML4 is active, because higher-half
+/// entries (256-511) are shared across all address spaces.
 unsafe fn double_fault_stack_top() -> u64 {
-    let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACK) as *const u8;
-    stack_ptr.add(DOUBLE_FAULT_STACK_SIZE) as u64
+    let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACK) as u64;
+    let higher_half_base: u64 = 0xFFFF_8000_0000_0000;
+    stack_ptr + higher_half_base + DOUBLE_FAULT_STACK_SIZE as u64
 }
