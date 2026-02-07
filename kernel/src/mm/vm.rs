@@ -57,7 +57,7 @@
 // - No copy-on-write or demand paging yet
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::mm::pmm;
 use crate::boot::{EfiMemoryDescriptor, MemoryMap};
@@ -98,6 +98,33 @@ static PAGE_TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// Shared memory VA allocation uses this to start above all identity-mapped
 /// regions, avoiding costly page-table probing and collision avoidance.
 static IDENTITY_MAP_CEILING: AtomicUsize = AtomicUsize::new(0);
+/// Set to `true` after `init()` completes and the higher-half mirror is active.
+/// Before this flag is set, page-table structures are accessed via their
+/// identity-mapped (phys == virt) addresses (UEFI page tables are still active).
+/// After this flag is set, all accesses go through the higher-half mirror
+/// (`HIGHER_HALF_BASE + phys`), which is shared across every address space
+/// (PML4 entries 256-511).  This avoids relying on lower-half identity mappings
+/// that user processes may have partially overwritten with their own pages.
+static HIGHER_HALF_READY: AtomicBool = AtomicBool::new(false);
+
+/// Convert a physical address to a virtual address suitable for kernel access.
+///
+/// Before `vm::init()` completes, returns the identity-mapped address (phys == virt)
+/// because the UEFI page tables are still active.  After init, returns the
+/// higher-half mirror address (`HIGHER_HALF_BASE + phys`), which is guaranteed
+/// to be valid in every address space since higher-half PML4 entries are shared.
+///
+/// This MUST be used for all page-table structure accesses to prevent corruption
+/// when running inside a user process whose lower-half identity mappings have
+/// been partially overwritten by user-page remaps.
+#[inline]
+pub fn phys_to_virt_ptr(phys: usize) -> usize {
+    if HIGHER_HALF_READY.load(Ordering::Relaxed) {
+        HIGHER_HALF_BASE + phys
+    } else {
+        phys
+    }
+}
 const LOG_ORIGIN: &str = "vmm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +359,12 @@ pub fn init(memory_map: &MemoryMap) {
         load_cr3(pml4_phys as u64);
     }
 
+    // The higher-half mirror is now active.  From this point on, all
+    // page-table structure accesses must go through phys_to_virt_ptr()
+    // to avoid depending on lower-half identity mappings that user
+    // processes will overwrite.
+    HIGHER_HALF_READY.store(true, Ordering::Release);
+
     // Record the identity-map ceiling so that shared-memory VA allocation
     // can start above all identity-mapped pages.
     IDENTITY_MAP_CEILING.store(max_physical_addr, Ordering::Relaxed);
@@ -521,8 +554,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
         return Err(VmError::NotInitialized);
     }
 
-    let src = unsafe { &*(src_pml4 as *const PageTable) };
-    let dst = unsafe { &mut *(dst_pml4_phys as *mut PageTable) };
+    let src = unsafe { &*(phys_to_virt_ptr(src_pml4) as *const PageTable) };
+    let dst = unsafe { &mut *(phys_to_virt_ptr(dst_pml4_phys) as *mut PageTable) };
 
     // For higher half (kernel space at 0xFFFF_8000+): share page tables
     // These are kernel mappings that don't change per-process
@@ -547,8 +580,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
         };
         PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
 
-        let src_pdpt = unsafe { &*(src_pdpt_phys as *const PageTable) };
-        let dst_pdpt = unsafe { &mut *(dst_pdpt_phys as *mut PageTable) };
+        let src_pdpt = unsafe { &*(phys_to_virt_ptr(src_pdpt_phys) as *const PageTable) };
+        let dst_pdpt = unsafe { &mut *(phys_to_virt_ptr(dst_pdpt_phys) as *mut PageTable) };
 
         for pdpt_idx in 0..ENTRIES_PER_TABLE {
             if !src_pdpt.entries[pdpt_idx].is_present() {
@@ -564,8 +597,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
             };
             PAGE_TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
 
-            let src_pd = unsafe { &*(src_pd_phys as *const PageTable) };
-            let dst_pd = unsafe { &mut *(dst_pd_phys as *mut PageTable) };
+            let src_pd = unsafe { &*(phys_to_virt_ptr(src_pd_phys) as *const PageTable) };
+            let dst_pd = unsafe { &mut *(phys_to_virt_ptr(dst_pd_phys) as *mut PageTable) };
 
             for pd_idx in 0..ENTRIES_PER_TABLE {
                 if !src_pd.entries[pd_idx].is_present() {
@@ -589,8 +622,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
                     // Copy all PT entries using volatile writes to prevent
                     // the compiler from optimising away stores to hardware-
                     // walked page-table pages.
-                    let src_pt = src_pt_phys as *const PageTableEntry;
-                    let dst_pt = dst_pt_phys as *mut PageTableEntry;
+                    let src_pt = phys_to_virt_ptr(src_pt_phys) as *const PageTableEntry;
+                    let dst_pt = phys_to_virt_ptr(dst_pt_phys) as *mut PageTableEntry;
                     unsafe {
                         for pt_idx in 0..ENTRIES_PER_TABLE {
                             let val = core::ptr::read_volatile(src_pt.add(pt_idx));
@@ -603,7 +636,7 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
                     let raw = src_pd.entries[pd_idx].0;
                     let flags = raw & !ADDR_MASK;
                     unsafe {
-                        let dst_pde = &mut (*(dst_pd_phys as *mut PageTable)).entries[pd_idx];
+                        let dst_pde = &mut (*(phys_to_virt_ptr(dst_pd_phys) as *mut PageTable)).entries[pd_idx];
                         core::ptr::write_volatile(
                             &mut dst_pde.0 as *mut u64,
                             (dst_pt_phys as u64 & ADDR_MASK) | flags,
@@ -616,7 +649,7 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
             let raw = src_pdpt.entries[pdpt_idx].0;
             let flags = raw & !ADDR_MASK;
             unsafe {
-                let dst_pdpte = &mut (*(dst_pdpt_phys as *mut PageTable)).entries[pdpt_idx];
+                let dst_pdpte = &mut (*(phys_to_virt_ptr(dst_pdpt_phys) as *mut PageTable)).entries[pdpt_idx];
                 core::ptr::write_volatile(
                     &mut dst_pdpte.0 as *mut u64,
                     (dst_pd_phys as u64 & ADDR_MASK) | flags,
@@ -628,7 +661,7 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
         let raw = src.entries[idx].0;
         let flags = raw & !ADDR_MASK;
         unsafe {
-            let dst_pml4e = &mut (*(dst_pml4_phys as *mut PageTable)).entries[idx];
+            let dst_pml4e = &mut (*(phys_to_virt_ptr(dst_pml4_phys) as *mut PageTable)).entries[idx];
             core::ptr::write_volatile(
                 &mut dst_pml4e.0 as *mut u64,
                 (dst_pdpt_phys as u64 & ADDR_MASK) | flags,
@@ -651,22 +684,22 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
 fn read_pte_in_pml4(pml4_phys: usize, virt: usize) -> Option<u64> {
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
 
-    let pml4 = unsafe { &*(pml4_phys as *const PageTable) };
+    let pml4 = unsafe { &*(phys_to_virt_ptr(pml4_phys) as *const PageTable) };
     let e = &pml4.entries[pml4_idx];
     if !e.is_present() { return None; }
 
-    let pdpt = unsafe { &*(e.addr() as *const PageTable) };
+    let pdpt = unsafe { &*(phys_to_virt_ptr(e.addr()) as *const PageTable) };
     let e = &pdpt.entries[pdpt_idx];
     if !e.is_present() { return None; }
 
-    let pd = unsafe { &*(e.addr() as *const PageTable) };
+    let pd = unsafe { &*(phys_to_virt_ptr(e.addr()) as *const PageTable) };
     let e = &pd.entries[pd_idx];
     if !e.is_present() { return None; }
 
     // 2 MiB huge page – treat as present
     if e.0 & (1 << 7) != 0 { return Some(e.0); }
 
-    let pt = unsafe { &*(e.addr() as *const PageTable) };
+    let pt = unsafe { &*(phys_to_virt_ptr(e.addr()) as *const PageTable) };
     let e = &pt.entries[pt_idx];
     if !e.is_present() { return None; }
 
@@ -744,17 +777,17 @@ fn verify_and_repair_clone(src_pml4: usize, dst_pml4: usize) {
 fn repair_leaf_pte(pml4_phys: usize, virt: usize, raw_pte: u64) {
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
 
-    let pml4 = unsafe { &*(pml4_phys as *const PageTable) };
+    let pml4 = unsafe { &*(phys_to_virt_ptr(pml4_phys) as *const PageTable) };
     if !pml4.entries[pml4_idx].is_present() { return; }
 
-    let pdpt = unsafe { &*(pml4.entries[pml4_idx].addr() as *const PageTable) };
+    let pdpt = unsafe { &*(phys_to_virt_ptr(pml4.entries[pml4_idx].addr()) as *const PageTable) };
     if !pdpt.entries[pdpt_idx].is_present() { return; }
 
-    let pd = unsafe { &*(pdpt.entries[pdpt_idx].addr() as *const PageTable) };
+    let pd = unsafe { &*(phys_to_virt_ptr(pdpt.entries[pdpt_idx].addr()) as *const PageTable) };
     if !pd.entries[pd_idx].is_present() { return; }
     if pd.entries[pd_idx].0 & (1 << 7) != 0 { return; } // huge page
 
-    let pt = unsafe { &mut *(pd.entries[pd_idx].addr() as *mut PageTable) };
+    let pt = unsafe { &mut *(phys_to_virt_ptr(pd.entries[pd_idx].addr()) as *mut PageTable) };
     unsafe {
         core::ptr::write_volatile(&mut pt.entries[pt_idx].0 as *mut u64, raw_pte);
     }
@@ -813,28 +846,28 @@ pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
 
     // Walk through each level and add USER bit
-    let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+    let pml4 = unsafe { &mut *(phys_to_virt_ptr(pml4_phys) as *mut PageTable) };
     let pml4e = &mut pml4.entries[pml4_idx];
     if !pml4e.is_present() {
         return Err(VmError::NotMapped);
     }
     pml4e.0 |= PageFlags::USER.bits();
 
-    let pdpt = unsafe { &mut *(pml4e.addr() as *mut PageTable) };
+    let pdpt = unsafe { &mut *(phys_to_virt_ptr(pml4e.addr()) as *mut PageTable) };
     let pdpte = &mut pdpt.entries[pdpt_idx];
     if !pdpte.is_present() {
         return Err(VmError::NotMapped);
     }
     pdpte.0 |= PageFlags::USER.bits();
 
-    let pd = unsafe { &mut *(pdpte.addr() as *mut PageTable) };
+    let pd = unsafe { &mut *(phys_to_virt_ptr(pdpte.addr()) as *mut PageTable) };
     let pde = &mut pd.entries[pd_idx];
     if !pde.is_present() {
         return Err(VmError::NotMapped);
     }
     pde.0 |= PageFlags::USER.bits();
 
-    let pt = unsafe { &mut *(pde.addr() as *mut PageTable) };
+    let pt = unsafe { &mut *(phys_to_virt_ptr(pde.addr()) as *mut PageTable) };
     let pte = &mut pt.entries[pt_idx];
     if !pte.is_present() {
         return Err(VmError::NotMapped);
@@ -963,7 +996,7 @@ fn walk_to_entry_with_root(
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
     let mut created = false;
 
-    let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+    let pml4 = unsafe { &mut *(phys_to_virt_ptr(pml4_phys) as *mut PageTable) };
     let pdpt = ensure_table(&mut pml4.entries[pml4_idx], create, &mut created)?;
     let pd = ensure_table(&mut pdpt.entries[pdpt_idx], create, &mut created)?;
     let pt = ensure_table(&mut pd.entries[pd_idx], create, &mut created)?;
@@ -980,7 +1013,7 @@ fn walk_to_entry_with_root_user(
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
     let mut created = false;
 
-    let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+    let pml4 = unsafe { &mut *(phys_to_virt_ptr(pml4_phys) as *mut PageTable) };
     let pdpt = ensure_table_user(&mut pml4.entries[pml4_idx], create, &mut created, user_access)?;
     let pd = ensure_table_user(&mut pdpt.entries[pdpt_idx], create, &mut created, user_access)?;
     let pt = ensure_table_user(&mut pd.entries[pd_idx], create, &mut created, user_access)?;
@@ -994,7 +1027,7 @@ fn ensure_table(
     created_flag: &mut bool,
 ) -> Result<&'static mut PageTable, VmError> {
     if entry.is_present() {
-        let table = unsafe { &mut *(entry.addr() as *mut PageTable) };
+        let table = unsafe { &mut *(phys_to_virt_ptr(entry.addr()) as *mut PageTable) };
         return Ok(table);
     }
 
@@ -1007,7 +1040,7 @@ fn ensure_table(
     entry.set(phys, PageFlags::PRESENT | PageFlags::WRITABLE);
     *created_flag = true;
 
-    Ok(unsafe { &mut *(phys as *mut PageTable) })
+    Ok(unsafe { &mut *(phys_to_virt_ptr(phys) as *mut PageTable) })
 }
 
 fn ensure_table_user(
@@ -1021,7 +1054,7 @@ fn ensure_table_user(
         if user_access && (entry.0 & PageFlags::USER.bits()) == 0 {
             entry.0 |= PageFlags::USER.bits();
         }
-        let table = unsafe { &mut *(entry.addr() as *mut PageTable) };
+        let table = unsafe { &mut *(phys_to_virt_ptr(entry.addr()) as *mut PageTable) };
         return Ok(table);
     }
 
@@ -1041,7 +1074,7 @@ fn ensure_table_user(
     entry.set(phys, table_flags);
     *created_flag = true;
 
-    Ok(unsafe { &mut *(phys as *mut PageTable) })
+    Ok(unsafe { &mut *(phys_to_virt_ptr(phys) as *mut PageTable) })
 }
 
 fn is_mappable_ram(typ: u32) -> bool {

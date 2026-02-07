@@ -46,7 +46,7 @@ use core::mem::size_of;
 use core::ptr;
 
 use crate::boot::ExecutableImage;
-use crate::mm::{addrspace, pmm};
+use crate::mm::{addrspace, pmm, vm};
 use crate::mm::addrspace::{AddressSpaceId, USER_CANONICAL_MAX};
 use crate::mm::vm::PageFlags;
 use crate::thread::ThreadId;
@@ -367,8 +367,9 @@ fn map_segment(
     let pages = size / pmm::PAGE_SIZE;
     let phys_base = pmm::alloc_pages_zeroed(pages).ok_or(ExecError::OutOfMemory)?;
 
+    // Use higher-half address to avoid broken identity mapping in user address spaces
     unsafe {
-        ptr::copy_nonoverlapping(data.as_ptr(), phys_base as *mut u8, data.len());
+        ptr::copy_nonoverlapping(data.as_ptr(), vm::phys_to_virt_ptr(phys_base) as *mut u8, data.len());
     }
 
     match addrspace::map_region(address_space, owner, virt_start, phys_base, size, flags) {
