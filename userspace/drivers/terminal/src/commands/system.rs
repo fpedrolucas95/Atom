@@ -14,6 +14,32 @@ const OS_VERSION: &str = "0.1.0";
 const OS_CODENAME: &str = "Helium";
 const KERNEL_VERSION: &str = "0.1.0-microkernel";
 
+const ASCII_LOGO: &str = r#"
+                          vmiddirv
+                       rWAAAAAAAAAA6v
+                     vNAAAAAAAAAAAAAA1
+                    vIAAAA0v    r1AAAAN
+                    WAAAEr        mEAAANv
+                   vAAAAd          1AAAAAr
+                   vAAAA1          RAAAAAAm
+                    dAAAAd        1AAAAAAAA0
+                 v   1AAAA6      RAAAAi0AAAA1
+              vRAAAi  dAAAAW   vEAAAAi  dAAAARv
+             dAAAAEm   iAAAAi vEAAAIv    mEAAAEv
+            RAAAA1      v0Wi iAAAANv      vIAAAEm
+          mIAAAEi           0AAAAW         vRAAAAd
+         6AAAANr           WAAAA6            1AAAA0
+       vIAAAAd           vIAAAAd              0AAAAW
+       1AAAIv            IAAAEr                iEAAAd
+      vNAAAd           mAAAAEr  dIERv           RAAAR
+      vNAAAd          iAAAAR    IAAAAm          RAAAW
+       1AAAEm        1AAAAW      RAAAEi        dAAAEi
+        NAAAAIm    0AAAAA0        RAAAAIi    dEAAAA1
+         0AAAAAAAAAAAAAIr          dEAAAAAAAAAAAAIm
+           iRAAAAAAAE1r              mWEAAAAAAEWm
+                v
+"#;
+
 /// help command - display available commands or specific command help
 pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     if let Some(topic) = cmd.arg(0) {
@@ -251,34 +277,67 @@ pub fn cmd_echo(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
 /// sysinfo command - display system information summary
 pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
-    ctx.println_colored("System Information", Theme::TEXT_INFO);
-    ctx.println("==================");
-    ctx.println("");
 
-    // OS info
-    ctx.print("OS:           ");
-    ctx.println_colored(OS_NAME, Theme::PROMPT_USER);
-
-    ctx.print("Version:      ");
-    ctx.println(OS_VERSION);
-
-    ctx.print("Kernel:       ");
-    ctx.println(KERNEL_VERSION);
-
-    ctx.print("Architecture: ");
-    ctx.println("x86_64");
+    // Print ASCII Logo
+    for line in ASCII_LOGO.lines() {
+        if !line.is_empty() {
+            ctx.println_colored(line, Theme::TEXT_INFO);
+        }
+    }
 
     ctx.println("");
 
-    // Uptime
-    let mut buffer = [0u8; 64];
-    let len = ctx.ipc.format_uptime(&mut buffer);
-    let uptime = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
-    ctx.print("Uptime:       ");
-    ctx.println(uptime);
+    // OS and Kernel info from environment (virtual file)
+    let mut version_buf = [0u8; 128];
+    if let Some(len) = ctx.ipc.read_file("/etc/version", &mut version_buf) {
+        let version_str = unsafe { core::str::from_utf8_unchecked(&version_buf[..len]) };
+        for line in version_str.lines() {
+            if !line.is_empty() {
+                ctx.println(line);
+            }
+        }
+    } else {
+        ctx.print("OS:           ");
+        ctx.println_colored(OS_NAME, Theme::PROMPT_USER);
+        ctx.print("Kernel:       ");
+        ctx.println(KERNEL_VERSION);
+    }
+
+    // Packages (loaded ATXF)
+    let pkg_count = ctx.ipc.count_processes();
+    ctx.print("Packages:     ");
+    let mut num_buf = [0u8; 16];
+    let n = format_number(pkg_count as u64, &mut num_buf);
+    ctx.print(unsafe { core::str::from_utf8_unchecked(&num_buf[..n]) });
+    ctx.print(" (ATXF loaded: ");
+
+    let mut first = true;
+    ctx.ipc.query_processes(|_, name, _| {
+        if !first {
+            ctx.print(", ");
+        }
+        ctx.print(name);
+        first = false;
+    });
+    ctx.println(")");
+
+    // Resolution
+    if let Some((w, h)) = ctx.ipc.get_resolution() {
+        ctx.print("Resolution:   ");
+        let mut res_buf = [0u8; 32];
+        let mut pos = format_number(w as u64, &mut res_buf);
+        res_buf[pos] = b'x';
+        pos += 1;
+        pos += format_number(h as u64, &mut res_buf[pos..]);
+        ctx.println(unsafe { core::str::from_utf8_unchecked(&res_buf[..pos]) });
+    }
+
+    // CPU
+    ctx.print("CPU:          ");
+    ctx.println("x86_64 (Atom Core)");
 
     // Memory
-    let (total, used, free) = ctx.ipc.query_memory();
+    let (total, used, _) = ctx.ipc.query_memory();
     let mut mem_line = [0u8; 64];
     let mut pos = 0;
     pos += format_number(used / 1024, &mut mem_line[pos..]);
@@ -294,6 +353,13 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     let mem_str = unsafe { core::str::from_utf8_unchecked(&mem_line[..pos]) };
     ctx.print("Memory:       ");
     ctx.println(mem_str);
+
+    // Uptime
+    let mut uptime_buf = [0u8; 64];
+    let len = ctx.ipc.format_uptime(&mut uptime_buf);
+    let uptime = unsafe { core::str::from_utf8_unchecked(&uptime_buf[..len]) };
+    ctx.print("Uptime:       ");
+    ctx.println(uptime);
 
     ctx.println("");
 

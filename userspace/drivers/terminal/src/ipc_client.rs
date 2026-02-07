@@ -101,6 +101,16 @@ impl IpcClient {
         get_ticks()
     }
 
+    /// Get screen resolution via syscall
+    pub fn get_resolution(&self) -> Option<(u32, u32)> {
+        atom_syscall::graphics::get_framebuffer().map(|fb| (fb.width, fb.height))
+    }
+
+    /// Get total number of processes
+    pub fn count_processes(&self) -> usize {
+        atom_syscall::process::get_process_count()
+    }
+
     /// Get system uptime formatted as string
     pub fn format_uptime(&self, buffer: &mut [u8]) -> usize {
         let ticks = get_ticks();
