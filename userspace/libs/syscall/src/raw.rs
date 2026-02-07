@@ -59,6 +59,7 @@ pub mod numbers {
     pub const SYS_READ_KLOG: u64 = 49;
     pub const SYS_MOUSE_GET_ID: u64 = 50;
     pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51;
+    pub const SYS_GET_CPU_BRAND: u64 = 52;
 }
 
 /// Raw syscall with no arguments
