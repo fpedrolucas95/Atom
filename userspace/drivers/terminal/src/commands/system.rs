@@ -198,10 +198,7 @@ pub fn cmd_uptime(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Com
     CommandResult::Ok
 }
 
-/// date command - display current date/time
 pub fn cmd_date(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    // In a full implementation, we would query an RTC service
-    // For now, show uptime-based timestamp
     let ticks = get_ticks();
     let total_seconds = ticks / 100;
 
@@ -212,7 +209,6 @@ pub fn cmd_date(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
     let mut time_str = [0u8; 32];
     let mut pos = 0;
 
-    // Format time
     if hours < 10 {
         time_str[pos] = b'0';
         pos += 1;
@@ -250,7 +246,6 @@ pub fn cmd_date(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
     CommandResult::Ok
 }
 
-/// echo command - display text
 pub fn cmd_echo(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     let mut output = [0u8; 256];
     let mut pos = 0;
@@ -274,11 +269,9 @@ pub fn cmd_echo(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
     CommandResult::Ok
 }
 
-/// sysinfo command - display system information summary
 pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
 
-    // Print ASCII Logo
     for line in ASCII_LOGO.lines() {
         if !line.is_empty() {
             ctx.println_colored(line, Theme::TEXT_INFO);
@@ -287,7 +280,6 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
 
     ctx.println("");
 
-    // OS and Kernel info from environment (virtual file)
     let mut version_buf = [0u8; 128];
     if let Some(len) = ctx.ipc.read_file("/etc/version", &mut version_buf) {
         let version_str = unsafe { core::str::from_utf8_unchecked(&version_buf[..len]) };
@@ -303,25 +295,12 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
         ctx.println(KERNEL_VERSION);
     }
 
-    // Packages (loaded ATXF)
     let pkg_count = ctx.ipc.count_processes();
     ctx.print("Packages:     ");
     let mut num_buf = [0u8; 16];
     let n = format_number(pkg_count as u64, &mut num_buf);
-    ctx.print(unsafe { core::str::from_utf8_unchecked(&num_buf[..n]) });
-    ctx.print(" (ATXF loaded: ");
+    ctx.println(unsafe { core::str::from_utf8_unchecked(&num_buf[..n]) });
 
-    let mut first = true;
-    ctx.ipc.query_processes(|_, name, _| {
-        if !first {
-            ctx.print(", ");
-        }
-        ctx.print(name);
-        first = false;
-    });
-    ctx.println(")");
-
-    // Resolution
     if let Some((w, h)) = ctx.ipc.get_resolution() {
         ctx.print("Resolution:   ");
         let mut res_buf = [0u8; 32];
@@ -332,7 +311,6 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
         ctx.println(unsafe { core::str::from_utf8_unchecked(&res_buf[..pos]) });
     }
 
-    // CPU
     ctx.print("CPU:          ");
     let mut cpu_buf = [0u8; 64];
     let cpu_len = ctx.ipc.get_cpu_brand(&mut cpu_buf);
@@ -360,7 +338,6 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     ctx.print("Memory:       ");
     ctx.println(mem_str);
 
-    // Uptime
     let mut uptime_buf = [0u8; 64];
     let len = ctx.ipc.format_uptime(&mut uptime_buf);
     let uptime = unsafe { core::str::from_utf8_unchecked(&uptime_buf[..len]) };
@@ -372,7 +349,6 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     CommandResult::Ok
 }
 
-/// log command - display system log
 pub fn cmd_log(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
     ctx.println_colored("System Log", Theme::TEXT_INFO);
@@ -388,7 +364,6 @@ pub fn cmd_log(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
     CommandResult::Ok
 }
 
-/// ports command - list IPC ports (diagnostic)
 pub fn cmd_ports(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
     ctx.println_colored("IPC Ports", Theme::TEXT_INFO);
@@ -407,7 +382,6 @@ pub fn cmd_ports(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comm
     CommandResult::Ok
 }
 
-/// caps command - list capabilities (diagnostic)
 pub fn cmd_caps(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
     ctx.println_colored("Process Capabilities", Theme::TEXT_INFO);
@@ -422,7 +396,6 @@ pub fn cmd_caps(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
     CommandResult::Ok
 }
 
-/// Format a number into a buffer
 fn format_number(mut n: u64, buffer: &mut [u8]) -> usize {
     if buffer.is_empty() {
         return 0;
