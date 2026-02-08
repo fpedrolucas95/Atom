@@ -43,10 +43,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const HEAP_SIZE: usize = 1024 * 1024; // 1 MB heap
-
 struct BumpAllocator {
-    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    start: AtomicUsize,
+    size: AtomicUsize,
     next: AtomicUsize,
 }
 
@@ -55,9 +54,16 @@ unsafe impl Sync for BumpAllocator {}
 impl BumpAllocator {
     const fn new() -> Self {
         Self {
-            heap: UnsafeCell::new([0; HEAP_SIZE]),
+            start: AtomicUsize::new(0),
+            size: AtomicUsize::new(0),
             next: AtomicUsize::new(0),
         }
+    }
+
+    fn init(&self, start: usize, size: usize) {
+        self.start.store(start, Ordering::SeqCst);
+        self.size.store(size, Ordering::SeqCst);
+        self.next.store(0, Ordering::SeqCst);
     }
 }
 
@@ -66,19 +72,26 @@ unsafe impl GlobalAlloc for BumpAllocator {
         let size = layout.size();
         let align = layout.align().max(16);
 
+        let heap_start = self.start.load(Ordering::Relaxed);
+        let heap_size = self.size.load(Ordering::Relaxed);
+
+        if heap_start == 0 || heap_size == 0 {
+            return core::ptr::null_mut();
+        }
+
         loop {
             let current = self.next.load(Ordering::Relaxed);
             let aligned = (current + align - 1) & !(align - 1);
             let new_next = aligned + size;
 
-            if new_next > HEAP_SIZE {
+            if new_next > heap_size {
                 return core::ptr::null_mut();
             }
 
             if self.next.compare_exchange_weak(
                 current, new_next, Ordering::SeqCst, Ordering::Relaxed
             ).is_ok() {
-                return (self.heap.get() as *mut u8).add(aligned);
+                return (heap_start as *mut u8).add(aligned);
             }
         }
     }
@@ -100,7 +113,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId};
+use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags, shared_region_create, shared_region_map, get_framebuffer};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{yield_now, exit};
@@ -494,10 +507,6 @@ impl WindowManager {
 struct CursorState {
     x: i32,
     y: i32,
-    saved_region: [u32; 16 * 16],
-    saved_x: i32,
-    saved_y: i32,
-    has_saved: bool,
     visible: bool,
 }
 
@@ -506,10 +515,6 @@ impl CursorState {
         Self {
             x: (width / 2) as i32,
             y: (height / 2) as i32,
-            saved_region: [0; 16 * 16],
-            saved_x: 0,
-            saved_y: 0,
-            has_saved: false,
             visible: true,
         }
     }
@@ -517,54 +522,6 @@ impl CursorState {
     fn apply_delta(&mut self, dx: i32, dy: i32, width: u32, height: u32) {
         self.x = (self.x + dx).clamp(0, (width - 1) as i32);
         self.y = (self.y - dy).clamp(0, (height - 1) as i32); // Y inverted in PS/2
-    }
-
-    fn save_region(&mut self, fb: &Framebuffer) {
-        self.saved_x = self.x;
-        self.saved_y = self.y;
-        self.has_saved = true;
-
-        let fb_addr = fb.address();
-        let stride = fb.stride();
-        let bpp = fb.bytes_per_pixel();
-
-        for row in 0..16u32 {
-            for col in 0..16u32 {
-                let px = (self.x as u32).wrapping_add(col);
-                let py = (self.y as u32).wrapping_add(row);
-
-                if px < fb.width() && py < fb.height() {
-                    let offset = (py * stride + px) as usize * bpp;
-                    let ptr = (fb_addr + offset) as *const u32;
-                    self.saved_region[(row * 16 + col) as usize] = unsafe { ptr.read_volatile() };
-                }
-            }
-        }
-    }
-
-    fn restore_region(&self, fb: &Framebuffer) {
-        if !self.has_saved {
-            return;
-        }
-
-        let fb_addr = fb.address();
-        let stride = fb.stride();
-        let bpp = fb.bytes_per_pixel();
-
-        for row in 0..16u32 {
-            for col in 0..16u32 {
-                let px = (self.saved_x as u32).wrapping_add(col);
-                let py = (self.saved_y as u32).wrapping_add(row);
-
-                if px < fb.width() && py < fb.height() {
-                    let offset = (py * stride + px) as usize * bpp;
-                    let ptr = (fb_addr + offset) as *mut u32;
-                    unsafe {
-                        ptr.write_volatile(self.saved_region[(row * 16 + col) as usize]);
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -611,6 +568,8 @@ enum DragOperation {
 
 struct Compositor {
     fb: Framebuffer,
+    backbuffer_fb: Framebuffer,
+    _backbuffer: Vec<u32>,
     wm: WindowManager,
     cursor: CursorState,
     event_port: PortId,
@@ -691,8 +650,20 @@ impl Compositor {
             color: Color::new(163, 190, 140),
         });
 
+        let fb_size_pixels = (fb.stride() * fb.height()) as usize;
+        let mut backbuffer = alloc::vec![0u32; fb_size_pixels];
+        let backbuffer_fb = Framebuffer::new_custom(
+            backbuffer.as_mut_ptr() as usize,
+            fb.width(),
+            fb.height(),
+            fb.stride(),
+            fb.bytes_per_pixel() as u32,
+        ).expect("Failed to create backbuffer framebuffer");
+
         Self {
             fb,
+            backbuffer_fb,
+            _backbuffer: backbuffer,
             wm: WindowManager::new(),
             cursor: CursorState::new(width, height),
             event_port,
@@ -795,10 +766,8 @@ impl Compositor {
         // Poll mouse
         while let Some(event) = self.mouse_driver.poll_event() {
             // Update cursor position
-            self.cursor.restore_region(&self.fb);
             self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
-            self.cursor.save_region(&self.fb);
-            self.draw_cursor();
+            self.dirty = true;
 
             // Handle button states
             if event.left_button {
@@ -931,7 +900,6 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + libipc::messages::SurfacePresentMsg::SIZE {
                     if let Some(msg) = libipc::messages::SurfacePresentMsg::from_bytes(&data[payload_start..]) {
-                        log("Compositor: Received SurfacePresent, triggering redraw");
                         if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                             window.content_dirty = true;
                             self.dirty = true;
@@ -1051,10 +1019,8 @@ impl Compositor {
             MessageType::MouseMove => {
                 let payload_start = MessageHeader::SIZE;
                 if let Some(event) = MouseMoveEvent::from_bytes(&data[payload_start..]) {
-                    self.cursor.restore_region(&self.fb);
                     self.cursor.apply_delta(event.dx as i32, event.dy as i32, self.fb.width(), self.fb.height());
-                    self.cursor.save_region(&self.fb);
-                    self.draw_cursor();
+                    self.dirty = true;
                 }
             }
             MessageType::MouseButtonDown => {
@@ -1082,7 +1048,6 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
                     if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
-                        log("Compositor: Received SurfacePresent, triggering redraw");
                         // Mark the specific window as dirty
                         if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                             window.content_dirty = true;
@@ -1622,10 +1587,11 @@ impl Compositor {
     }
 
     fn draw_all(&mut self) {
-        self.cursor.restore_region(&self.fb);
+        // Redraw everything to the backbuffer
+        log("Compositor: Performing coalesced redraw");
 
         // Desktop background
-        self.fb.fill_rect(0, 0, self.fb.width(), self.fb.height(), self.desktop_bg);
+        self.backbuffer_fb.fill_rect(0, 0, self.backbuffer_fb.width(), self.backbuffer_fb.height(), self.desktop_bg);
 
         // Desktop Icons
         self.draw_desktop_icons();
@@ -1653,9 +1619,11 @@ impl Compositor {
             self.draw_wallpaper_picker();
         }
 
-        // Cursor
-        self.cursor.save_region(&self.fb);
+        // Cursor (now composed directly in backbuffer)
         self.draw_cursor();
+
+        // Final atomic presentation: Blit backbuffer to hardware framebuffer
+        self.backbuffer_fb.blit(&self.fb);
     }
 
     fn draw_wallpaper_picker(&self) {
@@ -1665,19 +1633,19 @@ impl Compositor {
         let ph = self.wallpaper_picker.height;
 
         // Shadow
-        self.fb.fill_rect(px + 4, py + 4, pw, ph, theme::SHADOW);
+        self.backbuffer_fb.fill_rect(px + 4, py + 4, pw, ph, theme::SHADOW);
 
         // Background
-        self.fb.fill_rect(px, py, pw, ph, theme::WINDOW_BG);
-        self.fb.draw_rect(px, py, pw, ph, theme::WINDOW_BORDER);
+        self.backbuffer_fb.fill_rect(px, py, pw, ph, theme::WINDOW_BG);
+        self.backbuffer_fb.draw_rect(px, py, pw, ph, theme::WINDOW_BORDER);
 
         // Header
-        self.fb.fill_rect(px + 1, py + 1, pw - 2, 32, theme::WINDOW_HEADER_FOCUSED);
-        self.fb.draw_string(px + 12, py + 8, "Change Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
+        self.backbuffer_fb.fill_rect(px + 1, py + 1, pw - 2, 32, theme::WINDOW_HEADER_FOCUSED);
+        self.backbuffer_fb.draw_string(px + 12, py + 8, "Change Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
 
         // Close button (X)
-        self.fb.fill_rect(px + pw - 24, py + 8, 16, 16, Color::new(191, 97, 106));
-        self.fb.draw_string(px + pw - 20, py + 8, "x", Color::WHITE, Color::new(191, 97, 106));
+        self.backbuffer_fb.fill_rect(px + pw - 24, py + 8, 16, 16, Color::new(191, 97, 106));
+        self.backbuffer_fb.draw_string(px + pw - 20, py + 8, "x", Color::WHITE, Color::new(191, 97, 106));
 
         // Color tiles
         let start_x = px + 20;
@@ -1689,8 +1657,8 @@ impl Compositor {
             let tx = start_x + (i as u32 % 4) * (tile_size + spacing);
             let ty = start_y + (i as u32 / 4) * (tile_size + spacing);
 
-            self.fb.fill_rect(tx, ty, tile_size, tile_size, *color);
-            self.fb.draw_rect(tx, ty, tile_size, tile_size, theme::WINDOW_BORDER);
+            self.backbuffer_fb.fill_rect(tx, ty, tile_size, tile_size, *color);
+            self.backbuffer_fb.draw_rect(tx, ty, tile_size, tile_size, theme::WINDOW_BORDER);
         }
     }
 
@@ -1700,15 +1668,15 @@ impl Compositor {
         let menu_h = self.context_menu.items.len() as u32 * item_h;
 
         // Shadow
-        self.fb.fill_rect(self.context_menu.x as u32 + 2, self.context_menu.y as u32 + 2, menu_w, menu_h, theme::SHADOW);
+        self.backbuffer_fb.fill_rect(self.context_menu.x as u32 + 2, self.context_menu.y as u32 + 2, menu_w, menu_h, theme::SHADOW);
 
         // Background
-        self.fb.fill_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::PANEL_BG);
-        self.fb.draw_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::WINDOW_BORDER);
+        self.backbuffer_fb.fill_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::PANEL_BG);
+        self.backbuffer_fb.draw_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::WINDOW_BORDER);
 
         for (i, item) in self.context_menu.items.iter().enumerate() {
             let iy = self.context_menu.y as u32 + (i as u32 * item_h);
-            self.fb.draw_string(self.context_menu.x as u32 + 8, iy + 4, item, theme::PANEL_TEXT, theme::PANEL_BG);
+            self.backbuffer_fb.draw_string(self.context_menu.x as u32 + 8, iy + 4, item, theme::PANEL_TEXT, theme::PANEL_BG);
         }
     }
 
@@ -1728,38 +1696,38 @@ impl Compositor {
             let size = 48u32;
 
             // Icon box shadow
-            self.fb.fill_rect(ix + 2, iy + 2, size, size, theme::SHADOW);
+            self.backbuffer_fb.fill_rect(ix + 2, iy + 2, size, size, theme::SHADOW);
             // Icon box
-            self.fb.fill_rect(ix, iy, size, size, icon.color);
-            self.fb.draw_rect(ix, iy, size, size, theme::WINDOW_BORDER);
+            self.backbuffer_fb.fill_rect(ix, iy, size, size, icon.color);
+            self.backbuffer_fb.draw_rect(ix, iy, size, size, theme::WINDOW_BORDER);
 
             // Icon symbol (generic square for now)
-            self.fb.draw_rect(ix + 12, iy + 12, 24, 24, Color::WHITE);
+            self.backbuffer_fb.draw_rect(ix + 12, iy + 12, 24, 24, Color::WHITE);
 
             // Label
             let label_len = icon.label.len() as i32 * 8;
             let lx = (ix as i32 + (size as i32 - label_len) / 2).max(0) as u32;
-            self.fb.draw_string(lx as u32, iy + size + 8, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
+            self.backbuffer_fb.draw_string(lx as u32, iy + size + 8, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
         }
     }
 
     fn draw_panel(&self) {
-        let width = self.fb.width();
+        let width = self.backbuffer_fb.width();
 
         // Panel background
-        self.fb.fill_rect(0, 0, width, 28, theme::PANEL_BG);
+        self.backbuffer_fb.fill_rect(0, 0, width, 28, theme::PANEL_BG);
         // Bottom border for panel
-        self.fb.fill_rect(0, 27, width, 1, theme::WINDOW_BORDER);
+        self.backbuffer_fb.fill_rect(0, 27, width, 1, theme::WINDOW_BORDER);
 
         // Logo
-        self.fb.draw_string(16, 6, "ATOM", theme::ACCENT, theme::PANEL_BG);
+        self.backbuffer_fb.draw_string(16, 6, "ATOM", theme::ACCENT, theme::PANEL_BG);
 
         // Status
-        self.fb.draw_string(70, 6, "|  OS", theme::PANEL_TEXT, theme::PANEL_BG);
+        self.backbuffer_fb.draw_string(70, 6, "|  OS", theme::PANEL_TEXT, theme::PANEL_BG);
 
         // Clock (right side)
         let clock_x = width.saturating_sub(64);
-        self.fb.draw_string(clock_x, 6, "12:00", theme::PANEL_TEXT, theme::PANEL_BG);
+        self.backbuffer_fb.draw_string(clock_x, 6, "12:00", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
     fn draw_window(&self, window: &Window) {
@@ -1774,11 +1742,11 @@ impl Compositor {
 
         // Shadow (only if not maximized)
         if window.state != WindowState::Maximized {
-            self.fb.fill_rect(x + 2, y + 2, w + 2, h + 2, theme::SHADOW);
+            self.backbuffer_fb.fill_rect(x + 2, y + 2, w + 2, h + 2, theme::SHADOW);
         }
 
         // Outer Border
-        self.fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
+        self.backbuffer_fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
 
         // Header (Title Bar)
         let header_color = if window.focused {
@@ -1786,12 +1754,12 @@ impl Compositor {
         } else {
             theme::WINDOW_HEADER
         };
-        self.fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
+        self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
                          w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
                          header_color);
 
         // Title
-        self.fb.draw_string(x + 12, y + 8, &window.title, theme::PANEL_TEXT, header_color);
+        self.backbuffer_fb.draw_string(x + 12, y + 8, &window.title, theme::PANEL_TEXT, header_color);
 
         // Window controls (buttons)
         let btn_y = y + 8;
@@ -1801,33 +1769,33 @@ impl Compositor {
         let min_x = max_x - 22;
 
         // Close button (Red)
-        self.fb.fill_rect(close_x, btn_y, btn_size, btn_size, Color::new(191, 97, 106));
+        self.backbuffer_fb.fill_rect(close_x, btn_y, btn_size, btn_size, Color::new(191, 97, 106));
         // Maximize button (Green)
-        self.fb.fill_rect(max_x, btn_y, btn_size, btn_size, Color::new(163, 190, 140));
+        self.backbuffer_fb.fill_rect(max_x, btn_y, btn_size, btn_size, Color::new(163, 190, 140));
         // Minimize button (Yellow)
-        self.fb.fill_rect(min_x, btn_y, btn_size, btn_size, Color::new(235, 203, 139));
+        self.backbuffer_fb.fill_rect(min_x, btn_y, btn_size, btn_size, Color::new(235, 203, 139));
 
         // Window content area background
         if window.surface.is_none() {
-            self.fb.fill_rect(window.content_x(), window.content_y(),
+            self.backbuffer_fb.fill_rect(window.content_x(), window.content_y(),
                              window.content_width(), window.content_height(),
                              theme::WINDOW_BG);
         }
 
         // Composite shared surface content into window
         if let Some(ref surface) = window.surface {
-            surface.blit_to_framebuffer(&self.fb, window.content_x(), window.content_y());
+            surface.blit_to_framebuffer(&self.backbuffer_fb, window.content_x(), window.content_y());
         }
 
         // Inner border around content
-        self.fb.draw_rect(window.content_x() - 1, window.content_y() - 1,
+        self.backbuffer_fb.draw_rect(window.content_x() - 1, window.content_y() - 1,
                          window.content_width() + 2, window.content_height() + 2,
                          theme::WINDOW_BORDER);
     }
 
     fn draw_dock(&self) {
-        let width = self.fb.width();
-        let height = self.fb.height();
+        let width = self.backbuffer_fb.width();
+        let height = self.backbuffer_fb.height();
 
         let dock_w = 320u32;
         let dock_h = 56u32;
@@ -1835,11 +1803,11 @@ impl Compositor {
         let dock_y = height.saturating_sub(dock_h + 12);
 
         // Dock shadow
-        self.fb.fill_rect(dock_x + 2, dock_y + 2, dock_w, dock_h, theme::SHADOW);
+        self.backbuffer_fb.fill_rect(dock_x + 2, dock_y + 2, dock_w, dock_h, theme::SHADOW);
 
         // Dock background
-        self.fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
-        self.fb.draw_rect(dock_x, dock_y, dock_w, dock_h, theme::WINDOW_BORDER);
+        self.backbuffer_fb.fill_rect(dock_x, dock_y, dock_w, dock_h, theme::DOCK_BG);
+        self.backbuffer_fb.draw_rect(dock_x, dock_y, dock_w, dock_h, theme::WINDOW_BORDER);
 
         // Dock icons
         let icons = [
@@ -1859,13 +1827,13 @@ impl Compositor {
             let ix = start_x + (i as u32 * (icon_size + padding));
 
             // Icon background
-            self.fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
+            self.backbuffer_fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
 
             // Icon label (centered)
             let label_len = label.len() as u32 * 8;
             let lx = ix + (icon_size - label_len) / 2;
             let ly = icon_y + (icon_size - 16) / 2;
-            self.fb.draw_string(lx, ly, label, Color::WHITE, *color);
+            self.backbuffer_fb.draw_string(lx, ly, label, Color::WHITE, *color);
         }
     }
 
@@ -1893,10 +1861,10 @@ impl Compositor {
             for (col, &pixel) in cols.iter().enumerate() {
                 let px = self.cursor.x as u32 + col as u32;
                 let py = self.cursor.y as u32 + row as u32;
-                if px < self.fb.width() && py < self.fb.height() {
+                if px < self.backbuffer_fb.width() && py < self.backbuffer_fb.height() {
                     match pixel {
-                        1 => self.fb.draw_pixel(px, py, theme::CURSOR_OUTLINE),
-                        2 => self.fb.draw_pixel(px, py, theme::CURSOR_FILL),
+                        1 => self.backbuffer_fb.draw_pixel(px, py, theme::CURSOR_OUTLINE),
+                        2 => self.backbuffer_fb.draw_pixel(px, py, theme::CURSOR_FILL),
                         _ => {}
                     }
                 }
@@ -1926,6 +1894,40 @@ fn main() -> ! {
     log("Atom Desktop Environment v1.0");
     log("Microkernel architecture - all UI in userspace");
 
+    // 1. Get framebuffer dimensions to size our heap
+    let fb_info = match get_framebuffer() {
+        Some(info) => info,
+        None => {
+            log("Desktop: Failed to get framebuffer info");
+            exit(1);
+        }
+    };
+
+    // 2. Calculate heap size: Framebuffer size + 8MB margin for apps and internal state
+    let fb_size = fb_info.stride as usize * fb_info.height as usize * fb_info.bytes_per_pixel as usize;
+    let heap_size = fb_size + 8 * 1024 * 1024;
+
+    // 3. Allocate and initialize dynamic heap
+    let region_id = match shared_region_create(heap_size) {
+        Ok(id) => id,
+        Err(_) => {
+            log("Desktop: Failed to create heap region");
+            exit(1);
+        }
+    };
+
+    let heap_start = match shared_region_map(region_id, 0, SharedMemFlags::READ_WRITE) {
+        Ok(addr) => addr,
+        Err(_) => {
+            log("Desktop: Failed to map heap region");
+            exit(1);
+        }
+    };
+
+    ALLOCATOR.init(heap_start, heap_size);
+    log("Desktop: Dynamic heap initialized");
+
+    // 4. Initialize compositor
     let fb = match Framebuffer::new() {
         Some(fb) => fb,
         None => {
