@@ -15,22 +15,6 @@ default rel
 
 section .text
 
-; Debug variables for IRET frame inspection
-section .bss
-align 8
-global DEBUG_IRET_RIP
-global DEBUG_IRET_CS
-global DEBUG_IRET_RFLAGS
-global DEBUG_IRET_RSP
-global DEBUG_IRET_SS
-global DEBUG_IRET_KERNEL_RSP
-DEBUG_IRET_RIP:         resq 1
-DEBUG_IRET_CS:          resq 1
-DEBUG_IRET_RFLAGS:      resq 1
-DEBUG_IRET_RSP:         resq 1
-DEBUG_IRET_SS:          resq 1
-DEBUG_IRET_KERNEL_RSP:  resq 1
-
 section .text
 
 ; =================================================
@@ -310,14 +294,9 @@ switch_context:
     mov rax, cr3
     mov [r12 + OFF_CR3], rax
 
-    ; Clean up our stack frame
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbp
-
-    ; Jump to common restore path
+    ; Jump to common restore path. r15 already contains the new context pointer.
+    ; We don't pop here because we are switching stacks/contexts anyway.
+    ; The original registers were saved in the 'old' context.
     jmp switch_to_context_internal
 
 ; =================================================
@@ -460,24 +439,5 @@ switch_to_context_internal:
     mov r13, [r15 + OFF_R13]
     mov r14, [r15 + OFF_R14]
     mov r15, [r15 + OFF_R15]
-
-    ; DEBUG: Save frame values AFTER restoring regs (use stack directly)
-    ; At this point all GPRs are restored, so we read directly from stack
-    ; and write to globals using the last instruction before IRETQ
-    push rax
-    mov rax, rsp
-    add rax, 8                      ; account for push rax
-    mov [rel DEBUG_IRET_KERNEL_RSP], rax
-    mov rax, [rsp + 8]              ; [original_rsp+0] = RIP
-    mov [rel DEBUG_IRET_RIP], rax
-    mov rax, [rsp + 16]             ; [original_rsp+8] = CS
-    mov [rel DEBUG_IRET_CS], rax
-    mov rax, [rsp + 24]             ; [original_rsp+16] = RFLAGS
-    mov [rel DEBUG_IRET_RFLAGS], rax
-    mov rax, [rsp + 32]             ; [original_rsp+24] = RSP
-    mov [rel DEBUG_IRET_RSP], rax
-    mov rax, [rsp + 40]             ; [original_rsp+32] = SS
-    mov [rel DEBUG_IRET_SS], rax
-    pop rax
 
     iretq
