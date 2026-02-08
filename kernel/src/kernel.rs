@@ -110,6 +110,7 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 
     serial::init();
     system::init(boot_info.cpu, boot_info.boot_method);
+    arch::setup_fpu();
 
     log_info!(LOG_KERNEL_INIT, "{}", build_info::BOOT_BANNER);
 

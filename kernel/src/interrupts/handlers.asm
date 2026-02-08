@@ -9,6 +9,7 @@ section .text
 ; External Rust handler functions
 extern rust_exception_handler
 extern rust_unexpected_interrupt_handler
+extern rust_timer_handler
 
 ; ---------------------------------------------------------------------------
 ; Catch-all interrupt stubs
@@ -136,6 +137,56 @@ EXCEPTION_HANDLER_NO_ERR 18   ; #MC Machine Check
 EXCEPTION_HANDLER_NO_ERR 19   ; #XM SIMD FP
 EXCEPTION_HANDLER_NO_ERR 20   ; #VE Virtualization
 EXCEPTION_HANDLER_ERR    21   ; #CP Control Protection
+
+; ---------------------------------------------------------------------------
+; Specialized timer interrupt stub
+; ---------------------------------------------------------------------------
+
+global timer_interrupt_stub
+timer_interrupt_stub:
+    push qword 0          ; dummy error code
+    push qword 32         ; TIMER_INTERRUPT_VECTOR
+
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rcx, rsp           ; arg0: *InterruptFrame
+
+    sub rsp, 32            ; Shadow space
+    call rust_timer_handler
+    add rsp, 32
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    add rsp, 16            ; drop vector + error_code
+    iretq
 
 ; ---------------------------------------------------------------------------
 ; Common exception handler

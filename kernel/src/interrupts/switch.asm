@@ -252,6 +252,7 @@ enter_user_first_time:
 %define OFF_FS      152
 %define OFF_GS      154
 %define OFF_CR3     160
+%define OFF_FPU     176
 
 ; =================================================
 ; switch_context(old, new) - MS x64: rcx=old, rdx=new
@@ -267,6 +268,9 @@ switch_context:
 
     mov r12, rcx   ; r12 = old context ptr
     mov r15, rdx   ; r15 = new context ptr
+
+    ; Save FPU/SSE state
+    fxsave [r12 + OFF_FPU]
 
     ; Save current context to r12 (old)
     mov [r12 + OFF_RAX], rax
@@ -326,6 +330,9 @@ switch_to_context:
 
 switch_to_context_internal:
     cli
+
+    ; Restore FPU/SSE state
+    fxrstor [r15 + OFF_FPU]
 
     ; ---- jump to higher-half mirror before touching CR3 ----
     ; r15 = context pointer (in higher-half kernel heap - always accessible)

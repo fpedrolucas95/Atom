@@ -139,4 +139,24 @@ pub fn current_privilege_level() -> u8 {
     }
 }
 
+/// Enable FPU and SSE support for the current CPU
+pub unsafe fn setup_fpu() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::asm;
+        let mut cr0: u64;
+        let mut cr4: u64;
+
+        asm!("mov {}, cr0", out(reg) cr0);
+        cr0 &= !(1 << 2); // Clear EM (Emulation)
+        cr0 |= 1 << 1;    // Set MP (Monitor Coprocessor)
+        asm!("mov cr0, {}", in(reg) cr0);
+
+        asm!("mov {}, cr4", out(reg) cr4);
+        cr4 |= 1 << 9;    // Set OSFXSR (FXSAVE/FXRSTOR support)
+        cr4 |= 1 << 10;   // Set OSXMMEXCPT (SIMD Floating-Point Exception support)
+        asm!("mov cr4, {}", in(reg) cr4);
+    }
+}
+
 pub mod gdt;

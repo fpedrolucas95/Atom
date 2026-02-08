@@ -49,7 +49,7 @@
 // - `halt()` inside an infinite loop ensures the CPU stays quiescent after a
 //   fatal exception, preventing further memory corruption.
 
-use crate::arch::{gdt, halt};
+use crate::arch::halt;
 use crate::ipc;
 use crate::input;
 use crate::mm;
@@ -57,7 +57,7 @@ use crate::sched;
 #[allow(unused_imports)]
 use crate::util::UI_DIRTY;
 use crate::{log_debug, log_info, log_panic, log_warn};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
 use crate::interrupts::LOG_ORIGIN;
 
 const EXCEPTION_NAMES: [&str; 32] = [
@@ -106,30 +106,30 @@ pub struct InterruptStackFrame {
 
 #[repr(C)]
 pub struct InterruptFrame {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9:  u64,
-    r8:  u64,
-    rbp: u64,
-    rdi: u64,
-    rsi: u64,
-    rdx: u64,
-    rcx: u64,
-    rbx: u64,
-    rax: u64,
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9:  u64,
+    pub r8:  u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
 
-    exception_number: u64,
-    error_code: u64,
+    pub exception_number: u64,
+    pub error_code: u64,
 
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-    rsp: u64,
-    ss: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 const _: () = {
@@ -421,53 +421,33 @@ static USER_MODE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    let coming_from_user = (_frame.code_segment & 0x3) == 0x3;
-
-    if coming_from_user {
-        let cs_valid = (_frame.code_segment as u16) == gdt::USER_CODE_SELECTOR;
-        let ss_valid = (_frame.stack_segment as u16) == gdt::USER_DATA_SELECTOR;
-        let rip_canonical = is_canonical(_frame.instruction_pointer);
-        let rsp_canonical = is_canonical(_frame.stack_pointer);
-
-        if !(cs_valid && ss_valid && rip_canonical && rsp_canonical) {
-            log_warn!(
-                "interrupt",
-                "Timer frame sanity check failed: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X} canonical_rip={} canonical_rsp={} cs_ok={} ss_ok={}",
-                _frame.instruction_pointer,
-                _frame.stack_pointer,
-                _frame.code_segment,
-                _frame.stack_segment,
-                rip_canonical,
-                rsp_canonical,
-                cs_valid,
-                ss_valid
-            );
-        }
-    }
-
-    if coming_from_user
-        && USER_MODE_INTERRUPTED
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
-        let cpl = _frame.code_segment & 0x3;
-        log_info!(
-            "interrupt",
-            "Timer interrupted user context: RIP={:#016X} CS={:#04X} SS={:#04X} CPL={}",
-            _frame.instruction_pointer,
-            _frame.code_segment,
-            _frame.stack_segment,
-            cpl
-        );
-    }
-
+    // Legacy handler for boot/early phase
     unsafe {
         TICKS += 1;
     }
-    
+    ipc::on_timer_tick(get_ticks());
+    super::apic::send_eoi();
+}
+
+#[no_mangle]
+pub extern "C" fn rust_timer_handler(frame: *const InterruptFrame) {
+    unsafe {
+        TICKS += 1;
+    }
+
     ipc::on_timer_tick(get_ticks());
 
-    super::apic::send_eoi();
+    // Check if coming from user mode (CPL=3)
+    let from_userspace = unsafe { ((*frame).cs & 0x3) == 0x3 };
+
+    if from_userspace {
+        // Preemptible context - signal EOI and try to switch
+        super::apic::send_eoi();
+        sched::drive_preemptive_tick(frame);
+    } else {
+        // Kernel context - do NOT preempt kernel for now to maintain stability
+        super::apic::send_eoi();
+    }
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
@@ -484,7 +464,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    
+
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();
 

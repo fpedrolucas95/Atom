@@ -171,7 +171,7 @@ impl Default for ThreadPriority {
 const LOG_ORIGIN: &str = "thread";
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 pub struct CpuContext {
     pub rax: u64,
@@ -199,6 +199,8 @@ pub struct CpuContext {
     pub fs: u16,
     pub gs: u16,
     pub cr3: u64,
+    pub _reserved_padding: u64, // Alignment to 16 bytes for FXSAVE
+    pub fpu_state: [u8; 512],
 }
 
 impl CpuContext {
@@ -229,11 +231,13 @@ impl CpuContext {
             fs: 0,
             gs: 0,
             cr3: 0,
+            _reserved_padding: 0,
+            fpu_state: [0; 512],
         }
     }
 
     pub fn new(entry_point: u64, stack_pointer: u64, page_table: u64) -> Self {
-        Self {
+        let mut ctx = Self {
             rax: 0,
             rbx: 0,
             rcx: 0,
@@ -259,7 +263,11 @@ impl CpuContext {
             fs: 0x10,
             gs: 0x10,
             cr3: page_table,
-        }
+            _reserved_padding: 0,
+            fpu_state: [0; 512],
+        };
+        ctx.init_fpu_state();
+        ctx
     }
 
     /// Create a kernel-mode (Ring 0) context
@@ -269,7 +277,7 @@ impl CpuContext {
     }
 
     pub fn new_user(entry_point: u64, user_stack: u64, page_table: u64) -> Self {
-        Self {
+        let mut ctx = Self {
             rax: 0,
             rbx: 0,
             rcx: 0,
@@ -295,6 +303,26 @@ impl CpuContext {
             fs: gdt::USER_DATA_SELECTOR,
             gs: gdt::USER_DATA_SELECTOR,
             cr3: page_table,
+            _reserved_padding: 0,
+            fpu_state: [0; 512],
+        };
+        ctx.init_fpu_state();
+        ctx
+    }
+
+    fn init_fpu_state(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            // Use fninit to set FPU to a known state, then fxsave to our buffer
+            core::arch::asm!(
+                "fninit",
+                "fxsave [{}]",
+                in(reg) self.fpu_state.as_mut_ptr(),
+            );
+
+            // MXCSR default value: 0x1F80 (all exceptions masked)
+            let mxcsr_ptr = self.fpu_state.as_mut_ptr().add(24) as *mut u32;
+            *mxcsr_ptr = 0x1F80;
         }
     }
 }
@@ -869,20 +897,10 @@ pub unsafe fn switch_thread_context(current: &mut CpuContext, next: &CpuContext)
 pub unsafe fn jump_to_context(context: &CpuContext) -> ! {
     guard_context_or_halt(context, "initial");
     
-    // For first-time user entry, use dedicated enter_user to avoid complex switch logic
-    let is_user_mode = (context.cs & 0x3) == 0x3;
-    if is_user_mode {
-        log_debug!(
-            LOG_ORIGIN,
-            "Using enter_user for first user jump: RIP={:#016X} RSP={:#016X} CR3={:#016X}",
-            context.rip,
-            context.rsp,
-            context.cr3
-        );
-        enter_user(context.rip, context.rsp, context.cr3)
-    } else {
-        switch_to_context(context as *const CpuContext)
-    }
+    // Always use switch_to_context to ensure FPU/SSE state is correctly restored.
+    // The switch_to_context assembly routine handles both kernel and user transitions
+    // by building the appropriate IRET frame.
+    switch_to_context(context as *const CpuContext)
 }
 
 pub fn jump_to_thread(thread_id: ThreadId) -> ! {
@@ -981,6 +999,48 @@ pub fn is_userspace_thread(thread_id: ThreadId) -> bool {
         .find(|t| t.id == thread_id)
         .map(|t| t.is_userspace)
         .unwrap_or(false)
+}
+
+/// Save a thread's context from an interrupt frame
+pub fn save_context_from_interrupt(id: ThreadId, frame: &crate::interrupts::handlers::InterruptFrame) {
+    let mut threads = THREAD_LIST.threads.lock();
+    if let Some(t) = threads.iter_mut().find(|t| t.id == id) {
+        t.context.rax = frame.rax;
+        t.context.rbx = frame.rbx;
+        t.context.rcx = frame.rcx;
+        t.context.rdx = frame.rdx;
+        t.context.rsi = frame.rsi;
+        t.context.rdi = frame.rdi;
+        t.context.rbp = frame.rbp;
+        t.context.rsp = frame.rsp;
+        t.context.r8 = frame.r8;
+        t.context.r9 = frame.r9;
+        t.context.r10 = frame.r10;
+        t.context.r11 = frame.r11;
+        t.context.r12 = frame.r12;
+        t.context.r13 = frame.r13;
+        t.context.r14 = frame.r14;
+        t.context.r15 = frame.r15;
+        t.context.rip = frame.rip;
+        t.context.rflags = frame.rflags;
+        t.context.cs = frame.cs as u16;
+        t.context.ss = frame.ss as u16;
+        t.context.cr3 = crate::arch::read_cr3();
+
+        // Save FPU/SSE state. Atom OS uses a strict save-on-switch policy to ensure
+        // that floating point calculations (common in GUI applications) are not
+        // corrupted by preemption or cooperative yielding.
+        unsafe {
+            core::arch::asm!("fxsave [{}]", in(reg) t.context.fpu_state.as_mut_ptr());
+        }
+    }
+}
+
+/// Perform a context switch from an interrupt handler
+pub fn perform_context_switch_from_interrupt(_from_id: ThreadId, to_id: ThreadId) {
+    // Current thread context is already saved by save_context_from_interrupt.
+    // We just need to jump to the new thread.
+    jump_to_thread(to_id);
 }
 
 /// Force update a thread's userspace context (RIP, RSP, CS, SS, segments)

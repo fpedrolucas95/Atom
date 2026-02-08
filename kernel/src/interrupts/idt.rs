@@ -103,6 +103,7 @@ struct IdtPointer {
 static mut IDT: Idt = Idt::new();
 
 extern "C" {
+    fn timer_interrupt_stub();
     fn exception_handler_0();
     fn exception_handler_1();
     fn exception_handler_2();
@@ -178,7 +179,7 @@ pub fn init() {
         IDT.entries[21].set_handler(exception_handler_21 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
 
         IDT.entries[TIMER_INTERRUPT_VECTOR as usize]
-            .set_handler(timer_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+            .set_handler(timer_interrupt_stub as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
         IDT.entries[KEYBOARD_INTERRUPT_VECTOR as usize]
             .set_handler(keyboard_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
         IDT.entries[MOUSE_INTERRUPT_VECTOR as usize]

@@ -76,7 +76,7 @@ impl ReadyQueues {
     fn pop_next(&mut self) -> Option<ThreadId> {
         // Simply pop from the highest priority non-empty queue
         for idx in (0..PRIORITY_LEVELS).rev() {
-            let mut i = 0;
+            let i = 0;
             while i < self.queues[idx].len() {
                 if let Some(id) = self.queues[idx].pop_front() {
                     if let Some(state) = thread::get_thread_state(id) {
@@ -320,6 +320,30 @@ pub fn drive_cooperative_tick() {
     if let (Some(prev_id), Some(next_id)) = (prev, next) {
         if prev_id != next_id {
             perform_context_switch(prev_id, next_id);
+        }
+    }
+}
+
+/// Drives preemptive scheduling from an interrupt context.
+///
+/// This function is called by the timer interrupt handler when a userspace
+/// thread is interrupted. It checks if the current time slice has expired
+/// and, if so, saves the current thread's state and switches to the next
+/// runnable thread.
+///
+/// Preemption is currently limited to userspace to ensure kernel stability
+/// and avoid complex nested interrupt handling issues in kernel mode.
+pub fn drive_preemptive_tick(frame: *const crate::interrupts::handlers::InterruptFrame) {
+    let (prev, next) = SCHEDULER.on_timer_tick();
+
+    if let (Some(prev_id), Some(next_id)) = (prev, next) {
+        if prev_id != next_id {
+            // Save current context from interrupt frame (including FPU/SSE state)
+            thread::save_context_from_interrupt(prev_id, unsafe { &*frame });
+
+            // Perform context switch - directly jump to the new thread's context.
+            // This never returns to the current stack frame.
+            thread::perform_context_switch_from_interrupt(prev_id, next_id);
         }
     }
 }
