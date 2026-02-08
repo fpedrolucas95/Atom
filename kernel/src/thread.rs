@@ -145,6 +145,7 @@ impl TerminationReason {
     }
 }
 
+#[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {
     Running,
@@ -313,16 +314,16 @@ impl CpuContext {
     fn init_fpu_state(&mut self) {
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            // Use fninit to set FPU to a known state, then fxsave to our buffer
-            core::arch::asm!(
-                "fninit",
-                "fxsave [{}]",
-                in(reg) self.fpu_state.as_mut_ptr(),
-            );
+            // Zero the buffer
+            self.fpu_state.fill(0);
 
-            // MXCSR default value: 0x1F80 (all exceptions masked)
+            // Set default MXCSR: 0x1F80 (all exceptions masked)
             let mxcsr_ptr = self.fpu_state.as_mut_ptr().add(24) as *mut u32;
             *mxcsr_ptr = 0x1F80;
+
+            // Set default FCW: 0x037F
+            let fcw_ptr = self.fpu_state.as_mut_ptr() as *mut u16;
+            *fcw_ptr = 0x037F;
         }
     }
 }
@@ -472,7 +473,7 @@ impl core::fmt::Display for ThreadId {
 }
 
 pub struct ThreadList {
-    threads: Mutex<Vec<Thread>>,
+    threads: Mutex<Vec<alloc::boxed::Box<Thread>>>,
 }
 
 impl ThreadList {
@@ -484,10 +485,10 @@ impl ThreadList {
 
     pub fn add(&self, thread: Thread) {
         let mut threads = self.threads.lock();
-        threads.push(thread);
+        threads.push(alloc::boxed::Box::new(thread));
     }
 
-    pub fn remove(&self, id: ThreadId) -> Option<Thread> {
+    pub fn remove(&self, id: ThreadId) -> Option<alloc::boxed::Box<Thread>> {
         let mut threads = self.threads.lock();
         if let Some(pos) = threads.iter().position(|t| t.id == id) {
             Some(threads.remove(pos))
@@ -513,6 +514,11 @@ impl ThreadList {
             .filter(|t| t.is_runnable())
             .map(|t| t.id)
             .collect()
+    }
+
+    fn find_mut(&self, id: ThreadId) -> Option<*mut Thread> {
+        let threads = self.threads.lock();
+        threads.iter().find(|t| t.id == id).map(|t| &**t as *const Thread as *mut Thread)
     }
 
     pub fn set_state(&self, id: ThreadId, state: ThreadState) -> bool {
@@ -567,22 +573,6 @@ impl ThreadList {
             let ctx_copy = threads[from_idx].context;
             Some(f(&mut threads[from_idx].context, &ctx_copy))
         }
-    }
-    
-    fn snapshot_thread(&self, id: ThreadId) -> Option<Thread> {
-        let threads = self.threads.lock();
-        threads.iter().find(|t| t.id == id).map(|t| Thread {
-            id: t.id,
-            state: t.state,
-            context: t.context,
-            kernel_stack: t.kernel_stack,
-            kernel_stack_size: t.kernel_stack_size,
-            address_space: t.address_space,
-            priority: t.priority,
-            name: t.name,
-            capability_table: crate::cap::create_capability_table(t.id),
-            is_userspace: t.is_userspace,
-        })
     }
 
     pub fn validate_capability(
@@ -685,7 +675,7 @@ pub fn add_thread(thread: Thread) {
     THREAD_LIST.add(thread);
 }
 
-pub fn remove_thread(id: ThreadId) -> Option<Thread> {
+pub fn remove_thread(id: ThreadId) -> Option<alloc::boxed::Box<Thread>> {
     THREAD_LIST.remove(id)
 }
 
@@ -982,7 +972,15 @@ pub fn save_context_from_interrupt(id: ThreadId, frame: &crate::interrupts::hand
         // that floating point calculations (common in GUI applications) are not
         // corrupted by preemption or cooperative yielding.
         unsafe {
-            core::arch::asm!("fxsave [{}]", in(reg) t.context.fpu_state.as_mut_ptr());
+            let fpu_ptr = t.context.fpu_state.as_mut_ptr();
+            // Verify 16-byte alignment as required by fxsave
+            if (fpu_ptr as usize) % 16 == 0 {
+                core::arch::asm!("fxsave [{}]", in(reg) fpu_ptr);
+            } else {
+                // If not aligned, we have a serious internal error.
+                // Log and don't perform fxsave to avoid Triple Fault.
+                log_error!(LOG_ORIGIN, "fxsave: pointer {:p} not 16-byte aligned!", fpu_ptr);
+            }
         }
     }
 }
