@@ -1431,40 +1431,50 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     log_debug!(LOG_ORIGIN, "Step 6/10: Removing address spaces from manager");
     crate::mm::addrspace::cleanup_thread_address_spaces(thread_id);
 
-    // Step 7: Free kernel stack
-    log_debug!(LOG_ORIGIN, "Step 7/10: Freeing kernel stack");
-    let kernel_stack_bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
-    let num_stack_pages = kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
-
-    log_debug!(
-        LOG_ORIGIN,
-        "Freeing {} kernel stack pages starting at 0x{:X}",
-        num_stack_pages,
-        kernel_stack_bottom
-    );
-
-    let current_pml4 = crate::arch::read_cr3() as usize;
+    // Step 7: Free kernel stack (ONLY if not current thread)
     let mut stack_pages_freed = 0;
+    let is_current = crate::sched::current_thread() == Some(thread_id);
 
-    for i in 0..num_stack_pages {
-        let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
+    if !is_current {
+        log_debug!(LOG_ORIGIN, "Step 7/10: Freeing kernel stack");
+        let kernel_stack_bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
+        let num_stack_pages = kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
 
-        if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
-            crate::mm::pmm::free_page(phys_addr);
-            stack_pages_freed += 1;
+        log_debug!(
+            LOG_ORIGIN,
+            "Freeing {} kernel stack pages starting at 0x{:X}",
+            num_stack_pages,
+            kernel_stack_bottom
+        );
+
+        let current_pml4 = crate::arch::read_cr3() as usize;
+
+        for i in 0..num_stack_pages {
+            let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
+
+            if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
+                crate::mm::pmm::free_page(phys_addr);
+                stack_pages_freed += 1;
+            }
         }
-    }
 
-    log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages", stack_pages_freed);
-    RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
+        log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages", stack_pages_freed);
+        RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
+    } else {
+        log_warn!(LOG_ORIGIN, "Step 7/10: Deferring kernel stack cleanup for current thread");
+    }
 
     // Step 8: Remove from scheduler (handled automatically when thread is removed)
     log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will remove thread on next tick");
 
-    // Step 9: Remove from global thread list
-    log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
-    if let Some(_removed) = THREAD_LIST.remove(thread_id) {
-        log_debug!(LOG_ORIGIN, "Thread removed from global list");
+    // Step 9: Remove from global thread list (ONLY if not current thread)
+    if !is_current {
+        log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
+        if let Some(_removed) = THREAD_LIST.remove(thread_id) {
+            log_debug!(LOG_ORIGIN, "Thread removed from global list");
+        }
+    } else {
+        log_warn!(LOG_ORIGIN, "Step 9/10: Deferring global list removal for current thread");
     }
 
     // Step 10: Update counters and log final report

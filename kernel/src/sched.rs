@@ -226,7 +226,19 @@ impl Scheduler {
         previous: Option<ThreadId>,
         next: Option<ThreadId>,
     ) -> Option<ThreadId> {
-        let chosen = next.or(previous).or_else(|| self.idle_id());
+        // Fallback strategy:
+        // 1. Use the explicitly selected 'next' thread if available
+        // 2. Fall back to 'previous' ONLY if it is still runnable (not blocked or exited)
+        // 3. Absolute fallback to the idle thread
+        let chosen = next
+            .or_else(|| {
+                previous.filter(|&id| {
+                    thread::get_thread_state(id)
+                        .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
+                        .unwrap_or(false)
+                })
+            })
+            .or_else(|| self.idle_id());
 
         if let Some(prev) = previous {
             if Some(prev) != chosen {
