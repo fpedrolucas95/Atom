@@ -1,5 +1,7 @@
 # Atom Kernel
 
+<img width="802" height="657" alt="image" src="https://github.com/user-attachments/assets/70794b71-059d-4b43-825d-db540fe6df5a" />
+
 **Atom Kernel** is an experimental operating system kernel written in **Rust**, following a **capability-based microkernel design**.
 
 The project is structured around a small, reliable kernel core responsible for bootstrapping, memory management, interrupts, scheduling, and system calls, while higher-level services and policies—such as drivers, filesystems, and networking—are designed to live in user space.
