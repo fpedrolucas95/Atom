@@ -157,6 +157,29 @@ impl Framebuffer {
         }
     }
 
+    /// Create a custom framebuffer pointing to a specific memory location.
+    /// Includes validation to prevent common memory safety issues.
+    pub fn new_custom(address: usize, width: u32, height: u32, stride: u32, bpp: u32) -> Option<Self> {
+        if address == 0 || width == 0 || height == 0 || stride < width || (bpp != 4 && bpp != 3) {
+            return None;
+        }
+
+        // Check for potential overflow in size calculation
+        let size = (stride as usize).checked_mul(height as usize)?
+            .checked_mul(bpp as usize)?;
+
+        Some(Self {
+            info: FramebufferInfo {
+                address,
+                width,
+                height,
+                stride,
+                bytes_per_pixel: bpp,
+                size,
+            }
+        })
+    }
+
     /// Create from mapped framebuffer
     pub fn from_mapped() -> Option<Self> {
         match map_framebuffer() {
@@ -273,6 +296,42 @@ impl Framebuffer {
         self.draw_hline(x, y + height - 1, width, color);
         self.draw_vline(x, y, height, color);
         self.draw_vline(x + width - 1, y, height, color);
+    }
+
+    /// Blit the contents of this framebuffer to another framebuffer.
+    /// This is an optimized line-by-line copy.
+    pub fn blit(&self, other: &Framebuffer) {
+        let width = self.width().min(other.width());
+        let height = self.height().min(other.height());
+        let bpp = self.bytes_per_pixel();
+
+        if bpp != other.bytes_per_pixel() {
+            // Fallback to pixel-by-pixel if formats differ (rare for compositor)
+            for y in 0..height {
+                for x in 0..width {
+                    // This is slow, but correct for different BPPs
+                    // However, for compositor we expect 4 BPP for both.
+                    let ptr = self.info.pixel_ptr(x, y);
+                    let color_val = unsafe { core::ptr::read_volatile(ptr) };
+                    let other_ptr = other.info.pixel_ptr(x, y);
+                    unsafe { core::ptr::write_volatile(other_ptr, color_val) };
+                }
+            }
+            return;
+        }
+
+        // Optimized line-by-line copy
+        for y in 0..height {
+            let src_offset = (y * self.stride()) as usize * bpp;
+            let dst_offset = (y * other.stride()) as usize * bpp;
+
+            let src_ptr = (self.address() + src_offset) as *const u8;
+            let dst_ptr = (other.address() + dst_offset) as *mut u8;
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, width as usize * bpp);
+            }
+        }
     }
 }
 
@@ -665,7 +724,8 @@ impl SharedSurface {
         }
     }
 
-    /// Blit this surface to a framebuffer at the specified position
+    /// Blit this surface to a framebuffer at the specified position.
+    /// Uses optimized line-by-line copy.
     pub fn blit_to_framebuffer(&self, fb: &Framebuffer, dest_x: u32, dest_y: u32) {
         let Some(src_addr) = self.mapped_addr else { return };
 
@@ -673,29 +733,40 @@ impl SharedSurface {
         let fb_stride = fb.stride();
         let fb_bpp = fb.bytes_per_pixel();
 
+        if fb_bpp != self.bytes_per_pixel as usize {
+            // Fallback if formats differ
+            for sy in 0..self.height {
+                let dy = dest_y + sy;
+                if dy >= fb.height() { break; }
+                for sx in 0..self.width {
+                    let dx = dest_x + sx;
+                    if dx >= fb.width() { break; }
+                    let src_ptr = (src_addr + self.pixel_offset(sx, sy)) as *const u32;
+                    let pixel = unsafe { src_ptr.read_volatile() };
+                    let dst_ptr = fb.info.pixel_ptr(dx, dy);
+                    unsafe { dst_ptr.write_volatile(pixel) };
+                }
+            }
+            return;
+        }
+
+        let copy_width = self.width.min(fb.width().saturating_sub(dest_x));
+        if copy_width == 0 { return; }
+
         for sy in 0..self.height {
             let dy = dest_y + sy;
             if dy >= fb.height() {
                 break;
             }
 
-            for sx in 0..self.width {
-                let dx = dest_x + sx;
-                if dx >= fb.width() {
-                    break;
-                }
+            let src_offset = self.pixel_offset(0, sy);
+            let dst_offset = (dy * fb_stride + dest_x) as usize * fb_bpp;
 
-                // Read from surface
-                let src_offset = self.pixel_offset(sx, sy);
-                let src_ptr = (src_addr + src_offset) as *const u32;
-                let pixel = unsafe { src_ptr.read_volatile() };
+            let src_ptr = (src_addr + src_offset) as *const u8;
+            let dst_ptr = (fb_addr + dst_offset) as *mut u8;
 
-                // Write to framebuffer
-                let dst_offset = (dy * fb_stride + dx) as usize * fb_bpp;
-                let dst_ptr = (fb_addr + dst_offset) as *mut u32;
-                unsafe {
-                    dst_ptr.write_volatile(pixel);
-                }
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize * fb_bpp);
             }
         }
     }
