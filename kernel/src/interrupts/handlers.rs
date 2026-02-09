@@ -430,6 +430,9 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
         let rsp_canonical = is_canonical(_frame.stack_pointer);
 
         if !(cs_valid && ss_valid && rip_canonical && rsp_canonical) {
+            // Note: logging from timer interrupt can cause deadlocks/reentrancy issues
+            // especially with early framebuffer logging.
+            /*
             log_warn!(
                 "interrupt",
                 "Timer frame sanity check failed: RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X} canonical_rip={} canonical_rsp={} cs_ok={} ss_ok={}",
@@ -442,6 +445,7 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
                 cs_valid,
                 ss_valid
             );
+            */
         }
     }
 

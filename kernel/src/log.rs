@@ -254,7 +254,14 @@ pub fn _log(level: LogLevel, origin: &str, args: fmt::Arguments, file: &str, lin
 
         // Mirror logs to framebuffer for hardware diagnostics
         if crate::graphics::is_initialized() {
-            write_fb_log(level, origin, args_for_vga);
+            // Guard against reentrancy in logging, which can happen if
+            // an interrupt logs while we are already logging.
+            static mut IN_FB_LOG: bool = false;
+            if !IN_FB_LOG {
+                IN_FB_LOG = true;
+                write_fb_log(level, origin, args_for_vga);
+                IN_FB_LOG = false;
+            }
         }
     }
 }
@@ -280,6 +287,9 @@ unsafe fn write_fb_log(level: LogLevel, origin: &str, args: fmt::Arguments) {
         _ => crate::graphics::Color::WHITE,
     };
 
+    // Disable interrupts to prevent deadlocks on framebuffer mutex
+    core::arch::asm!("cli", options(nomem, nostack));
+
     let y = FB_LOG_LINE * 10 + 30; // Start below the heartbeat
     let mut writer = FbLogWriter { x: 10, y, color };
 
@@ -291,6 +301,8 @@ unsafe fn write_fb_log(level: LogLevel, origin: &str, args: fmt::Arguments) {
     if FB_LOG_LINE > 60 {
         FB_LOG_LINE = 0;
     }
+
+    core::arch::asm!("sti", options(nomem, nostack));
 }
 
 unsafe fn write_vga_log(
