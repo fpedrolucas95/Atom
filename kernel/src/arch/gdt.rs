@@ -28,16 +28,13 @@
 use core::mem::size_of;
 
 const DOUBLE_FAULT_IST_INDEX: usize = 0;
-/// 16 KiB stack for the double-fault handler.
-///
-/// The previous 4 KiB was borderline: a #DF handler that logs register state
-/// through the serial driver can easily consume >2 KiB of stack.  On systems
-/// with large RAM the exception diagnostics (PMM stats, VA dump) push deeper.
-/// 16 KiB provides ample headroom and costs negligible BSS.
-const DOUBLE_FAULT_STACK_SIZE: usize = 16384;
+const INTERRUPT_IST_INDEX: usize = 1;
+
+/// 16 KiB stack for handlers.
+const DEFAULT_STACK_SIZE: usize = 16384;
 
 #[repr(align(16))]
-struct AlignedStack([u8; DOUBLE_FAULT_STACK_SIZE]);
+struct AlignedStack<const N: usize>([u8; N]);
 
 #[repr(C, packed)]
 struct DescriptorTablePointer {
@@ -87,7 +84,9 @@ static mut GDT: Gdt = Gdt {
     ],
 };
 
-static mut DOUBLE_FAULT_STACK: AlignedStack = AlignedStack([0; DOUBLE_FAULT_STACK_SIZE]);
+static mut DOUBLE_FAULT_STACK: AlignedStack<DEFAULT_STACK_SIZE> = AlignedStack([0; DEFAULT_STACK_SIZE]);
+static mut INTERRUPT_STACK: AlignedStack<DEFAULT_STACK_SIZE> = AlignedStack([0; DEFAULT_STACK_SIZE]);
+
 static mut TSS: Tss = Tss {
     _reserved_0: 0,
     rsp0: 0,
@@ -105,6 +104,7 @@ pub fn init(tss_rsp0: u64) {
         TSS.rsp0 = tss_rsp0 & !0xF;
 
         TSS.ist[DOUBLE_FAULT_IST_INDEX] = double_fault_stack_top();
+        TSS.ist[INTERRUPT_IST_INDEX] = interrupt_stack_top();
         TSS.iomap_base = size_of::<Tss>() as u16;
 
         write_tss_descriptor();
@@ -176,5 +176,11 @@ pub fn set_rsp0(rsp0: u64) {
 unsafe fn double_fault_stack_top() -> u64 {
     let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACK) as u64;
     let higher_half_base: u64 = 0xFFFF_8000_0000_0000;
-    stack_ptr + higher_half_base + DOUBLE_FAULT_STACK_SIZE as u64
+    stack_ptr + higher_half_base + DEFAULT_STACK_SIZE as u64
+}
+
+unsafe fn interrupt_stack_top() -> u64 {
+    let stack_ptr = core::ptr::addr_of!(INTERRUPT_STACK) as u64;
+    let higher_half_base: u64 = 0xFFFF_8000_0000_0000;
+    stack_ptr + higher_half_base + DEFAULT_STACK_SIZE as u64
 }

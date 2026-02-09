@@ -229,7 +229,12 @@ pub fn panic_write(x: u32, y: u32, text: &str, color: Color) {
                             let offset = (py * fb.stride + px) as usize * fb.bytes_per_pixel;
                             unsafe {
                                 let ptr = fb.address.add(offset) as *mut u32;
-                                ptr.write_volatile(pixel_value);
+                                let color = if glyph[row as usize] & (0x80 >> col) != 0 {
+                                    pixel_value
+                                } else {
+                                    0x000000 // Black background
+                                };
+                                ptr.write_volatile(color);
                             }
                         }
                     }

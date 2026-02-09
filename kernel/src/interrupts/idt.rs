@@ -44,6 +44,7 @@ use crate::interrupts::handlers::{
 
 const IDT_SIZE: usize = 256;
 const DOUBLE_FAULT_IST: u8 = 1;
+const INTERRUPT_IST: u8 = 2;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -178,15 +179,15 @@ pub fn init() {
         IDT.entries[21].set_handler(exception_handler_21 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
 
         IDT.entries[TIMER_INTERRUPT_VECTOR as usize]
-            .set_handler(timer_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+            .set_handler(timer_interrupt_handler as *const () as usize, KERNEL_CS, INTERRUPT_IST, GATE_TYPE_INTERRUPT);
         IDT.entries[KEYBOARD_INTERRUPT_VECTOR as usize]
-            .set_handler(keyboard_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+            .set_handler(keyboard_interrupt_handler as *const () as usize, KERNEL_CS, INTERRUPT_IST, GATE_TYPE_INTERRUPT);
         IDT.entries[MOUSE_INTERRUPT_VECTOR as usize]
-            .set_handler(mouse_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+            .set_handler(mouse_interrupt_handler as *const () as usize, KERNEL_CS, INTERRUPT_IST, GATE_TYPE_INTERRUPT);
 
         IDT.entries[USER_TRAP_INTERRUPT_VECTOR as usize]
             .set_handler(user_trap_interrupt_handler as *const () as usize, KERNEL_CS, 0, GATE_TYPE_TRAP | DPL_RING3);
-        
+
         let idt_ptr = IdtPointer {
             limit: (size_of::<Idt>() - 1) as u16,
             base: core::ptr::addr_of!(IDT) as u64,

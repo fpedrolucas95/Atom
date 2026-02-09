@@ -290,6 +290,10 @@ unsafe fn write_fb_log(level: LogLevel, origin: &str, args: fmt::Arguments) {
     // Disable interrupts to prevent deadlocks on framebuffer mutex
     core::arch::asm!("cli", options(nomem, nostack));
 
+    let max_lines = crate::graphics::get_dimensions()
+        .map(|(_, h)| (h.saturating_sub(40) / 10))
+        .unwrap_or(50) as u32;
+
     let y = FB_LOG_LINE * 10 + 30; // Start below the heartbeat
     let mut writer = FbLogWriter { x: 10, y, color };
 
@@ -297,8 +301,7 @@ unsafe fn write_fb_log(level: LogLevel, origin: &str, args: fmt::Arguments) {
     let _ = core::fmt::write(&mut writer, args);
 
     FB_LOG_LINE += 1;
-    // Simple wrap around if we fill the screen (crude but works for early boot)
-    if FB_LOG_LINE > 60 {
+    if FB_LOG_LINE >= max_lines {
         FB_LOG_LINE = 0;
     }
 
