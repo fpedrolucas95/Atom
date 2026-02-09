@@ -60,20 +60,10 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::mm::pmm;
-use crate::boot::{EfiMemoryDescriptor, MemoryMap};
+use crate::boot::*;
 
 use crate::{log_debug, log_info, log_error};
 
-const EFI_LOADER_CODE: u32 = 1;
-const EFI_LOADER_DATA: u32 = 2;
-const EFI_BOOT_SERVICES_CODE: u32 = 3;
-const EFI_BOOT_SERVICES_DATA: u32 = 4;
-const EFI_RUNTIME_SERVICES_CODE: u32 = 5;
-const EFI_RUNTIME_SERVICES_DATA: u32 = 6;
-const EFI_CONVENTIONAL_MEMORY: u32 = 7;
-const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
-const EFI_ACPI_MEMORY_NVS: u32 = 10;
-const EFI_PERSISTENT_MEMORY: u32 = 14;
 const EFI_MEMORY_UC: u64 = 0x0000_0000_0000_0001;
 const EFI_MEMORY_WC: u64 = 0x0000_0000_0000_0002;
 const EFI_MEMORY_WT: u64 = 0x0000_0000_0000_0004;
@@ -86,11 +76,11 @@ const ENTRIES_PER_TABLE: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 /// Higher-half kernel virtual memory base address
 pub const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
-/// Higher-half mirror covers up to 16 GiB of physical RAM.
-/// This must be >= the PMM's static bitmap coverage (16 GiB)
+/// Higher-half mirror covers up to 64 GiB of physical RAM.
+/// This must be >= the PMM's maximum supported memory (64 GiB)
 /// to ensure all tracked physical memory is accessible via the
 /// kernel's higher-half virtual addresses.
-const HIGHER_HALF_MIRROR_SIZE: usize = 16usize * 1024 * 1024 * 1024;
+const HIGHER_HALF_MIRROR_SIZE: usize = 64usize * 1024 * 1024 * 1024;
 static ACTIVE_PML4: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_PAGES: AtomicUsize = AtomicUsize::new(0);
 static PAGE_TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);

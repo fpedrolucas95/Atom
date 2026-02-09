@@ -33,7 +33,7 @@
 // - Zeroed variants for page tables and heap init
 // - get_stats / get_detailed_stats / get_memory_stats — diagnostics
 
-use crate::boot::{MemoryMap, EFI_CONVENTIONAL_MEMORY, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
+use crate::boot::*;
 #[allow(unused_imports)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
@@ -111,6 +111,25 @@ fn is_usable_memory(typ: u32) -> bool {
     typ == EFI_CONVENTIONAL_MEMORY
         || typ == EFI_BOOT_SERVICES_CODE
         || typ == EFI_BOOT_SERVICES_DATA
+}
+
+/// Check if an EFI memory type represents physical RAM (even if reserved or used by kernel/EFI)
+#[inline]
+fn is_any_ram(typ: u32) -> bool {
+    matches!(
+        typ,
+        EFI_LOADER_CODE
+            | EFI_LOADER_DATA
+            | EFI_BOOT_SERVICES_CODE
+            | EFI_BOOT_SERVICES_DATA
+            | EFI_RUNTIME_SERVICES_CODE
+            | EFI_RUNTIME_SERVICES_DATA
+            | EFI_CONVENTIONAL_MEMORY
+            | EFI_ACPI_RECLAIM_MEMORY
+            | EFI_ACPI_MEMORY_NVS
+            | EFI_PAL_CODE
+            | EFI_PERSISTENT_MEMORY
+    )
 }
 
 /// Get human-readable name for EFI memory type
@@ -252,14 +271,17 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         let num_pages = d.number_of_pages as usize;
         let end = start.saturating_add(num_pages * PAGE_SIZE);
 
-        if is_usable_memory(d.typ) {
+        if is_any_ram(d.typ) {
             physical_ram_pages += num_pages;
+        } else {
+            reserved_pages += num_pages;
+        }
+
+        if is_usable_memory(d.typ) {
             usable_region_count += 1;
             if end > highest_usable_addr {
                 highest_usable_addr = end;
             }
-        } else {
-            reserved_pages += num_pages;
         }
     }
 

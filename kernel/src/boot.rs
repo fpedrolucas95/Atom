@@ -5,9 +5,21 @@
 //! proper.
 
 // EFI Memory Types - these become available after ExitBootServices()
+pub const EFI_RESERVED_MEMORY: u32 = 0;
+pub const EFI_LOADER_CODE: u32 = 1;
+pub const EFI_LOADER_DATA: u32 = 2;
 pub const EFI_BOOT_SERVICES_CODE: u32 = 3;
 pub const EFI_BOOT_SERVICES_DATA: u32 = 4;
+pub const EFI_RUNTIME_SERVICES_CODE: u32 = 5;
+pub const EFI_RUNTIME_SERVICES_DATA: u32 = 6;
 pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;
+pub const EFI_UNUSABLE_MEMORY: u32 = 8;
+pub const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
+pub const EFI_ACPI_MEMORY_NVS: u32 = 10;
+pub const EFI_MEMORY_MAPPED_IO: u32 = 11;
+pub const EFI_MEMORY_MAPPED_IO_PORT_SPACE: u32 = 12;
+pub const EFI_PAL_CODE: u32 = 13;
+pub const EFI_PERSISTENT_MEMORY: u32 = 14;
 
 #[repr(C)]
 pub struct MemoryMap {
