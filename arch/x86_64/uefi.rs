@@ -61,6 +61,20 @@ type EfiSetWatchdogTimer = extern "win64" fn(
     watchdog_data: *mut c_void,
 ) -> EfiStatus;
 
+#[repr(C)]
+struct EfiSimpleTextOutputProtocol {
+    reset: extern "win64" fn(this: *mut EfiSimpleTextOutputProtocol, extended_verification: bool) -> EfiStatus,
+    output_string: extern "win64" fn(this: *mut EfiSimpleTextOutputProtocol, string: *const u16) -> EfiStatus,
+    test_string: usize,
+    query_mode: usize,
+    set_mode: usize,
+    set_attribute: usize,
+    clear_screen: extern "win64" fn(this: *mut EfiSimpleTextOutputProtocol) -> EfiStatus,
+    set_cursor_position: usize,
+    enable_cursor: usize,
+    mode: *mut c_void,
+}
+
 const EFI_SUCCESS: EfiStatus = 0;
 const EFI_BUFFER_TOO_SMALL: EfiStatus = 0x8000_0000_0000_0005;
 const EFI_INVALID_PARAMETER: EfiStatus = 0x8000_0000_0000_0002;
@@ -408,6 +422,22 @@ fn setup_framebuffer(bs: &mut EfiBootServices) -> Option<FramebufferInfo> {
 
 fn disable_watchdog(bs: &mut EfiBootServices) {
     let _ = (bs.set_watchdog_timer)(0, 0, 0, ptr::null_mut());
+}
+
+fn uefi_print(st: &EfiSystemTable, s: &str) {
+    let mut buf = [0u16; 128];
+    let mut i = 0;
+    for c in s.chars() {
+        if i >= buf.len() - 1 {
+            break;
+        }
+        buf[i] = c as u16;
+        i += 1;
+    }
+    buf[i] = 0;
+
+    let con_out = unsafe { &mut *(st.con_out as *mut EfiSimpleTextOutputProtocol) };
+    let _ = (con_out.output_string)(con_out, buf.as_ptr());
 }
 
 /// Convert ASCII string to UTF-16 for UEFI
@@ -828,6 +858,8 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
     }
 
     let st = unsafe { &mut *(system_table as *mut EfiSystemTable) };
+    uefi_print(st, "Atom Kernel Bootloader Starting...\r\n");
+
     let bs = match unsafe { st.boot_services.as_mut() } {
         Some(bs) => bs,
         None => return EFI_INVALID_PARAMETER,
@@ -835,21 +867,37 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
 
     disable_watchdog(bs);
 
+    uefi_print(st, "Locating Graphics Output Protocol...\r\n");
     let framebuffer_info = setup_framebuffer(bs);
+    if framebuffer_info.is_some() {
+        uefi_print(st, "GOP initialized successfully\r\n");
+    } else {
+        uefi_print(st, "WARNING: GOP not found, graphical output disabled\r\n");
+    }
 
     // Load the init payload (init.atxf) from the boot volume
+    uefi_print(st, "Loading init payload...\r\n");
     let init_payload = load_init_payload(image, bs)
         .unwrap_or_else(ExecutableImage::empty);
+
+    if init_payload.is_present() {
+        uefi_print(st, "Init payload loaded\r\n");
+    } else {
+        uefi_print(st, "ERROR: init.atxf not found!\r\n");
+    }
 
     // Load drivers from \drivers\ directory at boot time
     // These are pre-loaded so they can be spawned by userspace via spawn_process()
     // Note: QEMU uses virtual FAT which doesn't work with AHCI, so we must
     // load drivers at boot when EFI filesystem protocol is still available
+    uefi_print(st, "Loading boot drivers...\r\n");
     let drivers = load_drivers(image, bs);
+    uefi_print(st, "Boot drivers loaded\r\n");
 
     let mut mmap_buf: *mut c_void = ptr::null_mut();
     let mut mmap_buf_size: usize = 0;
 
+    uefi_print(st, "Acquiring memory map and exiting boot services...\r\n");
     loop {
         let mut needed_size: usize = 0;
         let mut _map_key: usize = 0;
@@ -929,7 +977,7 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
             memory_map: MemoryMap::new(mmap_buf as *const u8, actual_size, desc_size2),
             framebuffer: framebuffer_info.unwrap_or_else(FramebufferInfo::empty),
             framebuffer_present: framebuffer_info.is_some(),
-            verbose: false,
+            verbose: true, // Enable verbose logging on real hardware for diagnostics
             boot_method: BootMethod::Uefi,
             cpu: cpu_info(),
             init_payload,

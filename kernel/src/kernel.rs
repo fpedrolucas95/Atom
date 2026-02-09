@@ -121,6 +121,18 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
         if mm::vm::map_framebuffer(fb.address, fb.size) {
             graphics::init(fb);
             graphics::init_terminal();
+
+            // Heartbeat: Draw a small green square in the top-left corner
+            // to show that kmain has successfully initialized graphics.
+            for y in 0..20 {
+                for x in 0..20 {
+                    let pixel_offset = (y * fb.pixels_per_scan_line + x) as usize * 4;
+                    unsafe {
+                        let ptr = (fb.address as *mut u8).add(pixel_offset) as *mut u32;
+                        ptr.write_volatile(0x00FF00); // Green
+                    }
+                }
+            }
         }
     }
 

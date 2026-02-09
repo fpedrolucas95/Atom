@@ -355,6 +355,18 @@ pub fn init_ps2_mouse_full() {
     log_info!("input", "Initializing PS/2 controller (keyboard + mouse)...");
 
     // ========================================================================
+    // Phase 0: Hardware Detection
+    // ========================================================================
+
+    // Check if the PS/2 controller exists. On most modern systems without one,
+    // reading from port 0x64 returns 0xFF.
+    let initial_status = read_status();
+    if initial_status == 0xFF {
+        log_info!("input", "PS/2 controller not detected (status 0xFF), skipping initialization");
+        return;
+    }
+
+    // ========================================================================
     // Phase 1: Controller Configuration
     // ========================================================================
 

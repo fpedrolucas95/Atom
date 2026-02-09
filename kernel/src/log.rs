@@ -133,6 +133,7 @@ impl LogLevel {
 
 static mut CURRENT_LOG_LEVEL: LogLevel = LogLevel::Debug;
 static mut VGA_OUTPUT_ENABLED: bool = false;
+static mut FB_LOG_LINE: u32 = 0;
 
 pub fn init() {
     set_level(LogLevel::Info);
@@ -250,6 +251,45 @@ pub fn _log(level: LogLevel, origin: &str, args: fmt::Arguments, file: &str, lin
                 line,
             );
         }
+
+        // Mirror logs to framebuffer for hardware diagnostics
+        if crate::graphics::is_initialized() {
+            write_fb_log(level, origin, args_for_vga);
+        }
+    }
+}
+
+struct FbLogWriter {
+    x: u32,
+    y: u32,
+    color: crate::graphics::Color,
+}
+
+impl core::fmt::Write for FbLogWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        crate::graphics::panic_write(self.x, self.y, s, self.color);
+        self.x += s.len() as u32 * 8;
+        Ok(())
+    }
+}
+
+unsafe fn write_fb_log(level: LogLevel, origin: &str, args: fmt::Arguments) {
+    let color = match level {
+        LogLevel::Error | LogLevel::Panic => crate::graphics::Color::RED,
+        LogLevel::Warn => crate::graphics::Color::new(255, 255, 0),
+        _ => crate::graphics::Color::WHITE,
+    };
+
+    let y = FB_LOG_LINE * 10 + 30; // Start below the heartbeat
+    let mut writer = FbLogWriter { x: 10, y, color };
+
+    let _ = write!(writer, "[{}] [{}] ", level.as_str(), origin);
+    let _ = core::fmt::write(&mut writer, args);
+
+    FB_LOG_LINE += 1;
+    // Simple wrap around if we fill the screen (crude but works for early boot)
+    if FB_LOG_LINE > 60 {
+        FB_LOG_LINE = 0;
     }
 }
 
