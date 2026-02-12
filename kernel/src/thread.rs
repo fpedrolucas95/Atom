@@ -1137,14 +1137,18 @@ fn free_user_space_pages(pml4_phys: usize) -> usize {
                             for pt_idx in 0..512 {
                                 if let Ok(page_entry) = get_pt_entry(pt_phys as usize, pt_idx) {
                                     if page_entry != 0 && (page_entry & 0x1) != 0 {
-                                        let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
+                                        // CRITICAL: Only free pages that have the USER bit set (bit 2).
+                                        // Identity-mapped kernel pages (like the heap) do not have the USER bit.
+                                        // This prevents processes from freeing kernel memory during termination.
+                                        if (page_entry & 0x4) != 0 {
+                                            let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
 
-                                        // CRITICAL: Only free pages that are likely to be process-private.
-                                        // Avoid freeing the first 1MB (kernel/BIOS) and the framebuffer range.
-                                        // Framebuffer is usually at 0xC0000000 (3GB).
-                                        if phys_frame >= 0x100000 && phys_frame < 0xC0000000 {
-                                            crate::mm::pmm::free_page(phys_frame);
-                                            pages_freed += 1;
+                                            // Avoid freeing the framebuffer range even if mapped to userspace
+                                            // as it's a shared hardware resource.
+                                            if phys_frame < 0xC0000000 {
+                                                crate::mm::pmm::free_page(phys_frame);
+                                                pages_freed += 1;
+                                            }
                                         }
                                     }
                                 }
