@@ -15,86 +15,65 @@ extern rust_syscall_dispatcher
 extern CURRENT_THREAD_KSTACK
 
 section .bss align=16
-; UNIPROCESSOR ONLY: Temporary scratch space used during initial transition while IRQs are OFF.
-; NOTE: For SMP support, these must be moved to per-CPU storage (accessed via GS segment).
-temp_user_rsp:       resq 1
-temp_user_rcx:       resq 1
-temp_user_r11:       resq 1
+; Temporary storage used ONLY during the RSP swap while interrupts are disabled.
+; Since interrupts are disabled by the SYSCALL instruction itself (via SFMASK),
+; this is safe on a uniprocessor system. For SMP, this must be per-CPU (GS).
+temp_user_rsp: resq 1
 
 section .text
 global syscall_entry
 syscall_entry:
-    ; SYSCALL disables interrupts via SFMASK.
-    ; We save volatile state in scratch variables while IRQs are OFF.
+    ; SYSCALL disables interrupts.
+    ; We must not enable them until we are on a safe stack.
     mov     [rel temp_user_rsp], rsp
-    mov     [rel temp_user_rcx], rcx ; User RIP
-    mov     [rel temp_user_r11], r11 ; User RFLAGS
-
-    ; Switch to the current thread's kernel stack.
-    ; NOTE: For SMP support, CURRENT_THREAD_KSTACK must be a per-CPU variable in GS.
     mov     rsp, [rel CURRENT_THREAD_KSTACK]
-    and     rsp, -16 ; 16-byte alignment for ABI compliance
+    and     rsp, -16 ; ABI alignment
 
-    ; Build an IRET frame on the thread's kernel stack.
-    ; This ensures the return state is preserved during context switches.
-    ; Stack order (top to bottom): RIP, CS, RFLAGS, RSP, SS
+    ; Build IRET frame (SS, RSP, RFLAGS, CS, RIP)
     push    qword 0x23               ; SS
     push    qword [rel temp_user_rsp] ; RSP
-    push    qword [rel temp_user_r11] ; RFLAGS
+    push    r11                      ; RFLAGS
     push    qword 0x1B               ; CS
-    push    qword [rel temp_user_rcx] ; RIP
+    push    rcx                      ; RIP
 
-    ; Save callee-saved registers (RBX, RBP, R12-R15) as required by ABI
+    ; Save all other GPRs
     push    rbx
     push    rbp
     push    r12
     push    r13
     push    r14
     push    r15
+    push    r8  ; arg4
+    push    r9  ; arg5
 
-    ; Save arg4 (R8) and arg5 (R9) on the stack as they will be clobbered
-    ; by the Windows x64 ABI call parameters.
-    push    r8
-    push    r9
-
-    ; Prepare arguments for the Rust dispatcher (Windows x64 ABI)
-    ; User Convention: RAX=num, RDI=arg0, RSI=arg1, RDX=arg2, R10=arg3, R8=arg4, R9=arg5
-    ; Win Convention:  RCX=num, RDX=arg0, R8=arg1, R9=arg2, stack=[arg3, arg4, arg5, rip, rsp...]
-
+    ; Prepare args for Rust (Windows x64 ABI)
+    ; RCX=num, RDX=arg0, R8=arg1, R9=arg2
     mov     rcx, rax        ; arg0 (num)
-    mov     rax, rdx        ; temp for user RDX
+    mov     rax, rdx        ; temp
     mov     rdx, rdi        ; arg1 (user RDI)
     mov     r8,  rsi        ; arg2 (user RSI)
     mov     r9,  rax        ; arg3 (user RDX)
 
-    ; Reserve shadow space (32) + 8 argument slots (64) = 96.
-    ; Use 128 to maintain 16-byte alignment (pushed 13 * 8 = 104; 104+120=224, 224%16=0).
-    sub     rsp, 120
+    sub     rsp, 120        ; shadow space + arguments 3-14
 
-    ; arg3 (user R10) -> [rsp + 32]
-    mov     rax, r10
+    ; Fill stack arguments for dispatcher
+    mov     rax, r10        ; User R10 -> arg3
     mov     [rsp + 32], rax
-
-    ; arg4 (user R8) -> [rsp + 40]
-    mov     rax, [rsp + 128] ; Retrieve from stack (pushed R9 is at +120, R8 at +128)
+    mov     rax, [rsp + 128] ; User R8  -> arg4
     mov     [rsp + 40], rax
-
-    ; arg5 (user R9) -> [rsp + 48]
-    mov     rax, [rsp + 120] ; Retrieve from stack
+    mov     rax, [rsp + 120] ; User R9  -> arg5
     mov     [rsp + 48], rax
 
-    ; Pass original RIP and RSP to the dispatcher (for logging/debug).
-    mov     rax, [rel temp_user_rcx]
+    ; Original user RIP and RSP (for debug)
+    mov     rax, [rsp + 184]
     mov     [rsp + 56], rax
-    mov     rax, [rel temp_user_rsp]
+    mov     rax, [rsp + 208]
     mov     [rsp + 64], rax
 
-    ; Pass original callee-saved registers to the dispatcher.
-    ; These are retrieved from the stack where we pushed them earlier.
-    ; Offsets are relative to current RSP (which is 120 bytes below the last push).
-    mov     rax, [rsp + 176] ; RBX (7th push from top of 13)
+    ; Original callee-saved registers (for debug/trace)
+    mov     rax, [rsp + 176] ; RBX
     mov     [rsp + 72], rax
-    mov     rax, [rsp + 168] ; RBP (6th push from top)
+    mov     rax, [rsp + 168] ; RBP
     mov     [rsp + 80], rax
     mov     rax, [rsp + 160] ; R12
     mov     [rsp + 88], rax
@@ -107,13 +86,9 @@ syscall_entry:
 
     call    rust_syscall_dispatcher
 
-    ; Restore shadow space and arguments (from 'sub rsp, 120')
+    ; Restore stack and return
     add     rsp, 120
-
-    ; Skip the saved R8 and R9
-    add     rsp, 16
-
-    ; Restore callee-saved registers
+    add     rsp, 16 ; skip saved R8, R9
     pop     r15
     pop     r14
     pop     r13
@@ -121,15 +96,7 @@ syscall_entry:
     pop     rbp
     pop     rbx
 
-    ; The stack now points to the IRET frame we pushed earlier:
-    ; [rsp + 0]:  RIP
-    ; [rsp + 8]:  CS
-    ; [rsp + 16]: RFLAGS
-    ; [rsp + 24]: RSP
-    ; [rsp + 32]: SS
-
-    ; Ensure interrupts are enabled in the restored RFLAGS (bit 9 = 0x200)
+    ; The stack now points to the IRET frame (RIP, CS, RFLAGS, RSP, SS)
+    ; Ensure IF=1 in restored RFLAGS
     or      qword [rsp + 16], 0x200
-
-    ; Return to userspace using the frame on the stack
     iretq
