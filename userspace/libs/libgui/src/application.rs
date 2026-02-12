@@ -9,11 +9,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::surface::Surface;
-use crate::event::{Event, MouseEvent};
+use crate::event::{Event, MouseEvent, WindowEvent};
 use atom_syscall::ipc::{PortId, create_port};
 use atom_syscall::SyscallResult;
 use libipc::protocol::{lookup_service, send_message, get_payload};
-use libipc::messages::{MessageType, WmCreateWindowRequest, WmCreateWindowResponse};
+use libipc::messages::{MessageType, WmCreateWindowRequest, WmCreateWindowResponse, SurfaceAssignMsg};
 
 /// Application state and context
 pub struct Application {
@@ -27,6 +27,8 @@ pub struct Application {
     event_queue: Vec<Event>,
     /// Whether application should quit
     quit_requested: bool,
+    /// Surfaces managed by this application
+    surfaces: Vec<Surface>,
 }
 
 impl Application {
@@ -41,6 +43,7 @@ impl Application {
             wm_port,
             event_queue: Vec::new(),
             quit_requested: false,
+            surfaces: Vec::new(),
         })
     }
 
@@ -69,6 +72,7 @@ impl Application {
                     if let Some(resp) = WmCreateWindowResponse::from_bytes(payload) {
                         // Create surface from shared region
                         let surface = Surface::from_wm_response(resp, self.wm_port)?;
+                        self.surfaces.push(surface.clone());
                         return Ok(surface);
                     }
                 }
@@ -162,6 +166,23 @@ impl Application {
                     self.quit_requested = true;
                     return Event::Quit;
                 }
+                MessageType::SurfaceAssign => {
+                    if let Some(msg) = SurfaceAssignMsg::from_bytes(payload) {
+                        if let Some(surface) = self.surfaces.iter_mut().find(|s| s.window_id() == msg.window_id) {
+                            // Update shared surface transparently
+                            if let Ok(new_shared) = atom_syscall::graphics::SharedSurface::from_region(msg.region_id, msg.width, msg.height) {
+                                let mut inner = surface.inner.borrow_mut();
+                                inner.shared = new_shared;
+                                inner.scale_factor = msg.scale_factor;
+                                // Signal resize to application
+                                return Event::Window(WindowEvent::Resize {
+                                    width: msg.width,
+                                    height: msg.height,
+                                });
+                            }
+                        }
+                    }
+                }
                 MessageType::WmEvent => {
                     if let Some(wm_event) = libipc::messages::WmWindowEventMsg::from_bytes(payload) {
                         match wm_event.event_type {
@@ -174,6 +195,12 @@ impl Application {
                             }
                             libipc::messages::WindowEventType::Unfocus => {
                                 return Event::Window(crate::event::WindowEvent::Unfocus);
+                            }
+                            libipc::messages::WindowEventType::Resize => {
+                                return Event::Window(WindowEvent::Resize {
+                                    width: wm_event.width,
+                                    height: wm_event.height,
+                                });
                             }
                             _ => {}
                         }

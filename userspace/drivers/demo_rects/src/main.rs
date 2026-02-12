@@ -98,8 +98,12 @@ fn main() -> ! {
 
     loop {
         // Poll for events
-        while let Event::Quit = app.poll_event() {
-            exit(0);
+        loop {
+            match app.poll_event() {
+                Event::Quit => exit(0),
+                Event::None => break,
+                _ => {}
+            }
         }
 
         // Render

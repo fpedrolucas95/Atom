@@ -112,6 +112,9 @@ fn main() -> ! {
                 }
                 Event::Window(WindowEvent::Focus) => focused = true,
                 Event::Window(WindowEvent::Unfocus) => focused = false,
+                Event::Window(WindowEvent::Resize { .. }) => {
+                    log("Demo Text: Window resized");
+                }
                 Event::None => break,
                 _ => {}
             }
@@ -124,10 +127,11 @@ fn main() -> ! {
         surface.draw_string(10, 10, "Welcome to Atom OS Window Manager", Color::rgb(136, 192, 208), bg_color);
         surface.draw_string(10, 30, &text, Color::WHITE, bg_color);
 
+        let status_y = surface.height().saturating_sub(20);
         if focused {
-            surface.draw_string(10, 380, "Status: FOCUSED", Color::rgb(163, 190, 140), bg_color);
+            surface.draw_string(10, status_y, "Status: FOCUSED", Color::rgb(163, 190, 140), bg_color);
         } else {
-            surface.draw_string(10, 380, "Status: Click to focus", Color::rgb(191, 97, 106), bg_color);
+            surface.draw_string(10, status_y, "Status: Click to focus", Color::rgb(191, 97, 106), bg_color);
         }
 
         surface.present();
