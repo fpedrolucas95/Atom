@@ -225,7 +225,14 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 fn init_scheduler() {
     extern "C" fn idle_thread_entry() -> ! {
         loop {
-            unsafe { core::arch::asm!("hlt"); }
+            // Reap any exited threads that are pending final cleanup.
+            // This is safe because the idle thread runs on its own stack
+            // and uses the kernel PML4.
+            crate::thread::reap_zombies();
+
+            unsafe {
+                core::arch::asm!("hlt");
+            }
         }
     }
 
@@ -289,7 +296,11 @@ fn display_memory_stats() {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Disable interrupts immediately to stop the world and prevent further log spam
+    crate::interrupts::disable();
+
     log_error!("PANIC", "{}", info);
+
     loop {
         halt();
     }

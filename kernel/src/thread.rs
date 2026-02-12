@@ -1366,6 +1366,94 @@ fn get_pt_entry(pt_phys: usize, index: usize) -> Result<u64, ()> {
 ///
 /// After this function completes, the entity is completely gone from the system.
 /// All memory is reclaimed, all handles are invalid, and all waiters are unblocked.
+struct ZombieInfo {
+    id: ThreadId,
+    pml4: u64,
+    stack: u64,
+    stack_size: usize,
+    name: &'static str,
+}
+
+static ZOMBIE_THREADS: Mutex<Vec<ZombieInfo>> = Mutex::new(Vec::new());
+
+/// Performs the final, dangerous cleanup operations (freeing stack and PML4)
+/// that cannot be done while the thread is still running.
+fn perform_final_cleanup(
+    thread_id: ThreadId,
+    address_space_cr3: u64,
+    kernel_stack: u64,
+    kernel_stack_size: usize,
+) {
+    // Step 5-7: Complete page table walk and physical memory cleanup
+    log_debug!(LOG_ORIGIN, "Final Step: Walking page tables and freeing physical frames for TID {}", thread_id);
+
+    // We must ensure we are NOT using the PML4 we are about to free.
+    // If we are currently on this PML4, this is a fatal logic error in the reaper.
+    let current_cr3 = crate::arch::read_cr3();
+    if address_space_cr3 != 0 && address_space_cr3 == current_cr3 {
+        log_panic!(LOG_ORIGIN, "REAPER ERROR: Attempting to free active PML4 0x{:X}", address_space_cr3);
+    }
+
+    let pages_freed = if address_space_cr3 != 0 && address_space_cr3 != current_cr3 {
+        // Thread has its own PML4 (userspace thread)
+        let user_pages = free_user_space_pages(address_space_cr3 as usize);
+        log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);
+
+        // Free the PML4 itself
+        crate::mm::pmm::free_page(address_space_cr3 as usize);
+        log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
+
+        user_pages
+    } else {
+        0
+    };
+
+    RESOURCE_COUNTERS.physical_pages_freed_on_termination.fetch_add(pages_freed, Ordering::Relaxed);
+
+    // Step 7: Free kernel stack
+    log_debug!(LOG_ORIGIN, "Final Step: Freeing kernel stack for TID {}", thread_id);
+    let kernel_stack_bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
+    let num_stack_pages = kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
+
+    let current_pml4 = current_cr3 as usize;
+    let mut stack_pages_freed = 0;
+
+    for i in 0..num_stack_pages {
+        let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
+
+        if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
+            crate::mm::pmm::free_page(phys_addr);
+            stack_pages_freed += 1;
+        }
+    }
+
+    log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages for TID {}", stack_pages_freed, thread_id);
+    RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn reap_zombies() {
+    let zombies = {
+        let mut list = ZOMBIE_THREADS.lock();
+        if list.is_empty() {
+            return;
+        }
+        core::mem::take(&mut *list)
+    };
+
+    for zombie in zombies {
+        log_info!(LOG_ORIGIN, "Reaping zombie thread {} ('{}')", zombie.id, zombie.name);
+
+        perform_final_cleanup(zombie.id, zombie.pml4, zombie.stack, zombie.stack_size);
+
+        // Only now remove from the global thread list
+        if let Some(_removed) = THREAD_LIST.remove(zombie.id) {
+            log_debug!(LOG_ORIGIN, "Zombie thread {} removed from global list", zombie.id);
+        }
+
+        RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     log_info!(
         LOG_ORIGIN,
@@ -1385,7 +1473,7 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         Some((ks, kss, as_cr3, name)) => (ks, kss, as_cr3, name),
         None => {
             log_warn!(LOG_ORIGIN, "Thread {} not found in thread list during termination", thread_id);
-            RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+            // Don't increment threads_terminated here, as it might already have been reaped
             return;
         }
     };
@@ -1408,81 +1496,44 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     log_debug!(LOG_ORIGIN, "Step 4/10: Revoking capabilities");
     crate::cap::revoke_all_thread_capabilities(thread_id);
 
-    // Step 5-7: Complete page table walk and physical memory cleanup
-    log_debug!(LOG_ORIGIN, "Step 5/10: Walking page tables and freeing physical frames");
-    let pages_freed = if address_space_cr3 != crate::arch::read_cr3() {
-        // Thread has its own PML4 (userspace thread)
-        let user_pages = free_user_space_pages(address_space_cr3 as usize);
-        log_info!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);
-
-        // Free the PML4 itself
-        crate::mm::pmm::free_page(address_space_cr3 as usize);
-        log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
-
-        user_pages
-    } else {
-        log_debug!(LOG_ORIGIN, "Thread using kernel PML4, skipping user page table cleanup");
-        0
-    };
-
-    RESOURCE_COUNTERS.physical_pages_freed_on_termination.fetch_add(pages_freed, Ordering::Relaxed);
-
     // Step 6: Clean up address spaces from manager
     log_debug!(LOG_ORIGIN, "Step 6/10: Removing address spaces from manager");
     crate::mm::addrspace::cleanup_thread_address_spaces(thread_id);
 
-    // Step 7: Free kernel stack
-    log_debug!(LOG_ORIGIN, "Step 7/10: Freeing kernel stack");
-    let kernel_stack_bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
-    let num_stack_pages = kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
+    // Step 8: Remove from scheduler (handled automatically when thread is removed or state is Exited)
+    log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will skip this thread from now on");
 
-    log_debug!(
-        LOG_ORIGIN,
-        "Freeing {} kernel stack pages starting at 0x{:X}",
-        num_stack_pages,
-        kernel_stack_bottom
-    );
+    let is_current = crate::sched::current_thread() == Some(thread_id);
 
-    let current_pml4 = crate::arch::read_cr3() as usize;
-    let mut stack_pages_freed = 0;
+    if is_current {
+        log_info!(LOG_ORIGIN, "Current thread {} exiting - deferring final cleanup to reaper", thread_id);
+        ZOMBIE_THREADS.lock().push(ZombieInfo {
+            id: thread_id,
+            pml4: address_space_cr3,
+            stack: kernel_stack,
+            stack_size: kernel_stack_size,
+            name: thread_name,
+        });
+    } else {
+        perform_final_cleanup(thread_id, address_space_cr3, kernel_stack, kernel_stack_size);
 
-    for i in 0..num_stack_pages {
-        let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
-
-        if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
-            crate::mm::pmm::free_page(phys_addr);
-            stack_pages_freed += 1;
+        // Step 9: Remove from global thread list
+        log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
+        if let Some(_removed) = THREAD_LIST.remove(thread_id) {
+            log_debug!(LOG_ORIGIN, "Thread removed from global list");
         }
+
+        // Step 10: Update counters and log final report
+        log_debug!(LOG_ORIGIN, "Step 10/10: Updating resource counters");
+        RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+
+        log_info!(
+            LOG_ORIGIN,
+            "=== ENTITY {} ('{}') TERMINATED SUCCESSFULLY ===",
+            thread_id,
+            thread_name
+        );
     }
-
-    log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages", stack_pages_freed);
-    RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
-
-    // Step 8: Remove from scheduler (handled automatically when thread is removed)
-    log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will remove thread on next tick");
-
-    // Step 9: Remove from global thread list
-    log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
-    if let Some(_removed) = THREAD_LIST.remove(thread_id) {
-        log_debug!(LOG_ORIGIN, "Thread removed from global list");
-    }
-
-    // Step 10: Update counters and log final report
-    log_debug!(LOG_ORIGIN, "Step 10/10: Updating resource counters");
-    RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
-
-    log_info!(
-        LOG_ORIGIN,
-        "=== ENTITY {} ('{}') TERMINATED SUCCESSFULLY ===",
-        thread_id,
-        thread_name
-    );
-    log_info!(
-        LOG_ORIGIN,
-        "Resource cleanup: {} user pages + {} stack pages freed",
-        pages_freed,
-        stack_pages_freed
-    );
 
     RESOURCE_COUNTERS.log_stats();
 }
