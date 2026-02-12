@@ -685,68 +685,6 @@ pub fn log_user_entry_once(thread_id: ThreadId, ctx: &CpuContext) {
             ctx.cs,
             ctx.ss
         );
-        
-        // DEBUG: Log the actual IRET frame that was built in switch.asm
-        extern "C" {
-            static DEBUG_IRET_RIP: u64;
-            static DEBUG_IRET_CS: u64;
-            static DEBUG_IRET_RFLAGS: u64;
-            static DEBUG_IRET_RSP: u64;
-            static DEBUG_IRET_SS: u64;
-            static DEBUG_IRET_KERNEL_RSP: u64;
-        }
-        
-        unsafe {
-            log_debug!(
-                "DEBUG_IRET",
-                "IRET frame @ kernel RSP={:#016X}:",
-                DEBUG_IRET_KERNEL_RSP
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+0]  RIP    = {:#016X} (expected: {:#016X})",
-                DEBUG_IRET_RIP,
-                ctx.rip
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+8]  CS     = {:#016X} (expected: 0x000000000000001B)",
-                DEBUG_IRET_CS
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+16] RFLAGS = {:#016X}",
-                DEBUG_IRET_RFLAGS
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+24] RSP    = {:#016X} (expected: {:#016X})",
-                DEBUG_IRET_RSP,
-                ctx.rsp
-            );
-            log_debug!(
-                "DEBUG_IRET",
-                "  [rsp+32] SS     = {:#016X} (expected: 0x0000000000000023)",
-                DEBUG_IRET_SS
-            );
-            
-            // Check if values match expectations
-            // Skip 0x0 values which occur during initial user transition before variables are set
-            if DEBUG_IRET_CS != 0 && DEBUG_IRET_CS != 0x1B {
-                log_error!(
-                    "DEBUG_IRET",
-                    "!!! CS is NOT 0x1B - actual value is {:#X} !!!",
-                    DEBUG_IRET_CS
-                );
-            }
-            if DEBUG_IRET_SS != 0 && DEBUG_IRET_SS != 0x23 {
-                log_error!(
-                    "DEBUG_IRET",
-                    "!!! SS is NOT 0x23 - actual value is {:#X} !!!",
-                    DEBUG_IRET_SS
-                );
-            }
-        }
     }
 }
 
