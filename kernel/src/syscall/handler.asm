@@ -83,15 +83,27 @@ syscall_entry:
     mov     rax, [rsp + 120] ; Retrieve from stack
     mov     [rsp + 48], rax
 
-    ; Passamos RIP e RSP originais para o dispatcher (para logs/debug)
+    ; Pass original RIP and RSP to the dispatcher (for logging/debug).
     mov     rax, [rel temp_user_rcx]
     mov     [rsp + 56], rax
     mov     rax, [rel temp_user_rsp]
     mov     [rsp + 64], rax
 
-    ; Passamos ponteiros para os registradores salvos na stack (opcional, mas útil)
-    lea     rax, [rsp + 128]  ; Ponteiro para o bloco de GPRs
+    ; Pass original callee-saved registers to the dispatcher.
+    ; These are retrieved from the stack where we pushed them earlier.
+    ; Offsets are relative to current RSP (which is 120 bytes below the last push).
+    mov     rax, [rsp + 176] ; RBX (7th push from top of 13)
     mov     [rsp + 72], rax
+    mov     rax, [rsp + 168] ; RBP (6th push from top)
+    mov     [rsp + 80], rax
+    mov     rax, [rsp + 160] ; R12
+    mov     [rsp + 88], rax
+    mov     rax, [rsp + 152] ; R13
+    mov     [rsp + 96], rax
+    mov     rax, [rsp + 144] ; R14
+    mov     [rsp + 104], rax
+    mov     rax, [rsp + 136] ; R15
+    mov     [rsp + 112], rax
 
     call    rust_syscall_dispatcher
 

@@ -231,8 +231,13 @@ fn init_scheduler() {
             crate::thread::reap_zombies();
 
             unsafe {
-                core::arch::asm!("hlt");
+                // STI followed by HLT is an atomic operation that enables interrupts
+                // and puts the CPU to sleep until the next interrupt.
+                core::arch::asm!("sti", "hlt");
             }
+
+            // After an interrupt wakes us up, yield to see if any other thread is now ready.
+            crate::sched::yield_current();
         }
     }
 
