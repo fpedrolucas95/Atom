@@ -8,7 +8,7 @@ extern crate alloc;
 
 use crate::color::Color;
 use crate::font::{get_glyph, FONT_WIDTH, FONT_HEIGHT};
-use atom_syscall::graphics::{SharedSurface, SharedRegionId};
+use atom_syscall::graphics::SharedSurface;
 use libipc::messages::{WindowId, WmCreateWindowResponse, WmCommitFrameMsg, MessageType};
 use libipc::protocol::send_message_async;
 use atom_syscall::ipc::PortId;
@@ -137,20 +137,25 @@ impl Surface {
         inner.dirty = true;
     }
 
-    /// Draw a single character at the given position
-    pub fn draw_char(&mut self, x: u32, y: u32, ch: u8, fg: Color, bg: Color) {
-        let mut inner = self.inner.borrow_mut();
+    /// Internal helper to draw a single glyph
+    fn draw_glyph(shared: &SharedSurface, x: u32, y: u32, ch: u8, fg: atom_syscall::graphics::Color, bg: atom_syscall::graphics::Color) {
         let glyph = get_glyph(ch);
-        let fg_atom = atom_syscall::graphics::Color::new(fg.r, fg.g, fg.b);
-        let bg_atom = atom_syscall::graphics::Color::new(bg.r, bg.g, bg.b);
-
         for row in 0..FONT_HEIGHT {
             for col in 0..FONT_WIDTH {
                 let bit = (glyph[row as usize] >> (7 - col)) & 1;
-                let color = if bit == 1 { fg_atom } else { bg_atom };
-                inner.shared.draw_pixel(x + col, y + row, color);
+                let color = if bit == 1 { fg } else { bg };
+                shared.draw_pixel(x + col, y + row, color);
             }
         }
+    }
+
+    /// Draw a single character at the given position
+    pub fn draw_char(&mut self, x: u32, y: u32, ch: u8, fg: Color, bg: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let fg_atom = atom_syscall::graphics::Color::new(fg.r, fg.g, fg.b);
+        let bg_atom = atom_syscall::graphics::Color::new(bg.r, bg.g, bg.b);
+
+        Self::draw_glyph(&inner.shared, x, y, ch, fg_atom, bg_atom);
         inner.dirty = true;
     }
 
@@ -166,14 +171,7 @@ impl Surface {
             if cx + FONT_WIDTH > width {
                 break;
             }
-            let glyph = get_glyph(ch);
-            for row in 0..FONT_HEIGHT {
-                for col in 0..FONT_WIDTH {
-                    let bit = (glyph[row as usize] >> (7 - col)) & 1;
-                    let color = if bit == 1 { fg_atom } else { bg_atom };
-                    inner.shared.draw_pixel(cx + col, y + row, color);
-                }
-            }
+            Self::draw_glyph(&inner.shared, cx, y, ch, fg_atom, bg_atom);
             cx += FONT_WIDTH;
         }
         inner.dirty = true;

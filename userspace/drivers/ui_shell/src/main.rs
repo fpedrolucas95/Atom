@@ -7,7 +7,6 @@
 extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 struct BumpAllocator {
@@ -81,14 +80,13 @@ use core::panic::PanicInfo;
 use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags, shared_region_create, shared_region_map, get_framebuffer};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
-use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
-use libipc::well_known;
 
 mod theme {
     use atom_syscall::graphics::Color;
@@ -807,32 +805,22 @@ impl Compositor {
         if !self.pending_windows.is_empty() {
             let pending = self.pending_windows.remove(0);
 
-            if let Some(window) = self.wm.get_window_mut(pending.window_id) {
+            let result = if let Some(window) = self.wm.get_window_mut(pending.window_id) {
                 window.event_port = Some(reg_msg.app_port);
+                window.surface_region_id.map(|rid| (rid, window.content_width(), window.content_height()))
+            } else {
+                None
+            };
 
-                if let Some(region_id) = window.surface_region_id {
-                    let msg = SurfaceAssignMsg {
-                        window_id: pending.window_id,
-                        region_id,
-                        width: window.content_width(),
-                        height: window.content_height(),
-                        stride: window.content_width(),
-                        bytes_per_pixel: 4,
-                        compositor_port: self.event_port,
-                        scale_factor: 1000,
-                    };
-
-                    let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
-                    let header_bytes = header.to_bytes();
-                    let payload_bytes = msg.to_bytes();
-
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]
-                        .copy_from_slice(&payload_bytes);
-
-                    let _ = send(reg_msg.app_port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]);
-                }
+            if let Some((region_id, cw, ch)) = result {
+                self.send_surface_assignment(
+                    pending.window_id,
+                    reg_msg.app_port,
+                    region_id,
+                    cw,
+                    ch,
+                    None
+                );
             }
         }
     }
@@ -1173,60 +1161,77 @@ impl Compositor {
         (x, y, w, h)
     }
 
+    fn send_surface_assignment(&self, window_id: WindowId, port: PortId, region_id: SharedRegionId, width: u32, height: u32, resize_pos: Option<(i32, i32)>) {
+        // 1. Notify client about surface
+        let assign = SurfaceAssignMsg {
+            window_id,
+            region_id,
+            width,
+            height,
+            stride: width,
+            bytes_per_pixel: 4,
+            compositor_port: self.event_port,
+            scale_factor: 1000,
+        };
+
+        let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
+        let mut full_msg = [0u8; 64];
+        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE].copy_from_slice(&assign.to_bytes());
+        let _ = send(port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]);
+
+        if let Some((win_x, win_y)) = resize_pos {
+            // 2. Notify client about resize event
+            let resize_event = libipc::messages::WmWindowEventMsg {
+                window_id,
+                event_type: libipc::messages::WindowEventType::Resize,
+                x: win_x,
+                y: win_y,
+                width,
+                height,
+            };
+
+            let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+            let mut full_msg = [0u8; 64];
+            full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+            full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&resize_event.to_bytes());
+            let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+        }
+    }
+
     fn reallocate_window_surface(&mut self, window_id: WindowId) {
-        if let Some(window) = self.wm.get_window_mut(window_id) {
+        let (cw, ch, already_correct) = if let Some(window) = self.wm.get_window(window_id) {
             let cw = window.content_width();
             let ch = window.content_height();
+            let already_correct = if let Some(ref s) = window.surface {
+                s.width() == cw && s.height() == ch
+            } else {
+                false
+            };
+            (cw, ch, already_correct)
+        } else {
+            return;
+        };
 
-            // Check if surface already has correct dimensions
-            if let Some(ref s) = window.surface {
-                if s.width() == cw && s.height() == ch {
-                    return;
-                }
-            }
+        if already_correct {
+            return;
+        }
 
-            // Create new shared surface for the window
-            if let Ok(new_surface) = SharedSurface::create(cw, ch) {
-                let region_id = new_surface.region_id();
+        // Create new shared surface for the window
+        if let Ok(new_surface) = SharedSurface::create(cw, ch) {
+            let region_id = new_surface.region_id();
+
+            let result = if let Some(window) = self.wm.get_window_mut(window_id) {
                 window.surface = Some(new_surface);
                 window.surface_region_id = Some(region_id);
                 window.content_dirty = true;
+                window.event_port.map(|port| (port, window.x, window.y))
+            } else {
+                None
+            };
 
-                if let Some(port) = window.event_port {
-                    // 1. Notify client about new surface
-                    let assign = SurfaceAssignMsg {
-                        window_id,
-                        region_id,
-                        width: cw,
-                        height: ch,
-                        stride: cw,
-                        bytes_per_pixel: 4,
-                        compositor_port: self.event_port,
-                        scale_factor: 1000,
-                    };
-
-                    let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE].copy_from_slice(&assign.to_bytes());
-                    let _ = send(port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]);
-
-                    // 2. Notify client about resize event
-                    let resize_event = libipc::messages::WmWindowEventMsg {
-                        window_id,
-                        event_type: libipc::messages::WindowEventType::Resize,
-                        x: window.x,
-                        y: window.y,
-                        width: cw,
-                        height: ch,
-                    };
-
-                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&resize_event.to_bytes());
-                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
-                }
+            if let Some((port, x, y)) = result {
+                self.send_surface_assignment(window_id, port, region_id, cw, ch, Some((x, y)));
             }
         }
     }
