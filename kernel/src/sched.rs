@@ -185,9 +185,7 @@ impl Scheduler {
 
                 // Only requeue if the thread is still runnable (not blocked or exited)
                 let current_state = thread::get_thread_state(cur);
-                let is_runnable = current_state
-                    .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
-                    .unwrap_or(false);
+                let is_runnable = self.is_runnable(cur);
 
                 if is_runnable && !ready.is_empty() {
                     let priority = self.get_priority(cur);
@@ -231,13 +229,7 @@ impl Scheduler {
         // 2. If no 'next', try to keep running 'previous' ONLY if it's still runnable
         // 3. Ultimate fallback: the idle thread
         let chosen = next
-            .or_else(|| {
-                previous.filter(|&id| {
-                    thread::get_thread_state(id)
-                        .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
-                        .unwrap_or(false)
-                })
-            })
+            .or_else(|| previous.filter(|&id| self.is_runnable(id)))
             .or_else(|| self.idle_id());
 
         if let Some(prev) = previous {
@@ -254,29 +246,53 @@ impl Scheduler {
         if let Some(id) = chosen {
             // Final safety check: never switch to an exited or invalid thread.
             // The idle thread is always considered safe to switch to.
-            let chosen_state = thread::get_thread_state(id);
-            let is_runnable = chosen_state
-                .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
-                .unwrap_or(false);
+            let is_runnable = self.is_runnable(id);
 
             let final_id = if is_runnable {
                 id
             } else {
                 let idle_id = self.idle_id().expect("Idle thread must exist");
-                let idle_state = thread::get_thread_state(idle_id);
 
                 // Idle thread must ALWAYS be runnable. If it's not, we have a fatal invariant violation.
-                if !idle_state.map(|s| matches!(s, ThreadState::Running | ThreadState::Ready)).unwrap_or(false) {
+                if !self.is_runnable(idle_id) {
+                    let chosen_state = thread::get_thread_state(id);
+                    let idle_state = thread::get_thread_state(idle_id);
+
+                    let chosen_desc = match chosen_state {
+                        Some(s) => match s {
+                            ThreadState::Running => "Running",
+                            ThreadState::Ready => "Ready",
+                            ThreadState::Blocked => "Blocked",
+                            ThreadState::WaitingIpc => "WaitingIpc",
+                            ThreadState::Exited => "Exited",
+                        },
+                        None => "Missing (thread not found)",
+                    };
+
+                    let idle_desc = match idle_state {
+                        Some(s) => match s {
+                            ThreadState::Running => "Running",
+                            ThreadState::Ready => "Ready",
+                            ThreadState::Blocked => "Blocked",
+                            ThreadState::WaitingIpc => "WaitingIpc",
+                            ThreadState::Exited => "Exited",
+                        },
+                        None => "Missing (thread not found)",
+                    };
+
                     panic!(
-                        "SCHEDULER INVARIANT VIOLATION: Idle thread {} is not runnable! State: {:?}. (Originally chosen thread {} was in state {:?})",
+                        "SCHEDULER INVARIANT VIOLATION: Idle thread {} is not runnable! State: {} ({:?}). (Originally chosen thread {} was in state {} ({:?}))",
                         idle_id,
+                        idle_desc,
                         idle_state,
                         id,
+                        chosen_desc,
                         chosen_state
                     );
                 }
 
                 if id != idle_id {
+                    let chosen_state = thread::get_thread_state(id);
                     log_debug!(
                         "sched",
                         "Fallback to idle thread {} (chosen thread {} was in state {:?})",
@@ -340,6 +356,12 @@ impl Scheduler {
 
     fn current_thread(&self) -> Option<ThreadId> {
         *self.current.lock()
+    }
+
+    fn is_runnable(&self, id: ThreadId) -> bool {
+        thread::get_thread_state(id)
+            .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
+            .unwrap_or(false)
     }
 }
 
