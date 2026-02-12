@@ -1396,25 +1396,28 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         reason.exit_code()
     );
 
-    // Get thread info before we start cleanup
-    let thread_info = THREAD_LIST.threads.lock()
-        .iter()
-        .find(|t| t.id == thread_id)
-        .map(|t| (t.kernel_stack, t.kernel_stack_size, t.address_space, t.name));
+    // Step 1: Mark as Exited and get thread info.
+    // We do this inside a single lock acquisition to ensure the state transition
+    // is atomic and that the scheduler immediately ignores this thread.
+    let thread_info = {
+        let mut threads = THREAD_LIST.threads.lock();
+        if let Some(t) = threads.iter_mut().find(|t| t.id == thread_id) {
+            t.set_state(ThreadState::Exited);
+            Some((t.kernel_stack, t.kernel_stack_size, t.address_space, t.name))
+        } else {
+            None
+        }
+    };
 
     let (kernel_stack, kernel_stack_size, address_space_cr3, thread_name) = match thread_info {
         Some((ks, kss, as_cr3, name)) => (ks, kss, as_cr3, name),
         None => {
             log_warn!(LOG_ORIGIN, "Thread {} not found in thread list during termination", thread_id);
-            // Don't increment threads_terminated here, as it might already have been reaped
             return;
         }
     };
 
     log_info!(LOG_ORIGIN, "Terminating '{}' (TID={}, CR3=0x{:X})", thread_name, thread_id, address_space_cr3);
-
-    // Step 1: Mark as Exited to prevent scheduling
-    set_thread_state(thread_id, ThreadState::Exited);
     log_debug!(LOG_ORIGIN, "Step 1/10: Thread marked as Exited");
 
     // Step 2: Close all IPC ports and wake waiters
