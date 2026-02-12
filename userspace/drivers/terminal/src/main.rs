@@ -126,6 +126,8 @@ struct Terminal {
     compositor_port: PortId,
     /// Our local IPC port for receiving messages
     local_port: PortId,
+    /// Shared surface for rendering
+    surface: Option<SharedSurface>,
     /// Surface dimensions
     surface_width: u32,
     surface_height: u32,
@@ -141,7 +143,9 @@ struct Terminal {
 
 
 impl Terminal {
-    fn new(window_id: u32, compositor_port: PortId, local_port: PortId, width: u32, height: u32) -> Self {
+    fn new(window_id: u32, compositor_port: PortId, local_port: PortId, surface: SharedSurface) -> Self {
+        let width = surface.width();
+        let height = surface.height();
         Self {
             display: DisplayBuffer::new(),
             input: InputBuffer::new(),
@@ -154,6 +158,7 @@ impl Terminal {
             window_id,
             compositor_port,
             local_port,
+            surface: Some(surface),
             surface_width: width,
             surface_height: height,
             char_width: 8,
@@ -177,7 +182,7 @@ impl Terminal {
 
 
     /// Initialize the terminal
-    fn init(&mut self, surface: &SharedSurface) {
+    fn init(&mut self) {
         // Initialize IPC client
         self.ipc.init();
 
@@ -186,8 +191,10 @@ impl Terminal {
         let cols = self.cols() as usize;
         self.display.set_dimensions(rows, cols);
 
-        // Clear surface with terminal background color
-        surface.clear(Theme::WINDOW_BG);
+        if let Some(ref surface) = self.surface {
+            // Clear surface with terminal background color
+            surface.clear(Theme::WINDOW_BG);
+        }
 
         // Show welcome message
         self.show_welcome();
@@ -196,7 +203,7 @@ impl Terminal {
         self.show_prompt();
 
         // Render initial state
-        if self.render(surface) {
+        if self.render() {
             self.notify_present();
         }
     }
@@ -577,7 +584,12 @@ impl Terminal {
 
     /// Render the terminal to the shared surface
     /// Returns true if anything was actually rendered
-    fn render(&mut self, surface: &SharedSurface) -> bool {
+    fn render(&mut self) -> bool {
+        let surface = match self.surface {
+            Some(ref s) => s,
+            None => return false,
+        };
+
         let rows = self.rows() as usize;
         let cols = self.cols() as usize;
 
@@ -747,7 +759,7 @@ impl Terminal {
     }
 
     /// Main event loop
-    fn run(&mut self, surface: &SharedSurface) {
+    fn run(&mut self) {
         log("Terminal: Entering main event loop");
 
         let mut msg_buffer = [0u8; 64];
@@ -760,7 +772,7 @@ impl Terminal {
             }
 
             // Render if needed and notify compositor only if we actually rendered
-            if self.render(surface) {
+            if self.render() {
                 self.notify_present();
             }
 
@@ -792,6 +804,19 @@ impl Terminal {
                 MessageType::TerminateRequest => {
                     log("Terminal: Received terminate request");
                     self.running = false;
+                }
+                MessageType::SurfaceAssign => {
+                    let payload_start = MessageHeader::SIZE;
+                    if let Some(msg) = SurfaceAssignMsg::from_bytes(&msg_buffer[payload_start..]) {
+                        log("Terminal: Received new surface assignment");
+                        if let Ok(new_surface) = SharedSurface::from_region(msg.region_id, msg.width, msg.height) {
+                            self.surface = Some(new_surface);
+                            self.surface_width = msg.width;
+                            self.surface_height = msg.height;
+                            self.display.set_dimensions(self.rows() as usize, self.cols() as usize);
+                            self.full_redraw_needed = true;
+                        }
+                    }
                 }
                 MessageType::KeyPress => {
                     // Process keyboard event from compositor
@@ -927,13 +952,12 @@ fn main() -> ! {
         surface_info.window_id,
         surface_info.compositor_port,
         local_port,
-        surface_info.width,
-        surface_info.height,
+        surface,
     );
-    terminal.init(&surface);
+    terminal.init();
 
     // Run main loop
-    terminal.run(&surface);
+    terminal.run();
 
     // Clean exit
     exit(0);

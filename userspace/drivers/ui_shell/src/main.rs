@@ -393,7 +393,7 @@ impl WindowManager {
         }
     }
 
-    fn toggle_maximize(&mut self, id: WindowId, screen_width: u32, screen_height: u32) {
+    fn toggle_maximize(&mut self, id: WindowId, work_x: i32, work_y: i32, work_w: u32, work_h: u32) -> bool {
         if let Some(window) = self.get_window_mut(id) {
             match window.state {
                 WindowState::Maximized => {
@@ -410,14 +410,16 @@ impl WindowManager {
                     window.saved_height = window.height;
 
                     window.state = WindowState::Maximized;
-                    window.x = 0;
-                    window.y = PANEL_HEIGHT as i32;
-                    window.width = screen_width;
-                    window.height = screen_height - PANEL_HEIGHT;
+                    window.x = work_x;
+                    window.y = work_y;
+                    window.width = work_w;
+                    window.height = work_h;
                 }
             }
             window.content_dirty = true;
+            return true;
         }
+        false
     }
 
     fn minimize_window(&mut self, id: WindowId) {
@@ -817,6 +819,7 @@ impl Compositor {
                         stride: window.content_width(),
                         bytes_per_pixel: 4,
                         compositor_port: self.event_port,
+                        scale_factor: 1000,
                     };
 
                     let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
@@ -974,10 +977,11 @@ impl Compositor {
                         self.handle_close_window(id);
                         return;
                     } else if x >= max_x && x < max_x + btn_size {
-                        let sw = self.fb.width();
-                        let sh = self.fb.height();
-                        self.wm.toggle_maximize(id, sw, sh);
-                        self.dirty = true;
+                        let (wx, wy, ww, wh) = self.get_work_area();
+                        if self.wm.toggle_maximize(id, wx, wy, ww, wh) {
+                            self.reallocate_window_surface(id);
+                            self.dirty = true;
+                        }
                         return;
                     } else if x >= min_x && x < min_x + btn_size {
                         self.wm.minimize_window(id);
@@ -1156,12 +1160,91 @@ impl Compositor {
         false
     }
 
+    fn get_work_area(&self) -> (i32, i32, u32, u32) {
+        let sw = self.fb.width();
+        let sh = self.fb.height();
+
+        let x = 0;
+        let y = PANEL_HEIGHT as i32;
+        let w = sw;
+        // Subtract panel height and dock area (bottom margin)
+        let h = sh.saturating_sub(PANEL_HEIGHT + DOCK_HEIGHT + 32);
+
+        (x, y, w, h)
+    }
+
+    fn reallocate_window_surface(&mut self, window_id: WindowId) {
+        if let Some(window) = self.wm.get_window_mut(window_id) {
+            let cw = window.content_width();
+            let ch = window.content_height();
+
+            // Check if surface already has correct dimensions
+            if let Some(ref s) = window.surface {
+                if s.width() == cw && s.height() == ch {
+                    return;
+                }
+            }
+
+            // Create new shared surface for the window
+            if let Ok(new_surface) = SharedSurface::create(cw, ch) {
+                let region_id = new_surface.region_id();
+                window.surface = Some(new_surface);
+                window.surface_region_id = Some(region_id);
+                window.content_dirty = true;
+
+                if let Some(port) = window.event_port {
+                    // 1. Notify client about new surface
+                    let assign = SurfaceAssignMsg {
+                        window_id,
+                        region_id,
+                        width: cw,
+                        height: ch,
+                        stride: cw,
+                        bytes_per_pixel: 4,
+                        compositor_port: self.event_port,
+                        scale_factor: 1000,
+                    };
+
+                    let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE].copy_from_slice(&assign.to_bytes());
+                    let _ = send(port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]);
+
+                    // 2. Notify client about resize event
+                    let resize_event = libipc::messages::WmWindowEventMsg {
+                        window_id,
+                        event_type: libipc::messages::WindowEventType::Resize,
+                        x: window.x,
+                        y: window.y,
+                        width: cw,
+                        height: ch,
+                    };
+
+                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&resize_event.to_bytes());
+                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                }
+            }
+        }
+    }
+
     fn handle_mouse_up(&mut self, x: i32, y: i32) {
         let captured = self.captured_window.take();
 
-        if !matches!(self.drag_op, DragOperation::None) {
-            self.drag_op = DragOperation::None;
-            return;
+        match self.drag_op {
+            DragOperation::Resize { window_id, .. } => {
+                self.reallocate_window_surface(window_id);
+                self.drag_op = DragOperation::None;
+                return;
+            }
+            DragOperation::Move { .. } => {
+                self.drag_op = DragOperation::None;
+                return;
+            }
+            DragOperation::None => {}
         }
 
         let target_id = captured.or_else(|| self.wm.window_at(x, y));

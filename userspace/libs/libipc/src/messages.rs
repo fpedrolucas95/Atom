@@ -405,10 +405,12 @@ pub struct SurfaceAssignMsg {
     pub bytes_per_pixel: u32,
     /// IPC port to send present requests back to compositor
     pub compositor_port: u64,
+    /// DPI Scale factor (scaled by 1000, e.g. 1000 = 1.0)
+    pub scale_factor: u32,
 }
 
 impl SurfaceAssignMsg {
-    pub const SIZE: usize = 36; // 4 + 8 + 4 + 4 + 4 + 4 + 8
+    pub const SIZE: usize = 40; // 4 + 8 + 4 + 4 + 4 + 4 + 8 + 4
 
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut bytes = [0u8; Self::SIZE];
@@ -419,6 +421,7 @@ impl SurfaceAssignMsg {
         bytes[20..24].copy_from_slice(&self.stride.to_le_bytes());
         bytes[24..28].copy_from_slice(&self.bytes_per_pixel.to_le_bytes());
         bytes[28..36].copy_from_slice(&self.compositor_port.to_le_bytes());
+        bytes[36..40].copy_from_slice(&self.scale_factor.to_le_bytes());
         bytes
     }
 
@@ -434,6 +437,7 @@ impl SurfaceAssignMsg {
             stride: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
             bytes_per_pixel: u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
             compositor_port: u64::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31], bytes[32], bytes[33], bytes[34], bytes[35]]),
+            scale_factor: u32::from_le_bytes([bytes[36], bytes[37], bytes[38], bytes[39]]),
         })
     }
 }
