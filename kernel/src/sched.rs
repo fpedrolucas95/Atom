@@ -254,14 +254,37 @@ impl Scheduler {
         if let Some(id) = chosen {
             // Final safety check: never switch to an exited or invalid thread.
             // The idle thread is always considered safe to switch to.
-            let is_runnable = thread::get_thread_state(id)
+            let chosen_state = thread::get_thread_state(id);
+            let is_runnable = chosen_state
                 .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
                 .unwrap_or(false);
 
             let final_id = if is_runnable {
                 id
             } else {
-                self.idle_id().expect("Idle thread must exist")
+                let idle_id = self.idle_id().expect("Idle thread must exist");
+                let idle_state = thread::get_thread_state(idle_id);
+
+                // Idle thread must ALWAYS be runnable. If it's not, we have a fatal invariant violation.
+                if !idle_state.map(|s| matches!(s, ThreadState::Running | ThreadState::Ready)).unwrap_or(false) {
+                    panic!(
+                        "SCHEDULER INVARIANT VIOLATION: Idle thread {} is not runnable! State: {:?}. (Originally chosen thread {} was in state {:?})",
+                        idle_id,
+                        idle_state,
+                        id,
+                        chosen_state
+                    );
+                }
+
+                if id != idle_id {
+                    log_debug!(
+                        "sched",
+                        "Fallback to idle thread {} (chosen thread {} was in state {:?})",
+                        idle_id, id, chosen_state
+                    );
+                }
+
+                idle_id
             };
 
             thread::set_thread_state(final_id, ThreadState::Running);
