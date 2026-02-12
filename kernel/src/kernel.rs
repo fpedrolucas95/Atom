@@ -225,7 +225,19 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 fn init_scheduler() {
     extern "C" fn idle_thread_entry() -> ! {
         loop {
-            unsafe { core::arch::asm!("hlt"); }
+            // Reap any exited threads that are pending final cleanup.
+            // This is safe because the idle thread runs on its own stack
+            // and uses the kernel PML4.
+            crate::thread::reap_zombies();
+
+            unsafe {
+                // STI followed by HLT is an atomic operation that enables interrupts
+                // and puts the CPU to sleep until the next interrupt.
+                core::arch::asm!("sti", "hlt");
+            }
+
+            // After an interrupt wakes us up, yield to see if any other thread is now ready.
+            crate::sched::yield_current();
         }
     }
 
@@ -256,6 +268,9 @@ fn start_scheduling() -> ! {
     if let Some(first) = sched::schedule() {
         if let Some(stack) = thread::kernel_stack_top(first) {
             gdt::set_rsp0(stack);
+            unsafe {
+                crate::thread::CURRENT_THREAD_KSTACK = stack;
+            }
         }
 
         thread::jump_to_thread(first);
@@ -289,7 +304,11 @@ fn display_memory_stats() {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Disable interrupts immediately to stop the world and prevent further log spam
+    crate::interrupts::disable();
+
     log_error!("PANIC", "{}", info);
+
     loop {
         halt();
     }

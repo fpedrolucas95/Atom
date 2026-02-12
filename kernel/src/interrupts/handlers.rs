@@ -467,6 +467,11 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
     
     ipc::on_timer_tick(get_ticks());
 
+    // Drive preemptive scheduling if we interrupted a userspace thread.
+    if coming_from_user {
+        sched::drive_cooperative_tick();
+    }
+
     super::apic::send_eoi();
 }
 

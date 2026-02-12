@@ -381,7 +381,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     TOTAL_PAGES.store(effective_tracked_pages, Ordering::Relaxed);
     PHYSICAL_RAM_PAGES.store(physical_ram_pages, Ordering::Relaxed);
     RESERVED_PAGES.store(reserved_pages, Ordering::Relaxed);
-    NEXT_FREE_HINT.store(1, Ordering::Relaxed); // Skip page 0
+    NEXT_FREE_HINT.store(2, Ordering::Relaxed); // Skip page 1 (Kernel PML4) // Skip page 0
 
     // -----------------------------------------------------------------------
     // Pass 2: Mark usable regions as free in the bitmap
@@ -688,7 +688,7 @@ pub fn free_page(addr: usize) {
 
     let page = addr / PAGE_SIZE;
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    if page >= total || page == 0 {
+    if page >= total || page <= 1 { // CRITICAL: Protect page 1 (Kernel PML4)
         return;
     }
 
@@ -817,7 +817,7 @@ pub fn free_pages(addr: usize, count: usize) {
     let mut freed = 0usize;
     for i in 0..count {
         let page = base_page + i;
-        if page >= total || page == 0 {
+        if page >= total || page <= 1 { // CRITICAL: Protect page 1 (Kernel PML4)
             continue;
         }
 

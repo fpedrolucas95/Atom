@@ -226,12 +226,24 @@ impl Scheduler {
         previous: Option<ThreadId>,
         next: Option<ThreadId>,
     ) -> Option<ThreadId> {
-        let chosen = next.or(previous).or_else(|| self.idle_id());
+        // Selection strategy:
+        // 1. Prefer the explicitly selected 'next' thread (from ready queue)
+        // 2. If no 'next', try to keep running 'previous' ONLY if it's still runnable
+        // 3. Ultimate fallback: the idle thread
+        let chosen = next
+            .or_else(|| {
+                previous.filter(|&id| {
+                    thread::get_thread_state(id)
+                        .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
+                        .unwrap_or(false)
+                })
+            })
+            .or_else(|| self.idle_id());
 
         if let Some(prev) = previous {
             if Some(prev) != chosen {
-                // Only set to Ready if it was previously Running
-                // If it was Blocked, it should stay Blocked
+                // Only set to Ready if it was previously Running and it's not chosen now.
+                // If it was Blocked or Exited, it should stay that way.
                 let prev_state = thread::get_thread_state(prev);
                 if let Some(ThreadState::Running) = prev_state {
                     thread::set_thread_state(prev, ThreadState::Ready);
@@ -240,9 +252,21 @@ impl Scheduler {
         }
 
         if let Some(id) = chosen {
-            thread::set_thread_state(id, ThreadState::Running);
-            *self.current.lock() = Some(id);
-            return Some(id);
+            // Final safety check: never switch to an exited or invalid thread.
+            // The idle thread is always considered safe to switch to.
+            let is_runnable = thread::get_thread_state(id)
+                .map(|s| matches!(s, ThreadState::Running | ThreadState::Ready))
+                .unwrap_or(false);
+
+            let final_id = if is_runnable {
+                id
+            } else {
+                self.idle_id().expect("Idle thread must exist")
+            };
+
+            thread::set_thread_state(final_id, ThreadState::Running);
+            *self.current.lock() = Some(final_id);
+            return Some(final_id);
         }
 
         None
