@@ -645,6 +645,11 @@ pub struct ThreadStats {
 static THREAD_LIST: ThreadList = ThreadList::new();
 static USERMODE_ENTRIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
 
+/// Global pointer to the current thread's kernel stack top.
+/// Used by syscall_entry in assembly to switch to the correct stack.
+#[no_mangle]
+pub static mut CURRENT_THREAD_KSTACK: u64 = 0;
+
 pub fn init() {
     log_info!(
         LOG_ORIGIN,
@@ -812,7 +817,6 @@ extern "C" {
     pub(crate) fn switch_to_context(new_context: *const CpuContext) -> !;
     pub(crate) fn enter_user(rip: u64, rsp: u64, cr3: u64) -> !;
     pub(crate) fn enter_user_first_time(rip: u64, rsp: u64, cr3: u64) -> !;
-    pub(crate) fn enter_user_resume(rip: u64, rsp: u64, cr3: u64, regs_ptr: *const crate::syscall::UserspaceGprs) -> !;
 }
 
 fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
@@ -1083,9 +1087,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     // Disable interrupts during the critical section
     crate::interrupts::disable();
 
-    // Get userspace return address BEFORE acquiring thread list lock
-    let userspace_return = crate::syscall::get_userspace_return_addr(from_id);
-
     // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
     let switch_info = {
         let mut threads = THREAD_LIST.threads.lock();
@@ -1110,14 +1111,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
             }
         };
 
-        // Update FROM thread's context with userspace return address if it's a userspace thread
-        if let Some((user_rip, user_rsp)) = userspace_return {
-            if threads[from_idx].is_userspace {
-                threads[from_idx].context.rip = user_rip;
-                threads[from_idx].context.rsp = user_rsp;
-            }
-        }
-
         // Force CR3 to match address_space
         let from_addr_space = threads[from_idx].address_space;
         let to_addr_space = threads[to_idx].address_space;
@@ -1131,96 +1124,36 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         threads[from_idx].context.cr3 = from_cr3;
         threads[to_idx].context.cr3 = to_cr3;
 
-        // Use the authoritative is_userspace flag - NOT address space heuristics
         let to_is_userspace = threads[to_idx].is_userspace;
-        let has_userspace_return = crate::syscall::get_userspace_return_addr(to_id).is_some();
-
         let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
         let to_ptr = &threads[to_idx].context as *const CpuContext;
-        let kstack = threads[to_idx].kernel_stack;
-        let to_entry_rip = threads[to_idx].context.rip;
-        let to_entry_rsp = threads[to_idx].context.rsp;
+        let to_kernel_stack = threads[to_idx].kernel_stack;
 
         if to_is_userspace {
             log_user_entry_once(to_id, &threads[to_idx].context);
         }
 
-        (from_ptr, to_ptr, kstack, to_is_userspace, has_userspace_return, to_entry_rip, to_entry_rsp, to_cr3)
+        (from_ptr, to_ptr, to_kernel_stack)
     }; // Lock released
 
-    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_is_userspace, has_userspace_return, to_entry_rip, to_entry_rsp, to_cr3) = switch_info;
+    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack) = switch_info;
 
-    // Update TSS.RSP0 for the new thread BEFORE entering userspace
+    // Update TSS.RSP0 and CURRENT_THREAD_KSTACK for the new thread
     // This ensures interrupt/syscall frames from usermode go to the correct kernel stack
     gdt::set_rsp0(to_kernel_stack);
-
-    // CRITICAL PATH DECISION:
-    // - Userspace threads (is_userspace=true): Always use enter_user* functions
-    //   which build a proper 5-qword IRET frame for Ring 3 transition.
-    //   * First-time entry: enter_user_first_time (zeros all GPRs)
-    //   * Syscall resume: enter_user_resume (restores callee-saved GPRs) or enter_user
-    // - Kernel threads (is_userspace=false): Use switch_context for
-    //   kernel-to-kernel context switch (saves/restores via assembly).
-    //
-    // The is_userspace flag is set at thread creation and never changes.
-    // This avoids the previous fragile heuristic of comparing address_space to
-    // kernel CR3, which failed for the init process (shares kernel CR3 but runs
-    // in Ring 3), causing IRET with CS=0x0 and SS=0x0.
-
-    if to_is_userspace {
-        // Determine target RIP/RSP: prefer saved userspace return address (from syscall entry),
-        // fall back to initial context values (first-time entry)
-        let (target_rip, target_rsp) = if has_userspace_return {
-            crate::syscall::get_userspace_return_addr(to_id)
-                .unwrap_or((to_entry_rip, to_entry_rsp))
-        } else {
-            (to_entry_rip, to_entry_rsp)
-        };
-
-        log_debug!(
-            LOG_ORIGIN,
-            "Enter userspace: TID={} RIP={:#016X} RSP={:#016X} CR3={:#016X} resume={}",
-            to_id, target_rip, target_rsp, to_cr3, has_userspace_return
-        );
-
-        // Re-enable interrupts before entering userspace
-        crate::interrupts::enable();
-
-        if has_userspace_return {
-            // Syscall resume - restore callee-saved registers if available
-            let gprs_map = crate::syscall::USERSPACE_GPRS.lock();
-            if let Some(gprs_ref) = gprs_map.get(&to_id) {
-                let gprs_ptr = gprs_ref as *const crate::syscall::UserspaceGprs;
-                drop(gprs_map);
-                unsafe {
-                    enter_user_resume(target_rip, target_rsp, to_cr3, gprs_ptr);
-                }
-            } else {
-                drop(gprs_map);
-                unsafe {
-                    enter_user(target_rip, target_rsp, to_cr3);
-                }
-            }
-        } else {
-            // First-time entry - zero all registers for clean initial state
-            unsafe {
-                enter_user_first_time(target_rip, target_rsp, to_cr3);
-            }
-        }
-        // enter_user* functions are divergent (-> !) so we never reach here
+    unsafe {
+        CURRENT_THREAD_KSTACK = to_kernel_stack;
     }
 
-    // Kernel-to-kernel context switch path
+    // Unified context switch: ALWAYS use switch_context to preserve kernel state.
+    // This fixes the issue where kernel threads (like idle) would be restarted
+    // every time they were scheduled back from a userspace thread.
+    //
+    // switch_context will save FROM context and restore TO context.
+    // If TO is userspace, switch_to_context_internal (in assembly) handles the IRET to Ring 3.
+    // If TO is kernel, it does a normal kernel-to-kernel switch.
     unsafe {
         guard_context_or_halt(&*to_ctx_ptr, "scheduled");
-    }
-
-    // Perform the actual context switch with no locks held.
-    // switch_context saves callee-saved registers to FROM, restores from TO,
-    // then enters switch_to_context_internal which builds a proper 5-qword
-    // IRET frame (including SS and RSP) and does iretq.
-    // When THIS thread is scheduled again, it will "return" from switch_context.
-    unsafe {
         switch_context(from_ctx_ptr, to_ctx_ptr);
     }
 

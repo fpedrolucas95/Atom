@@ -198,37 +198,6 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-// Storage for userspace return addresses, indexed by thread ID
-// This avoids deadlock by not requiring THREAD_LIST lock
-static USERSPACE_RETURN_ADDRS: Mutex<BTreeMap<crate::thread::ThreadId, (u64, u64)>> = Mutex::new(BTreeMap::new());
-
-// Storage for userspace GPRs (callee-saved registers)
-// Order: RBX, RBP, R12, R13, R14, R15
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct UserspaceGprs {
-    pub rbx: u64,
-    pub rbp: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-}
-
-// Public access to USERSPACE_GPRS for obtaining stable pointers
-pub static USERSPACE_GPRS: Mutex<BTreeMap<crate::thread::ThreadId, UserspaceGprs>> = Mutex::new(BTreeMap::new());
-
-/// Get the userspace return address for a thread (if stored)
-/// This is used by the scheduler to update thread context before context switch
-pub fn get_userspace_return_addr(thread_id: crate::thread::ThreadId) -> Option<(u64, u64)> {
-    USERSPACE_RETURN_ADDRS.lock().get(&thread_id).copied()
-}
-
-/// Get the userspace GPRs for a thread (if stored)
-pub fn get_userspace_gprs(thread_id: crate::thread::ThreadId) -> Option<UserspaceGprs> {
-    USERSPACE_GPRS.lock().get(&thread_id).copied()
-}
-
 #[no_mangle]
 extern "C" fn rust_syscall_dispatcher(
     syscall_num: u64,
@@ -240,34 +209,21 @@ extern "C" fn rust_syscall_dispatcher(
     arg5: u64,
     user_rip: u64,
     user_rsp: u64,
-    user_rbx: u64,
-    user_rbp: u64,
-    user_r12: u64,
-    user_r13: u64,
-    user_r14: u64,
-    user_r15: u64,
+    _user_rbx: u64,
+    _user_rbp: u64,
+    _user_r12: u64,
+    _user_r13: u64,
+    _user_r14: u64,
+    _user_r15: u64,
 ) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     log_debug!(
         LOG_ORIGIN,
-        "Syscall entry: num={} args=({:#X}, {:#X}, {:#X}, {:#X}, {:#X}, {:#X})",
+        "Syscall entry (TID={:?}): num={} args=({:#X}, {:#X}, {:#X}, {:#X}, {:#X}, {:#X})",
+        crate::sched::current_thread(),
         syscall_num, arg0, arg1, arg2, arg3, arg4, arg5
     );
-
-    // Store userspace return address and GPRs for this thread without acquiring THREAD_LIST lock
-    // This avoids deadlock when context switching
-    if let Some(current_tid) = crate::sched::current_thread() {
-        USERSPACE_RETURN_ADDRS.lock().insert(current_tid, (user_rip, user_rsp));
-        USERSPACE_GPRS.lock().insert(current_tid, UserspaceGprs {
-            rbx: user_rbx,
-            rbp: user_rbp,
-            r12: user_r12,
-            r13: user_r13,
-            r14: user_r14,
-            r15: user_r15,
-        });
-    }
 
     let result = match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),

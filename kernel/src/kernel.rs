@@ -263,6 +263,9 @@ fn start_scheduling() -> ! {
     if let Some(first) = sched::schedule() {
         if let Some(stack) = thread::kernel_stack_top(first) {
             gdt::set_rsp0(stack);
+            unsafe {
+                crate::thread::CURRENT_THREAD_KSTACK = stack;
+            }
         }
 
         thread::jump_to_thread(first);

@@ -6,43 +6,47 @@
 ; uma syscall. Este módulo salva o estado do usuário, troca para a stack do
 ; kernel, prepara os argumentos para o dispatcher Rust, e retorna ao usuário
 ; de forma segura.
-;
-; Seções:
-; - .bss: reserva memória para temporários e stack do kernel
-; - .text: código da syscall
 
 [BITS 64]
 default rel
 
 section .text
 extern rust_syscall_dispatcher
+extern CURRENT_THREAD_KSTACK
 
 section .bss align=16
+; Temporary storage used ONLY during initial transition (interrupts disabled)
 temp_user_rsp:       resq 1
 temp_user_rcx:       resq 1
 temp_user_r11:       resq 1
 temp_arg4:           resq 1
 temp_arg5:           resq 1
-temp_kernel_stack:   resb 16384
 
 section .text
 global syscall_entry
 syscall_entry:
+    ; SYSCALL has already disabled interrupts (via SFMASK).
+    ; We save initial state to globals while interrupts are disabled.
     mov     [rel temp_user_rsp], rsp
-    mov     [rel temp_user_rcx], rcx
-    mov     [rel temp_user_r11], r11
-    mov     [rel temp_arg4], r8
-    mov     [rel temp_arg5], r9
+    mov     [rel temp_user_rcx], rcx ; User RIP
+    mov     [rel temp_user_r11], r11 ; User RFLAGS
+    mov     [rel temp_arg4], r8      ; arg4 (original r8)
+    mov     [rel temp_arg5], r9      ; arg5 (original r9)
 
-    lea     rsp, [rel temp_kernel_stack + 16384]
-    ; Convert the identity-mapped BSS address to its higher-half mirror.
-    ; Higher-half PML4 entries (256-511) are shared across ALL address spaces,
-    ; so this stack remains reachable regardless of which CR3 is active.
-    ; R8 is safe to clobber here: its original value was saved to temp_arg4.
-    mov     r8, 0xFFFF800000000000
-    add     rsp, r8
-    and     rsp, -16
+    ; Switch to the per-thread kernel stack immediately.
+    ; This makes the syscall handler reentrant.
+    mov     rsp, [rel CURRENT_THREAD_KSTACK]
+    and     rsp, -16 ; Alignment
 
+    ; Build an IRET-compatible frame on the per-thread kernel stack.
+    ; This ensures we return to the CORRECT user context even after switches.
+    push    qword 0x23          ; SS
+    push    qword [rel temp_user_rsp]
+    push    qword [rel temp_user_r11]
+    push    qword 0x1B          ; CS
+    push    qword [rel temp_user_rcx] ; RIP
+
+    ; Save callee-saved registers as required by MS x64 ABI
     push    rbx
     push    rbp
     push    r12
@@ -50,57 +54,57 @@ syscall_entry:
     push    r14
     push    r15
 
-    ; Prepare arguments for rust_syscall_dispatcher (Windows x64 ABI)
-    ; User syscall convention: rax=num, rdi=arg0, rsi=arg1, rdx=arg2, r10=arg3
-    ; Windows x64 convention: rcx=arg0, rdx=arg1, r8=arg2, r9=arg3, stack for rest
+    ; Pass arguments to rust_syscall_dispatcher (Windows x64 ABI)
+    ; User:  rax=num, rdi=arg0, rsi=arg1, rdx=arg2, r10=arg3, r8=arg4, r9=arg5
+    ; Windows: rcx=num, rdx=arg0, r8=arg1, r9=arg2, stack=[arg3, arg4, arg5, ...]
+
     mov     rcx, rax        ; rcx = syscall number
-    mov     rax, rdx        ; save arg2 (rdx) before it's overwritten
+    mov     rax, rdx        ; save user rdx (arg2)
     mov     rdx, rdi        ; rdx = arg0
     mov     r8,  rsi        ; r8 = arg1
-    mov     r9,  rax        ; r9 = arg2 (from saved value)
+    mov     r9,  rax        ; r9 = arg2 (from saved)
 
-    sub     rsp, 120        ; Increased to 120 for 2+6 extra args (RIP, RSP, RBX, RBP, R12-R15)
+    ; Reserve shadow space (32) + 8 extra arg slots (64) = 96. Use 128 for alignment.
+    sub     rsp, 128
 
+    ; arg3 (user r10)
     mov     rax, r10
     mov     [rsp + 32], rax
 
+    ; arg4 (original r8)
     mov     rax, [rel temp_arg4]
     mov     [rsp + 40], rax
 
+    ; arg5 (original r9)
     mov     rax, [rel temp_arg5]
     mov     [rsp + 48], rax
 
-    ; Pass user RIP and RSP so dispatcher can update thread context
-    mov     rax, [rel temp_user_rcx]  ; RIP return address
+    ; Pass user RIP and RSP to the dispatcher for logging/context updates
+    mov     rax, [rel temp_user_rcx]
     mov     [rsp + 56], rax
-
-    mov     rax, [rel temp_user_rsp]  ; User RSP
+    mov     rax, [rel temp_user_rsp]
     mov     [rsp + 64], rax
 
-    ; Pass saved callee-saved registers (RBX, RBP, R12-R15)
-    ; These are on the stack now (we just pushed them)
-    mov     rax, [rsp + 120 + 40]  ; RBX (6th push, offset from current RSP)
+    ; Pass callee-saved registers (currently on stack)
+    ; RBX is at [rsp + 128 + 40] = [rsp + 168]
+    mov     rax, [rsp + 168]
     mov     [rsp + 72], rax
-    
-    mov     rax, [rsp + 120 + 32]  ; RBP (5th push)
+    mov     rax, [rsp + 160] ; RBP
     mov     [rsp + 80], rax
-    
-    mov     rax, [rsp + 120 + 24]  ; R12 (4th push)
+    mov     rax, [rsp + 152] ; R12
     mov     [rsp + 88], rax
-    
-    mov     rax, [rsp + 120 + 16]  ; R13 (3rd push)
+    mov     rax, [rsp + 144] ; R13
     mov     [rsp + 96], rax
-    
-    mov     rax, [rsp + 120 + 8]   ; R14 (2nd push)
+    mov     rax, [rsp + 136] ; R14
     mov     [rsp + 104], rax
-    
-    mov     rax, [rsp + 120]       ; R15 (1st push)
+    mov     rax, [rsp + 128] ; R15
     mov     [rsp + 112], rax
 
     call    rust_syscall_dispatcher
 
-    add     rsp, 120
+    add     rsp, 128
 
+    ; Restore registers
     pop     r15
     pop     r14
     pop     r13
@@ -108,25 +112,25 @@ syscall_entry:
     pop     rbp
     pop     rbx
 
-    mov     rcx, [rel temp_user_rcx]
-    mov     r11, [rel temp_user_r11]
+    ; Reconstruct the return frame from the per-thread stack.
+    ; This avoids race conditions on globals during return.
+    pop     rcx              ; RIP
+    add     rsp, 8           ; skip CS
+    pop     r11              ; RFLAGS
+    pop     r10              ; RSP
+    add     rsp, 8           ; skip SS
 
-    ; Ensure RFLAGS has IF set for user mode (interrupts enabled)
-    ; Clear trap flag and other problematic bits
+    ; Sanitize RFLAGS for return (ensure IF=1)
     and     r11, 0x3C7FD7
     or      r11, 0x200
 
-    ; Load user RSP into R10 but DON'T restore it yet!
-    ; We need to build iretq frame on the KERNEL stack first
-    mov     r10, [rel temp_user_rsp]
+    ; iretq expects: RIP, CS, RFLAGS, RSP, SS
+    ; We manually restore the frame to the stack for IRETQ
+    sub     rsp, 40
+    mov     [rsp + 0],  rcx  ; RIP
+    mov     qword [rsp + 8], 0x1B ; CS
+    mov     [rsp + 16], r11  ; RFLAGS
+    mov     [rsp + 24], r10  ; RSP
+    mov     qword [rsp + 32], 0x23 ; SS
 
-    ; Build iretq stack frame on KERNEL stack (current RSP)
-    ; Stack needs (pushed in reverse): SS, RSP, RFLAGS, CS, RIP
-    push    qword 0x23       ; SS = User Data Selector (0x20 | RPL=3)
-    push    r10              ; User RSP
-    push    r11              ; RFLAGS
-    push    qword 0x1B       ; CS = User Code Selector (0x18 | RPL=3)
-    push    rcx              ; RIP (unmodified return address from syscall)
-
-    ; iretq will pop these 5 values and restore to user context
     iretq
