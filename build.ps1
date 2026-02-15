@@ -26,6 +26,9 @@ $NASM_PATH  = "C:\Program Files\NASM\nasm.exe"
 $REPO_PATH  = $PSScriptRoot
 $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 
+# Detect host triple for cross-platform build
+$HOST_TRIPLE = (rustc -vV | Select-String "host: ") -replace "host:\s+", ""
+
 # Apenas as pastas dos drivers (não precisamos mais do nome do binário aqui)
 $USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell", "demo_rects", "demo_text")
 
@@ -121,13 +124,13 @@ New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi
 Header "ELF2ATXF TOOL"
 
 $ELF2ATXF_PATH = "tools\elf2atxf"
-$ELF2ATXF_EXE  = "$ELF2ATXF_PATH\target\x86_64-pc-windows-msvc\release\elf2atxf.exe"
+$ELF2ATXF_EXE  = "$ELF2ATXF_PATH\target\$HOST_TRIPLE\release\elf2atxf.exe"
 
 if (-not (Test-Path $ELF2ATXF_EXE) -or $Clean) {
-    Write-Step "Compilando elf2atxf tool..."
+    Write-Step "Compilando elf2atxf tool ($HOST_TRIPLE)..."
 
     Push-Location $ELF2ATXF_PATH
-    cargo build --release --target x86_64-pc-windows-msvc *> "$REPO_PATH\build.log"
+    cargo build --release --target $HOST_TRIPLE *> "$REPO_PATH\build.log"
     if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "Falha ao compilar elf2atxf"; Pop-Location; exit 1 }
     Pop-Location
 
@@ -283,7 +286,7 @@ if (-not $Kernel -and -not $Userspace) {  # Evita rodar assembly se --kernel onl
 
 Write-Step "Linkando Atom.efi..."
 
-$RUST_LLD = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe"
+$RUST_LLD = "$env:USERPROFILE\.rustup\toolchains\nightly-$HOST_TRIPLE\lib\rustlib\$HOST_TRIPLE\bin\rust-lld.exe"
 if (-not (Test-Path $RUST_LLD)) {
     Write-Warning "rust-lld não encontrado no caminho padrão. Tentando localizar..."
     $RUST_LLD = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains\nightly*" -Recurse -File -Name "rust-lld.exe" -ErrorAction SilentlyContinue |
