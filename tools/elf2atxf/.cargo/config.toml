@@ -1,4 +1,5 @@
 # This is a host tool, not a UEFI application
-# Build for the native host target
+# The target is now dynamically determined by the build scripts (build.sh / build.ps1)
+# to support cross-platform builds (Linux, macOS, Windows).
 [build]
-target = "x86_64-unknown-linux-gnu"
+# target = "x86_64-unknown-linux-gnu"

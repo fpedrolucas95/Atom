@@ -197,13 +197,16 @@ if [ "$KERNEL_ONLY" != true ]; then
     # -------------------------------------------------------------------------
     step "Building elf2atxf tool..."
 
+    # Detect host triple for cross-platform build
+    HOST_TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+
     if ! rustup +nightly target list --installed | grep -q "x86_64-unknown-none"; then
         step "Installing x86_64-unknown-none target..."
         rustup +nightly target add x86_64-unknown-none
     fi
 
     pushd tools/elf2atxf > /dev/null
-    if cargo build --release 2>build.log; then
+    if cargo build --release --target "$HOST_TRIPLE" 2>build.log; then
         success "elf2atxf built"
     else
         error "Failed to build elf2atxf"
@@ -212,7 +215,7 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
     popd > /dev/null
 
-    ELF2ATXF="tools/elf2atxf/target/x86_64-unknown-linux-gnu/release/elf2atxf"
+    ELF2ATXF="tools/elf2atxf/target/$HOST_TRIPLE/release/elf2atxf"
 
     # -------------------------------------------------------------------------
     # Build userspace drivers and convert to ATXF
