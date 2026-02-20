@@ -100,6 +100,11 @@ const EXCEPTION_NAMES: [&str; 32] = [
     "Reserved",
 ];
 
+// Kept for documentation: mirrors the five hardware-pushed words that the CPU
+// saves on the stack when delivering an interrupt.  The active pipeline uses
+// `InterruptFrame` (which embeds these same fields at its tail), so this
+// struct is never instantiated in code.
+#[allow(dead_code)]
 #[repr(C)]
 pub struct InterruptStackFrame {
     pub instruction_pointer: u64,
