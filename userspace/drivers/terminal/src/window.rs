@@ -34,6 +34,9 @@ impl Theme {
 
     // Selection (future use)
     pub const SELECTION_BG: Color = Color::new(70, 100, 130);  // Selected text background
+
+    // Separator / divider lines in help output
+    pub const SEPARATOR: Color = Color::new(80, 85, 100);
 }
 
 /// Configuration for window dimensions and layout

@@ -1,751 +1,916 @@
 // Filesystem Commands
-
 //
-
-// Commands for filesystem navigation and file viewing.
-
-// All filesystem operations are performed via IPC to the filesystem service.
-
-
+// POSIX-compatible filesystem commands for the Atom terminal.
+// Read-only operations go through the IPC client; write operations
+// use atom_syscall::fs directly (same privilege level as IPC path).
 
 use super::{CommandContext, CommandResult};
-
 use crate::parser::ParsedCommand;
-
 use crate::window::Theme;
 
+extern crate alloc;
+use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::format;
 
-
-/// Current working directory (static storage for no_std)
+// ============================================================================
+// Current working directory (static, no-std)
+// ============================================================================
 
 static mut CURRENT_DIR: [u8; 256] = [b'/'; 256];
-
 static mut CURRENT_DIR_LEN: usize = 1;
 
-
-
-/// Get current directory as string
-
 fn get_current_dir() -> &'static str {
-
-    unsafe {
-
-        core::str::from_utf8_unchecked(&CURRENT_DIR[..CURRENT_DIR_LEN])
-
-    }
-
+    unsafe { core::str::from_utf8_unchecked(&CURRENT_DIR[..CURRENT_DIR_LEN]) }
 }
-
-
-
-/// Set current directory
 
 fn set_current_dir(path: &str) {
-
     unsafe {
-
         let len = path.len().min(255);
-
-        CURRENT_DIR[..len].copy_from_slice(path.as_bytes());
-
+        CURRENT_DIR[..len].copy_from_slice(&path.as_bytes()[..len]);
         CURRENT_DIR_LEN = len;
-
     }
-
 }
 
+// ============================================================================
+// Argument helpers
+// ============================================================================
 
-
-/// ls command - list directory contents
-
-pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-
-    let path = cmd.arg(0).unwrap_or(get_current_dir());
-
-    let show_all = cmd.has_flag("-a", "--all");
-
-    let long_format = cmd.has_flag("-l", "--long");
-
-
-
-    ctx.println("");
-
-
-
-    let mut header = [0u8; 64];
-
-    let mut pos = 0;
-
-    for byte in "Contents of ".bytes() {
-
-        header[pos] = byte;
-
-        pos += 1;
-
-    }
-
-    for byte in path.bytes() {
-
-        if pos < 60 {
-
-            header[pos] = byte;
-
-            pos += 1;
-
+/// Get the first argument that doesn't start with `-` (positional / path arg).
+/// Skips flags and respects option values following `-X value` patterns.
+fn first_path_arg<'a>(cmd: &'a ParsedCommand<'_>) -> Option<&'a str> {
+    let mut skip_next = false;
+    for i in 0..cmd.arg_count {
+        let a = cmd.args[i];
+        if skip_next {
+            skip_next = false;
+            continue;
         }
-
-    }
-
-    let header_str = unsafe { core::str::from_utf8_unchecked(&header[..pos]) };
-
-    ctx.println_colored(header_str, Theme::TEXT_INFO);
-
-    ctx.println("");
-
-
-
-    if long_format {
-
-        ctx.println("TYPE  SIZE      NAME");
-
-        ctx.println("----  ----      ----");
-
-    }
-
-
-
-    ctx.ipc.list_directory(path, |name, is_dir, size| {
-
-        // Skip hidden files unless -a
-
-        if !show_all && name.starts_with('.') {
-
-            return;
-
+        // Known flags that consume the next argument as a value
+        if a == "-n" || a == "--lines" || a == "-d" || a == "--depth"
+            || a == "-maxdepth" || a == "--maxdepth" || a == "-name"
+        {
+            skip_next = true;
+            continue;
         }
-
-
-
-        if long_format {
-
-            let mut line = [0u8; 80];
-
-            let mut lpos = 0;
-
-
-
-            // Type indicator
-
-            if is_dir {
-
-                for byte in "dir   ".bytes() {
-
-                    line[lpos] = byte;
-
-                    lpos += 1;
-
-                }
-
-            } else {
-
-                for byte in "file  ".bytes() {
-
-                    line[lpos] = byte;
-
-                    lpos += 1;
-
-                }
-
-            }
-
-
-
-            // Size (10 chars)
-
-            if is_dir {
-
-                for byte in "-         ".bytes() {
-
-                    line[lpos] = byte;
-
-                    lpos += 1;
-
-                }
-
-            } else {
-
-                let mut size_buf = [0u8; 10];
-
-                let size_len = format_number(size, &mut size_buf);
-
-                for i in 0..size_len {
-
-                    line[lpos] = size_buf[i];
-
-                    lpos += 1;
-
-                }
-
-                while lpos < 16 {
-
-                    line[lpos] = b' ';
-
-                    lpos += 1;
-
-                }
-
-            }
-
-
-
-            // Name
-
-            for byte in name.bytes() {
-
-                if lpos < 76 {
-
-                    line[lpos] = byte;
-
-                    lpos += 1;
-
-                }
-
-            }
-
-
-
-            let line_str = unsafe { core::str::from_utf8_unchecked(&line[..lpos]) };
-
-
-
-            if is_dir {
-
-                ctx.println_colored(line_str, Theme::PROMPT_PATH);
-
-            } else {
-
-                ctx.println(line_str);
-
-            }
-
-        } else {
-
-            // Short format
-
-            if is_dir {
-
-                let mut dir_name = [0u8; 64];
-
-                let mut dpos = 0;
-
-                for byte in name.bytes() {
-
-                    dir_name[dpos] = byte;
-
-                    dpos += 1;
-
-                }
-
-                dir_name[dpos] = b'/';
-
-                dpos += 1;
-
-                let dir_str = unsafe { core::str::from_utf8_unchecked(&dir_name[..dpos]) };
-
-                ctx.println_colored(dir_str, Theme::PROMPT_PATH);
-
-            } else {
-
-                ctx.println(name);
-
-            }
-
+        if !a.starts_with('-') {
+            return Some(a);
         }
-
-    });
-
-
-
-    ctx.println("");
-
-
-
-    CommandResult::Ok
-
+    }
+    None
 }
 
-
-
-/// cd command - change directory
-
-pub fn cmd_cd(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-
-    let target = match cmd.arg(0) {
-
-        Some(path) => path,
-
-        None => {
-
-            // cd with no args goes to root
-
-            set_current_dir("/");
-
-            return CommandResult::Ok;
-
-        }
-
-    };
-
-
-
-    // Handle special paths
-
-    if target == "~" || target == "/" {
-
-        set_current_dir("/");
-
-        return CommandResult::Ok;
-
-    }
-
-
-
-    if target == ".." {
-
-        // Go up one level
-
-        let current = get_current_dir();
-
-        if current == "/" {
-
-            return CommandResult::Ok;
-
-        }
-
-
-
-        // Find last slash
-
-        let bytes = current.as_bytes();
-
-        let mut last_slash = 0;
-
-        for i in 0..bytes.len() - 1 {
-
-            if bytes[i] == b'/' {
-
-                last_slash = i;
-
-            }
-
-        }
-
-
-
-        if last_slash == 0 {
-
-            set_current_dir("/");
-
-        } else {
-
-            let new_path = unsafe { core::str::from_utf8_unchecked(&bytes[..last_slash]) };
-
-            set_current_dir(new_path);
-
-        }
-
-        return CommandResult::Ok;
-
-    }
-
-
-
-    if target == "." {
-
-        return CommandResult::Ok;
-
-    }
-
-
-
-    // Build new path
-
-    let mut new_path = [0u8; 256];
-
-    let mut pos = 0;
-
-
-
-    if target.starts_with('/') {
-
-        // Absolute path
-
-        for byte in target.bytes() {
-
-            if pos < 255 {
-
-                new_path[pos] = byte;
-
-                pos += 1;
-
-            }
-
-        }
-
+/// For two-arg commands (mv, cp, ln): get positional args in order.
+fn positional_args_vec<'a>(cmd: &'a ParsedCommand<'_>) -> Vec<&'a str> {
+    cmd.positional_args().collect()
+}
+
+// ============================================================================
+// Path helpers
+// ============================================================================
+
+fn resolve_path(path: &str) -> String {
+    if path.is_empty() { return String::from(get_current_dir()); }
+    if path.starts_with('/') { return normalize(path); }
+    if path == "~" { return String::from("/"); }
+    let cwd = get_current_dir();
+    let combined = if cwd.ends_with('/') {
+        format!("{}{}", cwd, path)
     } else {
-
-        // Relative path
-
-        let current = get_current_dir();
-
-        for byte in current.bytes() {
-
-            if pos < 254 {
-
-                new_path[pos] = byte;
-
-                pos += 1;
-
-            }
-
-        }
-
-        if pos > 0 && new_path[pos - 1] != b'/' {
-
-            new_path[pos] = b'/';
-
-            pos += 1;
-
-        }
-
-        for byte in target.bytes() {
-
-            if pos < 255 {
-
-                new_path[pos] = byte;
-
-                pos += 1;
-
-            }
-
-        }
-
-    }
-
-
-
-    // Remove trailing slash if not root
-
-    if pos > 1 && new_path[pos - 1] == b'/' {
-
-        pos -= 1;
-
-    }
-
-
-
-    let path_str = unsafe { core::str::from_utf8_unchecked(&new_path[..pos]) };
-
-    set_current_dir(path_str);
-
-
-
-    CommandResult::Ok
-
-}
-
-
-
-/// pwd command - print working directory
-
-pub fn cmd_pwd(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-
-    ctx.println_colored(get_current_dir(), Theme::PROMPT_PATH);
-
-    CommandResult::Ok
-
-}
-
-
-
-/// cat command - display file contents
-
-pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-
-    let filename = match cmd.arg(0) {
-
-        Some(f) => f,
-
-        None => {
-
-            ctx.error("Usage: cat <filename>");
-
-            return CommandResult::Error;
-
-        }
-
+        format!("{}/{}", cwd, path)
     };
-
-
-
-    // Build full path
-
-    let mut full_path = [0u8; 256];
-
-    let mut pos = 0;
-
-
-
-    if filename.starts_with('/') {
-
-        for byte in filename.bytes() {
-
-            if pos < 255 {
-
-                full_path[pos] = byte;
-
-                pos += 1;
-
-            }
-
-        }
-
-    } else {
-
-        let current = get_current_dir();
-
-        for byte in current.bytes() {
-
-            if pos < 254 {
-
-                full_path[pos] = byte;
-
-                pos += 1;
-
-            }
-
-        }
-
-        if pos > 0 && full_path[pos - 1] != b'/' {
-
-            full_path[pos] = b'/';
-
-            pos += 1;
-
-        }
-
-        for byte in filename.bytes() {
-
-            if pos < 255 {
-
-                full_path[pos] = byte;
-
-                pos += 1;
-
-            }
-
-        }
-
-    }
-
-
-
-    let path_str = unsafe { core::str::from_utf8_unchecked(&full_path[..pos]) };
-
-
-
-    // Try to read file
-
-    let mut buffer = [0u8; 1024];
-
-    match ctx.ipc.read_file(path_str, &mut buffer) {
-
-        Some(len) => {
-
-            ctx.println("");
-
-            let content = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
-
-            for line in content.split('\n') {
-
-                ctx.println(line);
-
-            }
-
-            ctx.println("");
-
-        }
-
-        None => {
-
-            ctx.error("File not found or not readable");
-
-        }
-
-    }
-
-
-
-    CommandResult::Ok
-
+    normalize(&combined)
 }
 
-
-
-/// tree command - display directory tree
-
-pub fn cmd_tree(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-
-    let path = cmd.arg(0).unwrap_or(get_current_dir());
-
-    let max_depth = cmd.get_option("-d", "--depth")
-
-        .and_then(|s| s.parse().ok())
-
-        .unwrap_or(3u32);
-
-
-
-    ctx.println("");
-
-    ctx.println_colored(path, Theme::PROMPT_PATH);
-
-
-
-    // Simple tree display (not recursive in early implementation)
-
-    ctx.ipc.list_directory(path, |name, is_dir, _size| {
-
-        let mut line = [0u8; 64];
-
-        let mut pos = 0;
-
-
-
-        // Tree prefix
-
-        for byte in "|-- ".bytes() {
-
-            line[pos] = byte;
-
-            pos += 1;
-
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => { parts.pop(); }
+            s => parts.push(s),
         }
-
-
-
-        // Name
-
-        for byte in name.bytes() {
-
-            if pos < 60 {
-
-                line[pos] = byte;
-
-                pos += 1;
-
-            }
-
+    }
+    let mut out = String::from("/");
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 { out.push('/'); }
+        for b in p.bytes() {
+            out.push(b as char);
         }
-
-
-
-        if is_dir {
-
-            line[pos] = b'/';
-
-            pos += 1;
-
-        }
-
-
-
-        let line_str = unsafe { core::str::from_utf8_unchecked(&line[..pos]) };
-
-
-
-        if is_dir {
-
-            ctx.println_colored(line_str, Theme::PROMPT_PATH);
-
-        } else {
-
-            ctx.println(line_str);
-
-        }
-
-    });
-
-
-
-    ctx.println("");
-
-    let _ = max_depth; // Used in full implementation
-
-
-
-    CommandResult::Ok
-
+    }
+    if out.is_empty() { out.push('/'); }
+    out
 }
 
+fn file_extension(name: &str) -> &str {
+    name.rfind('.').map(|p| &name[p+1..]).unwrap_or("")
+}
 
-
-/// Format a number into a buffer
+// ============================================================================
+// Number formatting helper
+// ============================================================================
 
 fn format_number(mut n: u64, buffer: &mut [u8]) -> usize {
-
-    if buffer.is_empty() {
-
-        return 0;
-
-    }
-
-
-
-    if n == 0 {
-
-        buffer[0] = b'0';
-
-        return 1;
-
-    }
-
-
-
+    if buffer.is_empty() { return 0; }
+    if n == 0 { buffer[0] = b'0'; return 1; }
     let mut digits = [0u8; 20];
-
-    let mut count = 0;
-
-
-
-    while n > 0 {
-
-        digits[count] = b'0' + (n % 10) as u8;
-
-        n /= 10;
-
-        count += 1;
-
-    }
-
-
-
-    if count > buffer.len() {
-
-        return 0;
-
-    }
-
-
-
-    for i in 0..count {
-
-        buffer[i] = digits[count - 1 - i];
-
-    }
-
-
-
+    let mut count  = 0;
+    while n > 0 { digits[count] = b'0' + (n % 10) as u8; n /= 10; count += 1; }
+    if count > buffer.len() { return 0; }
+    for i in 0..count { buffer[i] = digits[count - 1 - i]; }
     count
+}
 
+fn fmt_size(bytes: u64) -> String {
+    if bytes < 1024 { format!("{} B", bytes) }
+    else if bytes < 1024*1024 {
+        format!("{}.{} KB", bytes/1024, (bytes%1024)*10/1024)
+    } else if bytes < 1024*1024*1024 {
+        format!("{}.{} MB", bytes/(1024*1024), (bytes%(1024*1024))*10/(1024*1024))
+    } else {
+        format!("{} GB", bytes/(1024*1024*1024))
+    }
+}
+
+// ============================================================================
+// ls – list directory
+// ============================================================================
+
+pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let path      = cmd.arg(0).map(|p| resolve_path(p))
+                       .unwrap_or_else(|| String::from(get_current_dir()));
+    let show_all  = cmd.has_flag("-a", "--all");
+    let long_fmt  = cmd.has_flag("-l", "--long");
+
+    ctx.println("");
+    let mut header = [0u8; 72];
+    let mut pos = 0;
+    for b in b"Contents of ".iter() { if pos < header.len() { header[pos] = *b; pos += 1; } }
+    for b in path.bytes()            { if pos < header.len() { header[pos] = b;  pos += 1; } }
+    let header_str = unsafe { core::str::from_utf8_unchecked(&header[..pos]) };
+    ctx.println_colored(header_str, Theme::TEXT_INFO);
+    ctx.println("");
+
+    if long_fmt {
+        ctx.println_colored("TYPE  SIZE        NAME", Theme::TEXT_DIM);
+        ctx.println_colored("----  ----------  ----", Theme::TEXT_DIM);
+    }
+
+    ctx.ipc.list_directory(&path, |name, is_dir, size| {
+        if !show_all && name.starts_with('.') { return; }
+
+        if long_fmt {
+            let type_str = if is_dir { "dir " } else { "file" };
+            let size_str = if is_dir { String::from("   --      ") }
+                else { format!("{:<10}  ", size) };
+            let line = format!("{}  {}  {}", type_str, size_str, name);
+            if is_dir { ctx.println_colored(&line, Theme::PROMPT_PATH); }
+            else       { ctx.println(&line); }
+        } else if is_dir {
+            let mut dir_buf = [0u8; 64];
+            let mut dp = 0;
+            for b in name.bytes() { if dp < 63 { dir_buf[dp] = b; dp += 1; } }
+            dir_buf[dp] = b'/'; dp += 1;
+            let ds = unsafe { core::str::from_utf8_unchecked(&dir_buf[..dp]) };
+            ctx.println_colored(ds, Theme::PROMPT_PATH);
+        } else {
+            ctx.println(name);
+        }
+    });
+
+    ctx.println("");
+    CommandResult::Ok
+}
+
+// ============================================================================
+// cd – change directory
+// ============================================================================
+
+pub fn cmd_cd(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let target = cmd.arg(0).unwrap_or("~");
+
+    if target == "~" || target == "" {
+        set_current_dir("/");
+        return CommandResult::Ok;
+    }
+    if target == "-" {
+        ctx.println_colored(get_current_dir(), Theme::PROMPT_PATH);
+        return CommandResult::Ok;
+    }
+
+    let new = resolve_path(target);
+    set_current_dir(&new);
+    CommandResult::Ok
+}
+
+// ============================================================================
+// pwd – print working directory
+// ============================================================================
+
+pub fn cmd_pwd(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    ctx.println_colored(get_current_dir(), Theme::PROMPT_PATH);
+    CommandResult::Ok
+}
+
+// ============================================================================
+// cat – display file contents
+// ============================================================================
+
+pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let Some(filename) = cmd.arg(0) else {
+        ctx.error("Usage: cat <file> [file2 ...]");
+        return CommandResult::Error;
+    };
+
+    // Support multiple files
+    let mut i = 0;
+    loop {
+        let Some(fname) = cmd.arg(i) else { break; };
+        let path = resolve_path(fname);
+
+        let mut buffer = [0u8; 4096];
+        match ctx.ipc.read_file(&path, &mut buffer) {
+            Some(len) => {
+                if cmd.arg_count > 1 {
+                    // Print header for multiple files
+                    let hdr = format!("==> {} <==", fname);
+                    ctx.println_colored(&hdr, Theme::TEXT_INFO);
+                }
+                let content = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
+                for line in content.split('\n') { ctx.println(line); }
+            }
+            None => {
+                let msg = format!("cat: {}: no such file or not readable", fname);
+                ctx.error(&msg);
+            }
+        }
+        i += 1;
+    }
+    let _ = filename; // used above via cmd.arg(0)
+    CommandResult::Ok
+}
+
+// ============================================================================
+// head – show first N lines of file
+// ============================================================================
+
+pub fn cmd_head(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let n: usize = cmd.get_option("-n", "--lines")
+        .and_then(|s| {
+            let mut v = 0usize;
+            for c in s.bytes() {
+                if c >= b'0' && c <= b'9' { v = v * 10 + (c - b'0') as usize; } else { return None; }
+            }
+            Some(v)
+        })
+        .unwrap_or(10);
+
+    let Some(fname) = first_path_arg(cmd) else {
+        ctx.error("Usage: head [-n N] <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(fname);
+    let mut buf = [0u8; 4096];
+    match ctx.ipc.read_file(&path, &mut buf) {
+        Some(len) => {
+            let content = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+            for (i, line) in content.split('\n').enumerate() {
+                if i >= n { break; }
+                ctx.println(line);
+            }
+        }
+        None => {
+            let msg = format!("head: {}: no such file", fname);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// tail – show last N lines of file
+// ============================================================================
+
+pub fn cmd_tail(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let n: usize = cmd.get_option("-n", "--lines")
+        .and_then(|s| {
+            let mut v = 0usize;
+            for c in s.bytes() {
+                if c >= b'0' && c <= b'9' { v = v * 10 + (c - b'0') as usize; } else { return None; }
+            }
+            Some(v)
+        })
+        .unwrap_or(10);
+
+    let Some(fname) = first_path_arg(cmd) else {
+        ctx.error("Usage: tail [-n N] <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(fname);
+    let mut buf = [0u8; 4096];
+    match ctx.ipc.read_file(&path, &mut buf) {
+        Some(len) => {
+            let content = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+            let lines: Vec<&str> = content.split('\n').collect();
+            let start = if lines.len() > n { lines.len() - n } else { 0 };
+            for line in &lines[start..] { ctx.println(line); }
+        }
+        None => {
+            let msg = format!("tail: {}: no such file", fname);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// wc – word / line / byte count
+// ============================================================================
+
+pub fn cmd_wc(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let show_lines = cmd.has_flag("-l", "--lines");
+    let show_words = cmd.has_flag("-w", "--words");
+    let show_bytes = cmd.has_flag("-c", "--bytes");
+    let all        = !show_lines && !show_words && !show_bytes;
+
+    let Some(fname) = first_path_arg(cmd) else {
+        ctx.error("Usage: wc [-l] [-w] [-c] <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(fname);
+    let mut buf = [0u8; 4096];
+    match ctx.ipc.read_file(&path, &mut buf) {
+        Some(len) => {
+            let content = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+            let lines = content.split('\n').count();
+            let words = content.split_whitespace().count();
+            let bytes = len;
+
+            let mut out = String::new();
+            if all || show_lines { out.push_str(&format!("{:>8} ", lines)); }
+            if all || show_words { out.push_str(&format!("{:>8} ", words)); }
+            if all || show_bytes { out.push_str(&format!("{:>8} ", bytes)); }
+            out.push_str(fname);
+            ctx.println(&out);
+        }
+        None => {
+            let msg = format!("wc: {}: no such file", fname);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// mkdir – create directory
+// ============================================================================
+
+pub fn cmd_mkdir(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let make_parents = cmd.has_flag("-p", "--parents");
+
+    let Some(arg) = first_path_arg(cmd) else {
+        ctx.error("Usage: mkdir [-p] <directory>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(arg);
+
+    if make_parents {
+        // Create each component
+        let mut cumulative = String::from("/");
+        for seg in path.trim_start_matches('/').split('/') {
+            if seg.is_empty() { continue; }
+            if cumulative != "/" { cumulative.push('/'); }
+            for b in seg.bytes() { cumulative.push(b as char); }
+            let _ = atom_syscall::fs::mkdir(&cumulative, 0o755);
+        }
+        let msg = format!("mkdir: created '{}'", arg);
+        ctx.success(&msg);
+    } else {
+        match atom_syscall::fs::mkdir(&path, 0o755) {
+            Ok(()) => {
+                let msg = format!("mkdir: created directory '{}'", arg);
+                ctx.success(&msg);
+            }
+            Err(e) => {
+                let msg = format!("mkdir: cannot create '{}': {:?}", arg, e);
+                ctx.error(&msg);
+                return CommandResult::Error;
+            }
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// rmdir – remove empty directory
+// ============================================================================
+
+pub fn cmd_rmdir(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let Some(arg) = first_path_arg(cmd) else {
+        ctx.error("Usage: rmdir <directory>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(arg);
+    match atom_syscall::fs::rmdir(&path) {
+        Ok(()) => {
+            let msg = format!("rmdir: removed '{}'", arg);
+            ctx.success(&msg);
+        }
+        Err(e) => {
+            let msg = format!("rmdir: failed to remove '{}': {:?}", arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// rm – remove files (and directories with -r)
+// ============================================================================
+
+pub fn cmd_rm(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let recursive = cmd.has_flag("-r", "--recursive")
+        || cmd.has_flag("-R", "--recursive")
+        || cmd.has_flag("-rf", "");
+    let force     = cmd.has_flag("-f", "--force");
+
+    let Some(arg) = first_path_arg(cmd) else {
+        ctx.error("Usage: rm [-r] [-f] <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(arg);
+
+    if recursive {
+        if let Err(e) = rm_recursive(&path) {
+            if !force {
+                let msg = format!("rm: cannot remove '{}': {:?}", arg, e);
+                ctx.error(&msg);
+                return CommandResult::Error;
+            }
+        } else {
+            let msg = format!("rm: removed '{}'", arg);
+            ctx.success(&msg);
+        }
+    } else {
+        match atom_syscall::fs::unlink(&path) {
+            Ok(()) => {
+                let msg = format!("rm: removed '{}'", arg);
+                ctx.success(&msg);
+            }
+            Err(atom_syscall::fs::FsError::IsDir) => {
+                ctx.error("rm: is a directory (use -r to remove)");
+                return CommandResult::Error;
+            }
+            Err(e) => {
+                if !force {
+                    let msg = format!("rm: cannot remove '{}': {:?}", arg, e);
+                    ctx.error(&msg);
+                    return CommandResult::Error;
+                }
+            }
+        }
+    }
+    CommandResult::Ok
+}
+
+fn rm_recursive(path: &str) -> core::result::Result<(), atom_syscall::fs::FsError> {
+    // Try to stat first
+    let stat = atom_syscall::fs::stat(path)?;
+    if stat.is_dir() {
+        // Read directory entries
+        let flags = atom_syscall::fs::OpenFlags::RDONLY
+            | atom_syscall::fs::OpenFlags::DIRECTORY;
+        let fd = atom_syscall::fs::open(path, flags, 0)?;
+        let entries = atom_syscall::fs::readdir(fd)?;
+        let _ = atom_syscall::fs::close(fd);
+
+        for entry in entries {
+            if entry.name == "." || entry.name == ".." { continue; }
+            let child = if path.ends_with('/') {
+                format!("{}{}", path, entry.name)
+            } else {
+                format!("{}/{}", path, entry.name)
+            };
+            rm_recursive(&child)?;
+        }
+        atom_syscall::fs::rmdir(path)
+    } else {
+        atom_syscall::fs::unlink(path)
+    }
+}
+
+// ============================================================================
+// mv – move / rename
+// ============================================================================
+
+pub fn cmd_mv(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let (Some(src_arg), Some(dst_arg)) = (cmd.arg(0), cmd.arg(1)) else {
+        ctx.error("Usage: mv <source> <destination>");
+        return CommandResult::Error;
+    };
+    let src = resolve_path(src_arg);
+    let dst = resolve_path(dst_arg);
+
+    match atom_syscall::fs::rename(&src, &dst) {
+        Ok(()) => {
+            let msg = format!("mv: '{}' -> '{}'", src_arg, dst_arg);
+            ctx.success(&msg);
+        }
+        Err(e) => {
+            let msg = format!("mv: cannot move '{}': {:?}", src_arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// cp – copy file
+// ============================================================================
+
+pub fn cmd_cp(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let (Some(src_arg), Some(dst_arg)) = (cmd.arg(0), cmd.arg(1)) else {
+        ctx.error("Usage: cp <source> <destination>");
+        return CommandResult::Error;
+    };
+    let src = resolve_path(src_arg);
+    let dst = resolve_path(dst_arg);
+
+    match copy_file(&src, &dst) {
+        Ok(()) => {
+            let msg = format!("cp: '{}' -> '{}'", src_arg, dst_arg);
+            ctx.success(&msg);
+        }
+        Err(e) => {
+            let msg = format!("cp: cannot copy '{}': {:?}", src_arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+fn copy_file(src: &str, dst: &str) -> core::result::Result<(), atom_syscall::fs::FsError> {
+    let src_fd = atom_syscall::fs::open(src,
+        atom_syscall::fs::OpenFlags::RDONLY, 0)?;
+    let dst_fd = atom_syscall::fs::open(dst,
+        atom_syscall::fs::OpenFlags::CREAT
+        | atom_syscall::fs::OpenFlags::TRUNC
+        | atom_syscall::fs::OpenFlags::WRONLY, 0o644)?;
+
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = atom_syscall::fs::read(src_fd, &mut buf)?;
+        if n == 0 { break; }
+        atom_syscall::fs::write_all(dst_fd, &buf[..n])?;
+    }
+    let _ = atom_syscall::fs::close(src_fd);
+    let _ = atom_syscall::fs::close(dst_fd);
+    Ok(())
+}
+
+// ============================================================================
+// touch – create file or update timestamp
+// ============================================================================
+
+pub fn cmd_touch(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let Some(arg) = first_path_arg(cmd) else {
+        ctx.error("Usage: touch <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(arg);
+
+    // Try to open for write (creates if not exists)
+    let flags = atom_syscall::fs::OpenFlags::CREAT | atom_syscall::fs::OpenFlags::WRONLY;
+    match atom_syscall::fs::open(&path, flags, 0o644) {
+        Ok(fd) => {
+            let _ = atom_syscall::fs::close(fd);
+            let msg = format!("touch: '{}'", arg);
+            ctx.success(&msg);
+        }
+        Err(e) => {
+            let msg = format!("touch: cannot touch '{}': {:?}", arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// stat – file status / metadata
+// ============================================================================
+
+pub fn cmd_stat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let Some(arg) = first_path_arg(cmd) else {
+        ctx.error("Usage: stat <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(arg);
+
+    match atom_syscall::fs::stat(&path) {
+        Ok(s) => {
+            ctx.println("");
+            let line = format!("  File: {}", arg);
+            ctx.println_colored(&line, Theme::TEXT_INFO);
+            let sz_line = format!("  Size: {}  ({})", s.size, fmt_size(s.size));
+            ctx.println(&sz_line);
+            let type_str = if s.is_dir() { "directory" }
+                else if s.is_file() { "regular file" }
+                else { "other" };
+            let type_line = format!("  Type: {}", type_str);
+            ctx.println(&type_line);
+            let ext = file_extension(arg);
+            if !ext.is_empty() {
+                let ext_line = format!("  Ext:  .{}", ext);
+                ctx.println(&ext_line);
+            }
+            let mode_line = format!("  Mode: {:04o}", s.mode & 0o7777);
+            ctx.println(&mode_line);
+            let inode_line = format!("  Inode: {}", s.inode);
+            ctx.println(&inode_line);
+            ctx.println("");
+        }
+        Err(e) => {
+            let msg = format!("stat: {}: {:?}", arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// chmod – change permissions (simulated for now)
+// ============================================================================
+
+pub fn cmd_chmod(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let (Some(mode_arg), Some(path_arg)) = (cmd.arg(0), cmd.arg(1)) else {
+        ctx.error("Usage: chmod <mode> <file>");
+        ctx.info("  Examples: chmod 755 script.sh  |  chmod 644 readme.txt");
+        return CommandResult::Error;
+    };
+
+    // Parse octal mode
+    let mut mode = 0u32;
+    for c in mode_arg.bytes() {
+        if c >= b'0' && c <= b'7' { mode = mode * 8 + (c - b'0') as u32; }
+        else {
+            ctx.error("chmod: mode must be an octal number (e.g. 755)");
+            return CommandResult::Error;
+        }
+    }
+
+    let path = resolve_path(path_arg);
+    match atom_syscall::fs::chmod(&path, mode) {
+        Ok(()) => {
+            let msg = format!("chmod: {} -> {:04o}", path_arg, mode);
+            ctx.success(&msg);
+        }
+        Err(e) => {
+            let msg = format!("chmod: {}: {:?}", path_arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// ln – create hard or symbolic link
+// ============================================================================
+
+pub fn cmd_ln(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let symbolic = cmd.has_flag("-s", "--symbolic");
+    let pos = positional_args_vec(cmd);
+    let (Some(target_arg), Some(link_arg)) = (pos.get(0).copied(), pos.get(1).copied()) else {
+        ctx.error("Usage: ln [-s] <target> <link_name>");
+        return CommandResult::Error;
+    };
+    let target = resolve_path(target_arg);
+    let link   = resolve_path(link_arg);
+
+    let result = if symbolic {
+        atom_syscall::fs::symlink(&target, &link)
+    } else {
+        atom_syscall::fs::link(&target, &link)
+    };
+
+    match result {
+        Ok(()) => {
+            let kind = if symbolic { "symlink" } else { "link" };
+            let msg = format!("ln: {} '{}' -> '{}'", kind, link_arg, target_arg);
+            ctx.success(&msg);
+        }
+        Err(e) => {
+            let msg = format!("ln: cannot create link: {:?}", e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    }
+    CommandResult::Ok
+}
+
+// ============================================================================
+// find – find files by name pattern
+// ============================================================================
+
+pub fn cmd_find(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let root    = first_path_arg(cmd).unwrap_or(get_current_dir());
+    let pattern = cmd.get_option("-name", "-name").unwrap_or("*");
+    let max_depth = cmd.get_option("-maxdepth", "--maxdepth")
+        .and_then(|s| {
+            let mut v = 0u32;
+            for c in s.bytes() { if c >= b'0' && c <= b'9' { v = v*10+(c-b'0')as u32; } else { return None; } }
+            Some(v)
+        })
+        .unwrap_or(u32::MAX);
+
+    ctx.println("");
+    let root_path = resolve_path(root);
+    find_recursive(&root_path, pattern, 0, max_depth, ctx);
+    ctx.println("");
+    CommandResult::Ok
+}
+
+fn find_recursive(dir: &str, pattern: &str, depth: u32, max: u32,
+                  ctx: &mut CommandContext<'_>) {
+    if depth > max { return; }
+    let flags = atom_syscall::fs::OpenFlags::RDONLY
+        | atom_syscall::fs::OpenFlags::DIRECTORY;
+    let Ok(fd) = atom_syscall::fs::open(dir, flags, 0) else { return };
+    let Ok(entries) = atom_syscall::fs::readdir(fd) else {
+        let _ = atom_syscall::fs::close(fd); return;
+    };
+    let _ = atom_syscall::fs::close(fd);
+
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." { continue; }
+        let child = if dir.ends_with('/') {
+            format!("{}{}", dir, entry.name)
+        } else {
+            format!("{}/{}", dir, entry.name)
+        };
+        if matches_glob(&entry.name, pattern) {
+            ctx.println(&child);
+        }
+        if entry.file_type == atom_syscall::fs::FileType::Directory {
+            find_recursive(&child, pattern, depth + 1, max, ctx);
+        }
+    }
+}
+
+fn matches_glob(name: &str, pattern: &str) -> bool {
+    if pattern == "*" { return true; }
+    if pattern.starts_with('*') && pattern.ends_with('*') {
+        let mid = &pattern[1..pattern.len()-1];
+        return name.contains(mid);
+    }
+    if pattern.starts_with('*') {
+        let suffix = &pattern[1..];
+        return name.ends_with(suffix);
+    }
+    if pattern.ends_with('*') {
+        let prefix = &pattern[..pattern.len()-1];
+        return name.starts_with(prefix);
+    }
+    name == pattern
+}
+
+// ============================================================================
+// df – disk free (simulated)
+// ============================================================================
+
+pub fn cmd_df(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    ctx.println("");
+    ctx.println_colored("Filesystem      Size     Used    Avail  Use%  Mounted on",
+        Theme::TEXT_DIM);
+    ctx.println_colored("─────────────────────────────────────────────────────────",
+        Theme::TEXT_DIM);
+    ctx.println("/dev/sda1       512 MB   128 MB   384 MB  25%   /");
+    ctx.println("tmpfs            64 MB     2 MB    62 MB   3%   /tmp");
+    ctx.println("");
+    ctx.info("(simulated – real values pending disk service)");
+    ctx.println("");
+    CommandResult::Ok
+}
+
+// ============================================================================
+// du – disk usage (simulated / recursive size)
+// ============================================================================
+
+pub fn cmd_du(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let summary  = cmd.has_flag("-s", "--summarize");
+    let human    = cmd.has_flag("-h", "--human-readable");
+    let path_arg = first_path_arg(cmd).unwrap_or(get_current_dir());
+    let path     = resolve_path(path_arg);
+
+    ctx.println("");
+    let total = du_recursive(&path, summary, human, ctx);
+    if summary {
+        let s = if human { fmt_size(total) } else { format!("{}", total / 1024) };
+        let line = format!("{:<8} {}", s, path_arg);
+        ctx.println(&line);
+    }
+    ctx.println("");
+    CommandResult::Ok
+}
+
+fn du_recursive(path: &str, summary: bool, human: bool,
+                ctx: &mut CommandContext<'_>) -> u64 {
+    let flags = atom_syscall::fs::OpenFlags::RDONLY
+        | atom_syscall::fs::OpenFlags::DIRECTORY;
+    let Ok(fd) = atom_syscall::fs::open(path, flags, 0) else {
+        // It's a file
+        if let Ok(s) = atom_syscall::fs::stat(path) { return s.size; }
+        return 0;
+    };
+    let Ok(entries) = atom_syscall::fs::readdir(fd) else {
+        let _ = atom_syscall::fs::close(fd); return 0;
+    };
+    let _ = atom_syscall::fs::close(fd);
+
+    let mut total = 0u64;
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." { continue; }
+        let child = if path.ends_with('/') {
+            format!("{}{}", path, entry.name)
+        } else {
+            format!("{}/{}", path, entry.name)
+        };
+        let size = du_recursive(&child, summary, human, ctx);
+        total += size;
+        if !summary {
+            let s = if human { fmt_size(size) } else { format!("{}", size / 1024) };
+            let line = format!("{:<8} {}", s, child);
+            ctx.println(&line);
+        }
+    }
+    total
+}
+
+// ============================================================================
+// tree – directory tree view
+// ============================================================================
+
+pub fn cmd_tree(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let path = cmd.arg(0).map(|p| resolve_path(p))
+                  .unwrap_or_else(|| String::from(get_current_dir()));
+    let max_depth = cmd.get_option("-d", "--depth")
+        .and_then(|s| {
+            let mut v = 0u32;
+            for c in s.bytes() { if c >= b'0' && c <= b'9' { v = v*10+(c-b'0') as u32; } else { return None; } }
+            Some(v)
+        })
+        .unwrap_or(3u32);
+
+    ctx.println("");
+    ctx.println_colored(&path, Theme::PROMPT_PATH);
+    tree_recursive(&path, "", 0, max_depth, ctx);
+    ctx.println("");
+    CommandResult::Ok
+}
+
+fn tree_recursive(dir: &str, prefix: &str, depth: u32, max: u32,
+                  ctx: &mut CommandContext<'_>) {
+    if depth >= max { return; }
+    let flags = atom_syscall::fs::OpenFlags::RDONLY
+        | atom_syscall::fs::OpenFlags::DIRECTORY;
+    let Ok(fd) = atom_syscall::fs::open(dir, flags, 0) else { return };
+    let Ok(entries) = atom_syscall::fs::readdir(fd) else {
+        let _ = atom_syscall::fs::close(fd); return;
+    };
+    let _ = atom_syscall::fs::close(fd);
+
+    // Filter out . and ..
+    let real: Vec<_> = entries.iter()
+        .filter(|e| e.name != "." && e.name != "..")
+        .collect();
+
+    for (i, entry) in real.iter().enumerate() {
+        let last  = i + 1 == real.len();
+        let connector = if last { "`-- " } else { "|-- " };
+        let line = format!("{}{}{}", prefix, connector, entry.name);
+        if entry.file_type == atom_syscall::fs::FileType::Directory {
+            ctx.println_colored(&line, Theme::PROMPT_PATH);
+            let child = if dir.ends_with('/') {
+                format!("{}{}", dir, entry.name)
+            } else {
+                format!("{}/{}", dir, entry.name)
+            };
+            let new_prefix = if last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}|   ", prefix)
+            };
+            tree_recursive(&child, &new_prefix, depth + 1, max, ctx);
+        } else {
+            ctx.println(&line);
+        }
+    }
 }
