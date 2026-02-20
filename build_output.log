@@ -1,0 +1,759 @@
+
+[0;35m========== USERSPACE BUILD ==========[0m
+
+[0;36m[*] Building elf2atxf tool...[0m
+[0;32m[OK] elf2atxf built[0m
+[0;36m[*] Building userspace drivers...[0m
+[0;36m[*]   Building keyboard driver...[0m
+[0;36m[*]   Converting keyboard to ATXF...[0m
+elf2atxf: Converting userspace/drivers/keyboard/target/x86_64-unknown-none/release/keyboard_driver -> efi/drivers/keyboard.atxf
+  Entry point: 0x400880
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 16064 bytes at 0x400000
+  Data segment: 8 bytes at 0x404000
+  BSS: 69636 bytes
+  Entry offset: 0x880
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x880
+  Text:         offset=0x1000, size=16064 bytes
+  Data:         offset=0x5000, size=8 bytes
+  BSS:          69636 bytes
+  Total size:   20488 bytes
+[0;32m[OK] keyboard.atxf created[0m
+[0;36m[*]   Building mouse driver...[0m
+[0;36m[*]   Converting mouse to ATXF...[0m
+elf2atxf: Converting userspace/drivers/mouse/target/x86_64-unknown-none/release/mouse_driver -> efi/drivers/mouse.atxf
+  Entry point: 0x4006A0
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 14888 bytes at 0x400000
+  Data segment: 8 bytes at 0x404000
+  BSS: 69636 bytes
+  Entry offset: 0x6A0
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x6A0
+  Text:         offset=0x1000, size=14888 bytes
+  Data:         offset=0x5000, size=8 bytes
+  BSS:          69636 bytes
+  Total size:   20488 bytes
+[0;32m[OK] mouse.atxf created[0m
+[0;36m[*]   Building display driver...[0m
+[0;36m[*]   Converting display to ATXF...[0m
+elf2atxf: Converting userspace/drivers/display/target/x86_64-unknown-none/release/display_driver -> efi/drivers/display.atxf
+  Entry point: 0x4011A0
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 7272 bytes at 0x400000
+  Data segment: 8 bytes at 0x402000
+  BSS: 69636 bytes
+  Entry offset: 0x11A0
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x11A0
+  Text:         offset=0x1000, size=7272 bytes
+  Data:         offset=0x3000, size=8 bytes
+  BSS:          69636 bytes
+  Total size:   12296 bytes
+[0;32m[OK] display.atxf created[0m
+[0;36m[*]   Building terminal driver...[0m
+[0;36m[*]   Converting terminal to ATXF...[0m
+elf2atxf: Converting userspace/drivers/terminal/target/x86_64-unknown-none/release/terminal -> efi/drivers/terminal.atxf
+  Entry point: 0x40E160
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 129501 bytes at 0x400000
+  Data segment: 288 bytes at 0x420000
+  BSS: 528108 bytes
+  Entry offset: 0xE160
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0xE160
+  Text:         offset=0x1000, size=129501 bytes
+  Data:         offset=0x21000, size=288 bytes
+  BSS:          528108 bytes
+  Total size:   135456 bytes
+[0;32m[OK] terminal.atxf created[0m
+[0;36m[*]   Building ui_shell driver...[0m
+[0;36m[*]   Converting ui_shell to ATXF...[0m
+elf2atxf: Converting userspace/drivers/ui_shell/target/x86_64-unknown-none/release/atom_desktop -> efi/drivers/ui_shell.atxf
+  Entry point: 0x406520
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 48794 bytes at 0x400000
+  Data segment: 24 bytes at 0x40C000
+  BSS: 4100 bytes
+  Entry offset: 0x6520
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x6520
+  Text:         offset=0x1000, size=48794 bytes
+  Data:         offset=0xD000, size=24 bytes
+  BSS:          4100 bytes
+  Total size:   53272 bytes
+[0;32m[OK] ui_shell.atxf created[0m
+[0;36m[*]   Building demo_rects driver...[0m
+[0;36m[*]   Converting demo_rects to ATXF...[0m
+elf2atxf: Converting userspace/drivers/demo_rects/target/x86_64-unknown-none/release/demo_rects -> efi/drivers/demo_rects.atxf
+  Entry point: 0x400480
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 23898 bytes at 0x400000
+  Data segment: 16 bytes at 0x406000
+  BSS: 135164 bytes
+  Entry offset: 0x480
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x480
+  Text:         offset=0x1000, size=23898 bytes
+  Data:         offset=0x7000, size=16 bytes
+  BSS:          135164 bytes
+  Total size:   28688 bytes
+[0;32m[OK] demo_rects.atxf created[0m
+[0;36m[*]   Building demo_text driver...[0m
+[0;36m[*]   Converting demo_text to ATXF...[0m
+elf2atxf: Converting userspace/drivers/demo_text/target/x86_64-unknown-none/release/demo_text -> efi/drivers/demo_text.atxf
+  Entry point: 0x4008C0
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 24754 bytes at 0x400000
+  Data segment: 16 bytes at 0x407000
+  BSS: 135164 bytes
+  Entry offset: 0x8C0
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x8C0
+  Text:         offset=0x1000, size=24754 bytes
+  Data:         offset=0x8000, size=16 bytes
+  BSS:          135164 bytes
+  Total size:   32784 bytes
+[0;32m[OK] demo_text.atxf created[0m
+[0;36m[*] Building userspace services...[0m
+[0;36m[*]   Building init service...[0m
+[0;36m[*]   Converting init to ATXF...[0m
+elf2atxf: Converting userspace/services/init/target/x86_64-unknown-none/release/init -> efi/drivers/init.atxf
+  Entry point: 0x400680
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 15888 bytes at 0x400000
+  Data segment: 8 bytes at 0x404000
+  BSS: 73724 bytes
+  Entry offset: 0x680
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x680
+  Text:         offset=0x1000, size=15888 bytes
+  Data:         offset=0x5000, size=8 bytes
+  BSS:          73724 bytes
+  Total size:   20488 bytes
+[0;32m[OK] init.atxf created[0m
+[0;36m[*]   Building namesvc service...[0m
+[0;36m[*]   Converting namesvc to ATXF...[0m
+elf2atxf: Converting userspace/services/namesvc/target/x86_64-unknown-none/release/namesvc -> efi/drivers/namesvc.atxf
+  Entry point: 0x401530
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 23240 bytes at 0x400000
+  Data segment: 24 bytes at 0x406000
+  BSS: 81900 bytes
+  Entry offset: 0x1530
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x1530
+  Text:         offset=0x1000, size=23240 bytes
+  Data:         offset=0x7000, size=24 bytes
+  BSS:          81900 bytes
+  Total size:   28696 bytes
+[0;32m[OK] namesvc.atxf created[0m
+[0;36m[*]   Building service_manager service...[0m
+[0;36m[*]   Converting service_manager to ATXF...[0m
+elf2atxf: Converting userspace/services/service_manager/target/x86_64-unknown-none/release/service_manager -> efi/drivers/service_manager.atxf
+  Entry point: 0x402B30
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 20595 bytes at 0x400000
+  Data segment: 2336 bytes at 0x406000
+  BSS: 136928 bytes
+  Entry offset: 0x2B30
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x2B30
+  Text:         offset=0x1000, size=20595 bytes
+  Data:         offset=0x7000, size=2336 bytes
+  BSS:          136928 bytes
+  Total size:   31008 bytes
+[0;32m[OK] service_manager.atxf created[0m
+[0;36m[*]   Building fsd service...[0m
+[0;36m[*]   Converting fsd to ATXF...[0m
+elf2atxf: Converting userspace/services/fsd/target/x86_64-unknown-none/release/fsd -> efi/drivers/fsd.atxf
+  Entry point: 0x401E6C
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 15936 bytes at 0x400000
+  Data segment: 616 bytes at 0x404000
+  BSS: 273820 bytes
+  Entry offset: 0x1E6C
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x1E6C
+  Text:         offset=0x1000, size=15936 bytes
+  Data:         offset=0x5000, size=616 bytes
+  BSS:          273820 bytes
+  Total size:   21096 bytes
+[0;32m[OK] fsd.atxf created[0m
+[0;36m[*] Building userspace applications...[0m
+[0;36m[*]   Building fileman application...[0m
+[0;36m[*]   Converting fileman to ATXF...[0m
+elf2atxf: Converting userspace/apps/fileman/target/x86_64-unknown-none/release/fileman -> efi/drivers/fileman.atxf
+  Entry point: 0x403A72
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 32224 bytes at 0x400000
+  Data segment: 24 bytes at 0x408000
+  BSS: 4198388 bytes
+  Entry offset: 0x3A72
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x3A72
+  Text:         offset=0x1000, size=32224 bytes
+  Data:         offset=0x9000, size=24 bytes
+  BSS:          4198388 bytes
+  Total size:   36888 bytes
+[0;32m[OK] fileman.atxf created[0m
+[0;36m[*]   Building fs_test application...[0m
+[0;36m[*]   Converting fs_test to ATXF...[0m
+elf2atxf: Converting userspace/apps/fs_test/target/x86_64-unknown-none/release/fs_test -> efi/drivers/fs_test.atxf
+  Entry point: 0x401CA0
+  Program headers: 3 at offset 0x40
+  Base address: 0x400000
+  Text segment: 30776 bytes at 0x400000
+  Data segment: 16 bytes at 0x408000
+  BSS: 532464 bytes
+  Entry offset: 0x1CA0
+
+ATXF created successfully:
+  Magic:        0x41545846 ("ATXF")
+  Version:      1
+  Header size:  32 bytes
+  Entry offset: 0x1CA0
+  Text:         offset=0x1000, size=30776 bytes
+  Data:         offset=0x9000, size=16 bytes
+  BSS:          532464 bytes
+  Total size:   36880 bytes
+[0;32m[OK] fs_test.atxf created[0m
+[0;32m[OK] init.atxf installed as boot payload (PID 1)[0m
+[0;32m[OK] Userspace build completed[0m
+
+[0;35m========== KERNEL BUILD ==========[0m
+
+[0;36m[*] Compilando kernel Rust...[0m
+warning: unused imports: `E2BIG`, `EACCES`, `EAGAIN`, `EBADF`, `ECORRUPTED`, `EEXIST`, `EFBIG`, `EINTR`, `EISDIR`, `EMFILE`, `EMLINK`, `ENOENT`, `ENOSPC`, `ENOTDIR`, `ENOTEMPTY`, `EOVERFLOW`, `EPIPE`, `EROFS`, `EXDEV`, `FS_MAX_FDS`, `FS_MAX_NAME_LEN`, and `PORT_BLOCK_SERVICE`
+   --> kernel/src/syscall/mod.rs:178:5
+    |
+178 |     ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY, EBADF,
+    |     ^^^^^^  ^^^^^^  ^^^^^^  ^^^^^^^  ^^^^^^^^^  ^^^^^
+179 |     EFBIG, ENOSPC, EROFS, ENAMETOOLONG, EIO, EACCES,
+    |     ^^^^^  ^^^^^^  ^^^^^                     ^^^^^^
+180 |     EMFILE, EOVERFLOW, ECORRUPTED, EMLINK, EXDEV, EPIPE,
+    |     ^^^^^^  ^^^^^^^^^  ^^^^^^^^^^  ^^^^^^  ^^^^^  ^^^^^
+181 |     ENOTSUP, EAGAIN, EINTR, E2BIG,
+    |              ^^^^^^  ^^^^^  ^^^^^
+182 |     // Port constants
+183 |     PORT_FS_SERVICE, PORT_BLOCK_SERVICE,
+    |                      ^^^^^^^^^^^^^^^^^^
+184 |     // FS limits
+185 |     FS_MAX_PATH_LEN, FS_MAX_NAME_LEN, FS_MAX_FDS,
+    |                      ^^^^^^^^^^^^^^^  ^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `alloc::vec`
+    --> kernel/src/syscall/mod.rs:3673:5
+     |
+3673 | use alloc::vec;
+     |     ^^^^^^^^^^
+
+warning: unused import: `core::ptr`
+ --> kernel/src/drivers/usb_core.rs:5:5
+  |
+5 | use core::ptr;
+  |     ^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+  --> kernel/src/drivers/usb_core.rs:54:19
+   |
+54 |     trb.control = (9 << 10); // Enable Slot Command
+   |                   ^       ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+54 -     trb.control = (9 << 10); // Enable Slot Command
+54 +     trb.control = 9 << 10; // Enable Slot Command
+   |
+
+warning: variable does not need to be mutable
+  --> kernel/src/sched.rs:79:17
+   |
+79 |             let mut i = 0;
+   |                 ----^
+   |                 |
+   |                 help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `user_rip`
+   --> kernel/src/syscall/mod.rs:268:5
+    |
+268 |     user_rip: u64,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_rip`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `user_rsp`
+   --> kernel/src/syscall/mod.rs:269:5
+    |
+269 |     user_rsp: u64,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_rsp`
+
+warning: function `remap_page_user` is never used
+   --> kernel/src/mm/vm.rs:835:8
+    |
+835 | pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
+    |        ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `remap_page_flags` is never used
+   --> kernel/src/mm/vm.rs:883:8
+    |
+883 | pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Re...
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `InterruptStackFrame` is never constructed
+  --> kernel/src/interrupts/handlers.rs:99:12
+   |
+99 | pub struct InterruptStackFrame {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `push_keyboard_scancode` is never used
+   --> kernel/src/input.rs:333:8
+    |
+333 | pub fn push_keyboard_scancode(scancode: u8) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `push_mouse_byte` is never used
+   --> kernel/src/input.rs:338:8
+    |
+338 | pub fn push_mouse_byte(byte: u8) {
+    |        ^^^^^^^^^^^^^^^
+
+warning: static `HEAP_AVAILABLE` is never used
+  --> kernel/src/log.rs:58:8
+   |
+58 | static HEAP_AVAILABLE: AtomicBool = AtomicBool::new(false);
+   |        ^^^^^^^^^^^^^^
+
+warning: function `set_heap_available` is never used
+   --> kernel/src/log.rs:143:8
+    |
+143 | pub fn set_heap_available() {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> kernel/src/init_process.rs:56:23
+   |
+56 |     InvalidExecutable(ExecError),
+   |     ----------------- ^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `InitError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+56 -     InvalidExecutable(ExecError),
+56 +     InvalidExecutable(()),
+   |
+
+warning: function `driver_count` is never used
+  --> kernel/src/driver_registry.rs:46:8
+   |
+46 | pub fn driver_count() -> usize {
+   |        ^^^^^^^^^^^^
+
+warning: function `list_drivers` is never used
+  --> kernel/src/driver_registry.rs:51:8
+   |
+51 | pub fn list_drivers() -> impl Iterator<Item = &'static str> {
+   |        ^^^^^^^^^^^^
+
+warning: constant `AHCI_CAP` is never used
+ --> kernel/src/drivers/ahci.rs:8:7
+  |
+8 | const AHCI_CAP: usize = 0x00;      // Host Capabilities
+  |       ^^^^^^^^
+
+warning: constant `AHCI_IS` is never used
+  --> kernel/src/drivers/ahci.rs:10:7
+   |
+10 | const AHCI_IS: usize = 0x08;       // Interrupt Status
+   |       ^^^^^^^
+
+warning: constant `AHCI_VS` is never used
+  --> kernel/src/drivers/ahci.rs:12:7
+   |
+12 | const AHCI_VS: usize = 0x10;       // Version
+   |       ^^^^^^^
+
+warning: constant `PORT_IE` is never used
+  --> kernel/src/drivers/ahci.rs:22:7
+   |
+22 | const PORT_IE: usize = 0x14;       // Interrupt Enable
+   |       ^^^^^^^
+
+warning: constant `PORT_TFD` is never used
+  --> kernel/src/drivers/ahci.rs:24:7
+   |
+24 | const PORT_TFD: usize = 0x20;      // Task File Data
+   |       ^^^^^^^^
+
+warning: constant `PORT_SCTL` is never used
+  --> kernel/src/drivers/ahci.rs:27:7
+   |
+27 | const PORT_SCTL: usize = 0x2C;     // SATA Control
+   |       ^^^^^^^^^
+
+warning: constant `PORT_SERR` is never used
+  --> kernel/src/drivers/ahci.rs:28:7
+   |
+28 | const PORT_SERR: usize = 0x30;     // SATA Error
+   |       ^^^^^^^^^
+
+warning: constant `PORT_SACT` is never used
+  --> kernel/src/drivers/ahci.rs:29:7
+   |
+29 | const PORT_SACT: usize = 0x34;     // SATA Active
+   |       ^^^^^^^^^
+
+warning: constant `GHC_IE` is never used
+  --> kernel/src/drivers/ahci.rs:40:7
+   |
+40 | const GHC_IE: u32 = 1 << 1;        // Interrupt Enable
+   |       ^^^^^^
+
+warning: constant `GHC_HR` is never used
+  --> kernel/src/drivers/ahci.rs:41:7
+   |
+41 | const GHC_HR: u32 = 1 << 0;        // HBA Reset
+   |       ^^^^^^
+
+warning: constant `SATA_SIG_ATAPI` is never used
+  --> kernel/src/drivers/ahci.rs:45:7
+   |
+45 | const SATA_SIG_ATAPI: u32 = 0xEB140101;
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `ATA_CMD_IDENTIFY` is never used
+  --> kernel/src/drivers/ahci.rs:52:7
+   |
+52 | const ATA_CMD_IDENTIFY: u8 = 0xEC;
+   |       ^^^^^^^^^^^^^^^^
+
+warning: constant `ATTR_ARCHIVE` is never used
+  --> kernel/src/drivers/fat32.rs:80:7
+   |
+80 | const ATTR_ARCHIVE: u8 = 0x20;
+   |       ^^^^^^^^^^^^
+
+warning: field `partition_start` is never read
+  --> kernel/src/drivers/fat32.rs:95:5
+   |
+89 | struct FsInfo {
+   |        ------ field in this struct
+...
+95 |     partition_start: u64, // Partition offset in sectors
+   |     ^^^^^^^^^^^^^^^
+
+warning: function `list_directory` is never used
+   --> kernel/src/drivers/fat32.rs:427:8
+    |
+427 | pub fn list_directory(path: &str) -> Option<Vec<String>> {
+    |        ^^^^^^^^^^^^^^
+
+warning: struct `DeviceContext` is never constructed
+   --> kernel/src/drivers/xhci.rs:101:12
+    |
+101 | pub struct DeviceContext {
+    |            ^^^^^^^^^^^^^
+
+warning: struct `InputContext` is never constructed
+   --> kernel/src/drivers/xhci.rs:107:12
+    |
+107 | pub struct InputContext {
+    |            ^^^^^^^^^^^^
+
+warning: struct `InputControlContext` is never constructed
+   --> kernel/src/drivers/xhci.rs:113:12
+    |
+113 | pub struct InputControlContext {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SlotContext` is never constructed
+   --> kernel/src/drivers/xhci.rs:120:12
+    |
+120 | pub struct SlotContext {
+    |            ^^^^^^^^^^^
+
+warning: struct `EndpointContext` is never constructed
+   --> kernel/src/drivers/xhci.rs:129:12
+    |
+129 | pub struct EndpointContext {
+    |            ^^^^^^^^^^^^^^^
+
+warning: field `cap_regs` is never read
+   --> kernel/src/drivers/xhci.rs:139:9
+    |
+138 | pub struct XhciController {
+    |            -------------- field in this struct
+139 |     pub cap_regs: *const CapabilityRegisters,
+    |         ^^^^^^^^
+
+warning: constant `USB_DESC_DEVICE` is never used
+ --> kernel/src/drivers/usb_core.rs:8:11
+  |
+8 | pub const USB_DESC_DEVICE: u8 = 1;
+  |           ^^^^^^^^^^^^^^^
+
+warning: constant `USB_DESC_CONFIG` is never used
+ --> kernel/src/drivers/usb_core.rs:9:11
+  |
+9 | pub const USB_DESC_CONFIG: u8 = 2;
+  |           ^^^^^^^^^^^^^^^
+
+warning: constant `USB_DESC_STRING` is never used
+  --> kernel/src/drivers/usb_core.rs:10:11
+   |
+10 | pub const USB_DESC_STRING: u8 = 3;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `USB_DESC_INTERFACE` is never used
+  --> kernel/src/drivers/usb_core.rs:11:11
+   |
+11 | pub const USB_DESC_INTERFACE: u8 = 4;
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `USB_DESC_ENDPOINT` is never used
+  --> kernel/src/drivers/usb_core.rs:12:11
+   |
+12 | pub const USB_DESC_ENDPOINT: u8 = 5;
+   |           ^^^^^^^^^^^^^^^^^
+
+warning: struct `DeviceDescriptor` is never constructed
+  --> kernel/src/drivers/usb_core.rs:15:12
+   |
+15 | pub struct DeviceDescriptor {
+   |            ^^^^^^^^^^^^^^^^
+
+warning: struct `UsbDevice` is never constructed
+  --> kernel/src/drivers/usb_core.rs:33:12
+   |
+33 | pub struct UsbDevice {
+   |            ^^^^^^^^^
+
+warning: enum `DeviceState` is never used
+  --> kernel/src/drivers/usb_core.rs:41:10
+   |
+41 | pub enum DeviceState {
+   |          ^^^^^^^^^^^
+
+warning: static `DEVICES` is never used
+  --> kernel/src/drivers/usb_core.rs:48:12
+   |
+48 | static mut DEVICES: [Option<UsbDevice>; 64] = [None; 64];
+   |            ^^^^^^^
+
+warning: constant `USB_CLASS_HID` is never used
+ --> kernel/src/drivers/usb_hid.rs:6:11
+  |
+6 | pub const USB_CLASS_HID: u8 = 0x03;
+  |           ^^^^^^^^^^^^^
+
+warning: constant `HID_SUBCLASS_BOOT` is never used
+ --> kernel/src/drivers/usb_hid.rs:7:11
+  |
+7 | pub const HID_SUBCLASS_BOOT: u8 = 0x01;
+  |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `HID_PROTOCOL_KEYBOARD` is never used
+ --> kernel/src/drivers/usb_hid.rs:8:11
+  |
+8 | pub const HID_PROTOCOL_KEYBOARD: u8 = 0x01;
+  |           ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HID_PROTOCOL_MOUSE` is never used
+ --> kernel/src/drivers/usb_hid.rs:9:11
+  |
+9 | pub const HID_PROTOCOL_MOUSE: u8 = 0x02;
+  |           ^^^^^^^^^^^^^^^^^^
+
+warning: struct `HidDevice` is never constructed
+  --> kernel/src/drivers/usb_hid.rs:11:12
+   |
+11 | pub struct HidDevice {
+   |            ^^^^^^^^^
+
+warning: function `init_hid_device` is never used
+  --> kernel/src/drivers/usb_hid.rs:16:8
+   |
+16 | pub fn init_hid_device(slot_id: u8, protocol: u8) {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `handle_hid_report` is never used
+  --> kernel/src/drivers/usb_hid.rs:21:8
+   |
+21 | pub fn handle_hid_report(slot_id: u8, report: &[u8]) {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `HidDescriptor` is never constructed
+  --> kernel/src/drivers/usb_hid.rs:32:12
+   |
+32 | pub struct HidDescriptor {
+   |            ^^^^^^^^^^^^^
+
+warning: function `without_interrupts` is never used
+  --> kernel/src/util.rs:13:8
+   |
+13 | pub fn without_interrupts<F, R>(f: F) -> R
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: static `UI_DIRTY` is never used
+  --> kernel/src/util.rs:41:12
+   |
+41 | pub static UI_DIRTY: AtomicBool = AtomicBool::new(false);
+   |            ^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> kernel/src/syscall/mod.rs:3280:29
+     |
+3280 | ...ame: &str) -> Result<crate::executable::ExecutableSections, u64> {
+     |         ^^^^            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+     |         |
+     |         the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+3280 | fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections<'_>, u64> {
+     |                                                                                  ++++
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/ahci.rs:405:14
+    |
+405 |     unsafe { ACTIVE_PORT.is_some() }
+    |              ^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/fat32.rs:203:20
+    |
+203 |         let info = FS_INFO.as_ref().unwrap();
+    |                    ^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/fat32.rs:210:20
+    |
+210 |         let info = FS_INFO.as_ref()?;
+    |                    ^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/fat32.rs:229:20
+    |
+229 |         let info = FS_INFO.as_ref()?;
+    |                    ^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/fat32.rs:373:20
+    |
+373 |         let info = FS_INFO.as_ref()?;
+    |                    ^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/fat32.rs:423:14
+    |
+423 |     unsafe { FS_INFO.is_some() }
+    |              ^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a shared reference to mutable static
+   --> kernel/src/drivers/fat32.rs:429:20
+    |
+429 |         let info = FS_INFO.as_ref()?;
+    |                    ^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: `atom-kernel` (lib) generated 65 warnings (run `cargo fix --lib -p atom-kernel` to apply 8 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.08s
+[0;32m[OK] Kernel Rust compilado[0m
+[0;33m[!] Build teve warnings (veja build/cargo.log)[0m
+[0;33m[!] NASM não encontrado - pulando assembly e linking[0m
+[0;33m[!] Para build completo, instale NASM: sudo apt install nasm[0m
+
+[0;32m[OK] Build Rust concluído (sem assembly/linking)[0m

@@ -780,7 +780,9 @@ fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
             return Err("kernel CS selector invalid");
         }
 
-        if target.ss != gdt::KERNEL_DATA_SELECTOR {
+        // In x86_64 long mode, SS is often NULL (0) when returning to Ring 0.
+        // We accept either the explicit kernel data selector or NULL.
+        if target.ss != gdt::KERNEL_DATA_SELECTOR && target.ss != 0 {
             return Err("kernel SS selector invalid");
         }
     }
