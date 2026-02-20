@@ -534,7 +534,7 @@ impl Compositor {
         let mut icons = Vec::new();
         icons.push(DesktopIcon {
             label: String::from("File Manager"),
-            executable: String::from("terminal"),
+            executable: String::from("fileman"),
             x: 24,
             y: PANEL_HEIGHT as i32 + 24,
             color: Color::new(143, 188, 187),
@@ -1395,8 +1395,45 @@ impl Compositor {
             self.spawn_terminal();
             return;
         }
+        if name == "fileman" {
+            self.spawn_fileman();
+            return;
+        }
 
         let _ = spawn_process(name);
+    }
+
+    fn spawn_fileman(&mut self) {
+        let pid = match spawn_process("fileman") {
+            Ok(pid) => pid,
+            Err(_) => return,
+        };
+
+        let offset = (self.wm.windows.len() as i32) * 30;
+        let win_x = 100 + offset;
+        let win_y = 80 + offset;
+        let win_width = 720u32;
+        let win_height = 480u32;
+
+        let window_id = match self.wm.create_window_with_process(
+            "File Manager",
+            win_x,
+            win_y,
+            win_width,
+            win_height,
+            pid,
+            0,
+        ) {
+            Some(id) => id,
+            None => return,
+        };
+
+        self.pending_windows.push(PendingWindow {
+            pid,
+            window_id,
+        });
+
+        self.dirty = true;
     }
 
     fn spawn_terminal(&mut self) {

@@ -1,501 +1,1206 @@
+// Atom OS GUI File Manager
+//
+// A graphical file manager that renders to a compositor-assigned shared surface.
+// Supports icon view and list view, navigation, and file operations.
+//
+// Architecture (same as terminal):
+//   - Registers with compositor via IPC → receives a SharedSurface
+//   - Renders icon/list UI directly into the surface
+//   - Handles keyboard & mouse events forwarded by compositor
+
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::format;
 use core::panic::PanicInfo;
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::arch::asm;
 
 mod error;
 mod fs;
 
-use error::{FilManagerError, Result};
-use fs::{File, Dir, FsOps, FsQuery, FileMode};
+use fs::{Dir, DirEntry, FsOps};
+
+use atom_syscall::graphics::{Color, SharedSurface};
+use atom_syscall::ipc::{create_port, try_recv, send, wait_any, PortId};
+use atom_syscall::thread::{exit, yield_now, get_ticks};
+use atom_syscall::debug::log;
+
+use libipc::messages::{
+    MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg,
+    KeyEvent as IpcKeyEvent, MouseButtonEvent, MouseMoveEvent, MouseButton,
+    MouseScrollEvent,
+};
 
 // ============================================================================
-// Memory Allocator
+// Bump Allocator – 4 MB heap for file manager
 // ============================================================================
 
-mod allocator {
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::cell::UnsafeCell;
-    use core::ptr::null_mut;
+const HEAP_SIZE: usize = 4 * 1024 * 1024;
 
-    const HEAP_SIZE: usize = 1024 * 1024; // 1 MB heap for fileman
-
-    #[repr(align(4096))]
-    struct Heap {
-        data: UnsafeCell<[u8; HEAP_SIZE]>,
-        next: UnsafeCell<usize>,
-    }
-
-    unsafe impl Sync for Heap {}
-
-    static HEAP: Heap = Heap {
-        data: UnsafeCell::new([0; HEAP_SIZE]),
-        next: UnsafeCell::new(0),
-    };
-
-    pub struct BumpAllocator;
-
-    unsafe impl GlobalAlloc for BumpAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let next_ptr = HEAP.next.get();
-            let heap_start = HEAP.data.get() as *mut u8;
-
-            let align = layout.align();
-            let size = layout.size();
-            let current = *next_ptr;
-            let aligned = (current + align - 1) & !(align - 1);
-
-            if aligned + size > HEAP_SIZE {
-                return null_mut();
-            }
-
-            *next_ptr = aligned + size;
-            heap_start.add(aligned)
-        }
-
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-            // Bump allocator doesn't free
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: BumpAllocator = BumpAllocator;
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    next: AtomicUsize,
 }
 
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self {
+            heap: UnsafeCell::new([0u8; HEAP_SIZE]),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size  = layout.size();
+        let align = layout.align().max(16);
+        loop {
+            let cur     = self.next.load(Ordering::Relaxed);
+            let aligned = (cur + align - 1) & !(align - 1);
+            let new_end = aligned + size;
+            if new_end > HEAP_SIZE { return core::ptr::null_mut(); }
+            if self.next.compare_exchange_weak(cur, new_end,
+                    Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                return (self.heap.get() as *mut u8).add(aligned);
+            }
+        }
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! { loop {} }
+
 // ============================================================================
-// Panic Handler
+// Panic handler
 // ============================================================================
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe {
-            asm!("hlt");
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    main();
-    loop {
-        unsafe {
-            asm!("hlt");
-        }
-    }
+    log("fileman: PANIC");
+    exit(0xFF);
 }
 
 // ============================================================================
-// I/O Helpers
-// ============================================================================
-
-fn print(s: &str) {
-    atom_syscall::debug::log(s);
-}
-
-fn println(s: &str) {
-    let mut buf = alloc::string::String::new();
-    use core::fmt::Write;
-    let _ = writeln!(buf, "{}", s);
-    print(&buf);
-}
-
-fn print_error(msg: &str) {
-    let mut buf = String::new();
-    use core::fmt::Write;
-    let _ = writeln!(buf, "error: {}", msg);
-    print(&buf);
-}
-
-/// Read a line from stdin (simplified: reads until newline)
-fn read_line() -> String {
-    // For now, we'll use a stub that returns empty line
-    // In production, this would read from a proper input driver
-    String::new()
-}
-
-// ============================================================================
-// Command Handlers
-// ============================================================================
-
-struct CommandContext {
-    cwd: String,
-}
-
-impl CommandContext {
-    fn new() -> Self {
-        // Try to set starting directory, fall back to /
-        let cwd = String::from("/");
-        CommandContext { cwd }
-    }
-
-    /// Resolve path relative to current working directory
-    fn resolve_path(&self, path: &str) -> Result<String> {
-        if path.is_empty() {
-            return Ok(self.cwd.clone());
-        }
-
-        let resolved = if path.starts_with('/') {
-            // Absolute path
-            error::normalize_path(path)?
-        } else {
-            // Relative path
-            let full = if self.cwd.ends_with('/') {
-                format!("{}{}", self.cwd, path)
-            } else {
-                format!("{}/{}", self.cwd, path)
-            };
-            error::normalize_path(&full)?
-        };
-
-        Ok(resolved)
-    }
-
-    /// Change working directory
-    fn cmd_cd(&mut self, args: &[&str]) -> Result<()> {
-        if args.is_empty() {
-            // cd without args goes to root
-            self.cwd = String::from("/");
-            return Ok(());
-        }
-
-        if args.len() > 1 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 1,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        let target = self.resolve_path(args[0])?;
-
-        // Verify target is a directory
-        if !FsQuery::is_dir(&target)? {
-            return Err(FilManagerError::fs(
-                atom_syscall::fs::FsError::NotDir,
-                "cd",
-            ));
-        }
-
-        self.cwd = target;
-        Ok(())
-    }
-
-    /// Print working directory
-    fn cmd_pwd(&self, _args: &[&str]) -> Result<()> {
-        println(&self.cwd);
-        Ok(())
-    }
-
-    /// List directory contents
-    fn cmd_ls(&self, args: &[&str]) -> Result<()> {
-        let path = if args.is_empty() {
-            self.cwd.clone()
-        } else if args.len() == 1 {
-            self.resolve_path(args[0])?
-        } else {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 1,
-                    got: args.len(),
-                },
-            ));
-        };
-
-        let dir = Dir::open(&path)?;
-        let entries = dir.list()?;
-
-        if entries.is_empty() {
-            println("");
-            return Ok(());
-        }
-
-        for entry in entries {
-            let output = if entry.is_dir() {
-                format!("{}/", entry.name)
-            } else {
-                format!("{} ({})", entry.name, entry.size_string())
-            };
-            println(&output);
-        }
-
-        Ok(())
-    }
-
-    /// Create directory
-    fn cmd_mkdir(&self, args: &[&str]) -> Result<()> {
-        if args.is_empty() {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::MissingArg("path"),
-            ));
-        }
-
-        if args.len() > 1 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 1,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        let path = self.resolve_path(args[0])?;
-        FsOps::mkdir(&path)?;
-        
-        let msg = format!("mkdir: created directory '{}'", args[0]);
-        println(&msg);
-        Ok(())
-    }
-
-    /// Remove file
-    fn cmd_rm(&self, args: &[&str]) -> Result<()> {
-        if args.is_empty() {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::MissingArg("file"),
-            ));
-        }
-
-        let mut recursive = false;
-        
-        // Parse options
-        let mut i = 0;
-        while i < args.len() && args[i].starts_with('-') {
-            match args[i] {
-                "-r" | "-R" | "--recursive" => recursive = true,
-                _ => {
-                    let msg = format!("rm: unknown option '{}'", args[i]);
-                    print_error(&msg);
-                    return Err(FilManagerError::InvalidCommand(
-                        error::CommandError::UnknownCommand(args[i].len()),
-                    ));
-                }
-            }
-            i += 1;
-        }
-
-        if i >= args.len() {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::MissingArg("file"),
-            ));
-        }
-
-        let path = self.resolve_path(args[i])?;
-
-        if recursive {
-            FsOps::rm_recursive(&path)?;
-            let msg = format!("rm: removed '{}' and its contents", args[i]);
-            println(&msg);
-        } else {
-            // Try to remove as file first
-            match FsOps::unlink(&path) {
-                Ok(()) => {
-                    let msg = format!("rm: removed '{}'", args[i]);
-                    println(&msg);
-                }
-                Err(FilManagerError::FsOp(atom_syscall::fs::FsError::IsDir, _)) => {
-                    return Err(FilManagerError::FsOp(
-                        atom_syscall::fs::FsError::IsDir,
-                        "rm",
-                    ));
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Move/rename file or directory
-    fn cmd_mv(&self, args: &[&str]) -> Result<()> {
-        if args.len() < 2 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 2,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        if args.len() > 2 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 2,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        let src = self.resolve_path(args[0])?;
-        let dst = self.resolve_path(args[1])?;
-
-        FsOps::rename(&src, &dst)?;
-        
-        let msg = format!("mv: moved '{}' to '{}'", args[0], args[1]);
-        println(&msg);
-        Ok(())
-    }
-
-    /// Copy file
-    fn cmd_cp(&self, args: &[&str]) -> Result<()> {
-        if args.len() < 2 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 2,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        if args.len() > 2 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 2,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        let src = self.resolve_path(args[0])?;
-        let dst = self.resolve_path(args[1])?;
-
-        FsOps::copy(&src, &dst)?;
-        
-        let msg = format!("cp: copied '{}' to '{}'", args[0], args[1]);
-        println(&msg);
-        Ok(())
-    }
-
-    /// Display file contents
-    fn cmd_cat(&self, args: &[&str]) -> Result<()> {
-        if args.is_empty() {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::MissingArg("file"),
-            ));
-        }
-
-        if args.len() > 1 {
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::WrongArgCount {
-                    expected: 1,
-                    got: args.len(),
-                },
-            ));
-        }
-
-        let path = self.resolve_path(args[0])?;
-        let mut file = File::open(&path, FileMode::ReadOnly)?;
-        let content = file.read_all()?;
-
-        // Convert to string for display (assuming UTF-8)
-        match core::str::from_utf8(&content) {
-            Ok(text) => {
-                print(text);
-            }
-            Err(_) => {
-                println("[binary file - cannot display]");
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Show help
-    fn cmd_help(&self, _args: &[&str]) -> Result<()> {
-        let help_text = r#"Fileman - Simple File Manager for Atom OS
-
-Commands:
-  pwd              - Print working directory
-  cd [path]        - Change directory (default: /)
-  ls [path]        - List directory contents
-  cat <file>       - Display file contents
-  mkdir <path>     - Create directory
-  rm [-r] <path>   - Remove file (or directory with -r)
-  mv <src> <dst>   - Move/rename file or directory
-  cp <src> <dst>   - Copy file
-  help             - Show this help message
-  exit             - Exit fileman
-
-Options:
-  -r, -R           - Recursive (for rm)
-
-All paths can be absolute (/path) or relative.
-"#;
-        println(help_text);
-        Ok(())
-    }
-
-    /// Exit application
-    fn should_exit(&self, _args: &[&str]) -> bool {
-        true
-    }
-}
-
-// ============================================================================
-// Main CLI Loop
+// Entry point
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
-    let ctx = CommandContext::new();
+pub extern "C" fn _start() -> ! { main() }
 
-    println("=================================");
-    println("Fileman - File Manager for Atom OS");
-    println("Type 'help' for available commands");
-    println("=================================");
+// ============================================================================
+// Theme
+// ============================================================================
 
-    // For now, print initial prompt - in production this would be an interactive loop
-    let prompt = format!("fileman:{}> ", ctx.cwd);
-    println(&prompt);
-
-    0
+struct Theme;
+impl Theme {
+    // Backgrounds
+    const BG:          Color = Color::new(30, 33, 40);
+    const TOOLBAR_BG:  Color = Color::new(22, 25, 31);
+    const STATUS_BG:   Color = Color::new(18, 20, 26);
+    const LIST_HDR_BG: Color = Color::new(28, 32, 40);
+    const SEPARATOR:   Color = Color::new(50, 56, 68);
+    const HOVER_BG:    Color = Color::new(42, 48, 60);
+    const SEL_BG:      Color = Color::new(52, 84, 130);
+    const BTN_BG:      Color = Color::new(48, 54, 66);
+    const BTN_ACTIVE:  Color = Color::new(70, 100, 145);
+    // Text
+    const TEXT:        Color = Color::new(220, 222, 226);
+    const TEXT_DIM:    Color = Color::new(128, 133, 145);
+    const TEXT_PATH:   Color = Color::new(163, 190, 140);
+    const TEXT_ACCENT: Color = Color::new(136, 192, 208);
+    // File type colours
+    const DIR:         Color = Color::new(100, 160, 255);
+    const TXT:         Color = Color::new(100, 210, 100);
+    const IMG:         Color = Color::new(210, 100, 210);
+    const EXEC:        Color = Color::new(220, 90,  90);
+    const ZIP:         Color = Color::new(215, 178, 80);
+    const AUD:         Color = Color::new(80,  205, 175);
+    const VID:         Color = Color::new(155, 100, 215);
+    const OTHER:       Color = Color::new(155, 158, 168);
 }
 
 // ============================================================================
-// Testing/Development Entry Point
+// File-type detection
 // ============================================================================
 
-/// Internal test helper - can be called from other modules
-#[allow(dead_code)]
-fn execute_command(ctx: &mut CommandContext, cmd: &str) -> Result<bool> {
-    if cmd.trim().is_empty() {
-        return Ok(false);
+#[derive(Clone, Copy, PartialEq)]
+enum FileKind { Dir, Txt, Img, Exec, Zip, Aud, Vid, Other }
+
+impl FileKind {
+    fn detect(name: &str, is_dir: bool) -> Self {
+        if is_dir { return Self::Dir; }
+        let ext = name.rfind('.').map(|p| &name[p+1..]).unwrap_or("");
+        match ext {
+            "txt"|"md"|"rst"|"log"|"cfg"|"conf"|"toml"|"ini"|"yaml"|"yml"
+            |"rs" |"c"  |"h"  |"cpp"|"cc" |"py" |"js" |"ts" |"sh" |"bash"
+            |"json"|"xml"|"csv"|"env" => Self::Txt,
+            "png"|"jpg"|"jpeg"|"bmp"|"gif"|"ico"|"tga"|"tiff"|"svg" => Self::Img,
+            "exe"|"bin"|"elf"|"atxf"|"so"|"a"|"out" => Self::Exec,
+            "zip"|"tar"|"gz"|"xz"|"7z"|"rar"|"bz2"|"lz4" => Self::Zip,
+            "mp3"|"wav"|"ogg"|"flac"|"aac"|"m4a" => Self::Aud,
+            "mp4"|"avi"|"mkv"|"mov"|"webm"|"m4v" => Self::Vid,
+            _ => Self::Other,
+        }
     }
 
-    // Parse command and arguments
-    let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
-    if parts.is_empty() {
-        return Ok(false);
+    fn color(self) -> Color {
+        match self {
+            Self::Dir  => Theme::DIR,
+            Self::Txt  => Theme::TXT,
+            Self::Img  => Theme::IMG,
+            Self::Exec => Theme::EXEC,
+            Self::Zip  => Theme::ZIP,
+            Self::Aud  => Theme::AUD,
+            Self::Vid  => Theme::VID,
+            Self::Other=> Theme::OTHER,
+        }
     }
 
-    let cmd_name = parts[0];
-    let args = &parts[1..];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dir  => "DIR",
+            Self::Txt  => "TXT",
+            Self::Img  => "IMG",
+            Self::Exec => "EXE",
+            Self::Zip  => "ZIP",
+            Self::Aud  => "AUD",
+            Self::Vid  => "VID",
+            Self::Other=> "FILE",
+        }
+    }
+}
 
-    let should_exit = match cmd_name {
-        "pwd" => { ctx.cmd_pwd(args)?; false },
-        "cd" => { ctx.cmd_cd(args)?; false },
-        "ls" => { ctx.cmd_ls(args)?; false },
-        "cat" => { ctx.cmd_cat(args)?; false },
-        "mkdir" => { ctx.cmd_mkdir(args)?; false },
-        "rm" => { ctx.cmd_rm(args)?; false },
-        "mv" => { ctx.cmd_mv(args)?; false },
-        "cp" => { ctx.cmd_cp(args)?; false },
-        "help" => { ctx.cmd_help(args)?; false },
-        "exit" => ctx.should_exit(args),
-        _ => {
-            let msg = format!("fileman: unknown command '{}'", cmd_name);
-            print_error(&msg);
-            return Err(FilManagerError::InvalidCommand(
-                error::CommandError::UnknownCommand(cmd_name.len()),
-            ));
+// ============================================================================
+// Cached file entry
+// ============================================================================
+
+struct Entry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+    kind: FileKind,
+}
+
+impl Entry {
+    fn from_dir_entry(de: &DirEntry) -> Self {
+        let kind = FileKind::detect(&de.name, de.is_dir());
+        Self { name: de.name.clone(), is_dir: de.is_dir(), size: de.size, kind }
+    }
+
+    fn size_str(&self) -> String {
+        if self.is_dir { return String::from("  --"); }
+        format_size(self.size)
+    }
+
+    fn ext(&self) -> &str {
+        if self.is_dir { return ""; }
+        self.name.rfind('.').map(|p| &self.name[p+1..]).unwrap_or("")
+    }
+}
+
+fn format_size(b: u64) -> String {
+    if b < 1024 { format!("{} B", b) }
+    else if b < 1024*1024 {
+        let kb = b / 1024;
+        let f  = (b % 1024) * 10 / 1024;
+        format!("{}.{} KB", kb, f)
+    } else if b < 1024*1024*1024 {
+        let mb = b / (1024*1024);
+        let f  = (b % (1024*1024)) * 10 / (1024*1024);
+        format!("{}.{} MB", mb, f)
+    } else {
+        format!("{} GB", b / (1024*1024*1024))
+    }
+}
+
+// ============================================================================
+// View mode + clipboard
+// ============================================================================
+
+#[derive(PartialEq)]
+enum ViewMode { Icons, List }
+
+struct Clipboard { path: String, cut: bool }
+
+// ============================================================================
+// Layout constants
+// ============================================================================
+
+const CHAR_W:    u32 = 8;
+const CHAR_H:    u32 = 8;
+const TOOLBAR_H: u32 = 36;
+const STATUS_H:  u32 = 22;
+
+// Icon view cell
+const ICON_CELL_W: u32 = 90;
+const ICON_CELL_H: u32 = 82;
+const ICON_W:      u32 = 52;
+const ICON_H:      u32 = 46;
+
+// List view
+const LIST_HDR_H:  u32 = 20;
+const LIST_ROW_H:  u32 = 18;
+
+// Toolbar buttons (from left)
+const TB_BTN_H:  u32 = 26;
+const TB_BTN_Y:  u32 = (TOOLBAR_H - TB_BTN_H) / 2;
+
+struct Btn { x: u32, w: u32 }
+impl Btn {
+    const fn new(x: u32, w: u32) -> Self { Btn { x, w } }
+    fn contains(&self, mx: i32, my: i32) -> bool {
+        mx >= self.x as i32 && mx < (self.x + self.w) as i32
+            && my >= TB_BTN_Y as i32 && my < (TB_BTN_Y + TB_BTN_H) as i32
+    }
+}
+
+// Fixed left buttons
+const BTN_BACK: Btn = Btn::new(4,  32);
+const BTN_UP:   Btn = Btn::new(40, 26);
+
+// Right-side buttons (computed at render time relative to surface width)
+fn btn_refresh(sw: u32) -> Btn { Btn::new(sw - 36, 30) }
+fn btn_icons(sw: u32)   -> Btn { Btn::new(sw - 36 - 4 - 52, 50) }
+fn btn_list(sw: u32)    -> Btn { Btn::new(sw - 36 - 4 - 52 - 4 - 44, 42) }
+fn btn_new(sw: u32)     -> Btn { Btn::new(sw - 36 - 4 - 52 - 4 - 44 - 4 - 32, 30) }
+
+fn path_bar_rect(sw: u32) -> (u32, u32) {
+    // x and width
+    let x = BTN_UP.x + BTN_UP.w + 8;
+    let w = btn_new(sw).x - x - 8;
+    (x, w)
+}
+
+// ============================================================================
+// Status message helper (no-alloc fixed buffer)
+// ============================================================================
+
+struct StatusBuf { buf: [u8; 200], len: usize }
+
+impl StatusBuf {
+    fn new() -> Self { Self { buf: [0u8; 200], len: 0 } }
+    fn set(&mut self, s: &str) {
+        self.len = 0;
+        for b in s.bytes() {
+            if self.len < 199 { self.buf[self.len] = b; self.len += 1; }
+        }
+    }
+    fn as_str(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+// ============================================================================
+// File Manager state
+// ============================================================================
+
+struct FileManager {
+    // IPC / Window
+    window_id:        u32,
+    compositor_port:  PortId,
+    local_port:       PortId,
+    surface:          Option<SharedSurface>,
+    surface_width:    u32,
+    surface_height:   u32,
+
+    // Navigation
+    cwd:              String,
+    history:          Vec<String>,   // backward stack
+
+    // File listing
+    entries:          Vec<Entry>,
+
+    // UI
+    view_mode:        ViewMode,
+    selected:         Option<usize>,
+    scroll_offset:    u32,
+
+    // Mouse
+    mouse_x:          i32,
+    mouse_y:          i32,
+    last_click_idx:   i32,           // -1 = none
+    last_click_tick:  u64,
+
+    // Clipboard
+    clipboard:        Option<Clipboard>,
+
+    // Status bar
+    status:           StatusBuf,
+
+    // App
+    running:          bool,
+    needs_redraw:     bool,
+}
+
+impl FileManager {
+    fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
+           surface: SharedSurface) -> Self {
+        let w = surface.width();
+        let h = surface.height();
+        Self {
+            window_id, compositor_port, local_port,
+            surface: Some(surface),
+            surface_width: w, surface_height: h,
+            cwd: String::from("/"),
+            history: Vec::new(),
+            entries: Vec::new(),
+            view_mode: ViewMode::Icons,
+            selected: None,
+            scroll_offset: 0,
+            mouse_x: 0, mouse_y: 0,
+            last_click_idx: -1,
+            last_click_tick: 0,
+            clipboard: None,
+            status: StatusBuf::new(),
+            running: true,
+            needs_redraw: true,
+        }
+    }
+
+    // ─── Content area helpers ────────────────────────────────────────────────
+
+    fn content_y(&self) -> u32 { TOOLBAR_H }
+    fn content_h(&self) -> u32 {
+        self.surface_height.saturating_sub(TOOLBAR_H + STATUS_H)
+    }
+    fn status_y(&self) -> u32 { self.surface_height - STATUS_H }
+
+    // ─── Load directory ──────────────────────────────────────────────────────
+
+    fn load_dir(&mut self, path: &str) {
+        self.entries.clear();
+        self.selected = None;
+        self.scroll_offset = 0;
+
+        match Dir::open(path) {
+            Ok(dir) => {
+                match dir.list() {
+                    Ok(list) => {
+                        for de in &list {
+                            if de.name == "." || de.name == ".." { continue; }
+                            self.entries.push(Entry::from_dir_entry(de));
+                        }
+                        let msg = format!("{} items", self.entries.len());
+                        self.status.set(&msg);
+                    }
+                    Err(_) => { self.status.set("error: cannot list directory"); }
+                }
+            }
+            Err(_) => { self.status.set("error: cannot open directory"); }
+        }
+        self.needs_redraw = true;
+    }
+
+    fn navigate_to(&mut self, path: String) {
+        let old = self.cwd.clone();
+        self.cwd = path.clone();
+        self.load_dir(&path);
+        self.history.push(old);
+    }
+
+    fn go_back(&mut self) {
+        if let Some(prev) = self.history.pop() {
+            self.cwd = prev.clone();
+            self.load_dir(&prev);
+        }
+    }
+
+    fn go_up(&mut self) {
+        if self.cwd == "/" { return; }
+        let parent = match self.cwd.rfind('/') {
+            Some(0) => String::from("/"),
+            Some(pos) => String::from(&self.cwd[..pos]),
+            None => String::from("/"),
+        };
+        let old = self.cwd.clone();
+        self.history.push(old);
+        self.cwd = parent.clone();
+        self.load_dir(&parent);
+    }
+
+    // ─── Hit testing ─────────────────────────────────────────────────────────
+
+    fn item_at_pos(&self, mx: i32, my: i32) -> Option<usize> {
+        let cy = self.content_y() as i32;
+        let ch = self.content_h();
+        if my < cy || my >= (cy + ch as i32) { return None; }
+
+        match self.view_mode {
+            ViewMode::Icons => {
+                let cols = (self.surface_width / ICON_CELL_W).max(1);
+                let rx   = mx as u32;
+                let ry   = (my - cy) as u32 + self.scroll_offset * ICON_CELL_H;
+                let col  = rx / ICON_CELL_W;
+                let row  = ry / ICON_CELL_H;
+                if col >= cols { return None; }
+                let idx = (row * cols + col) as usize;
+                if idx < self.entries.len() { Some(idx) } else { None }
+            }
+            ViewMode::List => {
+                let hdr_bot = cy + LIST_HDR_H as i32;
+                if my < hdr_bot { return None; }
+                let ry   = (my - hdr_bot) as u32;
+                let idx  = (ry / LIST_ROW_H + self.scroll_offset) as usize;
+                if idx < self.entries.len() { Some(idx) } else { None }
+            }
+        }
+    }
+
+    fn visible_list_rows(&self) -> u32 {
+        self.content_h().saturating_sub(LIST_HDR_H) / LIST_ROW_H
+    }
+
+    // ─── Open / activate item ────────────────────────────────────────────────
+
+    fn activate(&mut self, idx: usize) {
+        if idx >= self.entries.len() { return; }
+        if self.entries[idx].is_dir {
+            let new_path = if self.cwd.ends_with('/') {
+                format!("{}{}", self.cwd, self.entries[idx].name)
+            } else {
+                format!("{}/{}", self.cwd, self.entries[idx].name)
+            };
+            self.navigate_to(new_path);
+        } else {
+            // Show info in status bar (opening requires a process spawn)
+            let msg = format!("open: {} ({}) – double-click to open",
+                self.entries[idx].name, self.entries[idx].size_str());
+            self.status.set(&msg);
+            self.needs_redraw = true;
+        }
+    }
+
+    // ─── File operations ─────────────────────────────────────────────────────
+
+    fn delete_selected(&mut self) {
+        let Some(idx) = self.selected else { return; };
+        if idx >= self.entries.len() { return; }
+        let path = self.full_path(idx);
+        let result = if self.entries[idx].is_dir {
+            FsOps::rm_recursive(&path)
+        } else {
+            FsOps::unlink(&path)
+        };
+        match result {
+            Ok(()) => {
+                let msg = format!("deleted: {}", self.entries[idx].name);
+                self.status.set(&msg);
+                let cwd = self.cwd.clone();
+                self.load_dir(&cwd);
+            }
+            Err(_) => { self.status.set("error: delete failed"); }
+        }
+    }
+
+    fn copy_selected(&mut self) {
+        let Some(idx) = self.selected else {
+            self.status.set("nothing selected");
+            return;
+        };
+        let path = self.full_path(idx);
+        let msg = format!("copied: {}", self.entries[idx].name);
+        self.clipboard = Some(Clipboard { path, cut: false });
+        self.status.set(&msg);
+        self.needs_redraw = true;
+    }
+
+    fn cut_selected(&mut self) {
+        let Some(idx) = self.selected else {
+            self.status.set("nothing selected");
+            return;
+        };
+        let path = self.full_path(idx);
+        let msg = format!("cut: {}", self.entries[idx].name);
+        self.clipboard = Some(Clipboard { path, cut: true });
+        self.status.set(&msg);
+        self.needs_redraw = true;
+    }
+
+    fn paste(&mut self) {
+        let Some(ref cb) = self.clipboard else {
+            self.status.set("clipboard empty");
+            return;
+        };
+        let src  = cb.path.clone();
+        let is_cut = cb.cut;
+        let fname = src.rfind('/').map(|p| &src[p+1..]).unwrap_or(&src);
+        let dst = if self.cwd.ends_with('/') {
+            format!("{}{}", self.cwd, fname)
+        } else {
+            format!("{}/{}", self.cwd, fname)
+        };
+
+        let result = if is_cut {
+            FsOps::rename(&src, &dst)
+        } else {
+            FsOps::copy(&src, &dst)
+        };
+
+        match result {
+            Ok(()) => {
+                let msg = format!("pasted: {}", fname);
+                self.status.set(&msg);
+                if is_cut { self.clipboard = None; }
+                let cwd = self.cwd.clone();
+                self.load_dir(&cwd);
+            }
+            Err(_) => { self.status.set("error: paste failed"); }
+        }
+    }
+
+    fn new_folder(&mut self) {
+        let path = if self.cwd.ends_with('/') {
+            format!("{}new_folder", self.cwd)
+        } else {
+            format!("{}/new_folder", self.cwd)
+        };
+        match FsOps::mkdir(&path) {
+            Ok(()) => {
+                self.status.set("created: new_folder");
+                let cwd = self.cwd.clone();
+                self.load_dir(&cwd);
+            }
+            Err(_) => { self.status.set("error: could not create folder"); }
+        }
+    }
+
+    fn full_path(&self, idx: usize) -> String {
+        if self.cwd.ends_with('/') {
+            format!("{}{}", self.cwd, self.entries[idx].name)
+        } else {
+            format!("{}/{}", self.cwd, self.entries[idx].name)
+        }
+    }
+
+    // ─── Scroll helpers ──────────────────────────────────────────────────────
+
+    fn scroll_down(&mut self) {
+        let max = self.max_scroll();
+        if self.scroll_offset < max { self.scroll_offset += 1; self.needs_redraw = true; }
+    }
+
+    fn scroll_up(&mut self) {
+        if self.scroll_offset > 0 { self.scroll_offset -= 1; self.needs_redraw = true; }
+    }
+
+    fn max_scroll(&self) -> u32 {
+        match self.view_mode {
+            ViewMode::Icons => {
+                let cols = (self.surface_width / ICON_CELL_W).max(1);
+                let rows = (self.entries.len() as u32 + cols - 1) / cols;
+                let vis  = self.content_h() / ICON_CELL_H;
+                rows.saturating_sub(vis)
+            }
+            ViewMode::List => {
+                let vis = self.visible_list_rows();
+                (self.entries.len() as u32).saturating_sub(vis)
+            }
+        }
+    }
+
+    // ─── Rendering ───────────────────────────────────────────────────────────
+
+    fn render(&mut self) {
+        if !self.needs_redraw { return; }
+        self.needs_redraw = false;
+
+        let surface = match self.surface { Some(ref s) => s, None => return };
+
+        // Full background
+        surface.fill_rect(0, 0, self.surface_width, self.surface_height, Theme::BG);
+
+        // Toolbar
+        self.draw_toolbar(surface);
+
+        // File area
+        match self.view_mode {
+            ViewMode::Icons => self.draw_icons(surface),
+            ViewMode::List  => self.draw_list(surface),
+        }
+
+        // Status bar
+        self.draw_status(surface);
+    }
+
+    fn draw_toolbar(&self, surface: &SharedSurface) {
+        let sw = self.surface_width;
+        surface.fill_rect(0, 0, sw, TOOLBAR_H, Theme::TOOLBAR_BG);
+        // Bottom separator
+        surface.fill_rect(0, TOOLBAR_H - 1, sw, 1, Theme::SEPARATOR);
+
+        // Back button
+        self.draw_btn(surface, &BTN_BACK, "<-",
+            !self.history.is_empty());
+
+        // Up button
+        let can_up = self.cwd != "/";
+        self.draw_btn(surface, &BTN_UP, "^", can_up);
+
+        // Right buttons
+        let b_ref  = btn_refresh(sw);
+        let b_ico  = btn_icons(sw);
+        let b_lst  = btn_list(sw);
+        let b_new  = btn_new(sw);
+        self.draw_btn(surface, &b_ref, "R",   true);
+        self.draw_btn_active(surface, &b_ico, "ICONS",
+            self.view_mode == ViewMode::Icons);
+        self.draw_btn_active(surface, &b_lst, "LIST",
+            self.view_mode == ViewMode::List);
+        self.draw_btn(surface, &b_new, "+",   true);
+
+        // Path bar
+        let (pbx, pbw) = path_bar_rect(sw);
+        surface.fill_rect(pbx, TB_BTN_Y, pbw, TB_BTN_H,
+            Color::new(15, 17, 22));
+        // Path text
+        let path = &self.cwd;
+        let max_chars = ((pbw.saturating_sub(8)) / CHAR_W) as usize;
+        let display = if path.len() > max_chars {
+            &path[path.len() - max_chars..]
+        } else {
+            path.as_str()
+        };
+        surface.draw_string(pbx + 4, TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2,
+            display, Theme::TEXT_PATH, Color::new(15, 17, 22));
+    }
+
+    fn draw_btn(&self, surface: &SharedSurface, btn: &Btn, label: &str, _enabled: bool) {
+        surface.fill_rect(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, Theme::BTN_BG);
+        let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
+        let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
+        surface.draw_string(tx, ty, label, Theme::TEXT, Theme::BTN_BG);
+    }
+
+    fn draw_btn_active(&self, surface: &SharedSurface, btn: &Btn, label: &str, active: bool) {
+        let bg = if active { Theme::BTN_ACTIVE } else { Theme::BTN_BG };
+        let fg = if active { Theme::TEXT_ACCENT } else { Theme::TEXT };
+        surface.fill_rect(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, bg);
+        let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
+        let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
+        surface.draw_string(tx, ty, label, fg, bg);
+    }
+
+    fn draw_icons(&self, surface: &SharedSurface) {
+        let sw   = self.surface_width;
+        let cols = (sw / ICON_CELL_W).max(1);
+        let cy   = self.content_y();
+        let ch   = self.content_h();
+
+        // How many rows fit on screen?
+        let visible_rows = ch / ICON_CELL_H;
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            let row = i as u32 / cols;
+            // Only render visible rows
+            if row < self.scroll_offset { continue; }
+            let vis_row = row - self.scroll_offset;
+            if vis_row >= visible_rows { break; }
+
+            let col = i as u32 % cols;
+            let cx  = col * ICON_CELL_W;
+            let cell_y = cy + vis_row * ICON_CELL_H;
+
+            // Cell background
+            let is_sel = self.selected == Some(i);
+            let cell_bg = if is_sel { Theme::SEL_BG } else { Theme::BG };
+            surface.fill_rect(cx, cell_y, ICON_CELL_W, ICON_CELL_H, cell_bg);
+
+            // Icon box (centred horizontally in cell)
+            let icon_x = cx + (ICON_CELL_W - ICON_W) / 2;
+            let icon_y = cell_y + 6;
+            surface.fill_rect(icon_x, icon_y, ICON_W, ICON_H, entry.kind.color());
+
+            // Type label inside icon (centred)
+            let lbl   = entry.kind.label();
+            let lbl_w = lbl.len() as u32 * CHAR_W;
+            let lbl_x = icon_x + (ICON_W - lbl_w) / 2;
+            let lbl_y = icon_y + (ICON_H - CHAR_H) / 2;
+            surface.draw_string(lbl_x, lbl_y, lbl,
+                Color::new(255, 255, 255), entry.kind.color());
+
+            // File name below icon (max ~10 chars, truncated)
+            let max_name = (ICON_CELL_W / CHAR_W).saturating_sub(2) as usize;
+            let name = if entry.name.len() > max_name {
+                &entry.name[..max_name]
+            } else {
+                &entry.name
+            };
+            let name_w = name.len() as u32 * CHAR_W;
+            let name_x = cx + (ICON_CELL_W.saturating_sub(name_w)) / 2;
+            let name_y = icon_y + ICON_H + 4;
+            surface.draw_string(name_x, name_y, name, Theme::TEXT, cell_bg);
+        }
+
+        // Empty directory label
+        if self.entries.is_empty() {
+            let msg = "Empty directory";
+            let mx  = (sw.saturating_sub(msg.len() as u32 * CHAR_W)) / 2;
+            let my  = cy + ch / 2;
+            surface.draw_string(mx, my, msg, Theme::TEXT_DIM, Theme::BG);
+        }
+    }
+
+    fn draw_list(&self, surface: &SharedSurface) {
+        let sw  = self.surface_width;
+        let cy  = self.content_y();
+
+        // Column X positions
+        let col_icon_x = 4u32;
+        let col_name_x = col_icon_x + 48;
+        let col_size_x = sw.saturating_sub(160);
+        let col_ext_x  = sw.saturating_sub(80);
+        let col_date_x = sw.saturating_sub(40);   // placeholder
+
+        // Header row
+        surface.fill_rect(0, cy, sw, LIST_HDR_H, Theme::LIST_HDR_BG);
+        surface.fill_rect(0, cy + LIST_HDR_H - 1, sw, 1, Theme::SEPARATOR);
+        surface.draw_string(col_icon_x, cy + (LIST_HDR_H - CHAR_H) / 2,
+            "Type", Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
+        surface.draw_string(col_name_x, cy + (LIST_HDR_H - CHAR_H) / 2,
+            "Name", Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
+        surface.draw_string(col_size_x, cy + (LIST_HDR_H - CHAR_H) / 2,
+            "Size", Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
+        surface.draw_string(col_ext_x,  cy + (LIST_HDR_H - CHAR_H) / 2,
+            "Ext",  Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
+
+        let list_y  = cy + LIST_HDR_H;
+        let vis     = self.visible_list_rows();
+
+        for (vi, ei) in (self.scroll_offset as usize ..).enumerate() {
+            if vi as u32 >= vis || ei >= self.entries.len() { break; }
+            let entry  = &self.entries[ei];
+            let row_y  = list_y + vi as u32 * LIST_ROW_H;
+
+            let is_sel = self.selected == Some(ei);
+            let row_bg = if is_sel { Theme::SEL_BG }
+                else if vi % 2 == 0 { Theme::BG }
+                else { Color::new(34, 38, 47) };
+
+            surface.fill_rect(0, row_y, sw, LIST_ROW_H, row_bg);
+
+            // Type colour chip
+            surface.fill_rect(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6,
+                entry.kind.color());
+            let lbl   = entry.kind.label();
+            let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;
+            surface.draw_string(lbl_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
+                lbl, Color::new(255, 255, 255), entry.kind.color());
+
+            // Name (truncate to fit)
+            let max_name = ((col_size_x - col_name_x).saturating_sub(8) / CHAR_W) as usize;
+            let name = if entry.name.len() > max_name {
+                &entry.name[..max_name]
+            } else {
+                &entry.name
+            };
+            let name_fg = if entry.is_dir { Theme::DIR } else { Theme::TEXT };
+            surface.draw_string(col_name_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
+                name, name_fg, row_bg);
+
+            // Size
+            let sz = entry.size_str();
+            surface.draw_string(col_size_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
+                &sz, Theme::TEXT_DIM, row_bg);
+
+            // Extension
+            let ext = entry.ext();
+            if !ext.is_empty() {
+                surface.draw_string(col_ext_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
+                    ext, Theme::TEXT_DIM, row_bg);
+            }
+        }
+
+        // Empty label
+        if self.entries.is_empty() {
+            let msg = "Empty directory";
+            let mx  = (sw.saturating_sub(msg.len() as u32 * CHAR_W)) / 2;
+            surface.draw_string(mx, list_y + 20, msg, Theme::TEXT_DIM, Theme::BG);
+        }
+    }
+
+    fn draw_status(&self, surface: &SharedSurface) {
+        let sw = self.surface_width;
+        let sy = self.status_y();
+        surface.fill_rect(0, sy, sw, STATUS_H, Theme::STATUS_BG);
+        surface.fill_rect(0, sy, sw, 1, Theme::SEPARATOR);
+
+        // Left: item count / selected
+        let left_msg = if let Some(idx) = self.selected {
+            if idx < self.entries.len() {
+                let e = &self.entries[idx];
+                if e.is_dir {
+                    format!("{} items  |  {} [dir]", self.entries.len(), e.name)
+                } else {
+                    format!("{} items  |  {}  {}  .{}",
+                        self.entries.len(), e.name, e.size_str(), e.ext())
+                }
+            } else {
+                format!("{} items", self.entries.len())
+            }
+        } else {
+            format!("{} items", self.entries.len())
+        };
+
+        surface.draw_string(8, sy + (STATUS_H - CHAR_H) / 2,
+            &left_msg, Theme::TEXT_DIM, Theme::STATUS_BG);
+
+        // Right: status message (copy/paste/error etc.)
+        let s = self.status.as_str();
+        if !s.is_empty() {
+            let tx = sw.saturating_sub(s.len() as u32 * CHAR_W + 8);
+            surface.draw_string(tx, sy + (STATUS_H - CHAR_H) / 2,
+                s, Theme::TEXT_ACCENT, Theme::STATUS_BG);
+        }
+
+        // Clipboard indicator
+        if let Some(ref cb) = self.clipboard {
+            let marker = if cb.cut { "[cut]" } else { "[copied]" };
+            let mx = sw / 2 - marker.len() as u32 * CHAR_W / 2;
+            surface.draw_string(mx, sy + (STATUS_H - CHAR_H) / 2,
+                marker, Theme::TEXT_ACCENT, Theme::STATUS_BG);
+        }
+    }
+
+    // ─── IPC: notify compositor ───────────────────────────────────────────────
+
+    fn present(&self) {
+        let msg   = SurfacePresentMsg { window_id: self.window_id };
+        let hdr   = MessageHeader::new(MessageType::SurfacePresent,
+                        SurfacePresentMsg::SIZE as u32);
+        let mut buf = [0u8; MessageHeader::SIZE + SurfacePresentMsg::SIZE];
+        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+        buf[MessageHeader::SIZE..].copy_from_slice(&msg.to_bytes());
+        let _ = send(self.compositor_port, &buf);
+    }
+
+    // ─── Event handlers ───────────────────────────────────────────────────────
+
+    fn handle_mouse_move(&mut self, ev: &MouseMoveEvent) {
+        self.mouse_x = ev.x;
+        self.mouse_y = ev.y;
+    }
+
+    fn handle_mouse_button_down(&mut self, ev: &MouseButtonEvent) {
+        if ev.button != MouseButton::Left { return; }
+        let mx = ev.x;
+        let my = ev.y;
+        let sw = self.surface_width;
+
+        // Toolbar button hit test
+        if my >= 0 && my < TOOLBAR_H as i32 {
+            if BTN_BACK.contains(mx, my) { self.go_back(); return; }
+            if BTN_UP.contains(mx, my)   { self.go_up();   return; }
+            if btn_icons(sw).contains(mx, my) {
+                self.view_mode = ViewMode::Icons;
+                self.scroll_offset = 0;
+                self.needs_redraw = true; return;
+            }
+            if btn_list(sw).contains(mx, my) {
+                self.view_mode = ViewMode::List;
+                self.scroll_offset = 0;
+                self.needs_redraw = true; return;
+            }
+            if btn_refresh(sw).contains(mx, my) {
+                let cwd = self.cwd.clone();
+                self.load_dir(&cwd); return;
+            }
+            if btn_new(sw).contains(mx, my) {
+                self.new_folder(); return;
+            }
+            return; // click on toolbar but no button
+        }
+
+        // File area hit test
+        if let Some(idx) = self.item_at_pos(mx, my) {
+            let now   = get_ticks();
+            let dbl   = self.last_click_idx == idx as i32
+                     && now.saturating_sub(self.last_click_tick) < 40; // ~400ms
+
+            self.selected        = Some(idx);
+            self.last_click_idx  = idx as i32;
+            self.last_click_tick = now;
+            self.needs_redraw    = true;
+
+            if dbl { self.activate(idx); }
+            else {
+                // Single click: show info
+                let e = &self.entries[idx];
+                if e.is_dir {
+                    let msg = format!("{} [directory]", e.name);
+                    self.status.set(&msg);
+                } else {
+                    let msg = format!("{}  {}  .{}", e.name, e.size_str(), e.ext());
+                    self.status.set(&msg);
+                }
+                self.needs_redraw = true;
+            }
+        } else {
+            // Click on empty area → deselect
+            self.selected = None;
+            self.last_click_idx = -1;
+            self.needs_redraw = true;
+        }
+    }
+
+    fn handle_scroll(&mut self, ev: &MouseScrollEvent) {
+        if ev.dz < 0 { self.scroll_down(); }
+        else          { self.scroll_up();   }
+    }
+
+    fn handle_key(&mut self, ev: &IpcKeyEvent) {
+        let ch  = ev.character;
+        let ctrl = ev.modifiers.ctrl;
+
+        match ch {
+            // Ctrl shortcuts
+            _ if ctrl => match ch {
+                b'c' | b'C' => self.copy_selected(),
+                b'x' | b'X' => self.cut_selected(),
+                b'v' | b'V' => self.paste(),
+                b'r' | b'R' | b'f' | b'F' => {
+                    let cwd = self.cwd.clone();
+                    self.load_dir(&cwd);
+                }
+                _ => {}
+            },
+            // Backspace = go up
+            0x08 => self.go_up(),
+            // Delete = delete selected
+            0x7F | 0xFF => self.delete_selected(),
+            // Enter = open/activate
+            b'\n' | b'\r' => {
+                if let Some(idx) = self.selected { self.activate(idx); }
+            }
+            // Escape = deselect
+            0x1B => {
+                self.selected = None;
+                self.needs_redraw = true;
+            }
+            // Arrow keys (sent as special scancodes; check scancode)
+            _ => {
+                // Arrow key scancodes from the compositor
+                match ev.scancode {
+                    0x48 => { // Up arrow
+                        self.scroll_up();
+                        // Or move selection up
+                        if let Some(sel) = self.selected {
+                            if sel > 0 {
+                                self.selected = Some(sel - 1);
+                                self.needs_redraw = true;
+                            }
+                        }
+                    }
+                    0x50 => { // Down arrow
+                        self.scroll_down();
+                        // Or move selection down
+                        if let Some(sel) = self.selected {
+                            if sel + 1 < self.entries.len() {
+                                self.selected = Some(sel + 1);
+                                self.needs_redraw = true;
+                            }
+                        } else if !self.entries.is_empty() {
+                            self.selected = Some(0);
+                            self.needs_redraw = true;
+                        }
+                    }
+                    0x4B => { // Left arrow – go back
+                        self.go_back();
+                    }
+                    0x4D => { // Right arrow – enter if dir
+                        if let Some(idx) = self.selected {
+                            if idx < self.entries.len() && self.entries[idx].is_dir {
+                                self.activate(idx);
+                            }
+                        }
+                    }
+                    0x49 => self.scroll_up(),   // Page Up
+                    0x51 => self.scroll_down(),  // Page Down
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // ─── IPC message dispatch ─────────────────────────────────────────────────
+
+    fn process_message(&mut self, buf: &[u8], len: usize) {
+        if len < MessageHeader::SIZE { return; }
+        let Some(hdr) = MessageHeader::from_bytes(buf) else { return };
+
+        match hdr.msg_type {
+            MessageType::TerminateRequest => {
+                self.running = false;
+            }
+            MessageType::SurfaceAssign => {
+                let p = MessageHeader::SIZE;
+                if let Some(msg) = SurfaceAssignMsg::from_bytes(&buf[p..]) {
+                    if let Ok(s) = SharedSurface::from_region(
+                            msg.region_id, msg.width, msg.height) {
+                        self.surface_width  = msg.width;
+                        self.surface_height = msg.height;
+                        self.compositor_port = msg.compositor_port as u64;
+                        self.surface = Some(s);
+                        self.needs_redraw = true;
+                    }
+                }
+            }
+            MessageType::KeyPress => {
+                let p = MessageHeader::SIZE;
+                if len >= p + 3 {
+                    if let Some(ev) = IpcKeyEvent::from_bytes(&buf[p..]) {
+                        self.handle_key(&ev);
+                    }
+                }
+            }
+            MessageType::MouseMove => {
+                let p = MessageHeader::SIZE;
+                if let Some(ev) = MouseMoveEvent::from_bytes(&buf[p..]) {
+                    self.handle_mouse_move(&ev);
+                }
+            }
+            MessageType::MouseButtonDown => {
+                let p = MessageHeader::SIZE;
+                if let Some(ev) = MouseButtonEvent::from_bytes(&buf[p..]) {
+                    self.handle_mouse_button_down(&ev);
+                }
+            }
+            MessageType::MouseScroll => {
+                let p = MessageHeader::SIZE;
+                if let Some(ev) = MouseScrollEvent::from_bytes(&buf[p..]) {
+                    self.handle_scroll(&ev);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ─── Surface assignment (wait on startup) ─────────────────────────────────
+
+    fn wait_for_surface(port: PortId) -> Option<SurfaceAssignMsg> {
+        let mut buf   = [0u8; 64];
+        let ports = [port];
+        for _ in 0..100 {
+            if wait_any(&ports, 100).is_ok() {
+                if let Ok(Some(len)) = try_recv(port, &mut buf) {
+                    if len >= MessageHeader::SIZE {
+                        if let Some(hdr) = MessageHeader::from_bytes(&buf) {
+                            if hdr.msg_type == MessageType::SurfaceAssign {
+                                let p = MessageHeader::SIZE;
+                                if len >= p + SurfaceAssignMsg::SIZE {
+                                    return SurfaceAssignMsg::from_bytes(&buf[p..]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // ─── Main loop ────────────────────────────────────────────────────────────
+
+    fn run(&mut self) {
+        log("fileman: entering main loop");
+
+        // Load root directory on startup
+        self.load_dir("/");
+
+        let mut msg_buf = [0u8; 256];
+        let ports = [self.local_port];
+
+        while self.running {
+            // Drain incoming IPC messages
+            while let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buf) {
+                self.process_message(&msg_buf, len);
+            }
+
+            // Render if dirty
+            if self.needs_redraw {
+                self.render();
+                self.present();
+            }
+
+            // Block until next event (100ms timeout)
+            let _ = wait_any(&ports, 100);
+        }
+
+        log("fileman: exiting");
+    }
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() -> ! {
+    log("fileman: starting GUI file manager");
+
+    let local_port = match create_port() {
+        Ok(p) => p,
+        Err(_) => { log("fileman: failed to create port"); exit(1); }
+    };
+
+    // Register service name
+    let _ = libipc::protocol::register_service("fileman", local_port);
+
+    // Find compositor registration port
+    log("fileman: looking up compositor.register...");
+    let register_port = loop {
+        match libipc::protocol::lookup_service("compositor.register") {
+            Ok(p) => break p,
+            Err(_) => yield_now(),
         }
     };
 
-    Ok(should_exit)
+    // Send AppRegister
+    let mut full_msg = [0u8; 48];
+    let hdr = MessageHeader::new(MessageType::AppRegister, 16);
+    full_msg[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + 8]
+        .copy_from_slice(&local_port.to_le_bytes());
+    full_msg[MessageHeader::SIZE + 8..MessageHeader::SIZE + 16]
+        .copy_from_slice(&0u64.to_le_bytes());
+
+    log("fileman: registering with compositor");
+    let _ = send(register_port, &full_msg[..MessageHeader::SIZE + 16]);
+
+    // Wait for surface
+    let surf_info = match FileManager::wait_for_surface(local_port) {
+        Some(i) => i,
+        None => { log("fileman: timeout waiting for surface"); exit(1); }
+    };
+
+    log("fileman: surface received");
+
+    let surface = match SharedSurface::from_region(
+            surf_info.region_id, surf_info.width, surf_info.height) {
+        Ok(s) => s,
+        Err(_) => { log("fileman: failed to map surface"); exit(1); }
+    };
+
+    let mut fm = FileManager::new(
+        surf_info.window_id,
+        surf_info.compositor_port as u64,
+        local_port,
+        surface,
+    );
+
+    fm.run();
+    exit(0);
 }

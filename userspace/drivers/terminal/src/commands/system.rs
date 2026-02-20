@@ -40,87 +40,257 @@ const ASCII_LOGO: &str = r#"
                 v
 "#;
 
-/// help command - display available commands or specific command help
+/// help command - display available commands or detailed help for one command
 pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     if let Some(topic) = cmd.arg(0) {
-        // Show help for specific command
-        if let Some((usage, desc)) = get_command_help(topic) {
-            ctx.println("");
-            ctx.println_colored(usage, Theme::TEXT_INFO);
-            ctx.println(desc);
-            ctx.println("");
-        } else {
-            ctx.error("No help available for that command.");
-        }
+        // ── Per-command help with examples ───────────────────────────────────
+        show_command_help(topic, ctx);
     } else {
-        // Show all commands
+        // ── Full command listing ──────────────────────────────────────────────
         ctx.println("");
-        ctx.println_colored("Atom Terminal - Available Commands", Theme::TEXT_INFO);
-        ctx.println("-----------------------------------");
+        ctx.println_colored("╔══════════════════════════════════════════════╗", Theme::TEXT_INFO);
+        ctx.println_colored("║        Atom Terminal – Command Reference     ║", Theme::TEXT_INFO);
+        ctx.println_colored("╚══════════════════════════════════════════════╝", Theme::TEXT_INFO);
+        ctx.println_colored("  Scroll up (Page Up / Ctrl+Up) to read more", Theme::TEXT_DIM);
         ctx.println("");
 
         let commands = get_all_commands();
-        let mut category = "";
 
-        for (name, desc) in commands.iter() {
-            // Simple categorization by command type
-            let new_category = if *name == "help" || *name == "version" || *name == "uptime"
-                || *name == "date" || *name == "sysinfo" || *name == "clear"
-                || *name == "echo" || *name == "log"
-            {
-                "System"
-            } else if *name == "ps" || *name == "kill" || *name == "exec"
-                || *name == "mem" || *name == "services"
-            {
-                "Process"
-            } else if *name == "ls" || *name == "cd" || *name == "pwd"
-                || *name == "cat" || *name == "tree"
-            {
-                "Filesystem"
-            } else {
-                "Other"
-            };
+        // Category headers and their members
+        let categories: &[(&str, &[&str])] = &[
+            ("System", &["help","version","uptime","date","sysinfo","clear","echo","log"]),
+            ("Process", &["ps","kill","exec","mem","services"]),
+            ("Navigation & Read", &["ls","cd","pwd","cat","head","tail","wc","stat","find","tree"]),
+            ("Write & Manage", &["mkdir","rmdir","rm","mv","cp","touch","chmod","ln","df","du"]),
+            ("Terminal", &["exit","ports","caps"]),
+        ];
 
-            if new_category != category {
-                category = new_category;
-                ctx.println("");
-                ctx.println_colored(category, Theme::PROMPT_USER);
+        for (cat_name, members) in categories {
+            ctx.println_colored(cat_name, Theme::PROMPT_USER);
+            ctx.println_colored("──────────────────────────────────────────────", Theme::SEPARATOR);
+
+            for (name, usage, desc) in commands.iter() {
+                // name, usage, desc are &&str here (slice iter returns &T)
+                if !members.iter().any(|m| m == name) { continue; }
+
+                // Format:  usage (padded to 32 chars) + desc
+                let mut line = [0u8; 92];
+                let mut pos = 0;
+                line[pos] = b' '; pos += 1;
+                line[pos] = b' '; pos += 1;
+                for b in usage.bytes() { if pos < 32 { line[pos] = b; pos += 1; } }
+                while pos < 34 { line[pos] = b' '; pos += 1; }
+                for b in desc.bytes()  { if pos < 90 { line[pos] = b; pos += 1; } }
+                let s = unsafe { core::str::from_utf8_unchecked(&line[..pos]) };
+                ctx.println(s);
             }
-
-            // Format command with description
-            let mut line = [0u8; 64];
-            let mut pos = 0;
-
-            // Write command name (padded to 12 chars)
-            for byte in name.bytes() {
-                if pos < 12 {
-                    line[pos] = byte;
-                    pos += 1;
-                }
-            }
-            while pos < 12 {
-                line[pos] = b' ';
-                pos += 1;
-            }
-
-            // Write description
-            for byte in desc.bytes() {
-                if pos < 60 {
-                    line[pos] = byte;
-                    pos += 1;
-                }
-            }
-
-            let line_str = unsafe { core::str::from_utf8_unchecked(&line[..pos]) };
-            ctx.println(line_str);
+            ctx.println("");
         }
 
+        ctx.println_colored("Keyboard shortcuts", Theme::PROMPT_USER);
+        ctx.println_colored("──────────────────────────────────────────────", Theme::SEPARATOR);
+        ctx.println("  Ctrl+C   Cancel current input");
+        ctx.println("  Ctrl+L   Clear screen");
+        ctx.println("  Ctrl+A   Beginning of line");
+        ctx.println("  Ctrl+E   End of line");
+        ctx.println("  Ctrl+U   Clear current line");
+        ctx.println("  Ctrl+K   Delete to end of line");
+        ctx.println("  Ctrl+D   Exit (when input is empty)");
+        ctx.println("  Up/Down  Navigate command history");
+        ctx.println("  PgUp     Scroll terminal output up");
+        ctx.println("  PgDn     Scroll terminal output down");
         ctx.println("");
-        ctx.println("Type 'help <command>' for more information.");
+        ctx.println_colored("  Type 'help <command>' for usage and examples.", Theme::TEXT_DIM);
         ctx.println("");
     }
 
     CommandResult::Ok
+}
+
+/// Per-command detailed help with examples
+fn show_command_help(topic: &str, ctx: &mut CommandContext<'_>) {
+    ctx.println("");
+
+    // Check static table first
+    if let Some((usage, desc)) = get_command_help(topic) {
+        ctx.println_colored(usage, Theme::TEXT_INFO);
+        ctx.println_colored("──────────────────────────────────────────────", Theme::SEPARATOR);
+        ctx.println(desc);
+        ctx.println("");
+    }
+
+    // Print detailed help per command
+    match topic {
+        "ls" | "dir" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -l, --long   Long format with type and size");
+            ctx.println("  -a, --all    Show hidden files (starting with .)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  ls");
+            ctx.println("  ls /etc");
+            ctx.println("  ls -l /var/log");
+            ctx.println("  ls -la");
+        }
+        "cd" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  cd /home/user");
+            ctx.println("  cd ..           (go up one level)");
+            ctx.println("  cd ~            (go to root)");
+            ctx.println("  cd -            (print current dir)");
+        }
+        "cat" | "type" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  cat readme.txt");
+            ctx.println("  cat /etc/version");
+            ctx.println("  cat file1.txt file2.txt   (concatenate)");
+        }
+        "head" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -n N   Show first N lines (default: 10)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  head log.txt");
+            ctx.println("  head -n 20 /var/log/system.log");
+        }
+        "tail" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -n N   Show last N lines (default: 10)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  tail log.txt");
+            ctx.println("  tail -n 50 /var/log/boot.log");
+        }
+        "wc" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -l   Count lines only");
+            ctx.println("  -w   Count words only");
+            ctx.println("  -c   Count bytes only");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  wc readme.txt          (lines, words, bytes)");
+            ctx.println("  wc -l /var/log/sys.log");
+            ctx.println("  wc -c large_file.bin");
+        }
+        "stat" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  stat readme.txt");
+            ctx.println("  stat /etc/version");
+        }
+        "find" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -name <pattern>       Match filename (supports * wildcard)");
+            ctx.println("  -maxdepth <N>         Limit search depth");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  find /home -name '*.txt'");
+            ctx.println("  find . -name 'main*'");
+            ctx.println("  find /etc -maxdepth 1");
+        }
+        "tree" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -d N   Maximum depth (default: 3)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  tree");
+            ctx.println("  tree /home");
+            ctx.println("  tree -d 2 /etc");
+        }
+        "mkdir" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -p, --parents   Create parent directories as needed");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  mkdir docs");
+            ctx.println("  mkdir /home/user/projects");
+            ctx.println("  mkdir -p /home/user/a/b/c");
+        }
+        "rmdir" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  rmdir empty_dir");
+            ctx.println("  rmdir /tmp/cache");
+        }
+        "rm" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -r, -R   Recursive (remove directory and contents)");
+            ctx.println("  -f       Force (ignore errors)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  rm old_file.txt");
+            ctx.println("  rm -r /tmp/build");
+            ctx.println("  rm -rf /tmp/old_cache");
+        }
+        "mv" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  mv file.txt renamed.txt");
+            ctx.println("  mv notes.txt /home/user/docs/");
+            ctx.println("  mv old_dir/ new_dir/");
+        }
+        "cp" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  cp readme.txt readme.bak");
+            ctx.println("  cp /etc/config /home/user/config.bak");
+        }
+        "touch" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  touch newfile.txt    (create if not exists)");
+            ctx.println("  touch existing.log   (update timestamp)");
+        }
+        "chmod" => {
+            ctx.println_colored("Common modes:", Theme::TEXT_DIM);
+            ctx.println("  755   rwxr-xr-x   (executable, world-readable)");
+            ctx.println("  644   rw-r--r--   (regular file)");
+            ctx.println("  600   rw-------   (private file)");
+            ctx.println("  777   rwxrwxrwx   (world-writable – use with care)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  chmod 755 script.sh");
+            ctx.println("  chmod 644 readme.txt");
+            ctx.println("  chmod 600 /etc/secret.key");
+        }
+        "ln" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -s, --symbolic   Create symbolic link (default: hard link)");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  ln -s /home/user/docs /tmp/docs_link");
+            ctx.println("  ln /etc/config /home/user/config");
+        }
+        "df" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  df           (show all mounted filesystems)");
+        }
+        "du" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -s, --summarize    Show only total");
+            ctx.println("  -h, --human        Human-readable sizes");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  du /home/user");
+            ctx.println("  du -sh /var");
+            ctx.println("  du -h /tmp");
+        }
+        "ps" | "procs" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  ps          (list all running processes)");
+        }
+        "kill" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  kill 42     (terminate process 42)");
+        }
+        "exec" | "run" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  exec terminal");
+            ctx.println("  run fileman");
+        }
+        _ => {
+            if get_command_help(topic).is_none() {
+                ctx.error("No help available for that command.");
+                ctx.info("  Type 'help' to see all commands.");
+            }
+        }
+    }
+    ctx.println("");
 }
 
 /// version command - display system version

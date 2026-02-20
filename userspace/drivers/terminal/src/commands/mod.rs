@@ -1,7 +1,6 @@
 // Commands Module
 //
-// This module provides the command registry and execution framework
-// for all built-in terminal commands.
+// Command registry and execution framework for all built-in terminal commands.
 
 pub mod system;
 pub mod process;
@@ -15,71 +14,52 @@ use crate::window::Theme;
 /// Result of command execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandResult {
-    /// Command executed successfully
     Ok,
-    /// Command not found
     NotFound,
-    /// Command failed with error message
     Error,
-    /// Request to clear the screen
     Clear,
-    /// Request to exit the terminal
     Exit,
 }
 
-/// Command context containing resources needed by commands
+/// Command context passed to every command handler
 pub struct CommandContext<'a> {
     pub display: &'a mut DisplayBuffer,
-    pub ipc: &'a IpcClient,
+    pub ipc:     &'a IpcClient,
 }
 
 impl<'a> CommandContext<'a> {
-    /// Print a line to the display
     pub fn println(&mut self, text: &str) {
         self.display.writeln(text, Theme::TEXT_NORMAL);
     }
-
-    /// Print with specific color
     pub fn println_colored(&mut self, text: &str, color: atom_syscall::graphics::Color) {
         self.display.writeln(text, color);
     }
-
-    /// Print without newline
     pub fn print(&mut self, text: &str) {
         self.display.write_str(text, Theme::TEXT_NORMAL);
     }
-
-    /// Print error message
     pub fn error(&mut self, text: &str) {
         self.display.writeln(text, Theme::TEXT_ERROR);
     }
-
-    /// Print success message
     pub fn success(&mut self, text: &str) {
         self.display.writeln(text, Theme::TEXT_SUCCESS);
     }
-
-    /// Print info message
     pub fn info(&mut self, text: &str) {
         self.display.writeln(text, Theme::TEXT_INFO);
     }
-
-    /// Print warning message
     pub fn warning(&mut self, text: &str) {
         self.display.writeln(text, Theme::TEXT_WARNING);
     }
 }
 
-/// Helper for case-insensitive command matching
 fn cmd_eq(input: &str, target: &str) -> bool {
     input.eq_ignore_ascii_case(target)
 }
 
-/// Execute a parsed command
+/// Execute a parsed command, return result code
 pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     let c = cmd.command;
 
-    // System information commands
+    // ── System ──────────────────────────────────────────────────────────────
     if cmd_eq(c, "help") || cmd_eq(c, "?") {
         return system::cmd_help(cmd, ctx);
     }
@@ -101,8 +81,17 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     if cmd_eq(c, "sysinfo") {
         return system::cmd_sysinfo(cmd, ctx);
     }
+    if cmd_eq(c, "log") || cmd_eq(c, "dmesg") {
+        return system::cmd_log(cmd, ctx);
+    }
+    if cmd_eq(c, "ports") {
+        return system::cmd_ports(cmd, ctx);
+    }
+    if cmd_eq(c, "caps") {
+        return system::cmd_caps(cmd, ctx);
+    }
 
-    // Process management commands
+    // ── Process management ──────────────────────────────────────────────────
     if cmd_eq(c, "ps") || cmd_eq(c, "procs") {
         return process::cmd_ps(cmd, ctx);
     }
@@ -119,7 +108,7 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
         return process::cmd_services(cmd, ctx);
     }
 
-    // Filesystem commands
+    // ── Filesystem – navigation / read ─────────────────────────────────────
     if cmd_eq(c, "ls") || cmd_eq(c, "dir") {
         return filesystem::cmd_ls(cmd, ctx);
     }
@@ -132,124 +121,120 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     if cmd_eq(c, "cat") || cmd_eq(c, "type") {
         return filesystem::cmd_cat(cmd, ctx);
     }
+    if cmd_eq(c, "head") {
+        return filesystem::cmd_head(cmd, ctx);
+    }
+    if cmd_eq(c, "tail") {
+        return filesystem::cmd_tail(cmd, ctx);
+    }
+    if cmd_eq(c, "wc") {
+        return filesystem::cmd_wc(cmd, ctx);
+    }
     if cmd_eq(c, "tree") {
         return filesystem::cmd_tree(cmd, ctx);
     }
+    if cmd_eq(c, "stat") {
+        return filesystem::cmd_stat(cmd, ctx);
+    }
+    if cmd_eq(c, "find") {
+        return filesystem::cmd_find(cmd, ctx);
+    }
 
-    // Terminal control
+    // ── Filesystem – write / management ────────────────────────────────────
+    if cmd_eq(c, "mkdir") {
+        return filesystem::cmd_mkdir(cmd, ctx);
+    }
+    if cmd_eq(c, "rmdir") {
+        return filesystem::cmd_rmdir(cmd, ctx);
+    }
+    if cmd_eq(c, "rm") {
+        return filesystem::cmd_rm(cmd, ctx);
+    }
+    if cmd_eq(c, "mv") {
+        return filesystem::cmd_mv(cmd, ctx);
+    }
+    if cmd_eq(c, "cp") {
+        return filesystem::cmd_cp(cmd, ctx);
+    }
+    if cmd_eq(c, "touch") {
+        return filesystem::cmd_touch(cmd, ctx);
+    }
+    if cmd_eq(c, "chmod") {
+        return filesystem::cmd_chmod(cmd, ctx);
+    }
+    if cmd_eq(c, "ln") {
+        return filesystem::cmd_ln(cmd, ctx);
+    }
+    if cmd_eq(c, "df") {
+        return filesystem::cmd_df(cmd, ctx);
+    }
+    if cmd_eq(c, "du") {
+        return filesystem::cmd_du(cmd, ctx);
+    }
+
+    // ── Terminal control ────────────────────────────────────────────────────
     if cmd_eq(c, "exit") || cmd_eq(c, "quit") || cmd_eq(c, "logout") {
         return CommandResult::Exit;
     }
 
-    // Debug/diagnostic commands
-    if cmd_eq(c, "log") || cmd_eq(c, "dmesg") {
-        return system::cmd_log(cmd, ctx);
-    }
-    if cmd_eq(c, "ports") {
-        return system::cmd_ports(cmd, ctx);
-    }
-    if cmd_eq(c, "caps") {
-        return system::cmd_caps(cmd, ctx);
-    }
-
-    // Unknown command
     ctx.error("Unknown command. Type 'help' for available commands.");
     CommandResult::NotFound
 }
 
-/// Get command description for help text
+// ─── Help metadata ──────────────────────────────────────────────────────────
+
+/// (usage, description) for a single command
 pub fn get_command_help(c: &str) -> Option<(&'static str, &'static str)> {
-    if cmd_eq(c, "help") || cmd_eq(c, "?") {
-        return Some(("help [command]", "Display help information"));
-    }
-    if cmd_eq(c, "version") || cmd_eq(c, "ver") {
-        return Some(("version", "Display system version information"));
-    }
-    if cmd_eq(c, "uptime") {
-        return Some(("uptime", "Show system uptime"));
-    }
-    if cmd_eq(c, "date") || cmd_eq(c, "time") {
-        return Some(("date", "Display current date and time"));
-    }
-    if cmd_eq(c, "clear") || cmd_eq(c, "cls") {
-        return Some(("clear", "Clear the terminal screen"));
-    }
-    if cmd_eq(c, "echo") {
-        return Some(("echo [text...]", "Display text"));
-    }
-    if cmd_eq(c, "sysinfo") {
-        return Some(("sysinfo", "Display system information summary"));
-    }
-    if cmd_eq(c, "ps") || cmd_eq(c, "procs") {
-        return Some(("ps", "List running processes"));
-    }
-    if cmd_eq(c, "kill") {
-        return Some(("kill <pid>", "Terminate a process"));
-    }
-    if cmd_eq(c, "exec") || cmd_eq(c, "run") {
-        return Some(("exec <program>", "Execute a program"));
-    }
-    if cmd_eq(c, "mem") || cmd_eq(c, "memory") {
-        return Some(("mem", "Display memory usage"));
-    }
-    if cmd_eq(c, "services") || cmd_eq(c, "svc") {
-        return Some(("services", "List registered services"));
-    }
-    if cmd_eq(c, "ls") || cmd_eq(c, "dir") {
-        return Some(("ls [path]", "List directory contents"));
-    }
-    if cmd_eq(c, "cd") {
-        return Some(("cd <path>", "Change current directory"));
-    }
-    if cmd_eq(c, "pwd") {
-        return Some(("pwd", "Print working directory"));
-    }
-    if cmd_eq(c, "cat") || cmd_eq(c, "type") {
-        return Some(("cat <file>", "Display file contents"));
-    }
-    if cmd_eq(c, "tree") {
-        return Some(("tree [path]", "Display directory tree"));
-    }
-    if cmd_eq(c, "exit") || cmd_eq(c, "quit") {
-        return Some(("exit", "Exit the terminal"));
-    }
-    if cmd_eq(c, "log") || cmd_eq(c, "dmesg") {
-        return Some(("log", "Display system log"));
-    }
-    if cmd_eq(c, "ports") {
-        return Some(("ports", "List IPC ports"));
-    }
-    if cmd_eq(c, "caps") {
-        return Some(("caps", "List capabilities"));
-    }
-    None
+    COMMANDS.iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(c))
+        .map(|(_, usage, desc)| (*usage, *desc))
 }
 
-/// Get all available commands for help display
-pub fn get_all_commands() -> &'static [(&'static str, &'static str)] {
-    &[
-        // System
-        ("help", "Display help information"),
-        ("version", "Show system version"),
-        ("uptime", "Show system uptime"),
-        ("date", "Show current date/time"),
-        ("sysinfo", "System information summary"),
-        ("clear", "Clear terminal screen"),
-        ("echo", "Display text"),
-        ("log", "Display system log"),
-        // Process
-        ("ps", "List processes"),
-        ("kill", "Terminate a process"),
-        ("exec", "Execute a program"),
-        ("mem", "Memory usage"),
-        ("services", "List services"),
-        // Filesystem
-        ("ls", "List directory"),
-        ("cd", "Change directory"),
-        ("pwd", "Print working directory"),
-        ("cat", "Display file contents"),
-        ("tree", "Directory tree"),
-        // Terminal
-        ("exit", "Exit terminal"),
-    ]
+/// Full command table: (name, usage, short-description)
+pub fn get_all_commands() -> &'static [(&'static str, &'static str, &'static str)] {
+    COMMANDS
 }
+
+static COMMANDS: &[(&str, &str, &str)] = &[
+    // ── System ────────────────────────────────────────────────────────────
+    ("help",     "help [command]",         "Show help (scroll up to read more)"),
+    ("version",  "version",                "Display system version"),
+    ("uptime",   "uptime",                 "Show system uptime"),
+    ("date",     "date",                   "Show current date / time"),
+    ("sysinfo",  "sysinfo",                "System info with ASCII logo"),
+    ("clear",    "clear",                  "Clear the terminal screen"),
+    ("echo",     "echo [text...]",         "Print text to terminal"),
+    ("log",      "log",                    "Show system log (dmesg)"),
+    // ── Process ───────────────────────────────────────────────────────────
+    ("ps",       "ps",                     "List running processes"),
+    ("kill",     "kill <pid>",             "Terminate a process"),
+    ("exec",     "exec <program>",         "Launch a program"),
+    ("mem",      "mem",                    "Memory usage statistics"),
+    ("services", "services",               "List registered services"),
+    // ── Filesystem – read ─────────────────────────────────────────────────
+    ("ls",       "ls [-l] [-a] [path]",   "List directory contents"),
+    ("cd",       "cd [path]",             "Change working directory"),
+    ("pwd",      "pwd",                    "Print working directory"),
+    ("cat",      "cat <file> [...]",      "Display file contents"),
+    ("head",     "head [-n N] <file>",    "Show first N lines (default 10)"),
+    ("tail",     "tail [-n N] <file>",    "Show last N lines (default 10)"),
+    ("wc",       "wc [-l|-w|-c] <file>",  "Count lines / words / bytes"),
+    ("stat",     "stat <file>",            "Show file metadata"),
+    ("find",     "find [path] [-name pat]","Find files matching pattern"),
+    ("tree",     "tree [-d N] [path]",    "Directory tree (depth N, default 3)"),
+    // ── Filesystem – write ────────────────────────────────────────────────
+    ("mkdir",    "mkdir [-p] <dir>",      "Create directory (-p: parents)"),
+    ("rmdir",    "rmdir <dir>",            "Remove empty directory"),
+    ("rm",       "rm [-r] [-f] <path>",   "Remove file (-r: recursive)"),
+    ("mv",       "mv <src> <dst>",        "Move / rename file or directory"),
+    ("cp",       "cp <src> <dst>",        "Copy file"),
+    ("touch",    "touch <file>",           "Create file or update timestamp"),
+    ("chmod",    "chmod <mode> <path>",   "Change file permissions (octal)"),
+    ("ln",       "ln [-s] <tgt> <link>",  "Create hard or symbolic link"),
+    ("df",       "df",                     "Show disk free space"),
+    ("du",       "du [-s] [-h] [path]",   "Show disk usage"),
+    // ── Terminal ──────────────────────────────────────────────────────────
+    ("exit",     "exit",                   "Exit the terminal"),
+    ("ports",    "ports",                  "List IPC ports"),
+    ("caps",     "caps",                   "List process capabilities"),
+];

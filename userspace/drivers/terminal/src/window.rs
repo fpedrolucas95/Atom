@@ -34,6 +34,14 @@ impl Theme {
 
     // Selection (future use)
     pub const SELECTION_BG: Color = Color::new(70, 100, 130);  // Selected text background
+
+    // Separator / divider lines in help output
+    pub const SEPARATOR: Color = Color::new(80, 85, 100);
+
+    // Scrollbar
+    pub const SCROLLBAR_TRACK: Color = Color::new(38, 40, 50);
+    pub const SCROLLBAR_THUMB: Color = Color::new(80, 90, 120);
+    pub const SCROLLBAR_THUMB_ACTIVE: Color = Color::new(110, 125, 165);
 }
 
 /// Configuration for window dimensions and layout

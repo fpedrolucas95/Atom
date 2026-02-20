@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
 atom_abi = { path = "../../libs/syscall/../syscall/../../../shared/abi" }
+libipc = { path = "../../libs/libipc" }
 
 [profile.release]
 opt-level = "z"
