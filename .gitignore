@@ -37,6 +37,7 @@ userspace/build/ui_shell.atxf
 # Build artifacts
 build/*.obj
 build/*.log
+build_output.log
 userspace/libs/syscall/build.log
 
 # EFI build outputs

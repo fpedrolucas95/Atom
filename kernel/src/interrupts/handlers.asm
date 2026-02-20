@@ -1,6 +1,13 @@
 ; kernel/src/interrupts/handlers.asm
 ;
 ; Interrupt and exception handler stubs for x86_64
+;
+; IRQ vector assignments — must stay in sync with *_INTERRUPT_VECTOR
+; constants defined in kernel/src/interrupts/mod.rs.
+%define TIMER_INTERRUPT_VECTOR      32
+%define KEYBOARD_INTERRUPT_VECTOR   33
+%define MOUSE_INTERRUPT_VECTOR      44
+%define USER_TRAP_INTERRUPT_VECTOR  104
 
 [BITS 64]
 
@@ -122,7 +129,7 @@ exception_handler_%1:
 global irq_handler_32
 irq_handler_32:
     push qword 0
-    push qword 32
+    push qword TIMER_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
     sub rsp, 32
@@ -134,7 +141,7 @@ irq_handler_32:
 global irq_handler_104
 irq_handler_104:
     push qword 0
-    push qword 104
+    push qword USER_TRAP_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
     sub rsp, 32
@@ -146,7 +153,7 @@ irq_handler_104:
 global irq_handler_33
 irq_handler_33:
     push qword 0
-    push qword 33
+    push qword KEYBOARD_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
     sub rsp, 32
@@ -158,7 +165,7 @@ irq_handler_33:
 global irq_handler_44
 irq_handler_44:
     push qword 0
-    push qword 44
+    push qword MOUSE_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
     sub rsp, 32

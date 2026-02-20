@@ -7,14 +7,16 @@
 // - Keyboard IRQ handling and a dummy vector handler for testing
 //
 // Key structures:
-// - `InterruptStackFrame`: minimal frame matching x86-interrupt ABI expectations
-//   (RIP/CS/RFLAGS/RSP/SS) for hardware-saved state.
+// - `InterruptStackFrame`: minimal 5-field view of the hardware-saved state
+//   (RIP/CS/RFLAGS/RSP/SS); kept for documentation purposes but the active
+//   interrupt pipeline uses `InterruptFrame` exclusively.
 // - `InterruptFrame`: full register snapshot layout matching the assembly
 //   stub’s push order, including exception number and error code.
 //
 // Exception handling flow:
-// - `rust_exception_handler(exception_number, error_code, stack_ptr)` receives
-//   a raw pointer to the saved `InterruptFrame` and dumps registers to serial.
+// - Each exception stub in `handlers.asm` pushes (vector, error_code) and all
+//   GPRs via `PUSH_ALL`, then calls `rust_exception_handler(frame)` with a
+//   single pointer to the resulting `InterruptFrame` on the stack.
 // - Uses `EXCEPTION_NAMES` for human-readable vector names; assumes the vector
 //   is < 32 and indexes directly (important for correctness).
 // - Special-cases common faults:
@@ -25,9 +27,12 @@
 //
 // Timer handling:
 // - `TICKS` is a global tick counter incremented on each timer interrupt.
-// - Calls into `sched::on_timer_tick()` to drive preemption/time slicing.
-// - Calls `ipc::on_timer_tick(get_ticks())` to advance IPC timeouts/timers.
-// - Always signals EOI via `apic::send_eoi()` to re-arm the interrupt line.
+// - The low-level timer ISR is `rust_timer_interrupt_handler`.
+// - It calls `sched::drive_cooperative_tick()` to drive cooperative scheduling
+//   (time accounting and voluntary yields) instead of preemptive time slicing
+//   via `sched::on_timer_tick()`.
+// - It calls `ipc::on_timer_tick(get_ticks())` to advance IPC timeouts/timers.
+// - It always signals EOI via `apic::send_eoi()` to re-arm the interrupt line.
 //
 // Keyboard handling:
 // - `keyboard_interrupt_handler` delegates to `keyboard::handle_interrupt()`
