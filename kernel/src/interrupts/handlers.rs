@@ -423,14 +423,22 @@ static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStackFrame) {
     let coming_from_user = (_frame.code_segment & 0x3) == 0x3;
 
-    if coming_from_user {
-        let cs_valid = (_frame.code_segment as u16) == gdt::USER_CODE_SELECTOR;
-        let ss_valid = (_frame.stack_segment as u16) == gdt::USER_DATA_SELECTOR;
+    {
+        let cpl = (_frame.code_segment & 0x3) as u8;
+        let cs_ok = if cpl == 0 {
+            _frame.code_segment == gdt::KERNEL_CODE_SELECTOR as u64
+        } else {
+            _frame.code_segment == gdt::USER_CODE_SELECTOR as u64
+        };
+        let ss_ok = if cpl == 0 {
+            _frame.stack_segment == gdt::KERNEL_DATA_SELECTOR as u64 || _frame.stack_segment == 0
+        } else {
+            _frame.stack_segment == gdt::USER_DATA_SELECTOR as u64
+        };
         let rip_canonical = is_canonical(_frame.instruction_pointer);
         let rsp_canonical = is_canonical(_frame.stack_pointer);
 
-        if !(cs_valid && ss_valid && rip_canonical && rsp_canonical) {
-            let cpl = _frame.code_segment & 0x3;
+        if !(cs_ok && ss_ok && rip_canonical && rsp_canonical) {
             log_warn!(
                 "interrupt",
                 "Timer frame sanity check failed (CPL={}): RIP={:#016X} RSP={:#016X} CS={:#04X} SS={:#04X} canonical_rip={} canonical_rsp={} cs_ok={} ss_ok={}",
@@ -441,9 +449,12 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
                 _frame.stack_segment,
                 rip_canonical,
                 rsp_canonical,
-                cs_valid,
-                ss_valid
+                cs_ok,
+                ss_ok
             );
+
+            // Always dump stack on sanity failure to help diagnose corruption
+            print_stack_trace(_frame as *const _ as u64);
         }
     }
 
@@ -466,15 +477,18 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_frame: &mut InterruptStac
     unsafe {
         TICKS += 1;
     }
-    
+
     ipc::on_timer_tick(get_ticks());
+
+    // MUST send EOI before potentially switching context, or the APIC
+    // will block further timer interrupts on this CPU while we are
+    // in the new thread.
+    super::apic::send_eoi();
 
     // Drive preemptive scheduling if we interrupted a userspace thread.
     if coming_from_user {
         sched::drive_cooperative_tick();
     }
-
-    super::apic::send_eoi();
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptStackFrame) {
@@ -491,7 +505,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_frame: &mut InterruptS
 }
 
 pub extern "x86-interrupt" fn mouse_interrupt_handler(_frame: &mut InterruptStackFrame) {
-    
+
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();
 

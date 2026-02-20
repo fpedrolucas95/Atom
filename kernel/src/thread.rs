@@ -783,6 +783,8 @@ fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
         // In 64-bit long mode, the SS selector can be NULL (0) when returning to CPL 0.
         // This is explicitly allowed by the architecture and often occurs during
         // kernel-to-kernel context switches or interrupts.
+        //
+        // Note: We also allow SS=0x10 (KERNEL_DATA_SELECTOR).
         if target.ss != gdt::KERNEL_DATA_SELECTOR && target.ss != 0 {
             return Err("kernel SS selector invalid");
         }
@@ -1100,12 +1102,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     }
 
     // Unified context switch: ALWAYS use switch_context to preserve kernel state.
-    // This fixes the issue where kernel threads (like idle) would be restarted
-    // every time they were scheduled back from a userspace thread.
-    //
-    // switch_context will save FROM context and restore TO context.
-    // If TO is userspace, switch_to_context_internal (in assembly) handles the IRET to Ring 3.
-    // If TO is kernel, it does a normal kernel-to-kernel switch.
     unsafe {
         guard_context_or_halt(&*to_ctx_ptr, "scheduled");
         switch_context(from_ctx_ptr, to_ctx_ptr);
