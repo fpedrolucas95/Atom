@@ -780,7 +780,10 @@ fn validate_context_for_iret(target: &CpuContext) -> Result<(), &'static str> {
             return Err("kernel CS selector invalid");
         }
 
-        if target.ss != gdt::KERNEL_DATA_SELECTOR {
+        // In 64-bit long mode, the SS selector can be NULL (0) when returning to CPL 0.
+        // This is explicitly allowed by the architecture and often occurs during
+        // kernel-to-kernel context switches or interrupts.
+        if target.ss != gdt::KERNEL_DATA_SELECTOR && target.ss != 0 {
             return Err("kernel SS selector invalid");
         }
     }
@@ -1066,6 +1069,19 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
         let to_ptr = &threads[to_idx].context as *const CpuContext;
         let to_kernel_stack = threads[to_idx].kernel_stack;
+        let to_name = threads[to_idx].name;
+        let from_name = threads[from_idx].name;
+
+        log_debug!(
+            LOG_ORIGIN,
+            "Switch: {} ({}) -> {} ({}) [TO: RIP={:#X} RSP={:#X} CS={:#X} SS={:#X} CR3={:#X}]",
+            from_id, from_name, to_id, to_name,
+            threads[to_idx].context.rip,
+            threads[to_idx].context.rsp,
+            threads[to_idx].context.cs,
+            threads[to_idx].context.ss,
+            threads[to_idx].context.cr3
+        );
 
         if to_is_userspace {
             log_user_entry_once(to_id, &threads[to_idx].context);
