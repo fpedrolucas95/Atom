@@ -54,3 +54,6 @@ tools/elf2atxf/build.log
 userspace/drivers/*/build.log
 userspace/services/*/build.log
 disk.img
+debug.log
+userspace/apps/fileman/build.log
+userspace/apps/fs_test/build.log

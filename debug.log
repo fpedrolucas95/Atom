@@ -2,7 +2,7 @@
 BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
 BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
 K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manager & Declarative Boot
-[t=0.000s] [INFO ] [[pmm]] Memory map: 129 regions (113 usable), highest_addr=0x7EF4000, tracked_pages=32500
+[t=0.000s] [INFO ] [[pmm]] Memory map: 127 regions (112 usable), highest_addr=0x7EF4000, tracked_pages=32500
 [t=0.000s] [INFO ] [[pmm]] Using static bitmap: 4063 bytes for 32500 pages (126 MiB addressable)
 [t=0.000s] [DEBUG] [[pmm]] Memory map regions: (kernel/src/mm/pmm.rs:391)
 [t=0.000s] [DEBUG] [[pmm]]   0x0000000000100000-0x0000000000800000 7 MB [Conventional] - USABLE (kernel/src/mm/pmm.rs:399)
@@ -10,7 +10,7 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.000s] [DEBUG] [[pmm]]   0x0000000001500000-0x0000000003F36000 42 MB [Conventional] - USABLE (kernel/src/mm/pmm.rs:399)
 [t=0.000s] [DEBUG] [[pmm]]   0x0000000003F56000-0x0000000005B82000 28 MB [Conventional] - USABLE (kernel/src/mm/pmm.rs:399)
 [t=0.000s] [DEBUG] [[pmm]]   0x0000000005D67000-0x0000000005F7C000 2 MB [BootServicesData] - USABLE (kernel/src/mm/pmm.rs:399)
-[t=0.000s] [DEBUG] [[pmm]]   0x0000000005F7F000-0x0000000006B0C000 11 MB [BootServicesData] - USABLE (kernel/src/mm/pmm.rs:399)
+[t=0.000s] [DEBUG] [[pmm]]   0x0000000005F7E000-0x0000000006B0C000 11 MB [BootServicesData] - USABLE (kernel/src/mm/pmm.rs:399)
 [t=0.000s] [DEBUG] [[pmm]]   0x0000000006E00000-0x0000000007000000 2 MB [BootServicesData] - USABLE (kernel/src/mm/pmm.rs:399)
 [t=0.000s] [DEBUG] [[pmm]]   0x00000000070BB000-0x00000000074BB000 4 MB [BootServicesData] - USABLE (kernel/src/mm/pmm.rs:399)
 [t=0.000s] [DEBUG] [[pmm]]   0x00000000075A7000-0x00000000078EF000 3 MB [BootServicesData] - USABLE (kernel/src/mm/pmm.rs:399)
@@ -18,10 +18,10 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.000s] [INFO ] [[pmm]] ========================================
 [t=0.000s] [INFO ] [[pmm]] PMM INITIALIZED — Memory Summary
 [t=0.000s] [INFO ] [[pmm]] ========================================
-[t=0.000s] [INFO ] [[pmm]]   Physical RAM:   120 MiB (30833 pages)
-[t=0.000s] [INFO ] [[pmm]]   Reserved/MMIO:  263 MiB (67375 pages)
+[t=0.000s] [INFO ] [[pmm]]   Physical RAM:   120 MiB (30817 pages)
+[t=0.000s] [INFO ] [[pmm]]   Reserved/MMIO:  263 MiB (67391 pages)
 [t=0.000s] [INFO ] [[pmm]]   Tracked range:  126 MiB (32500 pages)
-[t=0.000s] [INFO ] [[pmm]]   Free pages:     30832 (120 MiB)
+[t=0.000s] [INFO ] [[pmm]]   Free pages:     30816 (120 MiB)
 [t=0.000s] [INFO ] [[pmm]]   Bitmap type:    static (.bss)
 [t=0.000s] [INFO ] [[pmm]]   Bitmap size:    3 KiB
 [t=0.000s] [INFO ] [[pmm]]   Largest run:    21122 pages (82 MiB)
@@ -54,7 +54,7 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.000s] [INFO ] [vmm] Verifying stack mapping from 0x5C8E000 down to 0x5C4F000 (64 pages); RSP=0x5C8EE18 (phys=Some(97050624))
 [t=0.000s] [INFO ] [vmm] Stack verification complete: 0 new mappings; top page phys=Some(97050624), start phys=Some(96792576)
 [t=0.000s] [INFO ] [kernel:init] Usable RAM: 120 MB
-[t=0.000s] [INFO ] [vmm] PMM: 29671/32500 pages free (115/126 MiB)
+[t=0.000s] [INFO ] [vmm] PMM: 29655/32500 pages free (115/126 MiB)
 [t=0.000s] [INFO ] [thread] Threading subsystem initialized
 [t=0.000s] [INFO ] [sched] Scheduler initialized with idle thread
 [t=0.000s] [INFO ] [cap] Capability subsystem initialized (Phase 3.4 complete)
@@ -160,7 +160,7 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.050s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x401540, name_len=7)
 [t=0.050s] [INFO ] [syscall:spawn] Looking up driver: 'namesvc'
 [t=0.050s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/namesvc.atxf
-[t=0.050s] [INFO ] [syscall:spawn] Found driver 'namesvc' in registry: ptr=0x5d21018, size=28696
+[t=0.050s] [INFO ] [syscall:spawn] Found driver 'namesvc' in registry: ptr=0x5d18018, size=28696
 [t=0.050s] [INFO ] [syscall:spawn] Executable parsed: text=23320 bytes, data=24 bytes, bss=81900 bytes, entry=0x1530
 [t=0.050s] [INFO ] [spawn] Creating process 'namesvc' (pid=3) at text=0x400000, stack=0x80000000
 [t=0.050s] [INFO ] [spawn] Created new address space for 'namesvc': PML4=0x5A7000
@@ -183,7 +183,7 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.050s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x4015a3, name_len=15)
 [t=0.050s] [INFO ] [syscall:spawn] Looking up driver: 'service_manager'
 [t=0.050s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/service_manager.atxf
-[t=0.050s] [INFO ] [syscall:spawn] Found driver 'service_manager' in registry: ptr=0x5d29018, size=31008
+[t=0.050s] [INFO ] [syscall:spawn] Found driver 'service_manager' in registry: ptr=0x5d20018, size=31008
 [t=0.050s] [INFO ] [syscall:spawn] Executable parsed: text=20651 bytes, data=2336 bytes, bss=136928 bytes, entry=0x2B30
 [t=0.050s] [INFO ] [spawn] Creating process 'service_manager' (pid=4) at text=0x400000, stack=0x80000000
 [t=0.050s] [INFO ] [spawn] Created new address space for 'service_manager': PML4=0x65C000
@@ -207,67 +207,67 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.050s] [INFO ] [spawn] Creating process 'fsd' (pid=5) at text=0x400000, stack=0x80000000
 [t=0.050s] [INFO ] [spawn] Created new address space for 'fsd': PML4=0x71F000
 [t=0.050s] [INFO ] [spawn] Process memory: text=0x400000-0x404000, data=0x404000, bss=0x405000, entry=0x401E6C
-[t=0.060s] [INFO ] [spawn] Process 'fsd' (pid=5) scheduled
-[t=0.060s] [INFO ] [syscall:spawn] Process 'fsd' spawned successfully with PID 5
-[t=0.060s] [INFO ] [userspace] init: '
-[t=0.060s] [INFO ] [userspace] fsd
-[t=0.060s] [INFO ] [userspace] ' spawned OK
-[t=0.060s] [INFO ] [userspace] [Phase 1.5] FSD spawned with PID 
-[t=0.060s] [INFO ] [userspace] (check service_manager for details)
-[t=0.060s] [INFO ] [userspace] init: waiting for service '
-[t=0.060s] [INFO ] [userspace] fsd
-[t=0.060s] [INFO ] [userspace] '...
-[t=0.060s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(256)
-[t=0.060s] [INFO ] [userspace] namesvc: lookup service
-[t=0.060s] [INFO ] [userspace] namesvc: lookup for 'fsd' queued as pending
-[t=0.060s] [INFO ] [userspace] svcmgr: Service Manager starting
-[t=0.060s] [INFO ] [syscall] ipc_create_port_with_id succeeded: port_id=Port(2)
-[t=0.060s] [INFO ] [userspace] svcmgr: created port with reserved ID 2
-[t=0.060s] [INFO ] [userspace] svcmgr: service port ready, initializing services
-[t=0.060s] [INFO ] [userspace] svcmgr: registering known service names
-[t=0.060s] [INFO ] [userspace] svcmgr: service registry ready
-[t=0.060s] [INFO ] [userspace] ========================================
-[t=0.060s] [INFO ] [userspace] Filesystem Daemon (fsd) starting
-[t=0.060s] [INFO ] [userspace] ========================================
-[t=0.060s] [INFO ] [syscall] ipc_create_port_with_id succeeded: port_id=Port(3)
-[t=0.060s] [INFO ] [userspace] fsd: created FS port with reserved ID 3 (dynamic port would have been accepted too)
-[t=0.060s] [INFO ] [userspace] fsd: registering with namesvc...
-[t=0.060s] [INFO ] [userspace] fsd: ready, entering main loop
-[t=0.060s] [INFO ] [userspace] fsd: VFS subsystem initialized
-[t=0.060s] [INFO ] [userspace] fsd: mounted 1 mount points
-[t=0.060s] [INFO ] [userspace] fsd: ready to serve filesystem requests with journal-based crash-consistency
-[t=0.060s] [INFO ] [userspace] fsd: entering main loop
-[t=0.060s] [INFO ] [userspace] namesvc: registering service
-[t=0.060s] [INFO ] [userspace] namesvc: responded to pending lookup for 'fsd' with port 3
-[t=0.060s] [INFO ] [syscall] ipc_close_port succeeded: port_id=Port(256), caller=2
-[t=0.060s] [INFO ] [userspace] init: service '
-[t=0.060s] [INFO ] [userspace] fsd
-[t=0.060s] [INFO ] [userspace] ' is registered and ready
-[t=0.060s] [INFO ] [userspace] [Phase 1.5] Filesystem service ready and operational
-[t=0.060s] [INFO ] [userspace] 
-[t=0.060s] [INFO ] [userspace] [Phase 2] Spawning UI shell (compositor)...
-[t=0.060s] [INFO ] [userspace] init: spawning '
-[t=0.060s] [INFO ] [userspace] ui_shell
-[t=0.060s] [INFO ] [userspace] '...
-[t=0.060s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x401a3f, name_len=8)
-[t=0.060s] [INFO ] [syscall:spawn] Looking up driver: 'ui_shell'
-[t=0.060s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/ui_shell.atxf
-[t=0.060s] [INFO ] [syscall:spawn] Found driver 'ui_shell' in registry: ptr=0x5d00018, size=53272
-[t=0.060s] [INFO ] [syscall:spawn] Executable parsed: text=48568 bytes, data=24 bytes, bss=4100 bytes, entry=0x6420
-[t=0.060s] [INFO ] [spawn] Creating process 'ui_shell' (pid=6) at text=0x400000, stack=0x80000000
-[t=0.060s] [INFO ] [spawn] Created new address space for 'ui_shell': PML4=0x910000
-[t=0.060s] [INFO ] [spawn] Process memory: text=0x400000-0x40C000, data=0x40C000, bss=0x40D000, entry=0x406420
-[t=0.060s] [INFO ] [spawn] Process 'ui_shell' (pid=6) scheduled
-[t=0.060s] [INFO ] [syscall:spawn] Process 'ui_shell' spawned successfully with PID 6
-[t=0.060s] [INFO ] [userspace] init: '
-[t=0.060s] [INFO ] [userspace] ui_shell
-[t=0.060s] [INFO ] [userspace] ' spawned OK
-[t=0.060s] [INFO ] [userspace] init: waiting for service '
-[t=0.060s] [INFO ] [userspace] compositor
-[t=0.060s] [INFO ] [userspace] '...
-[t=0.060s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(257)
-[t=0.060s] [INFO ] [userspace] Atom Desktop Environment v1.0
-[t=0.060s] [INFO ] [syscall] shared_region_create(size=10308608)
+[t=0.050s] [INFO ] [spawn] Process 'fsd' (pid=5) scheduled
+[t=0.050s] [INFO ] [syscall:spawn] Process 'fsd' spawned successfully with PID 5
+[t=0.050s] [INFO ] [userspace] init: '
+[t=0.050s] [INFO ] [userspace] fsd
+[t=0.050s] [INFO ] [userspace] ' spawned OK
+[t=0.050s] [INFO ] [userspace] [Phase 1.5] FSD spawned with PID 
+[t=0.050s] [INFO ] [userspace] (check service_manager for details)
+[t=0.050s] [INFO ] [userspace] init: waiting for service '
+[t=0.050s] [INFO ] [userspace] fsd
+[t=0.050s] [INFO ] [userspace] '...
+[t=0.050s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(256)
+[t=0.050s] [INFO ] [userspace] namesvc: lookup service
+[t=0.050s] [INFO ] [userspace] namesvc: lookup for 'fsd' queued as pending
+[t=0.050s] [INFO ] [userspace] svcmgr: Service Manager starting
+[t=0.050s] [INFO ] [syscall] ipc_create_port_with_id succeeded: port_id=Port(2)
+[t=0.050s] [INFO ] [userspace] svcmgr: created port with reserved ID 2
+[t=0.050s] [INFO ] [userspace] svcmgr: service port ready, initializing services
+[t=0.050s] [INFO ] [userspace] svcmgr: registering known service names
+[t=0.050s] [INFO ] [userspace] svcmgr: service registry ready
+[t=0.050s] [INFO ] [userspace] ========================================
+[t=0.050s] [INFO ] [userspace] Filesystem Daemon (fsd) starting
+[t=0.050s] [INFO ] [userspace] ========================================
+[t=0.050s] [INFO ] [syscall] ipc_create_port_with_id succeeded: port_id=Port(3)
+[t=0.050s] [INFO ] [userspace] fsd: created FS port with reserved ID 3 (dynamic port would have been accepted too)
+[t=0.050s] [INFO ] [userspace] fsd: registering with namesvc...
+[t=0.050s] [INFO ] [userspace] fsd: ready, entering main loop
+[t=0.050s] [INFO ] [userspace] fsd: VFS subsystem initialized
+[t=0.050s] [INFO ] [userspace] fsd: mounted 1 mount points
+[t=0.050s] [INFO ] [userspace] fsd: ready to serve filesystem requests with journal-based crash-consistency
+[t=0.050s] [INFO ] [userspace] fsd: entering main loop
+[t=0.050s] [INFO ] [userspace] namesvc: registering service
+[t=0.050s] [INFO ] [userspace] namesvc: responded to pending lookup for 'fsd' with port 3
+[t=0.050s] [INFO ] [syscall] ipc_close_port succeeded: port_id=Port(256), caller=2
+[t=0.050s] [INFO ] [userspace] init: service '
+[t=0.050s] [INFO ] [userspace] fsd
+[t=0.050s] [INFO ] [userspace] ' is registered and ready
+[t=0.050s] [INFO ] [userspace] [Phase 1.5] Filesystem service ready and operational
+[t=0.050s] [INFO ] [userspace] 
+[t=0.050s] [INFO ] [userspace] [Phase 2] Spawning UI shell (compositor)...
+[t=0.050s] [INFO ] [userspace] init: spawning '
+[t=0.050s] [INFO ] [userspace] ui_shell
+[t=0.050s] [INFO ] [userspace] '...
+[t=0.050s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x401a3f, name_len=8)
+[t=0.050s] [INFO ] [syscall:spawn] Looking up driver: 'ui_shell'
+[t=0.050s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/ui_shell.atxf
+[t=0.050s] [INFO ] [syscall:spawn] Found driver 'ui_shell' in registry: ptr=0x5ced018, size=53272
+[t=0.050s] [INFO ] [syscall:spawn] Executable parsed: text=48848 bytes, data=24 bytes, bss=4100 bytes, entry=0x6520
+[t=0.050s] [INFO ] [spawn] Creating process 'ui_shell' (pid=6) at text=0x400000, stack=0x80000000
+[t=0.050s] [INFO ] [spawn] Created new address space for 'ui_shell': PML4=0x910000
+[t=0.050s] [INFO ] [spawn] Process memory: text=0x400000-0x40C000, data=0x40C000, bss=0x40D000, entry=0x406520
+[t=0.050s] [INFO ] [spawn] Process 'ui_shell' (pid=6) scheduled
+[t=0.050s] [INFO ] [syscall:spawn] Process 'ui_shell' spawned successfully with PID 6
+[t=0.050s] [INFO ] [userspace] init: '
+[t=0.050s] [INFO ] [userspace] ui_shell
+[t=0.050s] [INFO ] [userspace] ' spawned OK
+[t=0.050s] [INFO ] [userspace] init: waiting for service '
+[t=0.050s] [INFO ] [userspace] compositor
+[t=0.050s] [INFO ] [userspace] '...
+[t=0.050s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(257)
+[t=0.050s] [INFO ] [userspace] Atom Desktop Environment v1.0
+[t=0.050s] [INFO ] [syscall] shared_region_create(size=10308608)
 [t=0.060s] [INFO ] [sharedmem] Created region Region(1) with size 10308608 bytes (owner: 6)
 [t=0.060s] [INFO ] [syscall] shared_region_map(region=1, virt=0x0, flags=0x3)
 [t=0.060s] [INFO ] [syscall] shared_region_map: current_cr3=0x910000 caller_pml4=0x910000 match=true
@@ -294,7 +294,7 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.060s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x401ae6, name_len=7)
 [t=0.060s] [INFO ] [syscall:spawn] Looking up driver: 'display'
 [t=0.060s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/display.atxf
-[t=0.060s] [INFO ] [syscall:spawn] Found driver 'display' in registry: ptr=0x5cf5018, size=12296
+[t=0.060s] [INFO ] [syscall:spawn] Found driver 'display' in registry: ptr=0x5ce3018, size=12296
 [t=0.060s] [INFO ] [syscall:spawn] Executable parsed: text=7296 bytes, data=8 bytes, bss=69636 bytes, entry=0x11A0
 [t=0.060s] [INFO ] [spawn] Creating process 'display' (pid=7) at text=0x400000, stack=0x80000000
 [t=0.060s] [INFO ] [spawn] Created new address space for 'display': PML4=0x1393000
@@ -309,358 +309,74 @@ K[t=0.000s] [INFO ] [kernel:init] Atom Kernel v0.1.0 - Phase 6.3: Service Manage
 [t=0.060s] [INFO ] [userspace] Display Driver: Framebuffer acquired
 [t=0.060s] [INFO ] [userspace] Display Driver: Ready
 [t=0.060s] [INFO ] [userspace] namesvc: registering service
-[t=0.080s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.080s] [INFO ] [interrupt] Timer interrupted user context: RIP=0x0000A8C48148FB CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 CPL=3
-[t=0.090s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.100s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.110s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.120s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.150s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.160s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.170s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.180s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.190s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.190s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.200s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.220s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.230s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.230s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.240s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.250s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.260s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.270s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.280s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.280s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x4091a0, name_len=8)
-[t=0.280s] [INFO ] [syscall:spawn] Looking up driver: 'terminal'
-[t=0.280s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/terminal.atxf
-[t=0.280s] [INFO ] [syscall:spawn] Found driver 'terminal' in registry: ptr=0x5d3d018, size=98592
-[t=0.280s] [INFO ] [syscall:spawn] Executable parsed: text=91250 bytes, data=288 bytes, bss=528108 bytes, entry=0xC330
-[t=0.280s] [INFO ] [spawn] Creating process 'terminal' (pid=8) at text=0x400000, stack=0x80000000
-[t=0.280s] [INFO ] [spawn] Created new address space for 'terminal': PML4=0x1442000
-[t=0.280s] [INFO ] [spawn] Process memory: text=0x400000-0x417000, data=0x417000, bss=0x418000, entry=0x40C330
-[t=0.280s] [INFO ] [spawn] Process 'terminal' (pid=8) scheduled
-[t=0.280s] [INFO ] [syscall:spawn] Process 'terminal' spawned successfully with PID 8
-[t=0.280s] [INFO ] [syscall] shared_region_create(size=987624)
-[t=0.280s] [INFO ] [sharedmem] Created region Region(2) with size 987624 bytes (owner: 6)
-[t=0.280s] [INFO ] [syscall] shared_region_map(region=2, virt=0x0, flags=0x3)
-[t=0.280s] [INFO ] [syscall] shared_region_map: current_cr3=0x910000 caller_pml4=0x910000 match=true
-[t=0.280s] [WARN ] [syscall] ipc_send_async failed: invalid port_id=Port(0)
-[t=0.280s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.290s] [INFO ] [userspace] Terminal: Starting userspace terminal
-[t=0.290s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(261)
-[t=0.290s] [INFO ] [userspace] Terminal: Looking up compositor.register...
-[t=0.290s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(262)
-[t=0.290s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.290s] [INFO ] [userspace] namesvc: registering service
-[t=0.290s] [INFO ] [userspace] namesvc: lookup service
-[t=0.290s] [INFO ] [userspace] namesvc: immediate lookup for 'compositor.register' returned port 259
-[t=0.290s] [INFO ] [syscall] ipc_close_port succeeded: port_id=Port(262), caller=8
-[t=0.290s] [INFO ] [userspace] Terminal: Found compositor.register
-[t=0.290s] [INFO ] [userspace] Terminal: Sending registration to compositor
-[t=0.290s] [INFO ] [userspace] Terminal: Message sent, waiting for surface...
-[t=0.290s] [INFO ] [userspace] Terminal: Received surface assignment
-[t=0.290s] [INFO ] [syscall] shared_region_map(region=2, virt=0x0, flags=0x3)
-[t=0.290s] [INFO ] [syscall] shared_region_map: current_cr3=0x1442000 caller_pml4=0x1442000 match=true
-[t=0.290s] [INFO ] [userspace] Terminal: Shared surface mapped successfully
-[t=0.290s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(263)
-[t=0.290s] [INFO ] [userspace] Terminal: Entering main event loop
-[t=0.290s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.300s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.300s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.330s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.340s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.350s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.350s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.360s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.370s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.380s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.390s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.400s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.410s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.420s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.430s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.430s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.440s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.460s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.470s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.480s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.500s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.510s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.530s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.540s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.580s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.590s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.600s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.610s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.620s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.620s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.630s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.650s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.660s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.670s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.670s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.680s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.690s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.710s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.720s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.720s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.730s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.740s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x4091a0, name_len=8)
-[t=0.740s] [INFO ] [syscall:spawn] Looking up driver: 'terminal'
-[t=0.740s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/terminal.atxf
-[t=0.740s] [INFO ] [syscall:spawn] Found driver 'terminal' in registry: ptr=0x5d3d018, size=98592
-[t=0.740s] [INFO ] [syscall:spawn] Executable parsed: text=91250 bytes, data=288 bytes, bss=528108 bytes, entry=0xC330
-[t=0.740s] [INFO ] [spawn] Creating process 'terminal' (pid=9) at text=0x400000, stack=0x80000000
-[t=0.740s] [INFO ] [spawn] Created new address space for 'terminal': PML4=0x1669000
-[t=0.740s] [INFO ] [spawn] Process memory: text=0x400000-0x417000, data=0x417000, bss=0x418000, entry=0x40C330
-[t=0.740s] [INFO ] [spawn] Process 'terminal' (pid=9) scheduled
-[t=0.740s] [INFO ] [syscall:spawn] Process 'terminal' spawned successfully with PID 9
-[t=0.740s] [INFO ] [syscall] shared_region_create(size=987624)
-[t=0.740s] [INFO ] [sharedmem] Created region Region(3) with size 987624 bytes (owner: 6)
-[t=0.740s] [INFO ] [syscall] shared_region_map(region=3, virt=0x0, flags=0x3)
-[t=0.740s] [INFO ] [syscall] shared_region_map: current_cr3=0x910000 caller_pml4=0x910000 match=true
-[t=0.740s] [WARN ] [syscall] ipc_send_async failed: invalid port_id=Port(0)
-[t=0.740s] [INFO ] [userspace] Terminal: Starting userspace terminal
-[t=0.740s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(264)
-[t=0.740s] [INFO ] [userspace] Terminal: Looking up compositor.register...
-[t=0.740s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(265)
-[t=0.740s] [INFO ] [userspace] namesvc: registering service
-[t=0.740s] [INFO ] [userspace] namesvc: lookup service
-[t=0.740s] [INFO ] [userspace] namesvc: immediate lookup for 'compositor.register' returned port 259
-[t=0.740s] [INFO ] [syscall] ipc_close_port succeeded: port_id=Port(265), caller=9
-[t=0.740s] [INFO ] [userspace] Terminal: Found compositor.register
-[t=0.740s] [INFO ] [userspace] Terminal: Sending registration to compositor
-[t=0.740s] [INFO ] [userspace] Terminal: Message sent, waiting for surface...
-[t=0.740s] [INFO ] [userspace] Terminal: Received surface assignment
-[t=0.740s] [INFO ] [syscall] shared_region_map(region=3, virt=0x0, flags=0x3)
-[t=0.740s] [INFO ] [syscall] shared_region_map: current_cr3=0x1669000 caller_pml4=0x1669000 match=true
-[t=0.740s] [INFO ] [userspace] Terminal: Shared surface mapped successfully
-[t=0.740s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(266)
-[t=0.740s] [INFO ] [userspace] Terminal: Entering main event loop
-[t=0.740s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.750s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.770s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.780s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.790s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.800s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.810s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.830s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.840s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.850s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.850s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.860s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.870s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=0.880s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.890s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.910s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.920s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.930s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.940s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.950s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.960s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.970s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=0.990s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.000s] [WARN ] [ipc] Deadlock detection prevented 9 from blocking on Port(266)
-[t=1.000s] [WARN ] [syscall] ipc_recv deadlock detected (caller=9, port_id=Port(266))
-[t=1.000s] [INFO ] [userspace] fsd: fs_readdir (stub)
-[t=1.000s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.030s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.040s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.070s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.100s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.110s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.140s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.150s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.170s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.180s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.190s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.200s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.210s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.230s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.240s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.250s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.260s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.270s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.280s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.290s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.300s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.320s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.330s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.340s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.350s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.360s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.370s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.380s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.390s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.400s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.410s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.420s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.430s] [WARN ] [ipc] Deadlock detection prevented 9 from blocking on Port(266)
-[t=1.430s] [WARN ] [syscall] ipc_recv deadlock detected (caller=9, port_id=Port(266))
-[t=1.430s] [INFO ] [userspace] fsd: fs_readdir (stub)
-[t=1.430s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.440s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.450s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.460s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.480s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.490s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x4DC2894502C18349 RSP=0x154F9814902C783 CS=0x83204C743D5AF0F SS=0xC03199EBBB750000 canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.500s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=1.510s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.540s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.550s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=1.560s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.570s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=1.580s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.600s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.610s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.620s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.640s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.650s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=1.650s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.670s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.680s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.690s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.710s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.720s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.730s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.740s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.750s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.760s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.770s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.780s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.790s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.810s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.820s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.850s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.860s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.870s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.880s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.890s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.900s] [WARN ] [ipc] Deadlock detection prevented 9 from blocking on Port(266)
-[t=1.900s] [WARN ] [syscall] ipc_recv deadlock detected (caller=9, port_id=Port(266))
-[t=1.900s] [INFO ] [userspace] fsd: fs_readdir (stub)
-[t=1.900s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.910s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.920s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.930s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.940s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.950s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.960s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.970s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=1.990s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.000s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.010s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.030s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.040s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.050s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x5F415E415E5F5D5B RSP=0x20E13E800000027 CS=0x2509C0D8D48C3 SS=0x250C40D8D4800 canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.060s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.110s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.130s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.160s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.170s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.180s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.190s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.200s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.210s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.220s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.230s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.250s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.260s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.270s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.280s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.300s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.330s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.340s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.350s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.360s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.370s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.370s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.380s] [INFO ] [syscall] shared_region_unmap(region=3)
-[t=2.380s] [WARN ] [syscall] shared_region_unmap: failed - NotMapped
-[t=2.380s] [INFO ] [syscall] shared_region_destroy(region=3)
-[t=2.380s] [WARN ] [syscall] shared_region_destroy: failed - RegionInUse
-[t=2.380s] [INFO ] [userspace] Terminal: Received terminate request
-[t=2.390s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.400s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.410s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.420s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.440s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.450s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.460s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.480s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.490s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.500s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.510s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.520s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x5F415E415E5F5D5B RSP=0x20E13E800000027 CS=0x2509C0D8D48C3 SS=0x250C40D8D4800 canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.530s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.540s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.550s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.560s] [INFO ] [syscall] shared_region_unmap(region=2)
-[t=2.560s] [WARN ] [syscall] shared_region_unmap: failed - NotMapped
-[t=2.560s] [INFO ] [syscall] shared_region_destroy(region=2)
-[t=2.560s] [WARN ] [syscall] shared_region_destroy: failed - RegionInUse
-[t=2.560s] [INFO ] [userspace] Terminal: Received terminate request
-[t=2.560s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.580s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.590s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.590s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.600s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.600s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.620s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.630s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.640s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.650s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.660s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x5F415E415E5F5D5B RSP=0x20E13E800000027 CS=0x2509C0D8D48C3 SS=0x250C40D8D4800 canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.670s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.680s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.680s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.690s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.700s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.700s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.710s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.720s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.730s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.740s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.750s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.760s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.770s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.780s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.790s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.800s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x5F415E415E5F5D5B RSP=0x20E13E800000027 CS=0x2509C0D8D48C3 SS=0x250C40D8D4800 canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.810s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.830s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.840s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0xA4F3D1894807E283 RSP=0xF48010101010101 CS=0xFA8948D08949CCC3 SS=0xE183D9F7D189C1AF canonical_rip=false canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.850s] [PANIC] [thread] Refusing to iret to scheduled context: RIP=0x00000005B927BC RSP=0xFFFF8000009B8DD0 CS=0x08 SS=0x00 reason=kernel SS selector invalid
-[t=2.850s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.870s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.880s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.900s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.910s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.920s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.940s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.950s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.960s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.970s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.980s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=2.990s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.000s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.010s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.020s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.030s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.040s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.050s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.060s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.070s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.100s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.120s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.130s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.140s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.150s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.190s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.200s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.210s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.220s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.230s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.240s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.250s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
-[t=3.260s] [WARN ] [interrupt] Timer frame sanity check failed: RIP=0x0000A8C48148FB RSP=0xBA000250BD058D4C CS=0x5F415E415E5F5D5B SS=0x20E13E800000027 canonical_rip=true canonical_rsp=false cs_ok=false ss_ok=false
+[t=0.060s] [INFO ] [interrupt] Timer interrupted user context: RIP=0x0000000040132F CS=0x1B SS=0x23 CPL=3
+[t=0.310s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x4092b3, name_len=8)
+[t=0.310s] [INFO ] [syscall:spawn] Looking up driver: 'terminal'
+[t=0.310s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/terminal.atxf
+[t=0.310s] [INFO ] [syscall:spawn] Found driver 'terminal' in registry: ptr=0x5d34018, size=135456
+[t=0.310s] [INFO ] [syscall:spawn] Executable parsed: text=129106 bytes, data=288 bytes, bss=528108 bytes, entry=0xE160
+[t=0.310s] [INFO ] [spawn] Creating process 'terminal' (pid=8) at text=0x400000, stack=0x80000000
+[t=0.310s] [INFO ] [spawn] Created new address space for 'terminal': PML4=0x1442000
+[t=0.310s] [INFO ] [spawn] Process memory: text=0x400000-0x420000, data=0x420000, bss=0x421000, entry=0x40E160
+[t=0.310s] [INFO ] [spawn] Process 'terminal' (pid=8) scheduled
+[t=0.310s] [INFO ] [syscall:spawn] Process 'terminal' spawned successfully with PID 8
+[t=0.310s] [INFO ] [syscall] shared_region_create(size=987624)
+[t=0.310s] [INFO ] [sharedmem] Created region Region(2) with size 987624 bytes (owner: 6)
+[t=0.310s] [INFO ] [syscall] shared_region_map(region=2, virt=0x0, flags=0x3)
+[t=0.310s] [INFO ] [syscall] shared_region_map: current_cr3=0x910000 caller_pml4=0x910000 match=true
+[t=0.310s] [WARN ] [syscall] ipc_send_async failed: invalid port_id=Port(0)
+[t=0.310s] [INFO ] [userspace] Terminal: Starting userspace terminal
+[t=0.310s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(261)
+[t=0.310s] [INFO ] [userspace] Terminal: Looking up compositor.register...
+[t=0.310s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(262)
+[t=0.310s] [INFO ] [userspace] namesvc: registering service
+[t=0.310s] [INFO ] [userspace] namesvc: lookup service
+[t=0.310s] [INFO ] [userspace] namesvc: immediate lookup for 'compositor.register' returned port 259
+[t=0.310s] [INFO ] [syscall] ipc_close_port succeeded: port_id=Port(262), caller=8
+[t=0.310s] [INFO ] [userspace] Terminal: Found compositor.register
+[t=0.310s] [INFO ] [userspace] Terminal: Message sent, waiting for surface...
+[t=0.310s] [INFO ] [userspace] Terminal: Received surface assignment
+[t=0.310s] [INFO ] [syscall] shared_region_map(region=2, virt=0x0, flags=0x3)
+[t=0.310s] [INFO ] [syscall] shared_region_map: current_cr3=0x1442000 caller_pml4=0x1442000 match=true
+[t=0.310s] [INFO ] [userspace] Terminal: Shared surface mapped successfully
+[t=0.310s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(263)
+[t=0.310s] [INFO ] [userspace] Terminal: Entering main event loop
+[t=0.620s] [INFO ] [syscall:spawn] spawn_process(name_ptr=0x409290, name_len=7)
+[t=0.620s] [INFO ] [syscall:spawn] Looking up driver: 'fileman'
+[t=0.620s] [INFO ] [syscall:spawn] Trying to load from filesystem: /drivers/fileman.atxf
+[t=0.620s] [INFO ] [syscall:spawn] Found driver 'fileman' in registry: ptr=0x5cfb018, size=36888
+[t=0.620s] [INFO ] [syscall:spawn] Executable parsed: text=31912 bytes, data=24 bytes, bss=4198388 bytes, entry=0x3A17
+[t=0.620s] [INFO ] [spawn] Creating process 'fileman' (pid=9) at text=0x400000, stack=0x80000000
+[t=0.620s] [INFO ] [spawn] Created new address space for 'fileman': PML4=0x1672000
+[t=0.620s] [INFO ] [spawn] Process memory: text=0x400000-0x408000, data=0x408000, bss=0x409000, entry=0x403A17
+[t=0.620s] [INFO ] [spawn] Process 'fileman' (pid=9) scheduled
+[t=0.620s] [INFO ] [syscall:spawn] Process 'fileman' spawned successfully with PID 9
+[t=0.620s] [INFO ] [syscall] shared_region_create(size=1283784)
+[t=0.620s] [INFO ] [sharedmem] Created region Region(3) with size 1283784 bytes (owner: 6)
+[t=0.620s] [INFO ] [syscall] shared_region_map(region=3, virt=0x0, flags=0x3)
+[t=0.620s] [INFO ] [syscall] shared_region_map: current_cr3=0x910000 caller_pml4=0x910000 match=true
+[t=0.620s] [WARN ] [syscall] ipc_send_async failed: invalid port_id=Port(0)
+[t=0.620s] [INFO ] [userspace] fileman: starting GUI file manager
+[t=0.620s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(264)
+[t=0.620s] [INFO ] [userspace] fileman: looking up compositor.register...
+[t=0.620s] [INFO ] [syscall] ipc_create_port succeeded: port_id=Port(265)
+[t=0.620s] [INFO ] [userspace] namesvc: registering service
+[t=0.620s] [INFO ] [userspace] namesvc: lookup service
+[t=0.620s] [INFO ] [userspace] namesvc: immediate lookup for 'compositor.register' returned port 259
+[t=0.620s] [INFO ] [syscall] ipc_close_port succeeded: port_id=Port(265), caller=9
+[t=0.620s] [INFO ] [userspace] fileman: registering with compositor
+[t=0.620s] [INFO ] [userspace] fileman: surface received
+[t=0.620s] [INFO ] [syscall] shared_region_map(region=3, virt=0x0, flags=0x3)
+[t=0.620s] [INFO ] [syscall] shared_region_map: current_cr3=0x1672000 caller_pml4=0x1672000 match=true
+[t=0.620s] [INFO ] [userspace] fileman: entering main loop
+[t=0.620s] [WARN ] [ipc] Deadlock detection prevented 9 from blocking on Port(266)
+[t=0.620s] [INFO ] [userspace] fsd: failed to parse message header, ignoring
+[t=0.890s] [INFO ] [syscall] shared_region_unmap(region=3)
+[t=0.890s] [WARN ] [syscall] shared_region_unmap: failed - NotMapped
+[t=0.890s] [INFO ] [syscall] shared_region_destroy(region=3)
+[t=0.890s] [WARN ] [syscall] shared_region_destroy: failed - RegionInUse
+[t=0.960s] [INFO ] [syscall] shared_region_unmap(region=2)
+[t=0.960s] [WARN ] [syscall] shared_region_unmap: failed - NotMapped
+[t=0.960s] [INFO ] [syscall] shared_region_destroy(region=2)
+[t=0.960s] [WARN ] [syscall] shared_region_destroy: failed - RegionInUse
+[t=0.960s] [INFO ] [userspace] Terminal: Received terminate request

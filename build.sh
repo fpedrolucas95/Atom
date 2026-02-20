@@ -435,7 +435,7 @@ else
 fi
 
 rm -f build/handlers.obj
-if nasm -f win64 kernel/src/interrupts/handlers.asm -o build/handlers.obj 2>build/nasm_handlers.log; then
+if nasm -f win64 -i kernel/src/interrupts/ kernel/src/interrupts/handlers.asm -o build/handlers.obj 2>build/nasm_handlers.log; then
     success "handlers.obj criado"
 else
     error "Falha ao montar handlers.asm"

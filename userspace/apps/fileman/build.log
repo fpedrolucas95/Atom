@@ -1,5 +1,10 @@
+   Compiling compiler_builtins v0.1.160 (/Users/fpedrolucas95/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/Users/fpedrolucas95/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core)
+   Compiling alloc v0.0.0 (/Users/fpedrolucas95/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc)
+   Compiling atom_abi v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/shared/abi)
+   Compiling atom_syscall v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall)
 warning: unused import: `ToString`
-  --> /app/userspace/libs/syscall/src/fs.rs:26:29
+  --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/fs.rs:26:29
    |
 26 | use alloc::string::{String, ToString};
    |                             ^^^^^^^^
@@ -7,7 +12,7 @@ warning: unused import: `ToString`
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `tag`
-  --> /app/userspace/libs/syscall/src/debug.rs:16:19
+  --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/debug.rs:16:19
    |
 16 | pub fn log_tagged(tag: &str, message: &str) {
    |                   ^^^ help: if this is intentional, prefix it with an underscore: `_tag`
@@ -15,7 +20,7 @@ warning: unused variable: `tag`
    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: creating a mutable reference to mutable static
-   --> /app/userspace/libs/syscall/src/input.rs:234:13
+   --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/input.rs:234:13
     |
 234 |             DRIVER.init();
     |             ^^^^^^^^^^^^^ mutable reference to mutable static
@@ -25,7 +30,7 @@ warning: creating a mutable reference to mutable static
     = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
 
 warning: creating a mutable reference to mutable static
-   --> /app/userspace/libs/syscall/src/input.rs:237:9
+   --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/input.rs:237:9
     |
 237 |         DRIVER.poll_event().map(|e| (e.dx, e.dy))
     |         ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
@@ -33,16 +38,18 @@ warning: creating a mutable reference to mutable static
     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
 
-warning: `atom_syscall` (lib) generated 4 warnings (run `cargo fix --lib -p atom_syscall` to apply 2 suggestions)
+   Compiling libipc v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/libipc)
 warning: unused import: `alloc::vec::Vec`
-  --> /app/userspace/libs/libipc/src/lib.rs:30:5
+  --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/libipc/src/lib.rs:30:5
    |
 30 | use alloc::vec::Vec;
    |     ^^^^^^^^^^^^^^^
    |
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
+warning: `atom_syscall` (lib) generated 4 warnings (run `cargo fix --lib -p atom_syscall` to apply 2 suggestions)
 warning: `libipc` (lib) generated 1 warning (run `cargo fix --lib -p libipc` to apply 1 suggestion)
+   Compiling fileman v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/userspace/apps/fileman)
 warning: unused import: `ToString`
   --> src/main.rs:17:29
    |
@@ -60,7 +67,7 @@ warning: unused import: `core::arch::asm`
 warning: unused variable: `col_date_x`
    --> src/main.rs:767:13
     |
-767 |         let col_date_x = sw.saturating_sub(40);   // placeholder
+767 |         let col_date_x = sw.saturating_sub(40);...
     |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_col_date_x`
     |
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
@@ -71,7 +78,7 @@ warning: associated constant `HOVER_BG` is never used
 110 | impl Theme {
     | ---------- associated constant in this implementation
 ...
-117 |     const HOVER_BG:    Color = Color::new(42, 48, 60);
+117 |     const HOVER_BG:    Color = Color::new(42, 4...
     |           ^^^^^^^^
     |
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
@@ -105,7 +112,7 @@ warning: variants `WrongArgCount`, `UnknownCommand`, `MissingArg`, and `Conflict
 29 |     WrongArgCount { expected: usize, got: usize },
    |     ^^^^^^^^^^^^^
 30 |     /// Unknown command
-31 |     UnknownCommand(usize), // stores length of command string
+31 |     UnknownCommand(usize), // stores length of c...
    |     ^^^^^^^^^^^^^^
 32 |     /// Missing required argument
 33 |     MissingArg(&'static str),
@@ -128,7 +135,7 @@ warning: method `exit_code` is never used
 warning: function `normalize_path` is never used
    --> src/error.rs:160:8
     |
-160 | pub fn normalize_path(path: &str) -> Result<alloc::string::String> {
+160 | pub fn normalize_path(path: &str) -> Result<all...
     |        ^^^^^^^^^^^^^^
 
 warning: variants `WriteOnly` and `ReadWrite` are never constructed
@@ -153,13 +160,13 @@ warning: associated items `create`, `read_all`, `write`, `seek`, `stat`, and `fd
  47 |     pub fn create(path: &str) -> Result<Self> {
     |            ^^^^^^
 ...
- 69 |     pub fn read_all(&mut self) -> Result<Vec<u8>> {
+ 69 |     pub fn read_all(&mut self) -> Result<Vec<u8...
     |            ^^^^^^^^
 ...
- 87 |     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
+ 87 |     pub fn write(&mut self, buf: &[u8]) -> Resu...
     |            ^^^^^
 ...
- 93 |     pub fn seek(&mut self, offset: i64, whence: u32) -> Result<u64> {
+ 93 |     pub fn seek(&mut self, offset: i64, whence:...
     |            ^^^^
 ...
  99 |     pub fn stat(&self) -> Result<fs::FsStat> {
@@ -238,4 +245,4 @@ warning: associated functions `exists` and `is_file` are never used
     |            ^^^^^^^
 
 warning: `fileman` (bin "fileman") generated 16 warnings (run `cargo fix --bin "fileman" -p fileman` to apply 3 suggestions)
-    Finished `release` profile [optimized] target(s) in 0.07s
+    Finished `release` profile [optimized] target(s) in 5.87s
