@@ -49,3 +49,4 @@ tools/elf2atxf/build.log
 # Userspace build logs
 userspace/drivers/*/build.log
 userspace/services/*/build.log
+disk.img

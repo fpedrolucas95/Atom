@@ -8,6 +8,7 @@ description = "Atom OS userspace terminal emulator"
 [workspace]
 
 [dependencies]
+atom_abi = { path = "../../../shared/abi" }
 atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
 

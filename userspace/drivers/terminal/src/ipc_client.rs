@@ -9,9 +9,12 @@
 // - Requests are sent as structured messages
 // - Responses are received and decoded
 
-use atom_syscall::ipc::{create_port, close_port, send, recv, try_recv, send_async, PortId};
-use atom_syscall::error::SyscallResult;
+use atom_syscall::ipc::{create_port, close_port, send, recv_with_timeout, PortId};
 use atom_syscall::thread::get_ticks;
+use atom_abi::PORT_FS_SERVICE;
+
+extern crate alloc;
+use alloc::vec::Vec;
 
 /// Message types for IPC communication
 #[repr(u8)]
@@ -53,14 +56,14 @@ pub enum MessageType {
 }
 
 /// Well-known service port IDs
-/// In a real implementation, these would be discovered via a name service
+/// These must match the ports defined in atom_abi and libipc ports.rs
 pub mod service_ports {
     use super::PortId;
 
-    pub const SERVICE_MANAGER: PortId = 1;
-    pub const PROCESS_MANAGER: PortId = 2;
-    pub const MEMORY_MANAGER: PortId = 3;
-    pub const FILESYSTEM: PortId = 4;
+    pub const NAME_SERVICE: PortId = 1;        // namesvc (Port 1)
+    pub const SERVICE_MANAGER: PortId = 2;     // service_manager (Port 2)
+    pub const FILESYSTEM: PortId = 3;          // fsd (Port 3)
+    pub const BLOCK_SERVICE: PortId = 4;       // block service (Port 4)
     pub const DISPLAY_SERVER: PortId = 5;
     pub const INPUT_SERVER: PortId = 6;
 }
@@ -242,84 +245,127 @@ impl IpcClient {
         }
     }
 
-    /// List directory contents
-    /// For virtual directories (/proc, /sys), returns system information
-    /// For other paths, returns standard directory structure
+    /// List directory contents via IPC to filesystem daemon
+    /// Sends FsReaddir request to PORT_FS_SERVICE and parses real directory entries
     pub fn list_directory<F>(&self, path: &str, mut callback: F)
     where
         F: FnMut(&str, bool, u64), // name, is_dir, size
     {
+        // First check if it's a virtual directory handled by the kernel
+        if self.try_list_virtual_directory(path, &mut callback) {
+            return;
+        }
+
+        // Try to list via filesystem daemon
+        if let Err(_) = self.list_directory_ipc(path, &mut callback) {
+            // Fall back to empty if IPC fails
+        }
+    }
+
+    /// Check if this is a virtual directory and list from kernel
+    fn try_list_virtual_directory<F>(&self, path: &str, callback: &mut F) -> bool
+    where
+        F: FnMut(&str, bool, u64), // name, is_dir, size
+    {
         match path {
-            "/" => {
-                // Root directory structure
-                callback("bin", true, 0);
-                callback("etc", true, 0);
-                callback("dev", true, 0);
-                callback("sys", true, 0);
-                callback("proc", true, 0);
-                callback("home", true, 0);
-            }
             "/proc" => {
-                // Process information directory
                 use atom_syscall::process::{ProcessInfo, list_processes};
                 let mut buffer = [ProcessInfo::empty(); 32];
                 let count = list_processes(&mut buffer);
 
-                // Each process gets a directory named by its PID
                 for i in 0..count {
-                    // Create a static string for the PID
                     let pid = buffer[i].pid;
-                    // Use a simple approach - just show as numbered entries
                     if pid < 10 {
                         let digit = b'0' + pid as u8;
-                        let name = unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&digit)) };
+                        let name = unsafe {
+                            core::str::from_utf8_unchecked(core::slice::from_ref(&digit))
+                        };
                         callback(name, true, 0);
                     }
                 }
                 callback("meminfo", false, 128);
                 callback("version", false, 64);
                 callback("uptime", false, 32);
+                true
             }
-            "/sys" => {
-                // System information directory
-                callback("kernel", true, 0);
-                callback("memory", true, 0);
-                callback("devices", true, 0);
-            }
-            "/dev" => {
-                // Device nodes
-                callback("null", false, 0);
-                callback("zero", false, 0);
-                callback("fb0", false, 0);
-                callback("tty0", false, 0);
-                callback("kbd", false, 0);
-                callback("mouse", false, 0);
-            }
-            "/bin" => {
-                // Executables (drivers)
-                callback("terminal", false, 0);
-                callback("display", false, 0);
-                callback("keyboard", false, 0);
-                callback("mouse", false, 0);
-                callback("ui_shell", false, 0);
-            }
-            "/etc" => {
-                // Configuration files
-                callback("hostname", false, 32);
-                callback("version", false, 64);
-            }
-            "/home" => {
-                callback("user", true, 0);
-            }
-            _ => {
-                // Unknown path - return empty
-            }
+            _ => false,
         }
+    }
+
+    /// List directory via IPC to filesystem daemon
+    fn list_directory_ipc<F>(&self, path: &str, callback: &mut F) -> Result<(), &'static str>
+    where
+        F: FnMut(&str, bool, u64), // name, is_dir, size
+    {
+        use libipc::messages::{MessageHeader, MessageType, FsReply, FsDirentIter};
+
+        if path.len() > 4096 {
+            return Err("path too long");
+        }
+
+        // Get response port
+        let response_port = self.response_port.ok_or("no response port")?;
+
+        // Build FsReaddir request: path_len (4 bytes) + path (variable)
+        let mut request = Vec::new();
+        request.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        request.extend_from_slice(path.as_bytes());
+
+        // Build message: header + payload
+        let header = MessageHeader::new(MessageType::FsReaddir, request.len() as u32);
+        let mut message = Vec::new();
+        message.extend_from_slice(&header.to_bytes());
+        message.extend_from_slice(&request);
+
+        // Send to filesystem daemon (fsd on PORT_FS_SERVICE)
+        send(PORT_FS_SERVICE, &message).map_err(|_| "send failed")?;
+
+        // Wait for response with timeout (5 seconds = 5000ms)
+        let mut response_buf = [0u8; 4096];
+        let resp_len = recv_with_timeout(response_port, &mut response_buf, 5000)
+            .map_err(|_| "recv timeout or error")?;
+
+        // Parse response header
+        if resp_len < 16 {
+            return Err("response too short");
+        }
+
+        let header = MessageHeader::from_bytes(&response_buf[..16])
+            .ok_or("invalid header")?;
+
+        if header.msg_type != MessageType::FsReaddirReply {
+            return Err("wrong message type in reply");
+        }
+
+        // Parse FsReply (16 bytes: error + value)
+        let reply = FsReply::from_bytes(&response_buf[16..32])
+            .ok_or("invalid fs reply")?;
+
+        if !reply.is_ok() {
+            return Err("fs operation failed");
+        }
+
+        // Parse directory entries from payload
+        let payload = &response_buf[32..resp_len];
+        let iter = FsDirentIter::new(payload);
+
+        for entry in iter {
+            let is_dir = entry.file_type == 2; // EXT2_FT_DIR
+            callback(&entry.name, is_dir, 0);
+        }
+
+        Ok(())
     }
 
     /// Read file contents
     /// For virtual files in /proc and /sys, returns system information
+    /// Real filesystem reads will be implemented once fsd is fully functional
     pub fn read_file(&self, path: &str, buffer: &mut [u8]) -> Option<usize> {
+        self.read_virtual_file(path, buffer)
+    }
+
+    /// Read virtual files from kernel information
+    fn read_virtual_file(&self, path: &str, buffer: &mut [u8]) -> Option<usize> {
         match path {
             "/proc/version" | "/etc/version" => {
                 let content = b"OS:           Atom OS 0.1.0 (Helium)\nKernel:       0.1.0-microkernel\n";
@@ -327,35 +373,65 @@ impl IpcClient {
                 buffer[..copy_len].copy_from_slice(&content[..copy_len]);
                 return Some(copy_len);
             }
-            _ => {}
-        }
-
-        let content: &[u8] = match path {
+            "/etc/hostname" => {
+                let content = b"atom\n";
+                let copy_len = content.len().min(buffer.len());
+                buffer[..copy_len].copy_from_slice(&content[..copy_len]);
+                return Some(copy_len);
+            }
+            "/dev/null" => {
+                return Some(0);
+            }
             "/proc/meminfo" => {
-                // Get real memory info
                 let (total_kb, free_kb) = atom_syscall::debug::get_memory_info();
                 let used_kb = total_kb.saturating_sub(free_kb);
 
-                // Format memory info into buffer
                 let mut pos = 0;
                 let prefix = b"MemTotal:  ";
+                if pos + prefix.len() > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + prefix.len()].copy_from_slice(prefix);
                 pos += prefix.len();
-                pos += format_number_to_buffer(total_kb, &mut buffer[pos..]);
+
+                let written = format_number_to_buffer(total_kb, &mut buffer[pos..]);
+                pos += written;
+
+                if pos + 4 > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + 4].copy_from_slice(b" kB\n");
                 pos += 4;
 
                 let prefix = b"MemFree:   ";
+                if pos + prefix.len() > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + prefix.len()].copy_from_slice(prefix);
                 pos += prefix.len();
-                pos += format_number_to_buffer(free_kb, &mut buffer[pos..]);
+
+                let written = format_number_to_buffer(free_kb, &mut buffer[pos..]);
+                pos += written;
+
+                if pos + 4 > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + 4].copy_from_slice(b" kB\n");
                 pos += 4;
 
                 let prefix = b"MemUsed:   ";
+                if pos + prefix.len() > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + prefix.len()].copy_from_slice(prefix);
                 pos += prefix.len();
-                pos += format_number_to_buffer(used_kb, &mut buffer[pos..]);
+
+                let written = format_number_to_buffer(used_kb, &mut buffer[pos..]);
+                pos += written;
+
+                if pos + 4 > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + 4].copy_from_slice(b" kB\n");
                 pos += 4;
 
@@ -367,25 +443,69 @@ impl IpcClient {
 
                 let mut pos = 0;
                 pos += format_number_to_buffer(seconds, &mut buffer[pos..]);
+
+                if pos + 3 > buffer.len() {
+                    return None;
+                }
                 buffer[pos..pos + 3].copy_from_slice(b" s\n");
                 pos += 3;
 
                 return Some(pos);
             }
-            "/etc/hostname" => b"atom\n",
-            "/dev/null" => b"",
-            _ => return None,
-        };
-
-        let copy_len = content.len().min(buffer.len());
-        buffer[..copy_len].copy_from_slice(&content[..copy_len]);
-        Some(copy_len)
+            _ => None,
+        }
     }
 
-    /// Get file information
-    pub fn stat_file(&self, _path: &str) -> Option<FileInfo> {
-        // Would query FILESYSTEM service
-        None
+    /// Get file information via IPC to filesystem daemon
+    /// Returns file metadata (size, is_dir, timestamps)
+    /// Note: Requires fsd to be fully operational
+    pub fn stat_file(&self, path: &str) -> Option<FileInfo> {
+        use libipc::messages::{MessageHeader, MessageType, FsReply, FsStatBuf};
+
+        if path.len() > 4096 {
+            return None;
+        }
+
+        let response_port = self.response_port?;
+
+        // Build FsStat request: path_len (4 bytes) + path (variable)
+        let mut request = alloc::vec::Vec::new();
+        request.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        request.extend_from_slice(path.as_bytes());
+
+        // Build message header + payload
+        let header = MessageHeader::new(MessageType::FsStat, request.len() as u32);
+        let mut message = alloc::vec::Vec::new();
+        message.extend_from_slice(&header.to_bytes());
+        message.extend_from_slice(&request);
+
+        // Send to filesystem daemon (fsd on PORT_FS_SERVICE)
+        send(PORT_FS_SERVICE, &message).ok()?;
+
+        // Wait for response with timeout
+        let mut response_buf = [0u8; 4096];
+        let resp_len = recv_with_timeout(response_port, &mut response_buf, 5000).ok()?;
+
+        // Parse response: header (16 bytes) + FsReply (16 bytes) + FsStatBuf (80 bytes)
+        if resp_len < 32 + FsStatBuf::SIZE {
+            return None;
+        }
+
+        // Skip header, parse FsReply
+        let reply = FsReply::from_bytes(&response_buf[16..32])?;
+        if !reply.is_ok() {
+            return None;
+        }
+
+        // Parse stat structure
+        let stat = FsStatBuf::from_bytes(&response_buf[32..32 + FsStatBuf::SIZE])?;
+
+        Some(FileInfo {
+            size: stat.size,
+            is_dir: (stat.mode & 0o40000) != 0,
+            created: stat.ctime_ns,
+            modified: stat.mtime_ns,
+        })
     }
 
     /// Read system log entries from kernel log buffer

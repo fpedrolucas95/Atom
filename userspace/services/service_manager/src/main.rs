@@ -630,13 +630,20 @@ fn main() -> ! {
 
     // Create our IPC port with the reserved well-known ID (Port 2)
     let port = match atom_syscall::ipc::create_port_with_id(SERVICE_MANAGER_PORT) {
-        Ok(p) => p,
+        Ok(p) => {
+            atom_syscall::debug::log("svcmgr: created port with reserved ID 2");
+            p
+        }
         Err(_) => {
-            atom_syscall::debug::log("svcmgr: WARN - reserved Port(2) failed, using dynamic port");
+            atom_syscall::debug::log("svcmgr: WARN - reserved Port(2) busy, using dynamic port allocation");
             match atom_syscall::ipc::create_port() {
-                Ok(p) => p,
+                Ok(p) => {
+                    let msg = alloc::format!("svcmgr: allocated dynamic port {}", p);
+                    atom_syscall::debug::log(&msg);
+                    p
+                }
                 Err(_) => {
-                    atom_syscall::debug::log("svcmgr: failed to create port");
+                    atom_syscall::debug::log("svcmgr: FATAL - failed to create any port, exiting");
                     loop {
                         atom_syscall::thread::sleep_ms(1000);
                     }
@@ -645,7 +652,7 @@ fn main() -> ! {
         }
     };
 
-    atom_syscall::debug::log("svcmgr: port created");
+    atom_syscall::debug::log("svcmgr: service port ready, initializing services");
 
     // Initialize and start default services
     init_default_services();

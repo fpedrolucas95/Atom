@@ -87,6 +87,29 @@ pub fn recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<usize> {
     }
 }
 
+/// Receive a message from a port with timeout
+///
+/// Waits up to timeout_ms milliseconds for a message.
+/// Returns the number of bytes received.
+pub fn recv_with_timeout(port: PortId, buffer: &mut [u8], timeout_ms: u64) -> SyscallResult<usize> {
+    // Arguments: port, buffer_ptr, buffer_len, timeout_ms
+    let result = unsafe {
+        syscall4(SYS_IPC_RECV, port, buffer.as_mut_ptr() as u64, buffer.len() as u64, timeout_ms)
+    };
+
+    if crate::error::is_syscall_error(result) {
+        if result == EWOULDBLOCK {
+            Err(SyscallError::WouldBlock)
+        } else if result == ETIMEDOUT {
+            Err(SyscallError::TimedOut)
+        } else {
+            Err(SyscallError::InvalidArgument)
+        }
+    } else {
+        Ok(result as usize)
+    }
+}
+
 /// Try to receive a message without blocking
 ///
 /// Returns None if no message is available.

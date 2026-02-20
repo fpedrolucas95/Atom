@@ -22,7 +22,9 @@ pub mod ipc;
 pub mod debug;
 pub mod error;
 pub mod process;
+pub mod fs;
 
 // Re-export common types at crate root
 pub use error::{SyscallError, SyscallResult};
 pub use raw::{syscall0, syscall1, syscall2, syscall3};
+pub use fs::{FsError, FsResult, FsStat, FsStatvfs, FsDirent, OpenFlags, FileType as FsFileType};

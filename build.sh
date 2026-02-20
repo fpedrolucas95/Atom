@@ -108,6 +108,13 @@ USERSPACE_SERVICES=(
     "init"
     "namesvc"
     "service_manager"
+    "fsd"
+)
+
+# Userspace applications
+USERSPACE_APPS=(
+    "fileman"
+    "fs_test"
 )
 
 # =========================================================================
@@ -306,6 +313,53 @@ if [ "$KERNEL_ONLY" != true ]; then
             popd > /dev/null
             warning "$service service failed to build"
             cat "$service_path/build.log" 2>/dev/null || true
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # Build userspace applications and convert to ATXF
+    # -------------------------------------------------------------------------
+    step "Building userspace applications..."
+
+    for app in "${USERSPACE_APPS[@]}"; do
+        app_path="userspace/apps/$app"
+
+        if [ ! -f "$app_path/Cargo.toml" ]; then
+            warning "App $app not found, skipping..."
+            continue
+        fi
+
+        step "  Building $app application..."
+        pushd "$app_path" > /dev/null
+
+        if cargo build --release 2>build.log; then
+            popd > /dev/null
+
+            # Find the ELF binary name from Cargo.toml
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$app_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$app")
+            if [ -z "$bin_name" ]; then
+                bin_name="$app"
+            fi
+
+            elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/drivers/${app}.atxf"
+
+            if [ -f "$elf_path" ]; then
+                step "  Converting $app to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                    success "$app.atxf created"
+                else
+                    warning "Failed to convert $app to ATXF"
+                    cat build/elf2atxf_$app.log
+                fi
+            else
+                warning "ELF not found at $elf_path - app may not compile to UEFI target"
+                warning "If this is a userspace app, it might need separate handling"
+            fi
+        else
+            popd > /dev/null
+            warning "$app application failed to build"
+            cat "$app_path/build.log" 2>/dev/null || true
         fi
     done
 

@@ -213,6 +213,23 @@ pub enum ResourceType {
     InputDevice {
         device_type: InputDeviceType,
     },
+        /// Filesystem namespace root — grants access to a mounted filesystem tree.
+    /// READ = read files/dirs; WRITE = create/modify; GRANT = sub-delegation.
+    FsNamespace {
+        namespace_id: u64,
+    },
+    /// Directory capability — scoped access to a directory subtree.
+    /// Derived from FsNamespace or another FsDir (requires GRANT on parent).
+    FsDir {
+        namespace_id: u64,
+        inode: u64,
+    },
+    /// File capability — access to a specific regular file inode.
+    /// Derived from FsNamespace or FsDir; carries READ/WRITE/EXECUTE perms.
+    FsFile {
+        namespace_id: u64,
+        inode: u64,
+    },
 }
 
 /// Type of input device for capability granting
@@ -455,7 +472,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 9];
+        let mut by_type = [0usize; 12];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -468,6 +485,9 @@ impl CapabilityManager {
                 ResourceType::SharedMemoryRegion { .. } => 6,
                 ResourceType::Framebuffer { .. } => 7,
                 ResourceType::InputDevice { .. } => 8,
+                ResourceType::FsNamespace { .. } => 9,
+                ResourceType::FsDir { .. } => 10,
+                ResourceType::FsFile { .. } => 11,
             };
             by_type[idx] += 1;
         }
@@ -482,6 +502,9 @@ impl CapabilityManager {
             dma_caps: by_type[5],
             framebuffer_caps: by_type[7],
             input_caps: by_type[8],
+            fs_namespace_caps: by_type[9],
+            fs_dir_caps: by_type[10],
+            fs_file_caps: by_type[11],
         }
     }
 }
@@ -497,6 +520,9 @@ pub struct CapabilityStats {
     pub dma_caps: usize,
     pub framebuffer_caps: usize,
     pub input_caps: usize,
+    pub fs_namespace_caps: usize,
+    pub fs_dir_caps: usize,
+    pub fs_file_caps: usize,
 }
 
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();

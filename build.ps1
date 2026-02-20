@@ -36,7 +36,14 @@ $USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shel
 $USERSPACE_SERVICES = @(
     "init",
     "namesvc",
-    "service_manager"
+    "service_manager",
+    "fsd"
+)
+
+# Userspace applications
+$USERSPACE_APPS = @(
+    "fileman",
+    "fs_test"
 )
 
 # -------------------------------------------------------------------------
@@ -211,6 +218,67 @@ if (-not $Kernel) {
     # Services
     foreach ($service in $USERSPACE_SERVICES) {
         Build-And-Convert "userspace\services\$service" "service"
+    }
+
+    # Applications (userspace)
+    Write-Step "Compilando aplicações userspace..."
+    foreach ($app in $USERSPACE_APPS) {
+        $appPath = "userspace\apps\$app"
+        
+        if (-not (Test-Path "$appPath\Cargo.toml")) {
+            Write-Warning "Aplicação $app não encontrada, pulando..."
+            continue
+        }
+
+        Write-Step "Compilando aplicação $app..."
+        Push-Location $appPath
+        cargo build --release *> "$REPO_PATH\build.log"
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-Warning "Falha ao compilar aplicação $app"
+            Get-Content "$REPO_PATH\build.log" -Tail 20 | Write-Host
+            continue
+        }
+        Pop-Location
+
+        # Descobrir nome do binário a partir de Cargo.toml
+        $cargoContent = Get-Content "$appPath\Cargo.toml" -Raw
+
+        # Tentativa 1: procura name dentro de [[bin]]
+        if ($cargoContent -match '(?smi)\[\[bin\]\].*?name\s*=\s*"(.*?)"') {
+            $binName = $Matches[1].Trim()
+        }
+        # Tentativa 2: fallback para qualquer name = "..."
+        elseif ($cargoContent -match '(?smi)name\s*=\s*"(.*?)"') {
+            $binName = $Matches[1].Trim()
+        }
+        # Último fallback: nome da pasta
+        else {
+            $binName = Split-Path $appPath -Leaf
+        }
+
+        # Apps compile as x86_64-unknown-none like drivers/services
+        $elfPath = "$appPath\target\x86_64-unknown-none\release\$binName"
+
+        $appName = Split-Path $appPath -Leaf
+        $atxfPath = "efi\drivers\$appName.atxf"
+
+        if (Test-Path $elfPath) {
+            Write-Step "Convertendo $appName para ATXF..."
+            $elf2atxfFull = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
+            if (-not $elf2atxfFull) { Write-ErrorMsg "elf2atxf.exe não encontrado" }
+
+            & $elf2atxfFull "$elfPath" "$atxfPath" *> "$REPO_PATH\build.log"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Falha ao converter $appName para ATXF"
+                Get-Content "$REPO_PATH\build.log" | Write-Host
+            } else {
+                Write-Success "$appName.atxf criado"
+            }
+        } else {
+            Write-Warning "Binário ELF não encontrado para $appName em $elfPath"
+            Write-Warning "Apps userspace podem não compilar para UEFI - verifique configuração"
+        }
     }
 
     # Instalar init.atxf como payload de boot (PID 1)

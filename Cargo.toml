@@ -10,6 +10,8 @@ members = [
 # quando o loader de executaveis estiver pronto.
 # Por enquanto, o kernel usa um shell embutido (shell.rs).
 exclude = [
+    "userspace/apps/fileman",
+    "userspace/apps/fs_test",
     "userspace/drivers/keyboard",
     "userspace/drivers/mouse",
     "userspace/drivers/display",
@@ -20,6 +22,7 @@ exclude = [
     "userspace/services/init",
     "userspace/services/namesvc",
     "userspace/services/service_manager",
+    "userspace/services/fsd",
 ]
 resolver = "2"
 

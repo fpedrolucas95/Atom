@@ -533,17 +533,24 @@ impl Compositor {
 
         let mut icons = Vec::new();
         icons.push(DesktopIcon {
+            label: String::from("File Manager"),
+            executable: String::from("terminal"),
+            x: 24,
+            y: PANEL_HEIGHT as i32 + 24,
+            color: Color::new(143, 188, 187),
+        });
+        icons.push(DesktopIcon {
             label: String::from("Rect Demo"),
             executable: String::from("demo_rects"),
             x: 24,
-            y: PANEL_HEIGHT as i32 + 24,
+            y: PANEL_HEIGHT as i32 + 120,
             color: Color::new(136, 192, 208),
         });
         icons.push(DesktopIcon {
             label: String::from("Text Demo"),
             executable: String::from("demo_text"),
             x: 24,
-            y: PANEL_HEIGHT as i32 + 120,
+            y: PANEL_HEIGHT as i32 + 216,
             color: Color::new(163, 190, 140),
         });
 

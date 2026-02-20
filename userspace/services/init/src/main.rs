@@ -203,6 +203,38 @@ fn boot_sequence() {
     log("[Phase 1] Core services ready");
 
     // -----------------------------------------------------------------------
+    // Phase 1.5: Filesystem service (CRITICAL)
+    // -----------------------------------------------------------------------
+    log("");
+    log("[Phase 1.5] Spawning filesystem daemon (fsd)...");
+    
+    let fsd_pid = match spawn_service("fsd") {
+        Some(pid) => {
+            log("[Phase 1.5] FSD spawned with PID ");
+            // Note: Can't directly log u64, would need custom formatter
+            log("(check service_manager for details)");
+            pid
+        }
+        None => {
+            log("[Phase 1.5] CRITICAL ERROR: Failed to spawn fsd after retries");
+            log("[Phase 1.5] System cannot boot without filesystem service");
+            panic!("fsd spawn failed");
+        }
+    };
+
+    // Wait for fsd to register with service_manager and become ready
+    // Timeout: 5 seconds (handled by wait_for_service)
+    let fsd_ready = wait_for_service("fsd");
+    if !fsd_ready {
+        log("[Phase 1.5] CRITICAL ERROR: fsd did not register within timeout");
+        log("[Phase 1.5] Filesystem operations will fail");
+        log("[Phase 1.5] Boot cannot continue without filesystem service");
+        panic!("fsd readiness timeout");
+    }
+
+    log("[Phase 1.5] Filesystem service ready and operational");
+
+    // -----------------------------------------------------------------------
     // Phase 2: UI shell (compositor)
     // -----------------------------------------------------------------------
     log("");

@@ -1,0 +1,180 @@
+   Compiling compiler_builtins v0.1.160 (/Users/fpedrolucas95/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/Users/fpedrolucas95/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core)
+   Compiling alloc v0.0.0 (/Users/fpedrolucas95/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc)
+   Compiling atom_abi v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/shared/abi)
+   Compiling atom_syscall v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall)
+warning: unused import: `ToString`
+  --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/fs.rs:26:29
+   |
+26 | use alloc::string::{String, ToString};
+   |                             ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tag`
+  --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/debug.rs:16:19
+   |
+16 | pub fn log_tagged(tag: &str, message: &str) {
+   |                   ^^^ help: if this is intentional, prefix it with an underscore: `_tag`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/input.rs:234:13
+    |
+234 |             DRIVER.init();
+    |             ^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /Users/fpedrolucas95/Documents/GitHub/Atom/userspace/libs/syscall/src/input.rs:237:9
+    |
+237 |         DRIVER.poll_event().map(|e| (e.dx, e.dy))
+    |         ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `atom_syscall` (lib) generated 4 warnings (run `cargo fix --lib -p atom_syscall` to apply 2 suggestions)
+   Compiling fileman v0.1.0 (/Users/fpedrolucas95/Documents/GitHub/Atom/userspace/apps/fileman)
+warning: function `read_line` is never used
+   --> src/main.rs:117:4
+    |
+117 | fn read_line() -> String {
+    |    ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variants `IO` and `CrossDevice` are never constructed
+  --> src/error.rs:17:5
+   |
+11 | pub enum FilManagerError {
+   |          --------------- variants in this enum
+...
+17 |     IO,
+   |     ^^
+...
+23 |     CrossDevice,
+   |     ^^^^^^^^^^^
+   |
+   = note: `FilManagerError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `ConflictingOptions` is never constructed
+  --> src/error.rs:35:5
+   |
+27 | pub enum CommandError {
+   |          ------------ variant in this enum
+...
+35 |     ConflictingOptions,
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `CommandError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `exit_code` is never used
+  --> src/error.rs:45:12
+   |
+38 | impl FilManagerError {
+   | -------------------- method in this implementation
+...
+45 |     pub fn exit_code(&self) -> u32 {
+   |            ^^^^^^^^^
+
+warning: variants `WriteOnly` and `ReadWrite` are never constructed
+  --> src/fs.rs:16:5
+   |
+14 | pub enum FileMode {
+   |          -------- variants in this enum
+15 |     ReadOnly,
+16 |     WriteOnly,
+   |     ^^^^^^^^^
+17 |     ReadWrite,
+   |     ^^^^^^^^^
+   |
+   = note: `FileMode` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `create`, `write`, `seek`, `stat`, and `fd` are never used
+   --> src/fs.rs:47:12
+    |
+ 35 | impl File {
+    | --------- associated items in this implementation
+...
+ 47 |     pub fn create(path: &str) -> Result<Self> {
+    |            ^^^^^^
+...
+ 87 |     pub fn write(&mut self, buf: &[u8]) -> Resu...
+    |            ^^^^^
+...
+ 93 |     pub fn seek(&mut self, offset: i64, whence:...
+    |            ^^^^
+...
+ 99 |     pub fn stat(&self) -> Result<fs::FsStat> {
+    |            ^^^^
+...
+104 |     pub fn fd(&self) -> u64 {
+    |            ^^
+
+warning: field `position` is never read
+   --> src/fs.rs:120:5
+    |
+116 | pub struct Dir {
+    |            --- field in this struct
+...
+120 |     position: usize,
+    |     ^^^^^^^^
+
+warning: methods `path` and `fd` are never used
+   --> src/fs.rs:189:12
+    |
+123 | impl Dir {
+    | -------- methods in this implementation
+...
+189 |     pub fn path(&self) -> &str {
+    |            ^^^^
+...
+193 |     pub fn fd(&self) -> u64 {
+    |            ^^
+
+warning: field `mode` is never read
+   --> src/fs.rs:208:9
+    |
+204 | pub struct DirEntry {
+    |            -------- field in this struct
+...
+208 |     pub mode: u32,
+    |         ^^^^
+
+warning: methods `is_file`, `is_symlink`, `type_char`, and `mode_string` are never used
+   --> src/fs.rs:216:12
+    |
+211 | impl DirEntry {
+    | ------------- methods in this implementation
+...
+216 |     pub fn is_file(&self) -> bool {
+    |            ^^^^^^^
+...
+220 |     pub fn is_symlink(&self) -> bool {
+    |            ^^^^^^^^^^
+...
+224 |     pub fn type_char(&self) -> char {
+    |            ^^^^^^^^^
+...
+245 |     pub fn mode_string(&self) -> String {
+    |            ^^^^^^^^^^^
+
+warning: associated functions `exists` and `is_file` are never used
+   --> src/fs.rs:277:12
+    |
+275 | impl FsQuery {
+    | ------------ associated functions in this implementation
+276 |     /// Check if path exists
+277 |     pub fn exists(path: &str) -> Result<bool> {
+    |            ^^^^^^
+...
+311 |     pub fn is_file(path: &str) -> Result<bool> {
+    |            ^^^^^^^
+
+warning: `fileman` (bin "fileman") generated 11 warnings
+    Finished `release` profile [optimized] target(s) in 5.57s

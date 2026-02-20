@@ -60,6 +60,32 @@ pub mod numbers {
     pub const SYS_MOUSE_GET_ID: u64 = 50;
     pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51;
     pub const SYS_GET_CPU_BRAND: u64 = 52;
+
+    // Filesystem syscalls (53-76)
+    pub const SYS_FS_OPEN:     u64 = 53;
+    pub const SYS_FS_CLOSE:    u64 = 54;
+    pub const SYS_FS_READ:     u64 = 55;
+    pub const SYS_FS_WRITE:    u64 = 56;
+    pub const SYS_FS_SEEK:     u64 = 57;
+    pub const SYS_FS_STAT:     u64 = 58;
+    pub const SYS_FS_FSTAT:    u64 = 59;
+    pub const SYS_FS_MKDIR:    u64 = 60;
+    pub const SYS_FS_RMDIR:    u64 = 61;
+    pub const SYS_FS_UNLINK:   u64 = 62;
+    pub const SYS_FS_RENAME:   u64 = 63;
+    pub const SYS_FS_READDIR:  u64 = 64;
+    pub const SYS_FS_TRUNCATE: u64 = 65;
+    pub const SYS_FS_FSYNC:    u64 = 66;
+    pub const SYS_FS_MOUNT:    u64 = 67;
+    pub const SYS_FS_UMOUNT:   u64 = 68;
+    pub const SYS_FS_CHMOD:    u64 = 69;
+    pub const SYS_FS_DUP:      u64 = 70;
+    pub const SYS_FS_DUP2:     u64 = 71;
+    pub const SYS_FS_LINK:     u64 = 72;
+    pub const SYS_FS_SYMLINK:  u64 = 73;
+    pub const SYS_FS_READLINK: u64 = 74;
+    pub const SYS_FS_UTIMES:   u64 = 75;
+    pub const SYS_FS_STATVFS:  u64 = 76;
 }
 
 /// Raw syscall with no arguments

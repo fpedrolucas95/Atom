@@ -849,6 +849,23 @@ pub fn get_stats() -> SharedMemStats {
     SHARED_MEM_MANAGER.get_stats()
 }
 
+/// Return the physical address of the first page of a region.
+///
+/// The kernel uses this to access region data via the identity map
+/// (`phys_to_virt_ptr`) without needing to map the region into any
+/// user-space address space.  This is safe only from kernel context.
+pub fn region_first_phys(region_id: RegionId) -> Option<usize> {
+    let mgr = SHARED_MEM_MANAGER.regions.lock();
+    mgr.get(&region_id)
+        .and_then(|r| r.physical_pages.first().copied())
+}
+
+/// Return the size (bytes) of a shared region without acquiring region_info.
+pub fn region_size(region_id: RegionId) -> Option<usize> {
+    let mgr = SHARED_MEM_MANAGER.regions.lock();
+    mgr.get(&region_id).map(|r| r.size)
+}
+
 /// Resolve a thread's PML4 physical address into an `Option<usize>`.
 ///
 /// Returns `None` if the thread uses the kernel's own PML4 (address_space == 0

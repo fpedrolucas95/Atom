@@ -1,0 +1,15 @@
+[package]
+name = "fsd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Filesystem Daemon - Handles filesystem operations via IPC"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+atom_abi = { path = "../../../shared/abi" }
+libipc = { path = "../../libs/libipc" }
+
+[[bin]]
+name = "fsd"
+path = "src/main.rs"

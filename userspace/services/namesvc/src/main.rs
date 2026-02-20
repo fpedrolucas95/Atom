@@ -71,6 +71,34 @@ mod allocator {
 
 const MAX_SERVICES: usize = 64;
 const MAX_NAME_LEN: usize = 32;
+const MAX_PENDING_LOOKUPS: usize = 32;
+
+/// Represents a lookup request that arrived before the service was registered
+#[derive(Clone)]
+struct PendingLookup {
+    name: [u8; MAX_NAME_LEN],
+    name_len: usize,
+    reply_port: u64,
+    active: bool,
+}
+
+impl PendingLookup {
+    const fn empty() -> Self {
+        Self {
+            name: [0; MAX_NAME_LEN],
+            name_len: 0,
+            reply_port: 0,
+            active: false,
+        }
+    }
+
+    fn matches_name(&self, name: &str) -> bool {
+        if !self.active || name.len() != self.name_len {
+            return false;
+        }
+        &self.name[..self.name_len] == name.as_bytes()
+    }
+}
 
 #[derive(Clone)]
 struct ServiceEntry {
@@ -148,6 +176,58 @@ impl NameRegistry {
 
 static mut REGISTRY: NameRegistry = NameRegistry::new();
 
+/// Queue of pending lookup requests (waiting for services to register)
+struct PendingQueue {
+    lookups: [PendingLookup; MAX_PENDING_LOOKUPS],
+}
+
+impl PendingQueue {
+    const fn new() -> Self {
+        const EMPTY: PendingLookup = PendingLookup::empty();
+        Self {
+            lookups: [EMPTY; MAX_PENDING_LOOKUPS],
+        }
+    }
+
+    /// Add a pending lookup request
+    fn add(&mut self, name: &str, reply_port: u64) -> Result<(), &'static str> {
+        if name.len() > MAX_NAME_LEN {
+            return Err("name too long");
+        }
+
+        for lookup in self.lookups.iter_mut() {
+            if !lookup.active {
+                lookup.name[..name.len()].copy_from_slice(name.as_bytes());
+                lookup.name_len = name.len();
+                lookup.reply_port = reply_port;
+                lookup.active = true;
+                return Ok(());
+            }
+        }
+
+        Err("pending queue full")
+    }
+
+    /// Get all pending lookups for a service name and mark them inactive
+    fn get_and_clear(&mut self, name: &str) -> [Option<u64>; MAX_PENDING_LOOKUPS] {
+        let mut results = [None; MAX_PENDING_LOOKUPS];
+        let mut idx = 0;
+
+        for lookup in self.lookups.iter_mut() {
+            if lookup.active && lookup.matches_name(name) {
+                results[idx] = Some(lookup.reply_port);
+                idx += 1;
+                lookup.active = false;
+            }
+        }
+
+        results
+    }
+}
+
+static mut PENDING_QUEUE: PendingQueue = PendingQueue::new();
+
+
 // ============================================================================
 // Main Service Loop
 // ============================================================================
@@ -164,15 +244,51 @@ fn handle_request(header: MessageHeader, payload: &[u8]) {
                 atom_syscall::debug::log("namesvc: registering service");
                 let name = name_to_str(&msg.name);
                 let _ = unsafe { REGISTRY.register(name, msg.port) };
+
+                // Check if there are any pending lookups for this service
+                let pending = unsafe { PENDING_QUEUE.get_and_clear(name) };
+                for reply_port_opt in pending.iter() {
+                    if let Some(reply_port) = reply_port_opt {
+                        let resp = NsResponseMsg { port: msg.port };
+                        let _ = send_message(*reply_port, MessageType::NsResponse, &resp.to_bytes());
+                        let debug_msg = alloc::format!(
+                            "namesvc: responded to pending lookup for '{}' with port {}",
+                            name, msg.port
+                        );
+                        atom_syscall::debug::log(&debug_msg);
+                    }
+                }
             }
         }
         MessageType::NsLookup => {
             if let Some(msg) = NsLookupMsg::from_bytes(payload) {
                 atom_syscall::debug::log("namesvc: lookup service");
                 let name = name_to_str(&msg.name);
-                let found_port = unsafe { REGISTRY.lookup(name) }.unwrap_or(0);
-                let resp = NsResponseMsg { port: found_port };
-                let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
+
+                // Try immediate lookup
+                if let Some(found_port) = unsafe { REGISTRY.lookup(name) } {
+                    let resp = NsResponseMsg { port: found_port };
+                    let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
+                    let debug_msg = alloc::format!(
+                        "namesvc: immediate lookup for '{}' returned port {}",
+                        name, found_port
+                    );
+                    atom_syscall::debug::log(&debug_msg);
+                } else {
+                    // Service not found - add to pending queue
+                    if unsafe { PENDING_QUEUE.add(name, msg.reply_port) }.is_ok() {
+                        let debug_msg = alloc::format!(
+                            "namesvc: lookup for '{}' queued as pending",
+                            name
+                        );
+                        atom_syscall::debug::log(&debug_msg);
+                    } else {
+                        // Queue full - respond with error
+                        let resp = NsResponseMsg { port: 0 };
+                        let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
+                        atom_syscall::debug::log("namesvc: pending queue full, returning error");
+                    }
+                }
             }
         }
         _ => {}
@@ -189,18 +305,25 @@ fn main() -> ! {
     // This uses create_port_with_id() for deterministic assignment instead of
     // relying on being the first process to call create_port().
     let port = match atom_syscall::ipc::create_port_with_id(1) {
-        Ok(p) => p,
+        Ok(p) => {
+            atom_syscall::debug::log("namesvc: created port with reserved ID 1");
+            p
+        }
         Err(_) => {
             // Fallback: try regular create_port if reserved allocation fails
-            atom_syscall::debug::log("namesvc: WARN - reserved Port(1) failed, using dynamic port");
+            atom_syscall::debug::log("namesvc: WARN - reserved Port(1) busy, using dynamic port allocation");
             match atom_syscall::ipc::create_port() {
-                Ok(p) => p,
+                Ok(p) => {
+                    let msg = alloc::format!("namesvc: allocated dynamic port {}", p);
+                    atom_syscall::debug::log(&msg);
+                    p
+                }
                 Err(_) => loop { atom_syscall::thread::sleep_ms(1000); }
             }
         }
     };
 
-    atom_syscall::debug::log("namesvc: started on Port(1)");
+    atom_syscall::debug::log("namesvc: service port ready, entering main loop");
 
     // Self-register
     unsafe {

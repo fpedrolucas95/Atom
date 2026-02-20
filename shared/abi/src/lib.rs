@@ -50,6 +50,30 @@ pub const EWOULDBLOCK: u64 = u64::MAX - 8;
 pub const EDEADLK: u64 = u64::MAX - 9;
 pub const ENOTFOUND: u64 = u64::MAX - 10;
 
+// Filesystem error codes
+pub const ENOENT: u64 = u64::MAX - 11;
+pub const EEXIST: u64 = u64::MAX - 12;
+pub const EISDIR: u64 = u64::MAX - 13;
+pub const ENOTDIR: u64 = u64::MAX - 14;
+pub const ENOTEMPTY: u64 = u64::MAX - 15;
+pub const EBADF: u64 = u64::MAX - 16;
+pub const EFBIG: u64 = u64::MAX - 17;
+pub const ENOSPC: u64 = u64::MAX - 18;
+pub const EROFS: u64 = u64::MAX - 19;
+pub const ENAMETOOLONG: u64 = u64::MAX - 20;
+pub const EIO: u64 = u64::MAX - 21;
+pub const EACCES: u64 = u64::MAX - 22;
+pub const EMFILE: u64 = u64::MAX - 23;
+pub const EOVERFLOW: u64 = u64::MAX - 24;
+pub const ECORRUPTED: u64 = u64::MAX - 25;
+pub const EMLINK: u64 = u64::MAX - 26;
+pub const EXDEV: u64 = u64::MAX - 27;
+pub const EPIPE: u64 = u64::MAX - 28;
+pub const ENOTSUP: u64 = u64::MAX - 29;
+pub const EAGAIN: u64 = u64::MAX - 30;
+pub const EINTR: u64 = u64::MAX - 31;
+pub const E2BIG: u64 = u64::MAX - 32;
+
 /// Check whether a raw syscall return value represents an error code.
 ///
 /// This is the **single authoritative way** to distinguish error returns
@@ -59,3 +83,60 @@ pub const ENOTFOUND: u64 = u64::MAX - 10;
 pub fn is_syscall_error(value: u64) -> bool {
     value >= SYSCALL_ERROR_THRESHOLD
 }
+
+// ---------------------------------------------------------------------------
+// IPC Port constants
+// ---------------------------------------------------------------------------
+
+/// Well-known ports for system services:
+/// Port 1 = NAME_SERVICE (namesvc)
+/// Port 2 = SERVICE_MANAGER (service_manager)
+/// Port 3 = FS_SERVICE (fsd - Filesystem Daemon)
+pub const PORT_FS_SERVICE: u64 = 3;
+pub const PORT_BLOCK_SERVICE: u64 = 4;
+
+// ---------------------------------------------------------------------------
+// Filesystem limits
+// ---------------------------------------------------------------------------
+
+pub const FS_MAX_PATH_LEN: usize = 4096;
+pub const FS_MAX_NAME_LEN: usize = 256;
+pub const FS_MAX_FDS: usize = 1024;
+
+// ---------------------------------------------------------------------------
+// File open flags (O_* constants)
+// ---------------------------------------------------------------------------
+
+pub const O_RDONLY: u32 = 0x0000;
+pub const O_WRONLY: u32 = 0x0001;
+pub const O_RDWR: u32 = 0x0002;
+pub const O_CREAT: u32 = 0x0040;
+pub const O_EXCL: u32 = 0x0080;
+pub const O_TRUNC: u32 = 0x0200;
+pub const O_APPEND: u32 = 0x0400;
+pub const O_NONBLOCK: u32 = 0x0800;
+pub const O_SYNC: u32 = 0x1000;
+pub const O_DIRECTORY: u32 = 0x10000;
+pub const O_NOFOLLOW: u32 = 0x20000;
+pub const O_CLOEXEC: u32 = 0x80000;
+
+// ---------------------------------------------------------------------------
+// Seek constants
+// ---------------------------------------------------------------------------
+
+pub const SEEK_SET: u32 = 0;
+pub const SEEK_CUR: u32 = 1;
+pub const SEEK_END: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// File type masks (S_* constants for stat)
+// ---------------------------------------------------------------------------
+
+pub const S_IFMT: u32 = 0o170000;
+pub const S_IFREG: u32 = 0o100000;
+pub const S_IFDIR: u32 = 0o040000;
+pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFBLK: u32 = 0o060000;
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFIFO: u32 = 0o010000;
+pub const S_IFSOCK: u32 = 0o140000;

@@ -121,10 +121,68 @@ pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
 pub const SYS_GET_CPU_BRAND: u64 = 52; // Get CPU brand string
 
+/// open(path_ptr, path_len, flags, mode) -> fd (u64 handle)
+pub const SYS_FS_OPEN: u64 = 53;
+/// close(fd)
+pub const SYS_FS_CLOSE: u64 = 54;
+/// read(fd, buf_ptr, len) -> bytes_read
+pub const SYS_FS_READ: u64 = 55;
+/// write(fd, buf_ptr, len) -> bytes_written
+pub const SYS_FS_WRITE: u64 = 56;
+/// lseek(fd, offset, whence) -> new_offset
+pub const SYS_FS_SEEK: u64 = 57;
+/// stat(path_ptr, path_len, stat_ptr) -> 0 | errno
+pub const SYS_FS_STAT: u64 = 58;
+/// fstat(fd, stat_ptr) -> 0 | errno
+pub const SYS_FS_FSTAT: u64 = 59;
+/// mkdir(path_ptr, path_len, mode) -> 0 | errno
+pub const SYS_FS_MKDIR: u64 = 60;
+/// rmdir(path_ptr, path_len) -> 0 | errno
+pub const SYS_FS_RMDIR: u64 = 61;
+/// unlink(path_ptr, path_len) -> 0 | errno
+pub const SYS_FS_UNLINK: u64 = 62;
+/// rename(old_ptr, old_len, new_ptr, new_len) -> 0 | errno
+pub const SYS_FS_RENAME: u64 = 63;
+/// readdir(fd, dent_ptr, buf_len) -> entries_read | errno
+pub const SYS_FS_READDIR: u64 = 64;
+/// truncate(fd, new_size) -> 0 | errno
+pub const SYS_FS_TRUNCATE: u64 = 65;
+/// fsync(fd) -> 0 | errno
+pub const SYS_FS_FSYNC: u64 = 66;
+/// mount(dev_path_ptr, dev_path_len, mnt_ptr, mnt_len, fstype_ptr, fstype_len, flags) -> 0 | errno
+pub const SYS_FS_MOUNT: u64 = 67;
+/// umount(path_ptr, path_len) -> 0 | errno
+pub const SYS_FS_UMOUNT: u64 = 68;
+/// chmod(path_ptr, path_len, mode) -> 0 | errno
+pub const SYS_FS_CHMOD: u64 = 69;
+/// dup(fd) -> new_fd | errno
+pub const SYS_FS_DUP: u64 = 70;
+/// dup2(oldfd, newfd) -> newfd | errno
+pub const SYS_FS_DUP2: u64 = 71;
+/// link(old_ptr, old_len, new_ptr, new_len) -> 0 | errno (hard link)
+pub const SYS_FS_LINK: u64 = 72;
+/// symlink(target_ptr, target_len, link_ptr, link_len) -> 0 | errno
+pub const SYS_FS_SYMLINK: u64 = 73;
+/// readlink(path_ptr, path_len, buf_ptr, buf_len) -> bytes_read | errno
+pub const SYS_FS_READLINK: u64 = 74;
+/// utimes(path_ptr, path_len, atime_ns, mtime_ns) -> 0 | errno
+pub const SYS_FS_UTIMES: u64 = 75;
+/// statvfs(path_ptr, path_len, stat_ptr) -> 0 | errno
+pub const SYS_FS_STATVFS: u64 = 76;
+
 // Error codes — re-exported from the shared ABI crate (single source of truth).
 pub use atom_abi::{
     ESUCCESS, EINVAL, ENOSYS, ENOMEM, EPERM, EBUSY,
     EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
+    // Filesystem error codes
+    ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY, EBADF,
+    EFBIG, ENOSPC, EROFS, ENAMETOOLONG, EIO, EACCES,
+    EMFILE, EOVERFLOW, ECORRUPTED, EMLINK, EXDEV, EPIPE,
+    ENOTSUP, EAGAIN, EINTR, E2BIG,
+    // Port constants
+    PORT_FS_SERVICE, PORT_BLOCK_SERVICE,
+    // FS limits
+    FS_MAX_PATH_LEN, FS_MAX_NAME_LEN, FS_MAX_FDS,
 };
 
 extern "C" {
@@ -279,6 +337,33 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0 as *mut u8, arg1 as usize),
+
+
+        // Filesystem syscalls — forwarded to fsd via IPC
+        SYS_FS_OPEN     => sys_fs_open(arg0, arg1 as usize, arg2 as u32, arg3 as u32),
+        SYS_FS_CLOSE    => sys_fs_close(arg0),
+        SYS_FS_READ     => sys_fs_read(arg0, arg1, arg2 as usize),
+        SYS_FS_WRITE    => sys_fs_write(arg0, arg1, arg2 as usize),
+        SYS_FS_SEEK     => sys_fs_seek(arg0, arg1 as i64, arg2 as u32),
+        SYS_FS_STAT     => sys_fs_stat(arg0, arg1 as usize, arg2),
+        SYS_FS_FSTAT    => sys_fs_fstat(arg0, arg1),
+        SYS_FS_MKDIR    => sys_fs_mkdir(arg0, arg1 as usize, arg2 as u32),
+        SYS_FS_RMDIR    => sys_fs_rmdir(arg0, arg1 as usize),
+        SYS_FS_UNLINK   => sys_fs_unlink(arg0, arg1 as usize),
+        SYS_FS_RENAME   => sys_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_READDIR  => sys_fs_readdir(arg0, arg1, arg2 as usize),
+        SYS_FS_TRUNCATE => sys_fs_truncate(arg0, arg1),
+        SYS_FS_FSYNC    => sys_fs_fsync(arg0),
+        SYS_FS_MOUNT    => sys_fs_mount(arg0, arg1 as usize, arg2, arg3 as usize, arg4, arg5 as usize),
+        SYS_FS_UMOUNT   => sys_fs_umount(arg0, arg1 as usize),
+        SYS_FS_CHMOD    => sys_fs_chmod(arg0, arg1 as usize, arg2 as u32),
+        SYS_FS_DUP      => sys_fs_dup(arg0),
+        SYS_FS_DUP2     => sys_fs_dup2(arg0, arg1),
+        SYS_FS_LINK     => sys_fs_link(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_SYMLINK  => sys_fs_symlink(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_READLINK => sys_fs_readlink(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_UTIMES   => sys_fs_utimes(arg0, arg1 as usize, arg2 as i64, arg3 as i64),
+        SYS_FS_STATVFS  => sys_fs_statvfs(arg0, arg1 as usize, arg2),
 
         _ => {
             log_warn!(
@@ -3578,4 +3663,596 @@ fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
     }
 
     copy_len as u64
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem syscalls — Production-ready IPC forwarding to fsd
+// ---------------------------------------------------------------------------
+
+use alloc::vec::Vec;
+use alloc::vec;
+
+// Helper: validate userspace pointer is in canonical range
+#[inline]
+fn validate_user_pointer(ptr: u64) -> bool {
+    ptr <= atom_abi::USER_CANONICAL_MAX
+}
+
+// Helper: safely copy string from userspace
+fn copy_string_from_user(ptr: u64, len: usize) -> Result<alloc::string::String, u64> {
+    if len == 0 || len > FS_MAX_PATH_LEN {
+        return Err(ENAMETOOLONG);
+    }
+
+    if !validate_user_pointer(ptr) {
+        return Err(EINVAL);
+    }
+
+    match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(ptr as *const u8, len)
+    }) {
+        Ok(s) => Ok(alloc::string::String::from(s)),
+        Err(_) => Err(EINVAL),
+    }
+}
+
+// Helper: safely copy buffer from userspace
+fn copy_buffer_from_user(ptr: u64, len: usize, max_len: usize) -> Result<Vec<u8>, u64> {
+    if len == 0 || len > max_len {
+        return Err(EINVAL);
+    }
+
+    if !validate_user_pointer(ptr) {
+        return Err(EINVAL);
+    }
+
+    Ok(unsafe {
+        core::slice::from_raw_parts(ptr as *const u8, len).to_vec()
+    })
+}
+
+// Helper: safely write buffer to userspace
+fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
+    if src.is_empty() {
+        return Ok(());
+    }
+
+    if !validate_user_pointer(dst_ptr) {
+        return Err(EINVAL);
+    }
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr as *mut u8, src.len());
+    }
+
+    Ok(())
+}
+
+// Helper: send request to fsd and block for response
+fn send_fs_request_and_recv(req_payload: Vec<u8>) -> Result<Vec<u8>, u64> {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    if req_payload.len() > crate::ipc::MAX_MESSAGE_SIZE {
+        return Err(EMSGSIZE);
+    }
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return Err(EINVAL),
+    };
+
+    // Create reply port to receive response
+    let reply_port = crate::ipc::create_port(caller);
+    
+    // Build request message with reply port ID in first 8 bytes
+    let mut request = Vec::with_capacity(8 + req_payload.len());
+    request.extend_from_slice(&reply_port.raw().to_le_bytes());
+    request.extend_from_slice(&req_payload);
+
+    // Send to fsd
+    let fsd_port = crate::ipc::PortId::from_raw(PORT_FS_SERVICE);
+    let msg = crate::ipc::Message::new(caller, 1, request);
+
+    match crate::ipc::send_message(fsd_port, msg) {
+        Ok(_) => {
+            log_debug!(LOG_ORIGIN, "fs request sent to fsd (reply_port={})", reply_port);
+        }
+        Err(e) => {
+            let _ = crate::ipc::close_port(reply_port, caller);
+            log_warn!(LOG_ORIGIN, "fs request send failed: {:?}", e);
+            return Err(EIO);
+        }
+    }
+
+    // Block waiting for response
+    match crate::ipc::block_receive(
+        reply_port,
+        caller,
+        crate::thread::ThreadPriority::Normal,
+        Some(crate::interrupts::get_ticks() + 5000), // 50s timeout
+    ) {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = crate::ipc::close_port(reply_port, caller);
+            return Err(ETIMEDOUT);
+        }
+    }
+
+    // Perform context switch and wait for response
+    crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
+    loop {
+        let (prev, next) = crate::sched::on_timer_tick();
+        if let (Some(prev_id), Some(next_id)) = (prev, next) {
+            if prev_id != next_id {
+                crate::sched::perform_context_switch(prev_id, next_id);
+            }
+        }
+
+        crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
+
+        match crate::ipc::try_receive_message(reply_port, caller) {
+            Ok(Some(response)) => {
+                let _ = crate::ipc::close_port(reply_port, caller);
+                crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
+                return Ok(response.payload);
+            }
+            Ok(None) => {
+                // No message yet, continue waiting
+                crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
+                continue;
+            }
+            Err(_) => {
+                let _ = crate::ipc::close_port(reply_port, caller);
+                return Err(EIO);
+            }
+        }
+    }
+}
+
+// Helper: parse error code from response (first u64 in response)
+fn parse_error_response(response: &[u8]) -> u64 {
+    if response.len() >= 8 {
+        u64::from_le_bytes([
+            response[0], response[1], response[2], response[3],
+            response[4], response[5], response[6], response[7],
+        ])
+    } else {
+        EIO
+    }
+}
+
+/// Open a file
+fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, mode: u32) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_open(path_len={}, flags={:#x}, mode={:#x})", path_len, flags, mode);
+
+    // Validate and copy path from userspace
+    let path = match copy_string_from_user(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => {
+            log_warn!(LOG_ORIGIN, "path validation failed: {:#x}", e);
+            return e;
+        }
+    };
+
+    // Build request: [path_len(4) | path_bytes | flags(4) | mode(4)]
+    let mut req = Vec::with_capacity(4 + path.len() + 8);
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+    req.extend_from_slice(&flags.to_le_bytes());
+    req.extend_from_slice(&mode.to_le_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => {
+            if response.len() >= 16 {
+                // Response: [error(8) | fd(8)]
+                let error = u64::from_le_bytes([
+                    response[0], response[1], response[2], response[3],
+                    response[4], response[5], response[6], response[7],
+                ]);
+                if error == 0 {
+                    let fd = u64::from_le_bytes([
+                        response[8], response[9], response[10], response[11],
+                        response[12], response[13], response[14], response[15],
+                    ]);
+                    log_debug!(LOG_ORIGIN, "sys_fs_open succeeded: fd={}", fd);
+                    return fd;
+                }
+                return error;
+            }
+            EIO
+        }
+        Err(e) => e,
+    }
+}
+
+/// Close a file descriptor
+fn sys_fs_close(fd: u64) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_close(fd={})", fd);
+
+    // Build request: [fd(8)]
+    let req = fd.to_le_bytes().to_vec();
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => {
+            parse_error_response(&response)
+        }
+        Err(e) => e,
+    }
+}
+
+/// Read from file descriptor
+fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_read(fd={}, count={})", fd, count);
+
+    if count == 0 || count > 65536 {
+        return EINVAL;
+    }
+
+    if !validate_user_pointer(buf_ptr) {
+        return EINVAL;
+    }
+
+    // Build request: [fd(8) | count(8)]
+    let mut req = Vec::with_capacity(16);
+    req.extend_from_slice(&fd.to_le_bytes());
+    req.extend_from_slice(&(count as u64).to_le_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => {
+            if response.len() < 16 {
+                return EIO;
+            }
+
+            let error = u64::from_le_bytes([
+                response[0], response[1], response[2], response[3],
+                response[4], response[5], response[6], response[7],
+            ]);
+
+            if error != 0 {
+                return error;
+            }
+
+            let bytes_read = u64::from_le_bytes([
+                response[8], response[9], response[10], response[11],
+                response[12], response[13], response[14], response[15],
+            ]) as usize;
+
+            if bytes_read > count || 16 + bytes_read > response.len() {
+                log_warn!(LOG_ORIGIN, "invalid read response: bytes_read={} > {}", bytes_read, count);
+                return EIO;
+            }
+
+            // Copy data to userspace
+            if let Err(e) = write_buffer_to_user(buf_ptr, &response[16..16 + bytes_read]) {
+                return e;
+            }
+
+            bytes_read as u64
+        }
+        Err(e) => e,
+    }
+}
+
+/// Write to file descriptor
+fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_write(fd={}, count={})", fd, count);
+
+    if count == 0 || count > 65536 {
+        return EINVAL;
+    }
+
+    // Copy write buffer from userspace
+    let buf = match copy_buffer_from_user(buf_ptr, count, 65536) {
+        Ok(b) => b,
+        Err(e) => {
+            log_warn!(LOG_ORIGIN, "write buffer copy failed: {:#x}", e);
+            return e;
+        }
+    };
+
+    // Build request: [fd(8) | count(8) | data]
+    let mut req = Vec::with_capacity(16 + buf.len());
+    req.extend_from_slice(&fd.to_le_bytes());
+    req.extend_from_slice(&(buf.len() as u64).to_le_bytes());
+    req.extend_from_slice(&buf);
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => {
+            if response.len() < 16 {
+                return EIO;
+            }
+
+            let error = u64::from_le_bytes([
+                response[0], response[1], response[2], response[3],
+                response[4], response[5], response[6], response[7],
+            ]);
+
+            if error != 0 {
+                return error;
+            }
+
+            let bytes_written = u64::from_le_bytes([
+                response[8], response[9], response[10], response[11],
+                response[12], response[13], response[14], response[15],
+            ]);
+
+            if bytes_written > count as u64 {
+                log_warn!(LOG_ORIGIN, "invalid write response: bytes_written={} > {}", bytes_written, count);
+                return EIO;
+            }
+
+            log_debug!(LOG_ORIGIN, "sys_fs_write succeeded: wrote={} bytes", bytes_written);
+            bytes_written
+        }
+        Err(e) => e,
+    }
+}
+
+/// Get file status
+fn sys_fs_stat(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_stat(path_len={})", path_len);
+
+    let path = match copy_string_from_user(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    if !validate_user_pointer(stat_ptr) {
+        return EINVAL;
+    }
+
+    // Build request: [path_len(4) | path_bytes]
+    let mut req = Vec::with_capacity(4 + path.len());
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => {
+            if response.len() < 8 {
+                return EIO;
+            }
+
+            let error = u64::from_le_bytes([
+                response[0], response[1], response[2], response[3],
+                response[4], response[5], response[6], response[7],
+            ]);
+
+            if error != 0 {
+                return error;
+            }
+
+            // Stat structure is typically 128 bytes; copy to userspace
+            let stat_size = core::cmp::min(128, response.len() - 8);
+            if let Err(e) = write_buffer_to_user(stat_ptr, &response[8..8 + stat_size]) {
+                return e;
+            }
+
+            ESUCCESS
+        }
+        Err(e) => e,
+    }
+}
+
+/// Read directory
+fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_readdir(dirfd={}, count={})", dirfd, count);
+
+    if count == 0 || count > 4096 {
+        return EINVAL;
+    }
+
+    if !validate_user_pointer(dirent_ptr) {
+        return EINVAL;
+    }
+
+    // Build request: [dirfd(8) | count(8)]
+    let mut req = Vec::with_capacity(16);
+    req.extend_from_slice(&dirfd.to_le_bytes());
+    req.extend_from_slice(&(count as u64).to_le_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => {
+            if response.len() < 16 {
+                return EIO;
+            }
+
+            let error = u64::from_le_bytes([
+                response[0], response[1], response[2], response[3],
+                response[4], response[5], response[6], response[7],
+            ]);
+
+            if error != 0 {
+                return error;
+            }
+
+            let dirent_size = u64::from_le_bytes([
+                response[8], response[9], response[10], response[11],
+                response[12], response[13], response[14], response[15],
+            ]) as usize;
+
+            if dirent_size > count || 16 + dirent_size > response.len() {
+                log_warn!(LOG_ORIGIN, "invalid readdir response: size={} > {}", dirent_size, count);
+                return EIO;
+            }
+
+            if let Err(e) = write_buffer_to_user(dirent_ptr, &response[16..16 + dirent_size]) {
+                return e;
+            }
+
+            dirent_size as u64
+        }
+        Err(e) => e,
+    }
+}
+
+/// Create directory
+fn sys_fs_mkdir(path_ptr: u64, path_len: usize, mode: u32) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_mkdir(path_len={}, mode={:#x})", path_len, mode);
+
+    let path = match copy_string_from_user(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    // Build request: [path_len(4) | path_bytes | mode(4)]
+    let mut req = Vec::with_capacity(4 + path.len() + 4);
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+    req.extend_from_slice(&mode.to_le_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => parse_error_response(&response),
+        Err(e) => e,
+    }
+}
+
+/// Unlink (delete) file
+fn sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_unlink(path_len={})", path_len);
+
+    let path = match copy_string_from_user(path_ptr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    // Build request: [path_len(4) | path_bytes]
+    let mut req = Vec::with_capacity(4 + path.len());
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => parse_error_response(&response),
+        Err(e) => e,
+    }
+}
+
+/// Rename file
+fn sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_rename(old_len={}, new_len={})", old_path_len, new_path_len);
+
+    let old_path = match copy_string_from_user(old_path_ptr, old_path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let new_path = match copy_string_from_user(new_path_ptr, new_path_len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    // Build request: [old_len(4) | old_path | new_len(4) | new_path]
+    let mut req = Vec::with_capacity(8 + old_path.len() + new_path.len());
+    req.extend_from_slice(&(old_path.len() as u32).to_le_bytes());
+    req.extend_from_slice(old_path.as_bytes());
+    req.extend_from_slice(&(new_path.len() as u32).to_le_bytes());
+    req.extend_from_slice(new_path.as_bytes());
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => parse_error_response(&response),
+        Err(e) => e,
+    }
+}
+
+/// Synchronize file to disk
+fn sys_fs_fsync(fd: u64) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    log_debug!(LOG_ORIGIN, "sys_fs_fsync(fd={})", fd);
+
+    let req = fd.to_le_bytes().to_vec();
+
+    match send_fs_request_and_recv(req) {
+        Ok(response) => parse_error_response(&response),
+        Err(e) => e,
+    }
+}
+
+// Stub implementations for remaining syscalls (not in priority list)
+
+/// Seek in file descriptor
+fn sys_fs_seek(_fd: u64, _offset: i64, _whence: u32) -> u64 {
+    ENOTSUP
+}
+
+/// Get file status by descriptor
+fn sys_fs_fstat(_fd: u64, _stat_ptr: u64) -> u64 {
+    ENOTSUP
+}
+
+/// Remove directory
+fn sys_fs_rmdir(_path_ptr: u64, _path_len: usize) -> u64 {
+    ENOTSUP
+}
+
+/// Truncate file
+fn sys_fs_truncate(_path_ptr: u64, _length: u64) -> u64 {
+    ENOTSUP
+}
+
+/// Mount filesystem
+fn sys_fs_mount(_source_ptr: u64, _source_len: usize, _target_ptr: u64, _target_len: usize, _fstype_ptr: u64, _fstype_len: usize) -> u64 {
+    ENOTSUP
+}
+
+/// Unmount filesystem
+fn sys_fs_umount(_path_ptr: u64, _path_len: usize) -> u64 {
+    ENOTSUP
+}
+
+/// Change file permissions
+fn sys_fs_chmod(_path_ptr: u64, _path_len: usize, _mode: u32) -> u64 {
+    ENOTSUP
+}
+
+/// Duplicate file descriptor
+fn sys_fs_dup(_fd: u64) -> u64 {
+    ENOTSUP
+}
+
+/// Duplicate file descriptor to specific number
+fn sys_fs_dup2(_oldfd: u64, _newfd: u64) -> u64 {
+    ENOTSUP
+}
+
+/// Create hard link
+fn sys_fs_link(_oldpath_ptr: u64, _oldpath_len: usize, _newpath_ptr: u64, _newpath_len: usize) -> u64 {
+    ENOTSUP
+}
+
+/// Create symbolic link
+fn sys_fs_symlink(_target_ptr: u64, _target_len: usize, _linkpath_ptr: u64, _linkpath_len: usize) -> u64 {
+    ENOTSUP
+}
+
+/// Read symbolic link
+fn sys_fs_readlink(_path_ptr: u64, _path_len: usize, _buf_ptr: u64, _buf_size: usize) -> u64 {
+    ENOTSUP
+}
+
+/// Update file times
+fn sys_fs_utimes(_path_ptr: u64, _path_len: usize, _atime: i64, _mtime: i64) -> u64 {
+    ENOTSUP
+}
+
+/// Get filesystem statistics
+fn sys_fs_statvfs(_path_ptr: u64, _path_len: usize, _buf_ptr: u64) -> u64 {
+    ENOTSUP
 }

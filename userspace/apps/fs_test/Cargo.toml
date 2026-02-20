@@ -1,0 +1,13 @@
+[package]
+name = "fs_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atom_syscall = { path = "../../../userspace/libs/syscall" }
+atom_abi = { path = "../../../shared/abi" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

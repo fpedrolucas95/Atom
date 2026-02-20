@@ -20,6 +20,12 @@ pub mod well_known {
 
     /// Service manager for lifecycle control
     pub const SERVICE_MANAGER: u64 = 2;
+
+    /// Filesystem service (fsd) for filesystem operations
+    pub const FS_SERVICE: u64 = 3;
+
+    /// Block service for block device operations
+    pub const BLOCK_SERVICE: u64 = 4;
 }
 
 /// Port configuration for a service
