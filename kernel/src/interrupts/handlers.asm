@@ -9,24 +9,12 @@ section .text
 ; External Rust handler functions
 extern rust_exception_handler
 extern rust_unexpected_interrupt_handler
+extern rust_timer_interrupt_handler
+extern rust_keyboard_interrupt_handler
+extern rust_mouse_interrupt_handler
+extern rust_user_trap_interrupt_handler
 
-; ---------------------------------------------------------------------------
-; Catch-all interrupt stubs
-; ---------------------------------------------------------------------------
-
-global unexpected_interrupt_table
-
-unexpected_interrupt_table:
-%assign vec 0
-%rep 256
-    dq unexpected_interrupt_handler_%[vec]
-%assign vec vec + 1
-%endrep
-
-; ---------------------------------------------------------------------------
-; Common handler for unexpected interrupts (vectors without a dedicated stub)
-; ---------------------------------------------------------------------------
-unexpected_common:
+%macro PUSH_ALL 0
     push rax
     push rbx
     push rcx
@@ -42,16 +30,9 @@ unexpected_common:
     push r13
     push r14
     push r15
+%endmacro
 
-    ; Windows x64 ABI: first arg in RCX, second in RDX
-    mov rcx, [rsp + 15*8]          ; vector
-    lea rdx, [rsp + 15*8 + 16]     ; &InterruptStackFrame
-
-    ; Shadow space required by Windows x64 ABI
-    sub rsp, 32
-    call rust_unexpected_interrupt_handler
-    add rsp, 32
-
+%macro POP_ALL 0
     pop r15
     pop r14
     pop r13
@@ -67,31 +48,21 @@ unexpected_common:
     pop rcx
     pop rbx
     pop rax
-
     add rsp, 16                    ; drop vector + error_code
-    iretq
-
-; ---------------------------------------------------------------------------
-; Exception handler macros
-; ---------------------------------------------------------------------------
-
-%macro EXCEPTION_HANDLER_NO_ERR 1
-global exception_handler_%1
-exception_handler_%1:
-    push qword 0          ; dummy error code
-    push qword %1         ; vector
-    jmp exception_common
 %endmacro
 
-%macro EXCEPTION_HANDLER_ERR 1
-global exception_handler_%1
-exception_handler_%1:
-    ; CPU pushed: error_code at [rsp], then RIP, CS, RFLAGS, RSP, SS
-    ; Just push vector - no swap needed!
-    ; Result: vector, error_code, RIP (correct order for InterruptFrame)
-    push qword %1
-    jmp exception_common
-%endmacro
+; ---------------------------------------------------------------------------
+; Catch-all interrupt stubs
+; ---------------------------------------------------------------------------
+
+global unexpected_interrupt_table
+
+unexpected_interrupt_table:
+%assign vec 0
+%rep 256
+    dq unexpected_interrupt_handler_%[vec]
+%assign vec vec + 1
+%endrep
 
 ; ---------------------------------------------------------------------------
 ; Unexpected interrupt handlers (no error code)
@@ -110,6 +81,91 @@ unexpected_interrupt_handler_%1:
 UNEXPECTED_INTERRUPT_HANDLER vec
 %assign vec vec + 1
 %endrep
+
+; ---------------------------------------------------------------------------
+; Common handler for unexpected interrupts (vectors without a dedicated stub)
+; ---------------------------------------------------------------------------
+unexpected_common:
+    PUSH_ALL
+
+    mov rcx, rsp           ; arg0 = InterruptFrame*
+    sub rsp, 32            ; Shadow space
+    call rust_unexpected_interrupt_handler
+    add rsp, 32
+
+    POP_ALL
+    iretq
+
+; ---------------------------------------------------------------------------
+; Exception handler macros
+; ---------------------------------------------------------------------------
+
+%macro EXCEPTION_HANDLER_NO_ERR 1
+global exception_handler_%1
+exception_handler_%1:
+    push qword 0          ; dummy error code
+    push qword %1         ; vector
+    jmp exception_common
+%endmacro
+
+%macro EXCEPTION_HANDLER_ERR 1
+global exception_handler_%1
+exception_handler_%1:
+    push qword %1
+    jmp exception_common
+%endmacro
+
+; ---------------------------------------------------------------------------
+; IRQ Handlers
+; ---------------------------------------------------------------------------
+
+global irq_handler_32
+irq_handler_32:
+    push qword 0
+    push qword 32
+    PUSH_ALL
+    mov rcx, rsp
+    sub rsp, 32
+    call rust_timer_interrupt_handler
+    add rsp, 32
+    POP_ALL
+    iretq
+
+global irq_handler_104
+irq_handler_104:
+    push qword 0
+    push qword 104
+    PUSH_ALL
+    mov rcx, rsp
+    sub rsp, 32
+    call rust_user_trap_interrupt_handler
+    add rsp, 32
+    POP_ALL
+    iretq
+
+global irq_handler_33
+irq_handler_33:
+    push qword 0
+    push qword 33
+    PUSH_ALL
+    mov rcx, rsp
+    sub rsp, 32
+    call rust_keyboard_interrupt_handler
+    add rsp, 32
+    POP_ALL
+    iretq
+
+global irq_handler_44
+irq_handler_44:
+    push qword 0
+    push qword 44
+    PUSH_ALL
+    mov rcx, rsp
+    sub rsp, 32
+    call rust_mouse_interrupt_handler
+    add rsp, 32
+    POP_ALL
+    iretq
 
 ; ---------------------------------------------------------------------------
 ; Exception handlers (0–31)
@@ -142,43 +198,12 @@ EXCEPTION_HANDLER_ERR    21   ; #CP Control Protection
 ; ---------------------------------------------------------------------------
 
 exception_common:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
+    PUSH_ALL
 
-    mov rcx, rsp           ; ✅ First arg in rcx (was rdi)
-
-    sub rsp, 32            ; Shadow space required by MS x64
+    mov rcx, rsp           ; arg0 = InterruptFrame*
+    sub rsp, 32            ; Shadow space
     call rust_exception_handler
     add rsp, 32
 
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
-    add rsp, 16                    ; drop vector + error_code
+    POP_ALL
     iretq
