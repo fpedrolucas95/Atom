@@ -75,6 +75,12 @@ mod drivers;
 // See userspace/services/ for their implementations.
 mod util;
 
+// Kernel preemptive scheduler stress test.
+// Compiled and activated only when the `stress_test` Cargo feature is set.
+// Build: cargo build -p atom-kernel --release --features stress_test
+#[cfg(feature = "stress_test")]
+mod stress_test;
+
 // Microkernel architecture: All UI components run in userspace.
 // See userspace/ for desktop environment, drivers, and applications.
 
@@ -216,6 +222,16 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     log_info!(LOG_KERNEL_INIT, "Kernel provides: syscalls, IPC, capabilities");
     log_info!(LOG_KERNEL_INIT, "Init orchestrates: services, drivers, UI");
     log_info!(LOG_KERNEL_INIT, "===========================================");
+
+    // ===================================================================
+    // STRESS TEST (optional — requires --features stress_test)
+    // ===================================================================
+    // Spawns 128 yield-intensive kernel threads plus a High-priority
+    // monitor for 5 minutes to surface latent scheduler corruption.
+    // Threads are registered here; the scheduler drives the run.
+    // The monitor restores the original timer frequency when done.
+    #[cfg(feature = "stress_test")]
+    stress_test::run();
 
     log_info!(LOG_KERNEL_INIT, "Handing over to scheduler.");
     start_scheduling();

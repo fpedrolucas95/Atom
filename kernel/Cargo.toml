@@ -14,6 +14,11 @@ test = false
 bench = false
 doctest = false
 
+[features]
+# Activates the kernel-level preemptive scheduler stress test.
+# Build: cargo build -p atom-kernel --release --features stress_test
+stress_test = []
+
 [dependencies]
 spin = "0.9"
 x86_64 = "0.14"
