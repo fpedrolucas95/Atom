@@ -119,6 +119,8 @@ pub enum TerminationReason {
     KilledByKernel { reason_code: u64 },
     /// Killed by watchdog (unresponsive, timeout, etc.)
     Watchdog { timeout_ms: u64 },
+    /// Killed by OOM killer due to memory pressure
+    OutOfMemory,
 }
 
 impl TerminationReason {
@@ -130,6 +132,7 @@ impl TerminationReason {
             TerminationReason::Exception { vector, .. } => 0xFFFF_FFFF_0000_0000 | vector,
             TerminationReason::KilledByKernel { reason_code } => 0xFFFF_FFFE_0000_0000 | reason_code,
             TerminationReason::Watchdog { .. } => 0xFFFF_FFFD_0000_0000,
+            TerminationReason::OutOfMemory => 0xFFFF_FFFC_0000_0000,
         }
     }
 
@@ -141,6 +144,7 @@ impl TerminationReason {
             TerminationReason::Exception { .. } => "exception",
             TerminationReason::KilledByKernel { .. } => "killed by kernel",
             TerminationReason::Watchdog { .. } => "watchdog timeout",
+            TerminationReason::OutOfMemory => "out of memory",
         }
     }
 }
@@ -907,6 +911,17 @@ pub fn process_count() -> usize {
     THREAD_LIST.count()
 }
 
+/// Get information about all threads for OOM killer decisions.
+/// Returns (ThreadId, name, address_space, is_userspace) for each thread.
+pub fn get_all_thread_info() -> alloc::vec::Vec<(ThreadId, &'static str, u64, bool)> {
+    let threads = THREAD_LIST.threads.lock();
+    threads
+        .iter()
+        .filter(|t| t.state != ThreadState::Exited)
+        .map(|t| (t.id, t.name, t.address_space, t.is_userspace))
+        .collect()
+}
+
 pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
     let threads = THREAD_LIST.threads.lock();
     threads
@@ -1278,6 +1293,9 @@ fn perform_final_cleanup(
     }
 
     let pages_freed = if address_space_cr3 != 0 && address_space_cr3 != current_cr3 {
+        // Destroy VMA map for this address space (must happen before freeing pages)
+        crate::mm::vma::destroy_vma_map(address_space_cr3 as usize);
+
         // Thread has its own PML4 (userspace thread)
         let user_pages = free_user_space_pages(address_space_cr3 as usize);
         log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);

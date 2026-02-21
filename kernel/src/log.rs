@@ -55,6 +55,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 const LOG_BUFFER_SIZE: usize = 8192;
 static LOG_BUFFER: Mutex<LogBuffer> = Mutex::new(LogBuffer::new());
 /// Flag to track if heap is available for allocations
+#[allow(dead_code)]
 static HEAP_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 struct LogBuffer {
@@ -140,6 +141,7 @@ pub fn init() {
 
 /// Mark that the heap is now available for allocations
 /// Call this after heap initialization
+#[allow(dead_code)]
 pub fn set_heap_available() {
     HEAP_AVAILABLE.store(true, Ordering::Release);
 }

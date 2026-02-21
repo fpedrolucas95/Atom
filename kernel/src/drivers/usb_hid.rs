@@ -1,6 +1,8 @@
 // USB HID Class Driver for Atom OS
 // Handles Keyboard and Mouse reports
 
+#![allow(dead_code)]
+
 use crate::log_info;
 
 pub const USB_CLASS_HID: u8 = 0x03;

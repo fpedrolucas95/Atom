@@ -76,7 +76,7 @@ impl ReadyQueues {
     fn pop_next(&mut self) -> Option<ThreadId> {
         // Simply pop from the highest priority non-empty queue
         for idx in (0..PRIORITY_LEVELS).rev() {
-            let mut i = 0;
+            let i = 0;
             while i < self.queues[idx].len() {
                 if let Some(id) = self.queues[idx].pop_front() {
                     if let Some(state) = thread::get_thread_state(id) {

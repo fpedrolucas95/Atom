@@ -1,6 +1,8 @@
 // xHCI (USB 3.0) Host Controller Driver for Atom OS
 // Following xHCI 1.1 Specification
 
+#![allow(dead_code)]
+
 use crate::mm::pmm;
 use crate::mm::vm::{self, PageFlags};
 use core::ptr;

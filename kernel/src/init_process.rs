@@ -53,6 +53,7 @@ pub enum InitError {
     /// No boot payload was provided by the bootloader
     NoBootPayload,
     /// The boot payload is not a valid ATXF executable
+    #[allow(dead_code)]
     InvalidExecutable(ExecError),
     /// Failed to allocate memory for the process
     MemoryAllocationFailed,
