@@ -25,8 +25,11 @@ enter_user:
 
     ; ---- jump to higher-half mirror before touching CR3 ----
     lea  rax, [rel .hh_enter]
+    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
+    jc   .skip_hh_enter         ; If so, skip adding mirror base to avoid overflow
     mov  r10, HIGHER_HALF_BASE
     add  rax, r10
+.skip_hh_enter:
     jmp  rax
 .hh_enter:
     ; Load CR3 if non-zero
@@ -67,8 +70,11 @@ enter_user_first_time:
 
     ; ---- jump to higher-half mirror before touching CR3 ----
     lea  rax, [rel .hh_first]
+    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
+    jc   .skip_hh_first
     mov  r10, HIGHER_HALF_BASE
     add  rax, r10
+.skip_hh_first:
     jmp  rax
 .hh_first:
     test r8, r8
@@ -192,8 +198,11 @@ switch_to_context:
 switch_to_context_internal:
     cli
     lea  rax, [rel .hh_switch]
+    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
+    jc   .skip_hh_switch
     mov  rcx, HIGHER_HALF_BASE
     add  rax, rcx
+.skip_hh_switch:
     jmp  rax
 .hh_switch:
     ; Load CR3
