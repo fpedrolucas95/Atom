@@ -3775,13 +3775,38 @@ fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
 /// If addr_hint is 0, the kernel chooses a suitable address.
 /// If MAP_FIXED is set, the mapping is placed exactly at addr_hint.
 ///
-/// Only MAP_ANONYMOUS | MAP_PRIVATE is supported currently.
+/// **Supported flags:** `MAP_ANONYMOUS | MAP_PRIVATE` (optionally `| MAP_FIXED`).
+/// Any other combination (e.g. `MAP_SHARED`, missing `MAP_ANONYMOUS`,
+/// or unknown flag bits) is rejected with `EINVAL`.
 fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
     use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::mm::pmm::PAGE_SIZE;
 
     let length = length as usize;
     if length == 0 {
+        return EINVAL;
+    }
+
+    // -----------------------------------------------------------------------
+    // Flag validation — reject unsupported/dangerous combinations early so
+    // user code gets a clear EINVAL rather than undefined behaviour later.
+    //
+    // Supported:  MAP_ANONYMOUS | MAP_PRIVATE  (optionally | MAP_FIXED)
+    // Unsupported: MAP_SHARED, file-backed mappings (no MAP_ANONYMOUS), or
+    //              any unknown flag bits.
+    // -----------------------------------------------------------------------
+    const KNOWN_FLAGS: u64 = atom_abi::MAP_ANONYMOUS | atom_abi::MAP_PRIVATE | atom_abi::MAP_FIXED;
+
+    // MAP_ANONYMOUS must be set — we have no fd/file backing.
+    if flags & atom_abi::MAP_ANONYMOUS == 0 {
+        return EINVAL;
+    }
+    // MAP_PRIVATE must be set — MAP_SHARED is not supported.
+    if flags & atom_abi::MAP_PRIVATE == 0 {
+        return EINVAL;
+    }
+    // Reject any flag bits we don't know about.
+    if flags & !KNOWN_FLAGS != 0 {
         return EINVAL;
     }
 

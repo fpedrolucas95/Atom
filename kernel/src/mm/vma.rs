@@ -329,17 +329,78 @@ impl VmaMap {
         self.regions.len()
     }
 
-    /// Update permissions on an existing VMA
+    /// Update permissions on all VMAs that overlap `[start, end)`.
+    ///
+    /// Supports arbitrary page-aligned ranges: VMAs only partially covered by
+    /// `[start, end)` are **split** so that only the overlapping portion
+    /// receives the new permissions while the remaining head/tail fragments
+    /// keep their original permissions.  This lets callers use the same
+    /// patterns expected of a POSIX `mprotect(2)` implementation.
+    ///
+    /// Returns `VmaError::NotFound` if no VMA overlaps the requested range,
+    /// and `VmaError::InvalidRange` if `start`/`end` are not page-aligned or
+    /// form an empty interval.
     pub fn set_permissions(&mut self, start: usize, end: usize, perms: VmaPermissions) -> Result<(), VmaError> {
-        // Find VMA that covers this range
-        let vma = self.regions.get_mut(&start).ok_or(VmaError::NotFound)?;
-
-        if vma.end != end {
-            // For now, require exact match. Splitting VMAs can be added later.
+        if start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 || start >= end {
             return Err(VmaError::InvalidRange);
         }
 
-        vma.perms = perms;
+        // Collect the keys of all VMAs that overlap [start, end).
+        let keys: alloc::vec::Vec<usize> = self
+            .regions
+            .iter()
+            .filter(|(_, vma)| vma.overlaps(start, end))
+            .map(|(k, _)| *k)
+            .collect();
+
+        if keys.is_empty() {
+            return Err(VmaError::NotFound);
+        }
+
+        for key in keys {
+            let vma = self.regions.remove(&key).unwrap();
+            self.reserved_bytes = self.reserved_bytes.saturating_sub(vma.size());
+
+            // Head fragment: [vma.start, start) — retains original permissions.
+            if vma.start < start {
+                let head = Vma {
+                    start: vma.start,
+                    end: start,
+                    perms: vma.perms,
+                    backing: vma.backing,
+                    label: vma.label,
+                };
+                self.reserved_bytes += head.size();
+                self.regions.insert(head.start, head);
+            }
+
+            // Middle fragment: [max(vma.start, start), min(vma.end, end)) — new perms.
+            let mid_start = vma.start.max(start);
+            let mid_end   = vma.end.min(end);
+            let mid = Vma {
+                start: mid_start,
+                end: mid_end,
+                perms,
+                backing: vma.backing,
+                label: vma.label,
+            };
+            self.reserved_bytes += mid.size();
+            self.regions.insert(mid.start, mid);
+
+            // Tail fragment: [end, vma.end) — retains original permissions.
+            if vma.end > end {
+                let tail = Vma {
+                    start: end,
+                    end: vma.end,
+                    perms: vma.perms,
+                    backing: vma.backing,
+                    label: vma.label,
+                };
+                self.reserved_bytes += tail.size();
+                self.regions.insert(tail.start, tail);
+            }
+        }
+
         Ok(())
     }
 }

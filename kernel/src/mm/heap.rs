@@ -234,10 +234,11 @@ impl SlabAllocator {
                 return;
             }
 
-            // Convert virtual back to physical
+            // Convert virtual back to physical via the canonical helper so
+            // that this assumption is expressed in one place (vm::virt_to_phys)
+            // and remains correct if the VA–PA mapping scheme ever changes.
             let virt_base = ptr as usize - LARGE_HEADER_SIZE;
-            // The virt address is HIGHER_HALF_BASE + phys, so:
-            let phys = virt_base - vm::HIGHER_HALF_BASE;
+            let phys = vm::virt_to_phys(virt_base);
 
             pmm::free_pages(phys, pages);
             self.large_dealloc_count += 1;

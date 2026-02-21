@@ -125,6 +125,24 @@ pub fn phys_to_virt_ptr(phys: usize) -> usize {
         phys
     }
 }
+
+/// Convert a kernel virtual address back to a physical address.
+///
+/// This is the inverse of [`phys_to_virt_ptr`].  Before `vm::init()` completes
+/// the two are identical (identity map); after init the higher-half mirror is
+/// active and `virt = HIGHER_HALF_BASE + phys`.
+///
+/// Prefer this over the raw `virt - HIGHER_HALF_BASE` arithmetic so that the
+/// VA–PA relationship is expressed in one place and callers remain correct if
+/// the mapping scheme ever changes.
+#[inline]
+pub fn virt_to_phys(virt: usize) -> usize {
+    if HIGHER_HALF_READY.load(Ordering::Relaxed) {
+        virt - HIGHER_HALF_BASE
+    } else {
+        virt
+    }
+}
 const LOG_ORIGIN: &str = "vmm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
