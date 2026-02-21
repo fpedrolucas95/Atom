@@ -103,7 +103,6 @@ USERSPACE_DRIVERS=(
     "demo_text"
 )
 
-# System services (init is PID 1 - spawns everything else)
 USERSPACE_SERVICES=(
     "init"
     "namesvc"
@@ -111,7 +110,6 @@ USERSPACE_SERVICES=(
     "fsd"
 )
 
-# Userspace applications
 USERSPACE_APPS=(
     "fileman"
     "fs_test"
@@ -204,7 +202,6 @@ if [ "$KERNEL_ONLY" != true ]; then
     # -------------------------------------------------------------------------
     step "Building elf2atxf tool..."
 
-    # Detect host triple for cross-platform build
     HOST_TRIPLE=$(rustc -vV | sed -n 's/host: //p')
 
     if ! rustup +nightly target list --installed | grep -q "x86_64-unknown-none"; then
@@ -243,7 +240,6 @@ if [ "$KERNEL_ONLY" != true ]; then
         if cargo build --release 2>build.log; then
             popd > /dev/null
 
-            # Find the ELF binary name from Cargo.toml
             bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$driver")
             if [ -z "$bin_name" ]; then
                 bin_name="$driver"
@@ -289,7 +285,6 @@ if [ "$KERNEL_ONLY" != true ]; then
         if cargo build --release 2>build.log; then
             popd > /dev/null
 
-            # Find the ELF binary name from Cargo.toml
             bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$service")
             if [ -z "$bin_name" ]; then
                 bin_name="$service"
@@ -335,7 +330,6 @@ if [ "$KERNEL_ONLY" != true ]; then
         if cargo build --release 2>build.log; then
             popd > /dev/null
 
-            # Find the ELF binary name from Cargo.toml
             bin_name=$(grep -A5 '\[\[bin\]\]' "$app_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$app")
             if [ -z "$bin_name" ]; then
                 bin_name="$app"
@@ -363,8 +357,6 @@ if [ "$KERNEL_ONLY" != true ]; then
         fi
     done
 
-    # Copy init.atxf to EFI boot directory as the boot payload (PID 1)
-    # The init process spawns: namesvc, service_manager, drivers, ui_shell, terminal
     if [ -f "efi/drivers/init.atxf" ]; then
         cp efi/drivers/init.atxf efi/EFI/BOOT/init.atxf
         success "init.atxf installed as boot payload (PID 1)"
@@ -465,7 +457,6 @@ fi
 
 step "Linkando Atom.efi..."
 
-# Find rust-lld
 RUST_LLD=$(find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
 if [ -z "$RUST_LLD" ]; then
     warning "rust-lld não encontrado, tentando lld-link..."
@@ -490,82 +481,57 @@ else
 fi
 
 # =========================================================================
-# COPIAR PARA EFI BOOT
+# GERAR IMAGEM DE DISCO (Substitui a cópia simples)
 # =========================================================================
 
-step "Copiando para efi/EFI/BOOT/BOOTX64.EFI..."
-cp build/Atom.efi efi/EFI/BOOT/BOOTX64.EFI
-success "BOOTX64.EFI atualizado"
+DISK_IMG="build/atom_disk.img"
 
-# =========================================================================
-# SUMÁRIO DO BUILD
-# =========================================================================
+step "Gerando imagem de disco real..."
 
-header "BUILD COMPLETO"
+dd if=/dev/zero of=$DISK_IMG bs=1M count=64 2>/dev/null
 
-echo "Kernel:     build/Atom.efi"
-echo "EFI Image:  efi/EFI/BOOT/BOOTX64.EFI"
-echo "Drivers:    efi/drivers/"
-echo ""
+mformat -i $DISK_IMG -F ::
 
-# Lista de drivers compilados
-if [ -d "efi/drivers" ]; then
-    drivers=$(ls efi/drivers/*.bin 2>/dev/null || true)
-    if [ -n "$drivers" ]; then
-        echo -e "${CYAN}Drivers userspace:${NC}"
-        for d in efi/drivers/*.bin; do
-            echo "  - $(basename $d)"
-        done
-        echo ""
-    fi
+mmd -i $DISK_IMG ::/EFI
+mmd -i $DISK_IMG ::/EFI/BOOT
+mmd -i $DISK_IMG ::/drivers
+
+mcopy -i $DISK_IMG build/Atom.efi ::/EFI/BOOT/BOOTX64.EFI
+
+if ls efi/drivers/*.atxf 1> /dev/null 2>&1; then
+    mcopy -i $DISK_IMG efi/drivers/*.atxf ::/drivers/
 fi
 
+if [ -f "efi/EFI/BOOT/init.atxf" ]; then
+    mcopy -i $DISK_IMG efi/EFI/BOOT/init.atxf ::/EFI/BOOT/init.atxf
+fi
+
+success "Imagem de disco criada: $DISK_IMG"
+
 # =========================================================================
-# EXECUTAR QEMU (OPCIONAL)
+# EXECUTAR QEMU
 # =========================================================================
 
 if [ "$RUN" = true ]; then
     header "QEMU"
 
-    # Encontrar OVMF
-    OVMF_PATH="/usr/share/OVMF/OVMF_CODE.fd"
+    OVMF_PATH="/usr/local/share/ovmf/OVMF_CODE.fd" 
     if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
-    fi
-    if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="ovmf/OVMF.fd"
+        OVMF_PATH="ovmf/OVMF.fd" 
     fi
 
-    if [ ! -f "$OVMF_PATH" ]; then
-        error "OVMF.fd não encontrado"
-        warning "Instale: sudo apt install ovmf"
-        exit 1
-    fi
-
-    if ! command -v qemu-system-x86_64 &> /dev/null; then
-        error "qemu-system-x86_64 não encontrado"
-        warning "Instale: sudo apt install qemu-system-x86"
-        exit 1
-    fi
-
-    step "Iniciando QEMU..."
-    echo -e "${YELLOW}Pressione Ctrl+A X para sair do QEMU${NC}"
-    echo ""
-    echo "=========================================="
-
+    step "Iniciando QEMU com imagem real..."
+    
     qemu-system-x86_64 \
         -machine q35 \
         -cpu qemu64 \
         -m 512M \
         -bios "$OVMF_PATH" \
-        -drive format=raw,file=fat:rw:efi \
+        -drive format=raw,file=$DISK_IMG \
         -device VGA \
         -usb \
         -device usb-mouse \
         -serial stdio \
         -debugcon file:serial_log.txt \
         -global isa-debugcon.iobase=0xE9
-else
-    echo -e "${YELLOW}Para testar no QEMU: ./build.sh --run${NC}"
-    echo -e "${YELLOW}Para build rápido:   ./build.sh --rust-only${NC}"
 fi
