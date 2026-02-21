@@ -1,4 +1,4 @@
-# Atom Operating System and Kernel
+# Atom Operating System
 
 <img width="912" height="744" alt="Atom Desktop Environment with Terminal" src="https://github.com/user-attachments/assets/2e9248ef-fae0-4720-a3bd-035e511b5c5d" />
 <img width="912" height="744" alt="Atom Desktop Environment with File Manager" src="https://github.com/user-attachments/assets/44b7a931-3c27-4073-83f8-1f4ce8b8b013" />
