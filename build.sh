@@ -367,7 +367,6 @@ if [ "$KERNEL_ONLY" != true ]; then
     success "Userspace build completed"
 fi
 
-# Se --userspace only, parar aqui
 if [ "$USERSPACE_ONLY" = true ]; then
     echo ""
     success "Build userspace concluído!"

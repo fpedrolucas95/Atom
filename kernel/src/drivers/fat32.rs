@@ -423,6 +423,54 @@ pub fn is_available() -> bool {
     unsafe { FS_INFO.is_some() }
 }
 
+/// File metadata returned by stat_path (no file content is read).
+pub struct FileStat {
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+/// Stat a file or directory by path — returns metadata without reading content.
+/// Much cheaper than `open()` because it only reads directory entries, not file data.
+pub fn stat_path(path: &str) -> Option<FileStat> {
+    unsafe {
+        let info = FS_INFO.as_ref()?;
+        let path = path.trim_start_matches(['/', '\\']);
+
+        // Root directory
+        if path.is_empty() {
+            return Some(FileStat { size: 0, is_dir: true });
+        }
+
+        let parts: alloc::vec::Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            return Some(FileStat { size: 0, is_dir: true });
+        }
+
+        let mut current_cluster = info.root_cluster;
+
+        for (idx, part) in parts.iter().enumerate() {
+            let entry = find_in_directory(current_cluster, part)?;
+
+            if idx == parts.len() - 1 {
+                // Target entry found — extract metadata from DirEntry
+                let is_dir = entry.attr & ATTR_DIRECTORY != 0;
+                let size = u32::from_le(entry.file_size) as u64;
+                return Some(FileStat { size, is_dir });
+            } else {
+                // Navigate into subdirectory
+                if entry.attr & ATTR_DIRECTORY == 0 {
+                    return None;
+                }
+                current_cluster =
+                    ((u16::from_le(entry.first_cluster_hi) as u32) << 16) |
+                    (u16::from_le(entry.first_cluster_lo) as u32);
+            }
+        }
+
+        None
+    }
+}
+
 /// List files in a directory (for debugging)
 pub fn list_directory(path: &str) -> Option<Vec<String>> {
     unsafe {

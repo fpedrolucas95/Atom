@@ -17,7 +17,7 @@ use std::io::{self, Write};
 const ATXF_MAGIC: u32 = 0x4154_5846; // "ATXF" in ASCII, little-endian
 const ATXF_VERSION: u16 = 1;
 const PAGE_SIZE: usize = 4096;
-const USER_BASE: u64 = 0x400000; // Expected userspace load address
+const USER_BASE: u64 = 0x800000; // Expected userspace load address (must be above kernel heap)
 
 // ELF constants
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];

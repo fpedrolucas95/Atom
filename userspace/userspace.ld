@@ -1,9 +1,10 @@
 /* Userspace Linker Script for Atom OS
  *
  * This script ensures userspace binaries are linked at the correct base
- * address (0x400000) to match where the kernel loads them.
+ * address (0x800000) to match where the kernel loads them.
  *
- * The kernel's USER_EXEC_LOAD_BASE is 0x0040_0000 (4 MiB).
+ * The kernel's USER_EXEC_LOAD_BASE is 0x0080_0000 (8 MiB).
+ * This must be above the kernel heap ceiling (~0x66A000).
  */
 
 OUTPUT_FORMAT("elf64-x86-64")
@@ -11,7 +12,7 @@ OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
 /* Base address must match kernel's USER_EXEC_LOAD_BASE */
-USER_BASE = 0x400000;
+USER_BASE = 0x800000;
 
 SECTIONS
 {

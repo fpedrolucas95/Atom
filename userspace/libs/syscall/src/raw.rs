@@ -86,6 +86,11 @@ pub mod numbers {
     pub const SYS_FS_READLINK: u64 = 74;
     pub const SYS_FS_UTIMES:   u64 = 75;
     pub const SYS_FS_STATVFS:  u64 = 76;
+
+    // Kernel FS backend syscalls (used by fsd to access kernel FAT32 driver)
+    pub const SYS_KERN_FS_READ_FILE: u64 = 200;
+    pub const SYS_KERN_FS_LIST_DIR:  u64 = 201;
+    pub const SYS_KERN_FS_STAT_PATH: u64 = 202;
 }
 
 /// Raw syscall with no arguments

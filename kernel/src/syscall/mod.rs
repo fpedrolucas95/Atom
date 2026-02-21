@@ -119,7 +119,20 @@ pub const SYS_GET_PROCESS_COUNT: u64 = 48; // Get total number of processes
 pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
-pub const SYS_GET_CPU_BRAND: u64 = 52; // Get CPU brand string
+pub const SYS_GET_CPU_BRAND: u64 = 52;
+
+// ---------------------------------------------------------------------------
+// Kernel FS backend syscalls — used exclusively by fsd to access the
+// kernel's FAT32 driver.  These are *not* general-purpose filesystem
+// syscalls; applications use SYS_FS_OPEN etc. which route through fsd.
+// ---------------------------------------------------------------------------
+
+/// Read file contents: (path_ptr, path_len, buf_ptr, buf_len) -> bytes_read
+pub const SYS_KERN_FS_READ_FILE: u64 = 200;
+/// List directory:     (path_ptr, path_len, buf_ptr, buf_len) -> bytes_used
+pub const SYS_KERN_FS_LIST_DIR: u64 = 201;
+/// Stat a path:        (path_ptr, path_len, stat_ptr) -> 0 | errno
+pub const SYS_KERN_FS_STAT_PATH: u64 = 202;
 
 /// open(path_ptr, path_len, flags, mode) -> fd (u64 handle)
 pub const SYS_FS_OPEN: u64 = 53;
@@ -337,6 +350,11 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0 as *mut u8, arg1 as usize),
+
+        // Kernel FS backend syscalls (for fsd only)
+        SYS_KERN_FS_READ_FILE  => sys_kern_fs_read_file(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_LIST_DIR   => sys_kern_fs_list_dir(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_STAT_PATH  => sys_kern_fs_stat_path(arg0, arg1 as usize, arg2),
 
 
         // Filesystem syscalls — forwarded to fsd via IPC
@@ -3728,473 +3746,570 @@ fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
     Ok(())
 }
 
-// Helper: send request to fsd and block for response
-fn send_fs_request_and_recv(req_payload: Vec<u8>) -> Result<Vec<u8>, u64> {
-    const LOG_ORIGIN: &str = "fs_syscall";
+// ============================================================================
+// Kernel FS backend syscalls — provide fsd with access to the kernel's
+// FAT32 driver.  Only fsd should call these.
+// ============================================================================
 
-    if req_payload.len() > crate::ipc::MAX_MESSAGE_SIZE {
-        return Err(EMSGSIZE);
-    }
+/// Read a file from the kernel FAT32 driver.
+/// Returns the number of bytes read into the user buffer.
+fn sys_kern_fs_read_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: usize) -> u64 {
+    const LOG_ORIGIN: &str = "kern_fs";
 
-    let caller = match crate::sched::current_thread() {
-        Some(tid) => tid,
-        None => return Err(EINVAL),
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
+    let path = path_buf_as_str(&path_buf, path_blen);
 
-    // Create reply port to receive response
-    let reply_port = crate::ipc::create_port(caller);
-    
-    // Build request message with reply port ID in first 8 bytes
-    let mut request = Vec::with_capacity(8 + req_payload.len());
-    request.extend_from_slice(&reply_port.raw().to_le_bytes());
-    request.extend_from_slice(&req_payload);
-
-    // Send to fsd
-    let fsd_port = crate::ipc::PortId::from_raw(PORT_FS_SERVICE);
-    let msg = crate::ipc::Message::new(caller, 1, request);
-
-    match crate::ipc::send_message(fsd_port, msg) {
-        Ok(_) => {
-            log_debug!(LOG_ORIGIN, "fs request sent to fsd (reply_port={})", reply_port);
-        }
-        Err(e) => {
-            let _ = crate::ipc::close_port(reply_port, caller);
-            log_warn!(LOG_ORIGIN, "fs request send failed: {:?}", e);
-            return Err(EIO);
-        }
+    if buf_len == 0 || !validate_user_pointer(buf_ptr) {
+        return EINVAL;
     }
 
-    // Block waiting for response
-    match crate::ipc::block_receive(
-        reply_port,
-        caller,
-        crate::thread::ThreadPriority::Normal,
-        Some(crate::interrupts::get_ticks() + 5000), // 50s timeout
-    ) {
-        Ok(_) => {}
-        Err(_) => {
-            let _ = crate::ipc::close_port(reply_port, caller);
-            return Err(ETIMEDOUT);
-        }
-    }
+    log_debug!(LOG_ORIGIN, "kern_fs_read_file(path=\"{}\")", path);
 
-    // Perform context switch and wait for response
-    crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
-    loop {
-        let (prev, next) = crate::sched::on_timer_tick();
-        if let (Some(prev_id), Some(next_id)) = (prev, next) {
-            if prev_id != next_id {
-                crate::sched::perform_context_switch(prev_id, next_id);
+    match crate::drivers::fat32::open(path) {
+        Some(data) => {
+            let to_copy = core::cmp::min(data.len(), buf_len);
+            if let Err(e) = write_buffer_to_user(buf_ptr, &data[..to_copy]) {
+                return e;
             }
+            to_copy as u64
         }
-
-        crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
-
-        match crate::ipc::try_receive_message(reply_port, caller) {
-            Ok(Some(response)) => {
-                let _ = crate::ipc::close_port(reply_port, caller);
-                crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
-                return Ok(response.payload);
-            }
-            Ok(None) => {
-                // No message yet, continue waiting
-                crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
-                continue;
-            }
-            Err(_) => {
-                let _ = crate::ipc::close_port(reply_port, caller);
-                return Err(EIO);
-            }
-        }
+        None => ENOENT,
     }
 }
 
-// Helper: parse error code from response (first u64 in response)
-fn parse_error_response(response: &[u8]) -> u64 {
-    if response.len() >= 8 {
-        u64::from_le_bytes([
-            response[0], response[1], response[2], response[3],
-            response[4], response[5], response[6], response[7],
-        ])
-    } else {
-        EIO
-    }
-}
+/// List a directory from the kernel FAT32 driver.
+/// Writes packed directory entry records into the user buffer.
+///
+/// Each record: [ino(4) | rec_len(2) | name_len(1) | file_type(1) | name...]
+/// (4-byte aligned)
+///
+/// Returns total bytes written, or an error code.
+fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: usize) -> u64 {
+    const LOG_ORIGIN: &str = "kern_fs";
 
-/// Open a file
-fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, mode: u32) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_open(path_len={}, flags={:#x}, mode={:#x})", path_len, flags, mode);
-
-    // Validate and copy path from userspace
-    let path = match copy_string_from_user(path_ptr, path_len) {
-        Ok(p) => p,
-        Err(e) => {
-            log_warn!(LOG_ORIGIN, "path validation failed: {:#x}", e);
-            return e;
-        }
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
+    let path = path_buf_as_str(&path_buf, path_blen);
 
-    // Build request: [path_len(4) | path_bytes | flags(4) | mode(4)]
-    let mut req = Vec::with_capacity(4 + path.len() + 8);
-    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
-    req.extend_from_slice(path.as_bytes());
-    req.extend_from_slice(&flags.to_le_bytes());
-    req.extend_from_slice(&mode.to_le_bytes());
+    if buf_len == 0 || !validate_user_pointer(buf_ptr) {
+        return EINVAL;
+    }
 
-    match send_fs_request_and_recv(req) {
-        Ok(response) => {
-            if response.len() >= 16 {
-                // Response: [error(8) | fd(8)]
-                let error = u64::from_le_bytes([
-                    response[0], response[1], response[2], response[3],
-                    response[4], response[5], response[6], response[7],
-                ]);
-                if error == 0 {
-                    let fd = u64::from_le_bytes([
-                        response[8], response[9], response[10], response[11],
-                        response[12], response[13], response[14], response[15],
-                    ]);
-                    log_debug!(LOG_ORIGIN, "sys_fs_open succeeded: fd={}", fd);
-                    return fd;
+    log_debug!(LOG_ORIGIN, "kern_fs_list_dir(path=\"{}\")", path);
+
+    // list_directory expects path without leading /
+    let list_path = if path == "/" { "" } else { path };
+
+    match crate::drivers::fat32::list_directory(list_path) {
+        Some(entries) => {
+            let mut pos = 0usize;
+            let mut ino_counter: u32 = 1;
+
+            for entry_name in &entries {
+                // Parse name and type from the "name/" format
+                let (name, ftype) = if entry_name.ends_with('/') {
+                    (&entry_name[..entry_name.len() - 1], 2u8) // directory
+                } else {
+                    (entry_name.as_str(), 1u8) // regular file
+                };
+
+                let name_bytes = name.as_bytes();
+                let name_len = name_bytes.len().min(255);
+                let raw_len = 8 + name_len;
+                let rec_len = (raw_len + 3) & !3; // 4-byte align
+
+                if pos + rec_len > buf_len {
+                    break; // buffer full
                 }
-                return error;
+
+                // Build record in a stack buffer then copy to user
+                let mut rec = [0u8; 272]; // 8 header + 255 name + padding
+                rec[..rec_len].fill(0);
+                rec[0..4].copy_from_slice(&ino_counter.to_le_bytes());
+                rec[4..6].copy_from_slice(&(rec_len as u16).to_le_bytes());
+                rec[6] = name_len as u8;
+                rec[7] = ftype;
+                rec[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
+
+                if let Err(e) = write_buffer_to_user(buf_ptr + pos as u64, &rec[..rec_len]) {
+                    return e;
+                }
+
+                pos += rec_len;
+                ino_counter += 1;
             }
-            EIO
+
+            pos as u64
         }
-        Err(e) => e,
+        None => ENOENT,
     }
+}
+
+/// Stat a path using the kernel FAT32 driver.
+/// Writes an 80-byte stat buffer to userspace.
+///
+/// For FAT32, we return: size, mode (S_IFDIR or S_IFREG + 0o755), and
+/// inode = 1 (FAT32 has no real inode numbers).
+fn sys_kern_fs_stat_path(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
+    const LOG_ORIGIN: &str = "kern_fs";
+
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    if !validate_user_pointer(stat_ptr) {
+        return EINVAL;
+    }
+
+    log_debug!(LOG_ORIGIN, "kern_fs_stat_path(path=\"{}\")", path);
+
+    // Use stat_path to get metadata without reading file contents
+    fill_stat_to_user(path, stat_ptr)
+}
+
+/// Internal helper: stat a path and write the 80-byte result to userspace.
+/// Uses `fat32::stat_path()` so NO file data is read.
+fn fill_stat_to_user(path: &str, stat_ptr: u64) -> u64 {
+    let mut buf = [0u8; 80];
+
+    // Root directory special case
+    if path == "/" || path.is_empty() {
+        buf[8..16].copy_from_slice(&2u64.to_le_bytes()); // inode = 2
+        let mode: u32 = 0o040755;
+        buf[40..44].copy_from_slice(&mode.to_le_bytes());
+        buf[48..52].copy_from_slice(&2u32.to_le_bytes()); // nlinks
+        buf[56..60].copy_from_slice(&512u32.to_le_bytes()); // blksize
+        return match write_buffer_to_user(stat_ptr, &buf) {
+            Ok(_) => ESUCCESS,
+            Err(e) => e,
+        };
+    }
+
+    // stat_path reads only directory entries, never file content
+    match crate::drivers::fat32::stat_path(path) {
+        Some(st) => {
+            buf[0..8].copy_from_slice(&st.size.to_le_bytes()); // size
+            buf[8..16].copy_from_slice(&1u64.to_le_bytes()); // inode
+            let mode: u32 = if st.is_dir { 0o040755 } else { 0o100644 };
+            buf[40..44].copy_from_slice(&mode.to_le_bytes());
+            let nlinks: u32 = if st.is_dir { 2 } else { 1 };
+            buf[48..52].copy_from_slice(&nlinks.to_le_bytes());
+            buf[56..60].copy_from_slice(&512u32.to_le_bytes()); // blksize
+            match write_buffer_to_user(stat_ptr, &buf) {
+                Ok(_) => ESUCCESS,
+                Err(e) => e,
+            }
+        }
+        None => ENOENT,
+    }
+}
+
+// ============================================================================
+// Kernel-side file descriptor table
+//
+// Instead of routing FS syscalls through IPC to fsd (which requires fragile
+// in-kernel blocking + context-switch), the syscalls talk directly to the
+// kernel's FAT32 driver.  This is reliable, fast, and avoids the entire
+// class of IPC deadlock / format-mismatch bugs.
+//
+// The fd table uses a fixed-size static array to avoid heap allocations that
+// could collide with userspace virtual addresses.
+// ============================================================================
+
+const MAX_KERNEL_FDS: usize = 128;
+const MAX_PATH_BUF: usize = 256;
+
+/// A kernel-side open file/directory (zero-heap, stored in .bss).
+#[derive(Clone)]
+struct KernelFd {
+    in_use: bool,
+    path: [u8; MAX_PATH_BUF],
+    path_len: usize,
+    is_dir: bool,
+    flags: u32,
+    offset: usize,
+}
+
+impl KernelFd {
+    const EMPTY: Self = Self {
+        in_use: false,
+        path: [0u8; MAX_PATH_BUF],
+        path_len: 0,
+        is_dir: false,
+        flags: 0,
+        offset: 0,
+    };
+
+    fn path_str(&self) -> &str {
+        core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
+    }
+}
+
+/// Global fd table in .bss — no heap allocation.
+static KERNEL_FD_TABLE: spin::Mutex<[KernelFd; MAX_KERNEL_FDS]> =
+    spin::Mutex::new([KernelFd::EMPTY; MAX_KERNEL_FDS]);
+
+/// Copy a path string from userspace into a stack-allocated fixed buffer.
+/// Returns (buffer, length) on success.  No heap allocation.
+fn copy_path_from_user(ptr: u64, len: usize) -> Result<([u8; MAX_PATH_BUF], usize), u64> {
+    if len == 0 || len > MAX_PATH_BUF {
+        return Err(ENAMETOOLONG);
+    }
+    if !validate_user_pointer(ptr) {
+        return Err(EINVAL);
+    }
+    let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    // Validate UTF-8
+    if core::str::from_utf8(src).is_err() {
+        return Err(EINVAL);
+    }
+    let mut buf = [0u8; MAX_PATH_BUF];
+    buf[..len].copy_from_slice(src);
+    Ok((buf, len))
+}
+
+/// Get a &str from a (buf, len) pair returned by copy_path_from_user
+#[inline]
+fn path_buf_as_str(buf: &[u8; MAX_PATH_BUF], len: usize) -> &str {
+    // Safety: copy_path_from_user already validated UTF-8
+    unsafe { core::str::from_utf8_unchecked(&buf[..len]) }
+}
+
+/// Allocate an fd slot (returns 3..MAX_KERNEL_FDS-1, or EMFILE on full).
+fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
+    let mut table = KERNEL_FD_TABLE.lock();
+    // fd 0/1/2 reserved for stdin/out/err
+    for i in 3..MAX_KERNEL_FDS {
+        if !table[i].in_use {
+            table[i].in_use = true;
+            let plen = path.len().min(MAX_PATH_BUF);
+            table[i].path[..plen].copy_from_slice(&path.as_bytes()[..plen]);
+            table[i].path_len = plen;
+            table[i].is_dir = is_dir;
+            table[i].flags = flags;
+            table[i].offset = 0;
+            return Ok(i as u64);
+        }
+    }
+    Err(EMFILE)
+}
+
+// ============================================================================
+// Direct-to-FAT32 filesystem syscalls
+// ============================================================================
+
+/// Open a file or directory
+fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
+    const LOG_ORIGIN: &str = "fs_syscall";
+
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    log_debug!(LOG_ORIGIN, "sys_fs_open(path=\"{}\", flags={:#x})", path, flags);
+
+    let o_directory: u32 = 0x10000; // atom_abi::O_DIRECTORY
+    let is_dir = (flags & o_directory) != 0 || path == "/" || path.ends_with('/');
+
+    if is_dir {
+        // Verify directory exists via kernel FAT32
+        let list_path = if path == "/" || path.is_empty() {
+            ""
+        } else {
+            path.trim_start_matches('/')
+        };
+        if path != "/" && !path.is_empty() {
+            if crate::drivers::fat32::list_directory(list_path).is_none() {
+                log_debug!(LOG_ORIGIN, "directory not found: \"{}\"", path);
+                return ENOENT;
+            }
+        }
+    } else {
+        // Verify file exists (stat-like: try open for existence check,
+        // but we don't want to read the entire file here for large files)
+        let trimmed = path.trim_start_matches('/');
+        let parent_end = trimmed.rfind('/').unwrap_or(0);
+        let list_path = &trimmed[..parent_end];
+        let file_name = path.split('/').filter(|s| !s.is_empty()).last().unwrap_or("");
+
+        // Check parent directory for the entry
+        let found = match crate::drivers::fat32::list_directory(list_path) {
+            Some(entries) => entries.iter().any(|e| {
+                let name = if e.ends_with('/') { &e[..e.len()-1] } else { e.as_str() };
+                name.eq_ignore_ascii_case(file_name)
+            }),
+            None => false,
+        };
+
+        if !found {
+            log_debug!(LOG_ORIGIN, "file not found: \"{}\"", path);
+            return ENOENT;
+        }
+    }
+
+    // Store path without trailing slash
+    let store_path = path.trim_end_matches('/');
+    let fd = match alloc_kernel_fd(store_path, is_dir, flags) {
+        Ok(fd) => fd,
+        Err(e) => return e,
+    };
+
+    log_debug!(LOG_ORIGIN, "sys_fs_open OK: fd={} dir={}", fd, is_dir);
+    fd
 }
 
 /// Close a file descriptor
 fn sys_fs_close(fd: u64) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
-
     log_debug!(LOG_ORIGIN, "sys_fs_close(fd={})", fd);
 
-    // Build request: [fd(8)]
-    let req = fd.to_le_bytes().to_vec();
+    let idx = fd as usize;
+    if idx >= MAX_KERNEL_FDS {
+        return EBADF;
+    }
 
-    match send_fs_request_and_recv(req) {
-        Ok(response) => {
-            parse_error_response(&response)
-        }
-        Err(e) => e,
+    let mut table = KERNEL_FD_TABLE.lock();
+    if table[idx].in_use {
+        table[idx].in_use = false;
+        ESUCCESS
+    } else {
+        EBADF
     }
 }
 
 /// Read from file descriptor
 fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
-
     log_debug!(LOG_ORIGIN, "sys_fs_read(fd={}, count={})", fd, count);
 
-    if count == 0 || count > 65536 {
+    if count == 0 || !validate_user_pointer(buf_ptr) {
         return EINVAL;
     }
 
-    if !validate_user_pointer(buf_ptr) {
-        return EINVAL;
+    let idx = fd as usize;
+    if idx >= MAX_KERNEL_FDS {
+        return EBADF;
     }
 
-    // Build request: [fd(8) | count(8)]
-    let mut req = Vec::with_capacity(16);
-    req.extend_from_slice(&fd.to_le_bytes());
-    req.extend_from_slice(&(count as u64).to_le_bytes());
+    // Get path and offset without holding lock during FAT32 I/O
+    let (path_buf, path_len, offset, is_dir) = {
+        let table = KERNEL_FD_TABLE.lock();
+        if !table[idx].in_use {
+            return EBADF;
+        }
+        (table[idx].path, table[idx].path_len, table[idx].offset, table[idx].is_dir)
+    };
 
-    match send_fs_request_and_recv(req) {
-        Ok(response) => {
-            if response.len() < 16 {
-                return EIO;
+    if is_dir {
+        return EISDIR;
+    }
+
+    let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+
+    // Read the file from FAT32
+    match crate::drivers::fat32::open(path) {
+        Some(data) => {
+            if offset >= data.len() {
+                return 0; // EOF
             }
+            let available = data.len() - offset;
+            let to_read = available.min(count);
 
-            let error = u64::from_le_bytes([
-                response[0], response[1], response[2], response[3],
-                response[4], response[5], response[6], response[7],
-            ]);
-
-            if error != 0 {
-                return error;
-            }
-
-            let bytes_read = u64::from_le_bytes([
-                response[8], response[9], response[10], response[11],
-                response[12], response[13], response[14], response[15],
-            ]) as usize;
-
-            if bytes_read > count || 16 + bytes_read > response.len() {
-                log_warn!(LOG_ORIGIN, "invalid read response: bytes_read={} > {}", bytes_read, count);
-                return EIO;
-            }
-
-            // Copy data to userspace
-            if let Err(e) = write_buffer_to_user(buf_ptr, &response[16..16 + bytes_read]) {
+            if let Err(e) = write_buffer_to_user(buf_ptr, &data[offset..offset + to_read]) {
                 return e;
             }
 
-            bytes_read as u64
+            // Update offset
+            {
+                let mut table = KERNEL_FD_TABLE.lock();
+                if table[idx].in_use {
+                    table[idx].offset += to_read;
+                }
+            }
+
+            log_debug!(LOG_ORIGIN, "sys_fs_read OK: {} bytes", to_read);
+            to_read as u64
         }
-        Err(e) => e,
+        None => EIO,
     }
 }
 
-/// Write to file descriptor
-fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_write(fd={}, count={})", fd, count);
-
-    if count == 0 || count > 65536 {
-        return EINVAL;
-    }
-
-    // Copy write buffer from userspace
-    let buf = match copy_buffer_from_user(buf_ptr, count, 65536) {
-        Ok(b) => b,
-        Err(e) => {
-            log_warn!(LOG_ORIGIN, "write buffer copy failed: {:#x}", e);
-            return e;
-        }
-    };
-
-    // Build request: [fd(8) | count(8) | data]
-    let mut req = Vec::with_capacity(16 + buf.len());
-    req.extend_from_slice(&fd.to_le_bytes());
-    req.extend_from_slice(&(buf.len() as u64).to_le_bytes());
-    req.extend_from_slice(&buf);
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => {
-            if response.len() < 16 {
-                return EIO;
-            }
-
-            let error = u64::from_le_bytes([
-                response[0], response[1], response[2], response[3],
-                response[4], response[5], response[6], response[7],
-            ]);
-
-            if error != 0 {
-                return error;
-            }
-
-            let bytes_written = u64::from_le_bytes([
-                response[8], response[9], response[10], response[11],
-                response[12], response[13], response[14], response[15],
-            ]);
-
-            if bytes_written > count as u64 {
-                log_warn!(LOG_ORIGIN, "invalid write response: bytes_written={} > {}", bytes_written, count);
-                return EIO;
-            }
-
-            log_debug!(LOG_ORIGIN, "sys_fs_write succeeded: wrote={} bytes", bytes_written);
-            bytes_written
-        }
-        Err(e) => e,
-    }
+/// Write to file descriptor (read-only FAT32 — not supported)
+fn sys_fs_write(_fd: u64, _buf_ptr: u64, _count: usize) -> u64 {
+    EROFS
 }
 
-/// Get file status
+/// Get file status by path
 fn sys_fs_stat(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_stat(path_len={})", path_len);
-
-    let path = match copy_string_from_user(path_ptr, path_len) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-
-    if !validate_user_pointer(stat_ptr) {
-        return EINVAL;
-    }
-
-    // Build request: [path_len(4) | path_bytes]
-    let mut req = Vec::with_capacity(4 + path.len());
-    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
-    req.extend_from_slice(path.as_bytes());
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => {
-            if response.len() < 8 {
-                return EIO;
-            }
-
-            let error = u64::from_le_bytes([
-                response[0], response[1], response[2], response[3],
-                response[4], response[5], response[6], response[7],
-            ]);
-
-            if error != 0 {
-                return error;
-            }
-
-            // Stat structure is typically 128 bytes; copy to userspace
-            let stat_size = core::cmp::min(128, response.len() - 8);
-            if let Err(e) = write_buffer_to_user(stat_ptr, &response[8..8 + stat_size]) {
-                return e;
-            }
-
-            ESUCCESS
-        }
-        Err(e) => e,
-    }
+    // Delegate directly to the kernel FAT32 stat implementation
+    sys_kern_fs_stat_path(path_ptr, path_len, stat_ptr)
 }
 
-/// Read directory
+/// Read directory entries
 fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
-
     log_debug!(LOG_ORIGIN, "sys_fs_readdir(dirfd={}, count={})", dirfd, count);
 
-    if count == 0 || count > 4096 {
+    if count == 0 || !validate_user_pointer(dirent_ptr) {
         return EINVAL;
     }
 
-    if !validate_user_pointer(dirent_ptr) {
-        return EINVAL;
+    let idx = dirfd as usize;
+    if idx >= MAX_KERNEL_FDS {
+        return EBADF;
     }
 
-    // Build request: [dirfd(8) | count(8)]
-    let mut req = Vec::with_capacity(16);
-    req.extend_from_slice(&dirfd.to_le_bytes());
-    req.extend_from_slice(&(count as u64).to_le_bytes());
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => {
-            if response.len() < 16 {
-                return EIO;
-            }
-
-            let error = u64::from_le_bytes([
-                response[0], response[1], response[2], response[3],
-                response[4], response[5], response[6], response[7],
-            ]);
-
-            if error != 0 {
-                return error;
-            }
-
-            let dirent_size = u64::from_le_bytes([
-                response[8], response[9], response[10], response[11],
-                response[12], response[13], response[14], response[15],
-            ]) as usize;
-
-            if dirent_size > count || 16 + dirent_size > response.len() {
-                log_warn!(LOG_ORIGIN, "invalid readdir response: size={} > {}", dirent_size, count);
-                return EIO;
-            }
-
-            if let Err(e) = write_buffer_to_user(dirent_ptr, &response[16..16 + dirent_size]) {
-                return e;
-            }
-
-            dirent_size as u64
+    // Get path and is_dir without holding lock during FAT32 I/O
+    let (path_buf, path_len, is_dir) = {
+        let table = KERNEL_FD_TABLE.lock();
+        if !table[idx].in_use {
+            return EBADF;
         }
-        Err(e) => e,
+        (table[idx].path, table[idx].path_len, table[idx].is_dir)
+    };
+
+    if !is_dir {
+        return ENOTDIR;
+    }
+
+    let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+
+    // Convert path for FAT32 driver (expects "" for root, no leading /)
+    let list_path = if path == "/" || path.is_empty() {
+        ""
+    } else {
+        path.trim_start_matches('/')
+    };
+
+    match crate::drivers::fat32::list_directory(list_path) {
+        Some(entries) => {
+            let mut pos = 0usize;
+            let mut ino_counter: u32 = 1;
+
+            // Stack buffer for building individual dirent records (max 8 + 255 name + padding)
+            let mut rec = [0u8; 272]; // 8 header + 255 name + up to 3 padding + 6 spare
+
+            for entry_name in &entries {
+                // Parse name and type from "name/" format
+                let (name, ftype) = if entry_name.ends_with('/') {
+                    (&entry_name[..entry_name.len() - 1], 2u8) // directory
+                } else {
+                    (entry_name.as_str(), 1u8) // regular file
+                };
+
+                let name_bytes = name.as_bytes();
+                let name_len = name_bytes.len().min(255);
+                let raw_len = 8 + name_len;
+                let rec_len = (raw_len + 3) & !3; // 4-byte align
+
+                if pos + rec_len > count {
+                    break; // user buffer full
+                }
+
+                // Build dirent record: [ino(4)|rec_len(2)|name_len(1)|ftype(1)|name]
+                // Zero out the record area first
+                rec[..rec_len].fill(0);
+                rec[0..4].copy_from_slice(&ino_counter.to_le_bytes());
+                rec[4..6].copy_from_slice(&(rec_len as u16).to_le_bytes());
+                rec[6] = name_len as u8;
+                rec[7] = ftype;
+                rec[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
+
+                if let Err(e) = write_buffer_to_user(dirent_ptr + pos as u64, &rec[..rec_len]) {
+                    return e;
+                }
+
+                pos += rec_len;
+                ino_counter += 1;
+            }
+
+            log_debug!(LOG_ORIGIN, "sys_fs_readdir OK: {} bytes, {} entries", pos, ino_counter - 1);
+            pos as u64
+        }
+        None => ENOENT,
     }
 }
 
-/// Create directory
-fn sys_fs_mkdir(path_ptr: u64, path_len: usize, mode: u32) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_mkdir(path_len={}, mode={:#x})", path_len, mode);
-
-    let path = match copy_string_from_user(path_ptr, path_len) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-
-    // Build request: [path_len(4) | path_bytes | mode(4)]
-    let mut req = Vec::with_capacity(4 + path.len() + 4);
-    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
-    req.extend_from_slice(path.as_bytes());
-    req.extend_from_slice(&mode.to_le_bytes());
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => parse_error_response(&response),
-        Err(e) => e,
-    }
+/// Create directory (read-only FAT32 — not supported)
+fn sys_fs_mkdir(_path_ptr: u64, _path_len: usize, _mode: u32) -> u64 {
+    EROFS
 }
 
-/// Unlink (delete) file
-fn sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_unlink(path_len={})", path_len);
-
-    let path = match copy_string_from_user(path_ptr, path_len) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-
-    // Build request: [path_len(4) | path_bytes]
-    let mut req = Vec::with_capacity(4 + path.len());
-    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
-    req.extend_from_slice(path.as_bytes());
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => parse_error_response(&response),
-        Err(e) => e,
-    }
+/// Unlink (delete) file (read-only FAT32 — not supported)
+fn sys_fs_unlink(_path_ptr: u64, _path_len: usize) -> u64 {
+    EROFS
 }
 
-/// Rename file
-fn sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_rename(old_len={}, new_len={})", old_path_len, new_path_len);
-
-    let old_path = match copy_string_from_user(old_path_ptr, old_path_len) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-
-    let new_path = match copy_string_from_user(new_path_ptr, new_path_len) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-
-    // Build request: [old_len(4) | old_path | new_len(4) | new_path]
-    let mut req = Vec::with_capacity(8 + old_path.len() + new_path.len());
-    req.extend_from_slice(&(old_path.len() as u32).to_le_bytes());
-    req.extend_from_slice(old_path.as_bytes());
-    req.extend_from_slice(&(new_path.len() as u32).to_le_bytes());
-    req.extend_from_slice(new_path.as_bytes());
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => parse_error_response(&response),
-        Err(e) => e,
-    }
+/// Rename file (read-only FAT32 — not supported)
+fn sys_fs_rename(_old_path_ptr: u64, _old_path_len: usize, _new_path_ptr: u64, _new_path_len: usize) -> u64 {
+    EROFS
 }
 
-/// Synchronize file to disk
-fn sys_fs_fsync(fd: u64) -> u64 {
-    const LOG_ORIGIN: &str = "fs_syscall";
-
-    log_debug!(LOG_ORIGIN, "sys_fs_fsync(fd={})", fd);
-
-    let req = fd.to_le_bytes().to_vec();
-
-    match send_fs_request_and_recv(req) {
-        Ok(response) => parse_error_response(&response),
-        Err(e) => e,
-    }
+/// Synchronize file to disk (no-op for read-only)
+fn sys_fs_fsync(_fd: u64) -> u64 {
+    ESUCCESS
 }
 
 // Stub implementations for remaining syscalls (not in priority list)
 
 /// Seek in file descriptor
-fn sys_fs_seek(_fd: u64, _offset: i64, _whence: u32) -> u64 {
-    ENOTSUP
+fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
+    let idx = fd as usize;
+    if idx >= MAX_KERNEL_FDS {
+        return EBADF;
+    }
+
+    let mut table = KERNEL_FD_TABLE.lock();
+    if !table[idx].in_use {
+        return EBADF;
+    }
+
+    let new_offset = match whence {
+        0 => offset as usize,        // SEEK_SET
+        1 => {                        // SEEK_CUR
+            let cur = table[idx].offset as i64;
+            (cur + offset) as usize
+        }
+        _ => return EINVAL,
+    };
+
+    table[idx].offset = new_offset;
+    new_offset as u64
 }
 
 /// Get file status by descriptor
-fn sys_fs_fstat(_fd: u64, _stat_ptr: u64) -> u64 {
-    ENOTSUP
+fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
+    if !validate_user_pointer(stat_ptr) {
+        return EINVAL;
+    }
+
+    let idx = fd as usize;
+    if idx >= MAX_KERNEL_FDS {
+        return EBADF;
+    }
+
+    // Get path from fd table
+    let (path_buf, path_len) = {
+        let table = KERNEL_FD_TABLE.lock();
+        if !table[idx].in_use {
+            return EBADF;
+        }
+        (table[idx].path, table[idx].path_len)
+    };
+
+    let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+    let stat_path = if path.is_empty() { "/" } else { path };
+
+    fill_stat_to_user(stat_path, stat_ptr)
 }
 
 /// Remove directory

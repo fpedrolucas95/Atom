@@ -61,8 +61,9 @@ pub const ATXF_MAGIC: u32 = 0x4154_5846;
 /// Current ATXF format version
 pub const ATXF_VERSION: u16 = 1;
 
-/// Base address where user executables are loaded
-pub const USER_EXEC_LOAD_BASE: usize = 0x0040_0000;
+/// Base address where user executables are loaded.
+/// Must be above the kernel heap ceiling (~0x66A000) to avoid PTE conflicts.
+pub const USER_EXEC_LOAD_BASE: usize = 0x0080_0000;
 
 #[allow(dead_code)]
 #[derive(Debug)]

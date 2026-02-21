@@ -63,8 +63,8 @@ use crate::log_debug;
 use crate::log_info;
 use crate::log_warn;
 
-pub const MAX_MESSAGE_SIZE: usize = 256;
-pub const ZERO_COPY_THRESHOLD: usize = 128;
+pub const MAX_MESSAGE_SIZE: usize = 4096;
+pub const ZERO_COPY_THRESHOLD: usize = 4096;
 pub const MAX_BATCH_SIZE: usize = 32;
 pub const MAX_QUEUE_DEPTH: usize = 64;
 
@@ -791,24 +791,40 @@ impl IpcManager {
         let ports = self.ports.lock();
         let waiting = self.waiting_threads.lock();
 
-        let mut current_port = Some(target_port);
+        // Get the owner of the target port
+        let owner = match ports.get(&target_port) {
+            Some(port) => port.owner,
+            None => return false,
+        };
+
+        // Blocking on your own port is valid: the thread is waiting
+        // for an external sender to deliver a message. This is the
+        // standard request/reply pattern (create reply port, block on it).
+        if owner == start {
+            return false;
+        }
+
+        // Follow the wait chain from the owner to detect circular waits.
+        // If the owner is waiting on a port whose owner is waiting on ...
+        // until we reach `start`, there is a cycle.
+        let mut current_tid = owner;
         let mut steps = 0usize;
 
-        while let Some(port_id) = current_port {
+        while let Some(info) = waiting.get(&current_tid) {
             if steps > ports.len() + waiting.len() {
                 break;
             }
 
-            let owner = match ports.get(&port_id) {
+            let next_owner = match ports.get(&info.port) {
                 Some(port) => port.owner,
                 None => break,
             };
 
-            if owner == start {
-                return true;
+            if next_owner == start {
+                return true; // Cycle: start -> target_port -> owner -> ... -> start
             }
 
-            current_port = waiting.get(&owner).map(|info| info.port);
+            current_tid = next_owner;
             steps += 1;
         }
 

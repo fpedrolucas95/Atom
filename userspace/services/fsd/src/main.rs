@@ -215,8 +215,14 @@ fn main() -> ! {
 
 /// Main service loop: receive requests, dispatch to handlers, send replies.
 /// 
-/// This loop handles all filesystem requests. Each request is processed
-/// independently with full error handling.
+/// Message wire format (from kernel):
+///   [MessageHeader(16) | reply_port(8) | request_payload]
+///
+/// After parsing the header, the payload begins at byte 16.
+///   payload[0..8]  = reply_port (LE u64) — where to send the reply
+///   payload[8..]   = request-specific data
+///
+/// The handler returns a serialised response which we send to reply_port.
 fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler) -> ! {
     // Allocate receive buffer once for reuse
     let mut buffer = [0u8; libipc::MAX_MESSAGE_SIZE];
@@ -224,8 +230,7 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
     log("fsd: entering main loop");
 
     loop {
-        // Wait for incoming message with 5-second timeout to allow yields.
-        // A timeout here is not an error; it just means no message arrived.
+        // Block until a message arrives
         match atom_syscall::ipc::recv(fs_port, &mut buffer) {
             Ok(bytes_received) => {
                 if bytes_received < libipc::messages::MessageHeader::SIZE {
@@ -233,7 +238,7 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
                     continue;
                 }
 
-                // Parse message header
+                // Parse message header (first 16 bytes)
                 let header = match libipc::messages::MessageHeader::from_bytes(&buffer[..bytes_received]) {
                     Some(h) => h,
                     None => {
@@ -242,35 +247,39 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
                     }
                 };
 
-                // Get payload (everything after header)
+                // Payload starts after header
                 let payload_start = libipc::messages::MessageHeader::SIZE;
-                let payload_len = if bytes_received > payload_start {
-                    bytes_received - payload_start
-                } else {
-                    0
-                };
-                let payload = &buffer[payload_start..payload_start + payload_len];
+                let payload = &buffer[payload_start..bytes_received];
 
-                // Route message to appropriate handler
-                let _reply_msg_type = ipc_handler.handle_request(header.msg_type, payload);
+                // Extract reply_port (first 8 bytes of payload)
+                if payload.len() < 8 {
+                    log("fsd: payload too small for reply_port, ignoring");
+                    continue;
+                }
+                let reply_port = u64::from_le_bytes([
+                    payload[0], payload[1], payload[2], payload[3],
+                    payload[4], payload[5], payload[6], payload[7],
+                ]);
 
-                // For now, we don't send direct replies (they come via IPC back to requester)
-                // This is a simplification - in production, we'd track pending requests
-                // and send replies to the correct port.
-                if header.msg_type as u32 >= 1100 && header.msg_type as u32 <= 1143 {
-                    // This is a filesystem request, handler processed it
+                // The actual request data is after the reply_port
+                let request_data = &payload[8..];
+
+                // Dispatch to handler — returns response bytes (FsReply format)
+                let response = ipc_handler.handle_request(header.msg_type, request_data);
+
+                // Send raw response bytes back through the reply port.
+                // No MessageHeader wrapping — the kernel expects [error(8)|value(8)|data...]
+                if let Err(_) = atom_syscall::ipc::send(reply_port, &response) {
+                    log("fsd: failed to send reply");
                 }
             }
             Err(atom_syscall::SyscallError::WouldBlock) => {
-                // No message available right now (non-blocking recv), just yield
                 atom_syscall::thread::yield_now();
             }
             Err(atom_syscall::SyscallError::TimedOut) => {
-                // Timeout is normal, just yield and continue
                 atom_syscall::thread::yield_now();
             }
-            Err(e) => {
-                // Only log actual errors, never spam on WouldBlock
+            Err(_e) => {
                 log("fsd: FATAL recv error, terminating");
                 loop {
                     atom_syscall::thread::yield_now();

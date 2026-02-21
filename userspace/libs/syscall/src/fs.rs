@@ -714,3 +714,61 @@ where
     let _ = close(dst_fd);
     result
 }
+
+// ── Kernel FS Backend syscalls (used by fsd) ──────────────────────────────
+
+/// Read a file's contents directly from the kernel's FAT32 driver.
+/// Returns the number of bytes read into `buf`.
+pub fn kern_fs_read_file(path: &str, buf: &mut [u8]) -> FsResult<usize> {
+    let r = unsafe {
+        syscall4(
+            SYS_KERN_FS_READ_FILE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(r as usize)
+    }
+}
+
+/// List a directory directly from the kernel's FAT32 driver.
+/// Returns bytes written into `buf` (packed dirent records).
+pub fn kern_fs_list_dir(path: &str, buf: &mut [u8]) -> FsResult<usize> {
+    let r = unsafe {
+        syscall4(
+            SYS_KERN_FS_LIST_DIR,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(r as usize)
+    }
+}
+
+/// Stat a path directly from the kernel's FAT32 driver.
+/// Writes an 80-byte stat buffer.
+pub fn kern_fs_stat_path(path: &str, stat_buf: &mut [u8; 80]) -> FsResult<()> {
+    let r = unsafe {
+        syscall3(
+            SYS_KERN_FS_STAT_PATH,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            stat_buf.as_mut_ptr() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}

@@ -1,282 +1,345 @@
 //! IPC Request Handler Module
 //!
-//! This module defines the FsRequestHandler which routes incoming IPC messages
-//! to the appropriate filesystem operation handlers. It parses FsRequest structs,
-//! delegates to the VFS layer, and constructs FsReply responses.
+//! Routes incoming IPC messages to filesystem operation handlers.
+//! Parses request payloads, delegates to the kernel FAT32 backend via
+//! the `kern_fs_*` syscalls, and constructs response byte arrays that
+//! the kernel can forward to the requesting thread.
+//!
+//! ## Response wire formats (all little-endian)
+//!
+//! Most responses use the generic FsReply layout:
+//!   [error(8) | value(8)]            (16 bytes)
+//!
+//! stat   → [error(8) | stat_buf(80)] (88 bytes)
+//! read   → [error(8) | nbytes(8) | data(nbytes)]
+//! readdir→ [error(8) | size(8)   | dirent_data(size)]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+use alloc::string::String;
 use libipc::messages::MessageType;
 use crate::mounts::MountsManager;
 
-/// Maximum file descriptor value
-const MAX_FD: u32 = 1024;
+// ── Error codes (must match atom_abi) ─────────────────────────────────────
+const ESUCCESS: u64 = 0;
+const ENOENT: u64   = u64::MAX - 11;
+const EBADF: u64    = u64::MAX - 8;
+const EINVAL: u64   = u64::MAX - 1;
+const EIO: u64      = u64::MAX - 4;
+const EISDIR: u64   = u64::MAX - 20;
+const ENOTSUP: u64  = u64::MAX - 34;
 
-/// File descriptor tracking for this session
+// ── Simple file descriptor table ──────────────────────────────────────────
+
+const MAX_FDS: usize = 128;
+
+/// Tracks a single open "file" (file or directory).
+#[derive(Clone)]
+struct OpenFile {
+    path: String,
+    flags: u32,
+    is_dir: bool,
+    offset: usize,
+    /// Cached file data (read once on open if not a directory).
+    data: Option<Vec<u8>>,
+}
+
+/// The FSD IPC handler.  Owns the fd table and dispatches requests.
 pub struct FsdIpcHandler<'a> {
     mounts: &'a mut MountsManager,
-    // In a production system, we'd track per-client file descriptor tables,
-    // handles, and open file state. For now, we keep it minimal.
+    fds: [Option<OpenFile>; MAX_FDS],
+    next_fd: u32,
 }
 
 impl<'a> FsdIpcHandler<'a> {
     pub fn new(mounts: &'a mut MountsManager) -> Self {
-        Self { mounts }
+        Self {
+            mounts,
+            fds: core::array::from_fn(|_| None),
+            next_fd: 3, // 0/1/2 reserved for stdin/stdout/stderr
+        }
     }
 
-    /// Dispatch incoming request to handler based on message type
-    pub fn handle_request(&mut self, msg_type: MessageType, payload: &[u8]) -> MessageType {
+    // ── Dispatch ──────────────────────────────────────────────────────────
+
+    /// Dispatch incoming request to handler based on message type.
+    /// Returns a byte vector that will be sent verbatim to the reply port.
+    pub fn handle_request(&mut self, msg_type: MessageType, payload: &[u8]) -> Vec<u8> {
         match msg_type {
-            // Open file
-            MessageType::FsOpen => {
-                self.handle_fs_open(payload);
-                MessageType::FsOpenReply
-            }
-
-            // Close file
-            MessageType::FsClose => {
-                self.handle_fs_close(payload);
-                MessageType::FsCloseReply
-            }
-
-            // Read from file
-            MessageType::FsRead => {
-                self.handle_fs_read(payload);
-                MessageType::FsReadReply
-            }
-
-            // Write to file
-            MessageType::FsWrite => {
-                self.handle_fs_write(payload);
-                MessageType::FsWriteReply
-            }
-
-            // Seek in file
-            MessageType::FsSeek => {
-                self.handle_fs_seek(payload);
-                MessageType::FsSeekReply
-            }
-
-            // Stat file by path
-            MessageType::FsStat => {
-                self.handle_fs_stat(payload);
-                MessageType::FsStatReply
-            }
-
-            // Fstat file by descriptor
-            MessageType::FsFstat => {
-                self.handle_fs_fstat(payload);
-                MessageType::FsFstatReply
-            }
-
-            // Make directory
-            MessageType::FsMkdir => {
-                self.handle_fs_mkdir(payload);
-                MessageType::FsMkdirReply
-            }
-
-            // Remove directory
-            MessageType::FsRmdir => {
-                self.handle_fs_rmdir(payload);
-                MessageType::FsRmdirReply
-            }
-
-            // Delete file
-            MessageType::FsUnlink => {
-                self.handle_fs_unlink(payload);
-                MessageType::FsUnlinkReply
-            }
-
-            // Rename file
-            MessageType::FsRename => {
-                self.handle_fs_rename(payload);
-                MessageType::FsRenameReply
-            }
-
-            // List directory
-            MessageType::FsReaddir => {
-                self.handle_fs_readdir(payload);
-                MessageType::FsReaddirReply
-            }
-
-            // Truncate file
-            MessageType::FsTruncate => {
-                self.handle_fs_truncate(payload);
-                MessageType::FsTruncateReply
-            }
-
-            // Sync file
-            MessageType::FsFsync => {
-                self.handle_fs_fsync(payload);
-                MessageType::FsFsyncReply
-            }
-
-            // Mount filesystem
-            MessageType::FsMount => {
-                self.handle_fs_mount(payload);
-                MessageType::FsMountReply
-            }
-
-            // Unmount filesystem
-            MessageType::FsUmount => {
-                self.handle_fs_umount(payload);
-                MessageType::FsUmountReply
-            }
-
-            // Change mode
-            MessageType::FsChmod => {
-                self.handle_fs_chmod(payload);
-                MessageType::FsChmodReply
-            }
-
-            // Hard link
-            MessageType::FsLink => {
-                self.handle_fs_link(payload);
-                MessageType::FsLinkReply
-            }
-
-            // Symbolic link
-            MessageType::FsSymlink => {
-                self.handle_fs_symlink(payload);
-                MessageType::FsSymlinkReply
-            }
-
-            // Read link
-            MessageType::FsReadlink => {
-                self.handle_fs_readlink(payload);
-                MessageType::FsReadlinkReply
-            }
-
-            // Update times
-            MessageType::FsUtimes => {
-                self.handle_fs_utimes(payload);
-                MessageType::FsUtimesReply
-            }
-
-            // Stat filesystem
-            MessageType::FsStatvfs => {
-                self.handle_fs_statvfs(payload);
-                MessageType::FsStatvfsReply
-            }
-
-            // Unknown message type
+            MessageType::FsOpen    => self.handle_fs_open(payload),
+            MessageType::FsClose   => self.handle_fs_close(payload),
+            MessageType::FsRead    => self.handle_fs_read(payload),
+            MessageType::FsWrite   => self.handle_fs_write(payload),
+            MessageType::FsStat    => self.handle_fs_stat(payload),
+            MessageType::FsReaddir => self.handle_fs_readdir(payload),
             _ => {
-                atom_syscall::debug::log("fsd: unknown message type");
-                msg_type
+                atom_syscall::debug::log("fsd: unsupported msg_type, returning ENOTSUP");
+                Self::make_reply(ENOTSUP, 0)
             }
         }
     }
 
-    // ========================================================================
-    // Handler implementations (minimal functional versions)
-    // ========================================================================
+    // ── Helpers ───────────────────────────────────────────────────────────
 
-    fn handle_fs_open(&mut self, _payload: &[u8]) {
-        // TODO: Parse FsOpenRequest, call vfs::open, return fd
-        // For now, return error
-        atom_syscall::debug::log("fsd: fs_open (stub)");
+    fn log(msg: &str) {
+        atom_syscall::debug::log(msg);
     }
 
-    fn handle_fs_close(&mut self, _payload: &[u8]) {
-        // TODO: Parse handle, close file
-        atom_syscall::debug::log("fsd: fs_close (stub)");
+    /// Build a generic 16-byte FsReply: [error(8) | value(8)]
+    fn make_reply(error: u64, value: u64) -> Vec<u8> {
+        let mut v = Vec::with_capacity(16);
+        v.extend_from_slice(&error.to_le_bytes());
+        v.extend_from_slice(&value.to_le_bytes());
+        v
     }
 
-    fn handle_fs_read(&mut self, _payload: &[u8]) {
-        // TODO: Parse handle + length, read from file via VFS
-        atom_syscall::debug::log("fsd: fs_read (stub)");
+    fn alloc_fd(&mut self) -> Option<u32> {
+        for i in 3..MAX_FDS {
+            if self.fds[i].is_none() {
+                return Some(i as u32);
+            }
+        }
+        None
     }
 
-    fn handle_fs_write(&mut self, _payload: &[u8]) {
-        // TODO: Parse handle + data, write to file via VFS
-        atom_syscall::debug::log("fsd: fs_write (stub)");
+    // ── Open ──────────────────────────────────────────────────────────────
+    //
+    // Request: [path_len(4) | path_bytes | flags(4) | mode(4)]
+    // Reply:   [error(8) | fd(8)]
+
+    fn handle_fs_open(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 4 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if payload.len() < 4 + path_len + 8 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let path = match core::str::from_utf8(&payload[4..4 + path_len]) {
+            Ok(s) => s,
+            Err(_) => return Self::make_reply(EINVAL, 0),
+        };
+        let flags = u32::from_le_bytes([
+            payload[4 + path_len],
+            payload[5 + path_len],
+            payload[6 + path_len],
+            payload[7 + path_len],
+        ]);
+
+        Self::log(&alloc::format!("fsd: open path=\"{}\" flags={:#x}", path, flags));
+
+        let o_directory: u32 = 0x10000; // O_DIRECTORY from atom_abi
+
+        // Check if this is a directory open
+        let is_dir = (flags & o_directory) != 0 || path == "/" || path.ends_with('/');
+
+        if is_dir {
+            // Validate that the directory exists via kernel backend
+            let mut tmp = [0u8; 2048];
+            match atom_syscall::fs::kern_fs_list_dir(path, &mut tmp) {
+                Ok(_) => {} // directory exists
+                Err(_) => {
+                    // Maybe it's like "/" that needs special handling
+                    if path != "/" {
+                        return Self::make_reply(ENOENT, 0);
+                    }
+                }
+            }
+        } else {
+            // Validate file exists by reading 0-byte check (stat)
+            let mut stat_buf = [0u8; 80];
+            match atom_syscall::fs::kern_fs_stat_path(path, &mut stat_buf) {
+                Ok(()) => {}
+                Err(_) => return Self::make_reply(ENOENT, 0),
+            }
+        }
+
+        let fd = match self.alloc_fd() {
+            Some(f) => f,
+            None => return Self::make_reply(EIO, 0),
+        };
+
+        self.fds[fd as usize] = Some(OpenFile {
+            path: String::from(path),
+            flags,
+            is_dir,
+            offset: 0,
+            data: None,
+        });
+
+        Self::log(&alloc::format!("fsd: opened fd={} for \"{}\"", fd, path));
+        Self::make_reply(ESUCCESS, fd as u64)
     }
 
-    fn handle_fs_seek(&mut self, _payload: &[u8]) {
-        // TODO: Parse handle + offset + whence, seek in file
-        atom_syscall::debug::log("fsd: fs_seek (stub)");
+    // ── Close ─────────────────────────────────────────────────────────────
+    //
+    // Request: [fd(8)]
+    // Reply:   [error(8) | 0(8)]
+
+    fn handle_fs_close(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 8 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let fd = u64::from_le_bytes([
+            payload[0], payload[1], payload[2], payload[3],
+            payload[4], payload[5], payload[6], payload[7],
+        ]) as usize;
+
+        if fd >= MAX_FDS || self.fds[fd].is_none() {
+            return Self::make_reply(EBADF, 0);
+        }
+
+        self.fds[fd] = None;
+        Self::log(&alloc::format!("fsd: closed fd={}", fd));
+        Self::make_reply(ESUCCESS, 0)
     }
 
-    fn handle_fs_stat(&mut self, _payload: &[u8]) {
-        // TODO: Parse path, stat via VFS, return stat struct
-        atom_syscall::debug::log("fsd: fs_stat (stub)");
+    // ── Read ──────────────────────────────────────────────────────────────
+    //
+    // Request: [fd(8) | count(8)]
+    // Reply:   [error(8) | bytes_read(8) | data]
+
+    fn handle_fs_read(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 16 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let fd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
+
+        if fd >= MAX_FDS {
+            return Self::make_reply(EBADF, 0);
+        }
+
+        let file = match &self.fds[fd] {
+            Some(f) => f.clone(),
+            None => return Self::make_reply(EBADF, 0),
+        };
+
+        if file.is_dir {
+            return Self::make_reply(EISDIR, 0);
+        }
+
+        // Read file data from kernel backend
+        let mut buf = alloc::vec![0u8; count.min(65536)];
+        let bytes_read = match atom_syscall::fs::kern_fs_read_file(&file.path, &mut buf) {
+            Ok(n) => n,
+            Err(_) => return Self::make_reply(EIO, 0),
+        };
+
+        // Apply offset
+        let offset = self.fds[fd].as_ref().unwrap().offset;
+        if offset >= bytes_read {
+            // EOF
+            return Self::make_reply(ESUCCESS, 0);
+        }
+
+        let available = bytes_read - offset;
+        let to_return = available.min(count);
+
+        // Build response: [error(8) | bytes_read(8) | data]
+        let mut resp = Vec::with_capacity(16 + to_return);
+        resp.extend_from_slice(&ESUCCESS.to_le_bytes());
+        resp.extend_from_slice(&(to_return as u64).to_le_bytes());
+        resp.extend_from_slice(&buf[offset..offset + to_return]);
+
+        // Update offset
+        if let Some(ref mut f) = self.fds[fd] {
+            f.offset += to_return;
+        }
+
+        resp
     }
 
-    fn handle_fs_fstat(&mut self, _payload: &[u8]) {
-        // TODO: Parse handle, fstat via VFS
-        atom_syscall::debug::log("fsd: fs_fstat (stub)");
+    // ── Write ─────────────────────────────────────────────────────────────
+    //
+    // Request: [fd(8) | count(8) | data]
+    // Reply:   [error(8) | bytes_written(8)]
+
+    fn handle_fs_write(&mut self, _payload: &[u8]) -> Vec<u8> {
+        // FAT32 backend is read-only for now
+        Self::make_reply(ENOTSUP, 0)
     }
 
-    fn handle_fs_mkdir(&mut self, _payload: &[u8]) {
-        // TODO: Parse path + mode, create directory
-        atom_syscall::debug::log("fsd: fs_mkdir (stub)");
+    // ── Stat ──────────────────────────────────────────────────────────────
+    //
+    // Request: [path_len(4) | path_bytes]
+    // Reply:   [error(8) | stat_buf(80)]
+
+    fn handle_fs_stat(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 4 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if payload.len() < 4 + path_len {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let path = match core::str::from_utf8(&payload[4..4 + path_len]) {
+            Ok(s) => s,
+            Err(_) => return Self::make_reply(EINVAL, 0),
+        };
+
+        Self::log(&alloc::format!("fsd: stat path=\"{}\"", path));
+
+        let mut stat_buf = [0u8; 80];
+        match atom_syscall::fs::kern_fs_stat_path(path, &mut stat_buf) {
+            Ok(()) => {
+                // Reply: [error(8) | stat_buf(80)]
+                let mut resp = Vec::with_capacity(88);
+                resp.extend_from_slice(&ESUCCESS.to_le_bytes());
+                resp.extend_from_slice(&stat_buf);
+                resp
+            }
+            Err(_) => Self::make_reply(ENOENT, 0),
+        }
     }
 
-    fn handle_fs_rmdir(&mut self, _payload: &[u8]) {
-        // TODO: Parse path, remove directory
-        atom_syscall::debug::log("fsd: fs_rmdir (stub)");
-    }
+    // ── Readdir ───────────────────────────────────────────────────────────
+    //
+    // Request: [dirfd(8) | count(8)]
+    // Reply:   [error(8) | size(8) | dirent_data(size)]
 
-    fn handle_fs_unlink(&mut self, _payload: &[u8]) {
-        // TODO: Parse path, delete file
-        atom_syscall::debug::log("fsd: fs_unlink (stub)");
-    }
+    fn handle_fs_readdir(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 16 {
+            return Self::make_reply(EINVAL, 0);
+        }
 
-    fn handle_fs_rename(&mut self, _payload: &[u8]) {
-        // TODO: Parse old_path + new_path, rename
-        atom_syscall::debug::log("fsd: fs_rename (stub)");
-    }
+        let dirfd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
 
-    fn handle_fs_readdir(&mut self, _payload: &[u8]) {
-        // TODO: Parse directory fd/path, read entries
-        atom_syscall::debug::log("fsd: fs_readdir (stub)");
-    }
+        if dirfd >= MAX_FDS {
+            return Self::make_reply(EBADF, 0);
+        }
 
-    fn handle_fs_truncate(&mut self, _payload: &[u8]) {
-        // TODO: Parse fd + new_size, truncate
-        atom_syscall::debug::log("fsd: fs_truncate (stub)");
-    }
+        let dir = match &self.fds[dirfd] {
+            Some(f) if f.is_dir => f.clone(),
+            Some(_) => return Self::make_reply(EINVAL, 0), // not a directory
+            None    => return Self::make_reply(EBADF, 0),
+        };
 
-    fn handle_fs_fsync(&mut self, _payload: &[u8]) {
-        // TODO: Parse fd, sync to disk
-        atom_syscall::debug::log("fsd: fs_fsync (stub)");
-    }
+        Self::log(&alloc::format!("fsd: readdir fd={} path=\"{}\"", dirfd, dir.path));
 
-    fn handle_fs_mount(&mut self, _payload: &[u8]) {
-        // TODO: Parse device, mount point, fstype; call mounts manager
-        atom_syscall::debug::log("fsd: fs_mount (stub)");
-    }
+        // Ask kernel backend for directory listing (packed dirent format)
+        let buf_size = count.min(4096);
+        let mut dirent_buf = alloc::vec![0u8; buf_size];
+        let bytes_used = match atom_syscall::fs::kern_fs_list_dir(&dir.path, &mut dirent_buf) {
+            Ok(n) => n,
+            Err(_) => return Self::make_reply(ENOENT, 0),
+        };
 
-    fn handle_fs_umount(&mut self, _payload: &[u8]) {
-        // TODO: Parse mount point, unmount
-        atom_syscall::debug::log("fsd: fs_umount (stub)");
-    }
+        // Reply: [error(8) | size(8) | dirent_data]
+        let mut resp = Vec::with_capacity(16 + bytes_used);
+        resp.extend_from_slice(&ESUCCESS.to_le_bytes());
+        resp.extend_from_slice(&(bytes_used as u64).to_le_bytes());
+        resp.extend_from_slice(&dirent_buf[..bytes_used]);
 
-    fn handle_fs_chmod(&mut self, _payload: &[u8]) {
-        // TODO: Parse path + mode, change permissions
-        atom_syscall::debug::log("fsd: fs_chmod (stub)");
-    }
-
-    fn handle_fs_link(&mut self, _payload: &[u8]) {
-        // TODO: Parse old_path + new_path, create hard link
-        atom_syscall::debug::log("fsd: fs_link (stub)");
-    }
-
-    fn handle_fs_symlink(&mut self, _payload: &[u8]) {
-        // TODO: Parse target + link_name, create symlink
-        atom_syscall::debug::log("fsd: fs_symlink (stub)");
-    }
-
-    fn handle_fs_readlink(&mut self, _payload: &[u8]) {
-        // TODO: Parse link path, read target
-        atom_syscall::debug::log("fsd: fs_readlink (stub)");
-    }
-
-    fn handle_fs_utimes(&mut self, _payload: &[u8]) {
-        // TODO: Parse path + times, update timestamps
-        atom_syscall::debug::log("fsd: fs_utimes (stub)");
-    }
-
-    fn handle_fs_statvfs(&mut self, _payload: &[u8]) {
-        // TODO: Parse path, return filesystem stats
-        atom_syscall::debug::log("fsd: fs_statvfs (stub)");
+        Self::log(&alloc::format!("fsd: readdir returned {} bytes", bytes_used));
+        resp
     }
 }
