@@ -1,12 +1,22 @@
 #!/bin/bash
 # build_stress_test.sh
-# Script de build para o kernel Atom no Linux/macOS
+# Script de build + execução do kernel Atom com stress test habilitado.
+# Diferenças em relação ao build.sh:
+#   1. Passa --features stress_test ao compilar o kernel.
+#   2. Executa QEMU automaticamente após o build (RUN=true por padrão).
+#   3. Captura a saída serial em stress_serial.log para análise.
+#   4. Usa -no-reboot -no-shutdown para manter o QEMU vivo após o teste.
+#   5. Exibe o veredicto PASS/FAIL do log ao finalizar.
+#
+# IMPORTANTE: não execute build.sh --run depois deste script — ele
+# reconstruiria o kernel SEM --features stress_test e sobrescreveria o EFI.
+#
 # Uso:
-#   ./build_stress_test.sh              # Build completo (kernel + userspace)
+#   ./build_stress_test.sh              # Build + executa QEMU com stress test
 #   ./build_stress_test.sh --clean      # Limpar e rebuildar
-#   ./build_stress_test.sh --run        # Build e executar no QEMU
+#   ./build_stress_test.sh --no-run     # Build apenas, sem QEMU
 #   ./build_stress_test.sh --userspace  # Build apenas drivers userspace
-#   ./build_stress_test.sh --kernel     # Build apenas kernel
+#   ./build_stress_test.sh --kernel     # Build apenas kernel, sem QEMU
 #   ./build_stress_test.sh --rust-only  # Apenas validar código Rust
 #   ./build_stress_test.sh --setup      # Configurar dependências
 
@@ -58,32 +68,46 @@ fi
 # Parse argumentos
 # -------------------------------------------------------------------------
 
-RUN=false
+# RUN=true por padrão: o objetivo principal é rodar o stress test no QEMU.
+# Para construir sem executar, passe --no-run.
+RUN=true
 CLEAN=false
 RUST_ONLY=false
 SETUP=false
 USERSPACE_ONLY=false
 KERNEL_ONLY=false
 
+# Variáveis configuráveis via ambiente
+QEMU_MEM="${QEMU_MEM:-1G}"
+STRESS_LOG="${STRESS_LOG:-stress_serial.log}"
+
 for arg in "$@"; do
     case $arg in
-        --run)      RUN=true ;;
-        --clean)    CLEAN=true ;;
+        --run)       RUN=true ;;
+        --no-run)    RUN=false ;;
+        --clean)     CLEAN=true ;;
         --rust-only) RUST_ONLY=true ;;
-        --setup)    SETUP=true ;;
+        --setup)     SETUP=true ;;
         --userspace) USERSPACE_ONLY=true ;;
-        --kernel)   KERNEL_ONLY=true ;;
+        --kernel)    KERNEL_ONLY=true; RUN=false ;;
         --help|-h)
-            echo "Uso: ./build.sh [opções]"
+            echo "Uso: ./build_stress_test.sh [opções]"
             echo ""
             echo "Opções:"
             echo "  --clean       Limpar arquivos de build antes de compilar"
-            echo "  --run         Executar no QEMU após build"
+            echo "  --no-run      Build apenas, sem executar QEMU (padrão: executa)"
             echo "  --userspace   Build apenas drivers userspace"
-            echo "  --kernel      Build apenas kernel"
+            echo "  --kernel      Build apenas kernel (implica --no-run)"
             echo "  --rust-only   Apenas validar código Rust (sem NASM/linker)"
             echo "  --setup       Configurar dependências do Rust"
             echo "  --help, -h    Mostrar esta ajuda"
+            echo ""
+            echo "Variáveis de ambiente:"
+            echo "  QEMU_MEM      Memória para o QEMU (padrão: 1G)"
+            echo "  STRESS_LOG    Arquivo de log serial (padrão: stress_serial.log)"
+            echo ""
+            echo "AVISO: não execute build.sh --run depois deste script."
+            echo "  Ele reconstrói o kernel SEM --features stress_test."
             exit 0
             ;;
     esac
@@ -521,51 +545,130 @@ if [ -d "efi/drivers" ]; then
 fi
 
 # =========================================================================
-# EXECUTAR QEMU (OPCIONAL)
+# EXECUTAR QEMU COM STRESS TEST
 # =========================================================================
 
 if [ "$RUN" = true ]; then
-    header "QEMU"
+    header "QEMU — STRESS TEST"
 
-    # Encontrar OVMF
-    OVMF_PATH="/usr/share/OVMF/OVMF_CODE.fd"
-    if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
-    fi
-    if [ ! -f "$OVMF_PATH" ]; then
-        OVMF_PATH="ovmf/OVMF.fd"
+    # Encontrar OVMF: Linux e macOS (Homebrew Intel e Apple Silicon)
+    OVMF_PATH=""
+    for candidate in \
+        "/usr/share/OVMF/OVMF_CODE.fd" \
+        "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd" \
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd" \
+        "ovmf/OVMF.fd"; do
+        if [ -f "$candidate" ]; then
+            OVMF_PATH="$candidate"
+            break
+        fi
+    done
+
+    # macOS — Homebrew (Apple Silicon: /opt/homebrew; Intel: /usr/local)
+    if [ -z "$OVMF_PATH" ] && [[ "$(uname)" == "Darwin" ]]; then
+        BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+        for candidate in \
+            "$BREW_PREFIX/share/qemu/edk2-x86_64-code.fd" \
+            "$BREW_PREFIX/share/OVMF/OVMF_CODE.fd"; do
+            if [ -f "$candidate" ]; then
+                OVMF_PATH="$candidate"
+                break
+            fi
+        done
     fi
 
-    if [ ! -f "$OVMF_PATH" ]; then
+    if [ -z "$OVMF_PATH" ]; then
         error "OVMF.fd não encontrado"
-        warning "Instale: sudo apt install ovmf"
+        if [[ "$(uname)" == "Darwin" ]]; then
+            warning "No macOS o OVMF vem com o QEMU do Homebrew: brew install qemu"
+            warning "Ou coloque manualmente em ovmf/OVMF.fd"
+        else
+            warning "Instale: sudo apt install ovmf"
+        fi
         exit 1
     fi
+
+    success "Usando OVMF: $OVMF_PATH"
 
     if ! command -v qemu-system-x86_64 &> /dev/null; then
         error "qemu-system-x86_64 não encontrado"
-        warning "Instale: sudo apt install qemu-system-x86"
+        if [[ "$(uname)" == "Darwin" ]]; then
+            warning "Instale: brew install qemu"
+        else
+            warning "Instale: sudo apt install qemu-system-x86"
+        fi
         exit 1
     fi
 
-    step "Iniciando QEMU..."
-    echo -e "${YELLOW}Pressione Ctrl+A X para sair do QEMU${NC}"
+    # Remover log anterior para não misturar resultados
+    rm -f "$STRESS_LOG"
+
+    step "Iniciando QEMU com stress test (memória: $QEMU_MEM)..."
+    echo -e "${YELLOW}Log serial: $STRESS_LOG${NC}"
+    echo -e "${YELLOW}O QEMU não reiniciará ao fim do teste (-no-reboot -no-shutdown).${NC}"
+    echo -e "${YELLOW}Pressione Ctrl+A X para encerrar manualmente se necessário.${NC}"
     echo ""
     echo "=========================================="
 
+    # Diferenças em relação ao build.sh:
+    #   -m $QEMU_MEM         : mais memória para os 128 worker threads (1G)
+    #   -serial file:...     : captura saída serial para análise pós-execução
+    #   -no-reboot           : não reinicia em caso de panic/triple-fault
+    #   -no-shutdown         : mantém QEMU vivo para inspecionar estado final
     qemu-system-x86_64 \
         -machine q35 \
         -cpu qemu64 \
-        -m 512M \
+        -m "$QEMU_MEM" \
         -bios "$OVMF_PATH" \
         -drive format=raw,file=fat:rw:efi \
         -device VGA \
         -usb \
         -device usb-mouse \
-        -serial stdio \
-        -debugcon file:serial_log.txt \
-        -global isa-debugcon.iobase=0xE9
+        -serial file:"$STRESS_LOG" \
+        -debugcon file:stress_debug.log \
+        -global isa-debugcon.iobase=0xE9 \
+        -no-reboot \
+        -no-shutdown \
+        || true   # não abortar o script se QEMU sair com código != 0
+
+    echo "=========================================="
+    echo ""
+
+    # -------------------------------------------------------------------------
+    # Analisar resultado do log serial
+    # -------------------------------------------------------------------------
+    header "RESULTADO DO STRESS TEST"
+
+    if [ ! -f "$STRESS_LOG" ]; then
+        error "Arquivo de log não encontrado: $STRESS_LOG"
+        error "O kernel pode ter falhado antes de escrever na serial."
+        exit 1
+    fi
+
+    echo -e "${CYAN}Últimas 30 linhas do log:${NC}"
+    tail -30 "$STRESS_LOG"
+    echo ""
+
+    if grep -q "RESULT: PASS" "$STRESS_LOG"; then
+        success "STRESS TEST: PASS"
+    elif grep -q "RESULT: FAIL" "$STRESS_LOG"; then
+        error "STRESS TEST: FAIL"
+        echo ""
+        echo -e "${YELLOW}Eventos de falha:${NC}"
+        grep -E "FAIL|STALL|CANARY|PANIC|ERROR" "$STRESS_LOG" || true
+        exit 1
+    else
+        warning "Veredicto final não encontrado (teste incompleto ou kernel travado)"
+        echo ""
+        echo -e "${YELLOW}Eventos relevantes encontrados:${NC}"
+        grep -E "stress|FAIL|PASS|PANIC|ERROR|stall|canary" "$STRESS_LOG" | tail -20 || true
+    fi
+
+    echo ""
+    echo -e "${CYAN}Log completo:  $STRESS_LOG${NC}"
+    echo -e "${CYAN}Debug console: stress_debug.log${NC}"
 else
-    echo -e "${YELLOW}Para testar no QEMU: ./build.sh --run${NC}"
-    echo -e "${YELLOW}Para build rápido:   ./build.sh --rust-only${NC}"
+    echo -e "${YELLOW}Para executar o stress test: ./build_stress_test.sh${NC}"
+    echo -e "${YELLOW}Para build sem QEMU:         ./build_stress_test.sh --no-run${NC}"
+    echo -e "${YELLOW}Para build Rust rápido:      ./build_stress_test.sh --rust-only${NC}"
 fi
