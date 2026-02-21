@@ -299,6 +299,34 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 );
             }
 
+            let pf_present = error_code & 0x1 != 0;
+            let pf_write = error_code & 0x2 != 0;
+            let pf_user = error_code & 0x4 != 0;
+
+            // ---------------------------------------------------------------
+            // Demand paging: attempt to resolve the fault before killing
+            // ---------------------------------------------------------------
+            if from_userspace {
+                if let Some(tid) = sched::current_thread() {
+                    // Get the thread's address space (PML4 physical address)
+                    if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                        if pml4 != 0 {
+                            let fault_addr = cr2 as usize;
+
+                            // Try demand paging resolution
+                            if mm::vma::handle_page_fault(pml4 as usize, fault_addr, error_code) {
+                                // Fault resolved! Return to re-execute the instruction.
+                                // The assembly stub will POP_ALL + iretq.
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------------------------------------------------------------
+            // Unresolvable fault — log and terminate
+            // ---------------------------------------------------------------
             log_panic!(
                 LOG_ORIGIN,
                 "Page Fault at address {:#016X}",
@@ -308,9 +336,9 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
             log_debug!(
                 LOG_ORIGIN,
                 "PF flags: present={}, write={}, user={}, reserved={}, instr_fetch={}",
-                error_code & 0x1 != 0,
-                error_code & 0x2 != 0,
-                error_code & 0x4 != 0,
+                pf_present,
+                pf_write,
+                pf_user,
                 error_code & 0x8 != 0,
                 error_code & 0x10 != 0
             );
@@ -320,7 +348,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 if let Some(tid) = sched::current_thread() {
                     log_panic!(
                         LOG_ORIGIN,
-                        "User-space page fault - terminating thread {}",
+                        "User-space page fault (unresolvable) - terminating thread {}",
                         tid
                     );
 

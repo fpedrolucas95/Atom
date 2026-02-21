@@ -122,6 +122,19 @@ pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specifi
 pub const SYS_GET_CPU_BRAND: u64 = 52;
 
 // ---------------------------------------------------------------------------
+// Virtual memory management syscalls
+// ---------------------------------------------------------------------------
+
+/// mmap(addr_hint, length, prot, flags, 0, 0) -> mapped_addr | errno
+pub const SYS_MMAP: u64 = 100;
+/// munmap(addr, length) -> 0 | errno
+pub const SYS_MUNMAP: u64 = 101;
+/// mprotect(addr, length, prot) -> 0 | errno
+pub const SYS_MPROTECT: u64 = 102;
+/// brk(new_brk) -> current_brk | errno
+pub const SYS_BRK: u64 = 103;
+
+// ---------------------------------------------------------------------------
 // Kernel FS backend syscalls — used exclusively by fsd to access the
 // kernel's FAT32 driver.  These are *not* general-purpose filesystem
 // syscalls; applications use SYS_FS_OPEN etc. which route through fsd.
@@ -350,6 +363,12 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0 as *mut u8, arg1 as usize),
+
+        // Virtual memory management syscalls
+        SYS_MMAP => sys_mmap(arg0, arg1, arg2, arg3),
+        SYS_MUNMAP => sys_munmap(arg0, arg1),
+        SYS_MPROTECT => sys_mprotect(arg0, arg1, arg2),
+        SYS_BRK => sys_brk(arg0),
 
         // Kernel FS backend syscalls (for fsd only)
         SYS_KERN_FS_READ_FILE  => sys_kern_fs_read_file(arg0, arg1 as usize, arg2, arg3 as usize),
@@ -3335,7 +3354,12 @@ fn get_static_driver_name(name: &str) -> &'static str {
     }
 }
 
-/// Internal function to create a new userspace process from parsed sections
+/// Internal function to create a new userspace process from parsed sections.
+///
+/// This function now integrates with the VMA subsystem:
+/// - Text, data, and BSS sections are still eagerly mapped (they contain data)
+/// - The user stack uses a VMA with demand paging + guard page
+/// - A heap VMA is pre-registered for brk() support
 fn spawn_process_internal(
     name: &str,
     sections: &crate::executable::ExecutableSections,
@@ -3346,10 +3370,12 @@ fn spawn_process_internal(
     use crate::executable::USER_EXEC_LOAD_BASE;
     use crate::mm::pmm::{self, align_up, PAGE_SIZE};
     use crate::mm::vm::{self, PageFlags};
+    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
-    const USER_STACK_PAGES: usize = 64;  // 256KB stack for userspace processes
-    const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
+    const USER_STACK_PAGES: usize = 16;   // 64KB initial stack (rest demand-paged)
+    const USER_STACK_MAX_PAGES: usize = 256;  // 1MB max stack
+    const USER_STACK_MAX_SIZE: usize = USER_STACK_MAX_PAGES * PAGE_SIZE;
     const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
     const USER_STACK_TOP: usize = 0x0000_8000_0000;
 
@@ -3359,7 +3385,9 @@ fn spawn_process_internal(
     // since each process has isolated virtual memory
     let text_base = USER_EXEC_LOAD_BASE;
     let user_stack_top = USER_STACK_TOP;
-    let user_stack_base = user_stack_top - USER_STACK_SIZE;
+    // Initial stack: only map a small portion, the rest will be demand-paged
+    let initial_stack_size = USER_STACK_PAGES * PAGE_SIZE;
+    let user_stack_base = user_stack_top - initial_stack_size;
 
     log_info!(
         "spawn",
@@ -3375,6 +3403,9 @@ fn spawn_process_internal(
 
     // Clone kernel mappings to the new address space
     vm::clone_kernel_mappings(new_pml4_phys).map_err(|_| ENOMEM)?;
+
+    // Create VMA map for this address space
+    vma::create_vma_map(new_pml4_phys);
 
     log_info!(
         "spawn",
@@ -3402,10 +3433,18 @@ fn spawn_process_internal(
     for i in 0..text_pages {
         let virt = text_base + i * PAGE_SIZE;
         let phys = text_phys + i * PAGE_SIZE;
-        // Use remap to overwrite any existing mappings from shared page tables
         vm::remap_page_in_pml4(new_pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
             .map_err(|_| ENOMEM)?;
     }
+
+    // Register text VMA
+    let _ = vma::insert_vma(new_pml4_phys, Vma {
+        start: text_base,
+        end: text_base + text_size,
+        perms: VmaPermissions::read_exec(),
+        backing: VmaBacking::Anonymous,
+        label: "text",
+    });
 
     // Allocate and map data section
     let data_base = align_up(text_base + text_size);
@@ -3416,7 +3455,7 @@ fn spawn_process_internal(
         let data_phys = pmm::alloc_pages_zeroed(data_pages)
             .ok_or(ENOMEM)?;
 
-        // Copy data section content (use higher-half address to avoid broken identity mapping)
+        // Copy data section content
         unsafe {
             core::ptr::copy_nonoverlapping(
                 sections.data.as_ptr(),
@@ -3435,6 +3474,15 @@ fn spawn_process_internal(
                 PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
             ).map_err(|_| ENOMEM)?;
         }
+
+        // Register data VMA
+        let _ = vma::insert_vma(new_pml4_phys, Vma {
+            start: data_base,
+            end: data_base + data_size,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "data",
+        });
     }
 
     // Allocate and map BSS section
@@ -3456,7 +3504,18 @@ fn spawn_process_internal(
         ).map_err(|_| ENOMEM)?;
     }
 
-    // Allocate user stack
+    // Register BSS VMA
+    let _ = vma::insert_vma(new_pml4_phys, Vma {
+        start: bss_base,
+        end: bss_base + align_up(bss_size),
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Anonymous,
+        label: "bss",
+    });
+
+    // Allocate user stack with demand paging support
+    // Only map a small initial portion; the rest grows via page faults.
+    // The stack VMA covers the full potential range, but only initial pages are mapped.
     let stack_phys = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
         .ok_or(ENOMEM)?;
 
@@ -3471,26 +3530,49 @@ fn spawn_process_internal(
         ).map_err(|_| ENOMEM)?;
     }
 
+    // Register stack VMA with growth support.
+    // The VMA initially covers only the mapped pages but can grow downward
+    // via demand paging when page faults occur below it.
+    let _ = vma::insert_vma(new_pml4_phys, Vma {
+        start: user_stack_base,
+        end: user_stack_top,
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Stack {
+            max_size: USER_STACK_MAX_SIZE,
+        },
+        label: "stack",
+    });
+
+    // Register a heap VMA (starts empty, grows via brk())
+    let heap_start = atom_abi::USER_HEAP_START as usize;
+    let _ = vma::insert_vma(new_pml4_phys, Vma {
+        start: heap_start,
+        end: heap_start + PAGE_SIZE, // Minimal initial size
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Anonymous,
+        label: "heap",
+    });
+
     // Allocate kernel stack
     // CRITICAL: Use higher-half virtual address for kernel stack, not identity-mapped address.
-    // Child processes only have the upper-half PML4 entries cloned (kernel space at 0xFFFF_8000+).
-    // The identity mapping (phys == virt) is in the lower half which is cleared for children.
     let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
         .ok_or(ENOMEM)?;
     let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
-    
 
     // Calculate entry point
     let entry_point = text_base + sections.entry_offset;
 
     log_info!(
         "spawn",
-        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, entry=0x{:X}",
+        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, stack=0x{:X}-0x{:X} (growable to {}KB), entry=0x{:X}",
         text_base,
         text_base + text_size,
         data_base,
         bss_base,
+        user_stack_base,
+        user_stack_top,
+        USER_STACK_MAX_SIZE / 1024,
         entry_point
     );
 
@@ -3507,10 +3589,10 @@ fn spawn_process_internal(
         let bottom = kernel_stack_top - (KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
         let canary_addr = bottom as *mut u64;
         core::ptr::write_volatile(canary_addr, STACK_CANARY);
-        
+
         // Verify write
         let readback = core::ptr::read_volatile(canary_addr);
-        
+
         if readback != STACK_CANARY {
             log_error!(
                 "spawn",
@@ -3570,7 +3652,7 @@ fn spawn_process_internal(
     crate::thread::add_thread(thread);
     crate::sched::mark_thread_ready(pid);
 
-    log_info!("spawn", "Process '{}' (pid={}) scheduled", name, pid);
+    log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
 
     Ok(pid)
 }
@@ -3681,6 +3763,293 @@ fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
     }
 
     copy_len as u64
+}
+
+// ---------------------------------------------------------------------------
+// Virtual Memory Management Syscalls (mmap/munmap/mprotect/brk)
+// ---------------------------------------------------------------------------
+
+/// mmap(addr_hint, length, prot, flags) -> mapped_addr | errno
+///
+/// Maps anonymous private memory into the calling process's virtual address space.
+/// If addr_hint is 0, the kernel chooses a suitable address.
+/// If MAP_FIXED is set, the mapping is placed exactly at addr_hint.
+///
+/// Only MAP_ANONYMOUS | MAP_PRIVATE is supported currently.
+fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
+    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
+    use crate::mm::pmm::PAGE_SIZE;
+
+    let length = length as usize;
+    if length == 0 {
+        return EINVAL;
+    }
+
+    // Round up to page boundary
+    let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    // Get current thread's PML4
+    let tid = match crate::sched::current_thread() {
+        Some(t) => t,
+        None => return EPERM,
+    };
+
+    let pml4 = match crate::thread::get_thread_address_space(tid) {
+        Some(p) if p != 0 => p as usize,
+        _ => return EPERM,
+    };
+
+    // Build VMA permissions from prot flags
+    let mut perms = VmaPermissions::NONE;
+    if prot & atom_abi::PROT_READ != 0 {
+        perms = perms.union(VmaPermissions::READ);
+    }
+    if prot & atom_abi::PROT_WRITE != 0 {
+        perms = perms.union(VmaPermissions::WRITE);
+    }
+    if prot & atom_abi::PROT_EXEC != 0 {
+        perms = perms.union(VmaPermissions::EXEC);
+    }
+
+    let fixed = flags & atom_abi::MAP_FIXED != 0;
+
+    // Determine the virtual address
+    let virt_addr = if fixed {
+        let addr = addr_hint as usize;
+        if addr % PAGE_SIZE != 0 {
+            return EINVAL;
+        }
+        if addr + length > atom_abi::USER_MMAP_END as usize {
+            return EINVAL;
+        }
+        // Remove any existing mappings in this range
+        let removed = vma::remove_vma_range(pml4, addr, addr + length);
+        // Unmap the physical pages for removed VMAs
+        for old_vma in &removed {
+            unmap_vma_pages(pml4, old_vma);
+        }
+        addr
+    } else {
+        let hint_start = if addr_hint != 0 && addr_hint as usize >= atom_abi::USER_MMAP_START as usize {
+            addr_hint as usize
+        } else {
+            atom_abi::USER_MMAP_START as usize
+        };
+
+        match vma::find_free_region(pml4, hint_start, atom_abi::USER_MMAP_END as usize, length) {
+            Some(addr) => addr,
+            None => return ENOMEM,
+        }
+    };
+
+    // Create the VMA (lazy: no physical pages allocated yet)
+    let new_vma = Vma {
+        start: virt_addr,
+        end: virt_addr + length,
+        perms,
+        backing: VmaBacking::Anonymous,
+        label: "mmap",
+    };
+
+    match vma::insert_vma(pml4, new_vma) {
+        Ok(()) => virt_addr as u64,
+        Err(_) => ENOMEM,
+    }
+}
+
+/// munmap(addr, length) -> 0 | errno
+///
+/// Unmaps a previously mapped region, freeing both the VMA and any
+/// physical pages that were demand-paged into it.
+fn sys_munmap(addr: u64, length: u64) -> u64 {
+    use crate::mm::vma;
+    use crate::mm::pmm::PAGE_SIZE;
+
+    let addr = addr as usize;
+    let length = length as usize;
+
+    if addr % PAGE_SIZE != 0 || length == 0 {
+        return EINVAL;
+    }
+
+    let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    let tid = match crate::sched::current_thread() {
+        Some(t) => t,
+        None => return EPERM,
+    };
+
+    let pml4 = match crate::thread::get_thread_address_space(tid) {
+        Some(p) if p != 0 => p as usize,
+        _ => return EPERM,
+    };
+
+    let removed = vma::remove_vma_range(pml4, addr, addr + length);
+
+    if removed.is_empty() {
+        return EINVAL;
+    }
+
+    // Unmap physical pages
+    for old_vma in &removed {
+        unmap_vma_pages(pml4, old_vma);
+    }
+
+    ESUCCESS
+}
+
+/// mprotect(addr, length, prot) -> 0 | errno
+///
+/// Changes the protection on a virtual memory region.
+fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
+    use crate::mm::vma::{self, VmaPermissions};
+    use crate::mm::pmm::PAGE_SIZE;
+
+    let addr = addr as usize;
+    let length = length as usize;
+
+    if addr % PAGE_SIZE != 0 || length == 0 {
+        return EINVAL;
+    }
+
+    let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    let tid = match crate::sched::current_thread() {
+        Some(t) => t,
+        None => return EPERM,
+    };
+
+    let pml4 = match crate::thread::get_thread_address_space(tid) {
+        Some(p) if p != 0 => p as usize,
+        _ => return EPERM,
+    };
+
+    let mut perms = VmaPermissions::NONE;
+    if prot & atom_abi::PROT_READ != 0 {
+        perms = perms.union(VmaPermissions::READ);
+    }
+    if prot & atom_abi::PROT_WRITE != 0 {
+        perms = perms.union(VmaPermissions::WRITE);
+    }
+    if prot & atom_abi::PROT_EXEC != 0 {
+        perms = perms.union(VmaPermissions::EXEC);
+    }
+
+    match vma::set_permissions(pml4, addr, addr + length, perms) {
+        Ok(()) => ESUCCESS,
+        Err(_) => EINVAL,
+    }
+}
+
+/// brk(new_brk) -> current_brk | errno
+///
+/// Adjusts the program break (heap end). If new_brk is 0, returns the
+/// current break. Otherwise, extends or shrinks the heap.
+///
+/// The heap VMA is identified by the "heap" label.
+fn sys_brk(new_brk: u64) -> u64 {
+    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
+    use crate::mm::pmm::PAGE_SIZE;
+
+    let tid = match crate::sched::current_thread() {
+        Some(t) => t,
+        None => return ENOMEM,
+    };
+
+    let pml4 = match crate::thread::get_thread_address_space(tid) {
+        Some(p) if p != 0 => p as usize,
+        _ => return ENOMEM,
+    };
+
+    let heap_start = atom_abi::USER_HEAP_START as usize;
+
+    // Find existing heap VMA
+    let current_brk = match vma::find_vma(pml4, heap_start) {
+        Some(vma) if vma.label == "heap" => vma.end,
+        _ => {
+            // No heap VMA exists yet. If new_brk == 0, return the default start.
+            if new_brk == 0 {
+                return heap_start as u64;
+            }
+
+            // Create initial heap VMA
+            let new_brk_aligned = ((new_brk as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            if new_brk_aligned <= heap_start {
+                return heap_start as u64;
+            }
+
+            let heap_vma = Vma {
+                start: heap_start,
+                end: new_brk_aligned,
+                perms: VmaPermissions::read_write(),
+                backing: VmaBacking::Anonymous,
+                label: "heap",
+            };
+
+            match vma::insert_vma(pml4, heap_vma) {
+                Ok(()) => return new_brk_aligned as u64,
+                Err(_) => return ENOMEM,
+            }
+        }
+    };
+
+    if new_brk == 0 {
+        return current_brk as u64;
+    }
+
+    let new_brk_aligned = ((new_brk as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    if new_brk_aligned < heap_start {
+        return current_brk as u64;
+    }
+
+    if new_brk_aligned == current_brk {
+        return current_brk as u64;
+    }
+
+    // Remove old heap VMA and replace with resized one
+    vma::remove_vma(pml4, heap_start);
+
+    if new_brk_aligned < current_brk {
+        // Shrinking: unmap pages in the released range
+        let shrunk_start = new_brk_aligned;
+        let shrunk_end = current_brk;
+        for page in (shrunk_start..shrunk_end).step_by(PAGE_SIZE) {
+            let _ = crate::mm::vm::unmap_page_in_pml4(pml4, page);
+            vma::account_unmap(pml4);
+        }
+    }
+
+    let new_heap = Vma {
+        start: heap_start,
+        end: new_brk_aligned,
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Anonymous,
+        label: "heap",
+    };
+
+    match vma::insert_vma(pml4, new_heap) {
+        Ok(()) => new_brk_aligned as u64,
+        Err(_) => ENOMEM,
+    }
+}
+
+/// Helper: unmap all physical pages for a VMA by walking the page table
+fn unmap_vma_pages(pml4: usize, vma: &crate::mm::vma::Vma) {
+    use crate::mm::pmm::PAGE_SIZE;
+
+    for page in (vma.start..vma.end).step_by(PAGE_SIZE) {
+        // Query if the page is mapped
+        if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
+            let _ = crate::mm::vm::unmap_page_in_pml4(pml4, page);
+            // Free the physical page (only for non-device mappings)
+            match vma.backing {
+                crate::mm::vma::VmaBacking::Device { .. } => {},
+                _ => crate::mm::pmm::free_page(phys),
+            }
+            crate::mm::vma::account_unmap(pml4);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

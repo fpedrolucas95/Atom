@@ -85,6 +85,28 @@ pub fn is_syscall_error(value: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Virtual memory syscall constants (mmap/munmap/mprotect/brk)
+// ---------------------------------------------------------------------------
+
+/// mmap protection flags
+pub const PROT_NONE: u64 = 0;
+pub const PROT_READ: u64 = 1;
+pub const PROT_WRITE: u64 = 2;
+pub const PROT_EXEC: u64 = 4;
+
+/// mmap flags
+pub const MAP_ANONYMOUS: u64 = 0x20;
+pub const MAP_PRIVATE: u64 = 0x02;
+pub const MAP_FIXED: u64 = 0x10;
+
+/// Default user heap start (above typical text/data/bss)
+pub const USER_HEAP_START: u64 = 0x0000_0010_0000_0000;
+
+/// Default mmap region for dynamic allocations
+pub const USER_MMAP_START: u64 = 0x0000_2000_0000_0000;
+pub const USER_MMAP_END: u64 = 0x0000_7000_0000_0000;
+
+// ---------------------------------------------------------------------------
 // IPC Port constants
 // ---------------------------------------------------------------------------
 
