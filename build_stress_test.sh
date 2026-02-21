@@ -1,13 +1,12 @@
 #!/bin/bash
 # build_stress_test.sh
-# Script de build para o kernel Atom com stress test habilitado.
-# Baseado em build.sh; alterações marcadas com [STRESS].
-#
+# Script de build para o kernel Atom no Linux/macOS
 # Uso:
-#   ./build_stress_test.sh              # Build kernel + executa no QEMU
+#   ./build_stress_test.sh              # Build completo (kernel + userspace)
 #   ./build_stress_test.sh --clean      # Limpar e rebuildar
-#   ./build_stress_test.sh --run        # Build e executar no QEMU (mesmo que padrão)
-#   ./build_stress_test.sh --kernel     # Build apenas kernel (sem QEMU)
+#   ./build_stress_test.sh --run        # Build e executar no QEMU
+#   ./build_stress_test.sh --userspace  # Build apenas drivers userspace
+#   ./build_stress_test.sh --kernel     # Build apenas kernel
 #   ./build_stress_test.sh --rust-only  # Apenas validar código Rust
 #   ./build_stress_test.sh --setup      # Configurar dependências
 
@@ -59,42 +58,64 @@ fi
 # Parse argumentos
 # -------------------------------------------------------------------------
 
-# [STRESS] RUN=true por padrão: o objetivo principal é rodar o teste no QEMU
-RUN=true
+RUN=false
 CLEAN=false
 RUST_ONLY=false
 SETUP=false
+USERSPACE_ONLY=false
 KERNEL_ONLY=false
 
 for arg in "$@"; do
     case $arg in
-        --run)       RUN=true ;;
-        --clean)     CLEAN=true ;;
+        --run)      RUN=true ;;
+        --clean)    CLEAN=true ;;
         --rust-only) RUST_ONLY=true ;;
-        --setup)     SETUP=true ;;
-        --kernel)    KERNEL_ONLY=true; RUN=false ;;
+        --setup)    SETUP=true ;;
+        --userspace) USERSPACE_ONLY=true ;;
+        --kernel)   KERNEL_ONLY=true ;;
         --help|-h)
-            echo "Uso: ./build_stress_test.sh [opções]"
+            echo "Uso: ./build.sh [opções]"
             echo ""
             echo "Opções:"
             echo "  --clean       Limpar arquivos de build antes de compilar"
-            echo "  --run         Executar no QEMU após build (padrão)"
-            echo "  --kernel      Build apenas kernel, sem executar QEMU"
+            echo "  --run         Executar no QEMU após build"
+            echo "  --userspace   Build apenas drivers userspace"
+            echo "  --kernel      Build apenas kernel"
             echo "  --rust-only   Apenas validar código Rust (sem NASM/linker)"
             echo "  --setup       Configurar dependências do Rust"
             echo "  --help, -h    Mostrar esta ajuda"
-            echo ""
-            echo "Variáveis de ambiente:"
-            echo "  QEMU_MEM      Memória para o QEMU (padrão: 1G)"
-            echo "  STRESS_LOG    Arquivo de log serial (padrão: stress_serial.log)"
             exit 0
             ;;
     esac
 done
 
-# [STRESS] Parâmetros configuráveis via variável de ambiente
-QEMU_MEM="${QEMU_MEM:-1G}"
-STRESS_LOG="${STRESS_LOG:-stress_serial.log}"
+# -------------------------------------------------------------------------
+# Userspace drivers list
+# -------------------------------------------------------------------------
+
+USERSPACE_DRIVERS=(
+    "keyboard"
+    "mouse"
+    "display"
+    "terminal"
+    "ui_shell"
+    "demo_rects"
+    "demo_text"
+)
+
+# System services (init is PID 1 - spawns everything else)
+USERSPACE_SERVICES=(
+    "init"
+    "namesvc"
+    "service_manager"
+    "fsd"
+)
+
+# Userspace applications
+USERSPACE_APPS=(
+    "fileman"
+    "fs_test"
+)
 
 # =========================================================================
 # SETUP: Configurar dependências Rust
@@ -102,7 +123,7 @@ STRESS_LOG="${STRESS_LOG:-stress_serial.log}"
 
 if [ "$SETUP" = true ]; then
     header "SETUP"
-
+    
     step "Configurando toolchain Rust..."
 
     if [ ! -f "rust-toolchain.toml" ]; then
@@ -172,16 +193,204 @@ mkdir -p efi/EFI/BOOT
 mkdir -p efi/drivers
 
 # =========================================================================
-# BUILD KERNEL RUST  [STRESS: adiciona --features stress_test]
+# BUILD USERSPACE TOOLS AND DRIVERS
 # =========================================================================
 
-header "KERNEL BUILD (stress_test)"
+if [ "$KERNEL_ONLY" != true ]; then
+    header "USERSPACE BUILD"
 
-step "Compilando kernel Rust com feature stress_test..."
-# [STRESS] Única linha alterada em relação ao build.sh original:
-#   adicionado --features stress_test
+    # -------------------------------------------------------------------------
+    # Build elf2atxf tool first
+    # -------------------------------------------------------------------------
+    step "Building elf2atxf tool..."
+
+    # Detect host triple for cross-platform build
+    HOST_TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+
+    if ! rustup +nightly target list --installed | grep -q "x86_64-unknown-none"; then
+        step "Installing x86_64-unknown-none target..."
+        rustup +nightly target add x86_64-unknown-none
+    fi
+
+    pushd tools/elf2atxf > /dev/null
+    if cargo build --release --target "$HOST_TRIPLE" 2>build.log; then
+        success "elf2atxf built"
+    else
+        error "Failed to build elf2atxf"
+        cat build.log
+        exit 1
+    fi
+    popd > /dev/null
+
+    ELF2ATXF="tools/elf2atxf/target/$HOST_TRIPLE/release/elf2atxf"
+
+    # -------------------------------------------------------------------------
+    # Build userspace drivers and convert to ATXF
+    # -------------------------------------------------------------------------
+    step "Building userspace drivers..."
+
+    for driver in "${USERSPACE_DRIVERS[@]}"; do
+        driver_path="userspace/drivers/$driver"
+
+        if [ ! -f "$driver_path/Cargo.toml" ]; then
+            warning "Driver $driver not found, skipping..."
+            continue
+        fi
+
+        step "  Building $driver driver..."
+        pushd "$driver_path" > /dev/null
+
+        if cargo build --release 2>build.log; then
+            popd > /dev/null
+
+            # Find the ELF binary name from Cargo.toml
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$driver")
+            if [ -z "$bin_name" ]; then
+                bin_name="$driver"
+            fi
+
+            elf_path="$driver_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/drivers/${driver}.atxf"
+
+            if [ -f "$elf_path" ]; then
+                step "  Converting $driver to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$driver.log; then
+                    success "$driver.atxf created"
+                else
+                    warning "Failed to convert $driver to ATXF"
+                    cat build/elf2atxf_$driver.log
+                fi
+            else
+                warning "ELF not found at $elf_path"
+            fi
+        else
+            popd > /dev/null
+            warning "$driver driver failed to build"
+            cat "$driver_path/build.log" 2>/dev/null || true
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # Build userspace services and convert to ATXF
+    # -------------------------------------------------------------------------
+    step "Building userspace services..."
+
+    for service in "${USERSPACE_SERVICES[@]}"; do
+        service_path="userspace/services/$service"
+
+        if [ ! -f "$service_path/Cargo.toml" ]; then
+            warning "Service $service not found, skipping..."
+            continue
+        fi
+
+        step "  Building $service service..."
+        pushd "$service_path" > /dev/null
+
+        if cargo build --release 2>build.log; then
+            popd > /dev/null
+
+            # Find the ELF binary name from Cargo.toml
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$service")
+            if [ -z "$bin_name" ]; then
+                bin_name="$service"
+            fi
+
+            elf_path="$service_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/drivers/${service}.atxf"
+
+            if [ -f "$elf_path" ]; then
+                step "  Converting $service to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$service.log; then
+                    success "$service.atxf created"
+                else
+                    warning "Failed to convert $service to ATXF"
+                    cat build/elf2atxf_$service.log
+                fi
+            else
+                warning "ELF not found at $elf_path"
+            fi
+        else
+            popd > /dev/null
+            warning "$service service failed to build"
+            cat "$service_path/build.log" 2>/dev/null || true
+        fi
+    done
+
+    # -------------------------------------------------------------------------
+    # Build userspace applications and convert to ATXF
+    # -------------------------------------------------------------------------
+    step "Building userspace applications..."
+
+    for app in "${USERSPACE_APPS[@]}"; do
+        app_path="userspace/apps/$app"
+
+        if [ ! -f "$app_path/Cargo.toml" ]; then
+            warning "App $app not found, skipping..."
+            continue
+        fi
+
+        step "  Building $app application..."
+        pushd "$app_path" > /dev/null
+
+        if cargo build --release 2>build.log; then
+            popd > /dev/null
+
+            # Find the ELF binary name from Cargo.toml
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$app_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$app")
+            if [ -z "$bin_name" ]; then
+                bin_name="$app"
+            fi
+
+            elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/drivers/${app}.atxf"
+
+            if [ -f "$elf_path" ]; then
+                step "  Converting $app to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                    success "$app.atxf created"
+                else
+                    warning "Failed to convert $app to ATXF"
+                    cat build/elf2atxf_$app.log
+                fi
+            else
+                warning "ELF not found at $elf_path - app may not compile to UEFI target"
+                warning "If this is a userspace app, it might need separate handling"
+            fi
+        else
+            popd > /dev/null
+            warning "$app application failed to build"
+            cat "$app_path/build.log" 2>/dev/null || true
+        fi
+    done
+
+    # Copy init.atxf to EFI boot directory as the boot payload (PID 1)
+    # The init process spawns: namesvc, service_manager, drivers, ui_shell, terminal
+    if [ -f "efi/drivers/init.atxf" ]; then
+        cp efi/drivers/init.atxf efi/EFI/BOOT/init.atxf
+        success "init.atxf installed as boot payload (PID 1)"
+    else
+        warning "init.atxf not found - system will not boot!"
+    fi
+
+    success "Userspace build completed"
+fi
+
+# Se --userspace only, parar aqui
+if [ "$USERSPACE_ONLY" = true ]; then
+    echo ""
+    success "Build userspace concluído!"
+    exit 0
+fi
+
+# =========================================================================
+# BUILD KERNEL RUST
+# =========================================================================
+
+header "KERNEL BUILD"
+
+step "Compilando kernel Rust..."
 if cargo build -p atom-kernel --release --features stress_test 2>&1 | tee build/cargo.log; then
-    success "Kernel Rust compilado com stress_test"
+    success "Kernel Rust compilado"
 
     if grep -q "warning:" build/cargo.log; then
         warning "Build teve warnings (veja build/cargo.log)"
@@ -205,12 +414,7 @@ fi
 
 if ! command -v nasm &> /dev/null; then
     warning "NASM não encontrado - pulando assembly e linking"
-    # [STRESS] Instruções específicas por plataforma
-    if [[ "$(uname)" == "Darwin" ]]; then
-        warning "No macOS instale via: brew install nasm"
-    else
-        warning "Para build completo, instale NASM: sudo apt install nasm"
-    fi
+    warning "Para build completo, instale NASM: sudo apt install nasm"
     echo ""
     success "Build Rust concluído (sem assembly/linking)"
     exit 0
@@ -221,9 +425,6 @@ fi
 # =========================================================================
 
 step "Montando arquivos assembly..."
-
-# [STRESS] nasm -f win64 funciona em qualquer host (NASM é cross-assembler);
-# no macOS com brew install nasm o comportamento é idêntico ao Linux.
 
 if nasm -f win64 arch/x86_64/boot.asm -o build/boot.obj 2>build/nasm.log; then
     success "boot.obj criado"
@@ -304,145 +505,67 @@ header "BUILD COMPLETO"
 
 echo "Kernel:     build/Atom.efi"
 echo "EFI Image:  efi/EFI/BOOT/BOOTX64.EFI"
+echo "Drivers:    efi/drivers/"
 echo ""
 
-# =========================================================================
-# EXECUTAR QEMU COM STRESS TEST  [STRESS: bloco reescrito]
-# =========================================================================
-
-if [ "$RUN" = true ] && [ "$KERNEL_ONLY" = false ]; then
-    header "QEMU — STRESS TEST"
-
-    # -------------------------------------------------------------------------
-    # [STRESS] Detectar OVMF: Linux, macOS (Homebrew Intel e Apple Silicon)
-    # -------------------------------------------------------------------------
-    OVMF_PATH=""
-
-    # Linux paths
-    for candidate in \
-        "/usr/share/OVMF/OVMF_CODE.fd" \
-        "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd" \
-        "/usr/share/edk2/ovmf/OVMF_CODE.fd"; do
-        if [ -f "$candidate" ]; then
-            OVMF_PATH="$candidate"
-            break
-        fi
-    done
-
-    # macOS — Homebrew (Apple Silicon: /opt/homebrew; Intel: /usr/local)
-    if [ -z "$OVMF_PATH" ] && [[ "$(uname)" == "Darwin" ]]; then
-        BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-        for candidate in \
-            "$BREW_PREFIX/share/qemu/edk2-x86_64-code.fd" \
-            "$BREW_PREFIX/Cellar/qemu/$(ls "$BREW_PREFIX/Cellar/qemu" 2>/dev/null | tail -1)/share/qemu/edk2-x86_64-code.fd" \
-            "$BREW_PREFIX/share/OVMF/OVMF_CODE.fd"; do
-            if [ -f "$candidate" ]; then
-                OVMF_PATH="$candidate"
-                break
-            fi
+# Lista de drivers compilados
+if [ -d "efi/drivers" ]; then
+    drivers=$(ls efi/drivers/*.bin 2>/dev/null || true)
+    if [ -n "$drivers" ]; then
+        echo -e "${CYAN}Drivers userspace:${NC}"
+        for d in efi/drivers/*.bin; do
+            echo "  - $(basename $d)"
         done
+        echo ""
     fi
+fi
 
-    # Fallback: repositório local
-    if [ -z "$OVMF_PATH" ] && [ -f "ovmf/OVMF.fd" ]; then
+# =========================================================================
+# EXECUTAR QEMU (OPCIONAL)
+# =========================================================================
+
+if [ "$RUN" = true ]; then
+    header "QEMU"
+
+    # Encontrar OVMF
+    OVMF_PATH="/usr/share/OVMF/OVMF_CODE.fd"
+    if [ ! -f "$OVMF_PATH" ]; then
+        OVMF_PATH="/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"
+    fi
+    if [ ! -f "$OVMF_PATH" ]; then
         OVMF_PATH="ovmf/OVMF.fd"
     fi
 
-    if [ -z "$OVMF_PATH" ]; then
+    if [ ! -f "$OVMF_PATH" ]; then
         error "OVMF.fd não encontrado"
-        if [[ "$(uname)" == "Darwin" ]]; then
-            warning "No macOS o OVMF vem com o QEMU do Homebrew: brew install qemu"
-            warning "Ou coloque manualmente em ovmf/OVMF.fd"
-        else
-            warning "Instale: sudo apt install ovmf"
-        fi
+        warning "Instale: sudo apt install ovmf"
         exit 1
     fi
-
-    success "Usando OVMF: $OVMF_PATH"
 
     if ! command -v qemu-system-x86_64 &> /dev/null; then
         error "qemu-system-x86_64 não encontrado"
-        if [[ "$(uname)" == "Darwin" ]]; then
-            warning "Instale: brew install qemu"
-        else
-            warning "Instale: sudo apt install qemu-system-x86"
-        fi
+        warning "Instale: sudo apt install qemu-system-x86"
         exit 1
     fi
 
-    # -------------------------------------------------------------------------
-    # [STRESS] Remover log anterior para não misturar resultados
-    # -------------------------------------------------------------------------
-    rm -f "$STRESS_LOG"
-
-    step "Iniciando QEMU com stress test (memória: $QEMU_MEM)..."
-    echo -e "${YELLOW}Log serial: $STRESS_LOG${NC}"
-    echo -e "${YELLOW}O QEMU não reiniciará automaticamente ao fim do teste.${NC}"
-    echo -e "${YELLOW}Pressione Ctrl+A X para encerrar manualmente se necessário.${NC}"
+    step "Iniciando QEMU..."
+    echo -e "${YELLOW}Pressione Ctrl+A X para sair do QEMU${NC}"
     echo ""
     echo "=========================================="
 
-    # [STRESS] Diferenças em relação ao build.sh:
-    #   -m $QEMU_MEM         : mais memória para o stress test (padrão 1G)
-    #   -serial file:...     : redireciona saída serial para arquivo + tee no terminal
-    #   -no-reboot           : não reinicia em caso de panic/triple-fault
-    #   -no-shutdown         : mantém QEMU vivo para inspecionar estado final
-    #   -debugcon file:...   : debug console separado (porta 0xE9)
     qemu-system-x86_64 \
         -machine q35 \
         -cpu qemu64 \
-        -m "$QEMU_MEM" \
+        -m 512M \
         -bios "$OVMF_PATH" \
         -drive format=raw,file=fat:rw:efi \
         -device VGA \
         -usb \
         -device usb-mouse \
-        -serial file:"$STRESS_LOG" \
-        -debugcon file:stress_debug.log \
-        -global isa-debugcon.iobase=0xE9 \
-        -no-reboot \
-        -no-shutdown \
-        || true   # não abortar o script se o QEMU sair com código != 0
-
-    echo "=========================================="
-    echo ""
-
-    # -------------------------------------------------------------------------
-    # [STRESS] Analisar resultado do log serial
-    # -------------------------------------------------------------------------
-    header "RESULTADO DO STRESS TEST"
-
-    if [ ! -f "$STRESS_LOG" ]; then
-        error "Arquivo de log não encontrado: $STRESS_LOG"
-        error "O kernel pode ter falhado antes de escrever na serial."
-        exit 1
-    fi
-
-    echo -e "${CYAN}Últimas 30 linhas do log:${NC}"
-    tail -30 "$STRESS_LOG"
-    echo ""
-
-    # Verificar veredicto final
-    if grep -q "RESULT: PASS" "$STRESS_LOG"; then
-        success "STRESS TEST: PASS"
-    elif grep -q "RESULT: FAIL" "$STRESS_LOG"; then
-        error "STRESS TEST: FAIL"
-        echo ""
-        echo -e "${YELLOW}Linhas de falha detectadas:${NC}"
-        grep -E "FAIL|STALL|CANARY|PANIC|ERROR" "$STRESS_LOG" || true
-        exit 1
-    else
-        warning "Veredicto final não encontrado no log (teste incompleto ou kernel travado)"
-        echo ""
-        echo -e "${YELLOW}Eventos relevantes encontrados:${NC}"
-        grep -E "stress|FAIL|PASS|PANIC|ERROR|stall|canary" "$STRESS_LOG" | tail -20 || true
-    fi
-
-    echo ""
-    echo -e "${CYAN}Log completo: $STRESS_LOG${NC}"
-    echo -e "${CYAN}Debug log:    stress_debug.log${NC}"
+        -serial stdio \
+        -debugcon file:serial_log.txt \
+        -global isa-debugcon.iobase=0xE9
 else
-    echo -e "${YELLOW}Build concluído. Para executar: ./build_stress_test.sh --run${NC}"
-    echo -e "${YELLOW}Para build Rust rápido:        ./build_stress_test.sh --rust-only${NC}"
+    echo -e "${YELLOW}Para testar no QEMU: ./build.sh --run${NC}"
+    echo -e "${YELLOW}Para build rápido:   ./build.sh --rust-only${NC}"
 fi
