@@ -251,6 +251,34 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
     // Check if exception came from user space (CPL=3)
     let from_userspace = (frame.cs & 0x3) == 0x3;
 
+    // -----------------------------------------------------------------------
+    // Fast path: silently resolve demand-paged user-space page faults
+    // (error code 0x6 = write + user + not-present).  Normal BSS zero-fill
+    // and stack-growth faults all fall here and are handled with no logging.
+    // Only fall through to the diagnostic path for unresolvable faults.
+    // -----------------------------------------------------------------------
+    if exception_number == 14 && from_userspace {
+        let cr2: u64;
+        unsafe {
+            core::arch::asm!(
+                "mov {}, cr2",
+                out(reg) cr2,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        if let Some(tid) = sched::current_thread() {
+            if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                if pml4 != 0 {
+                    if mm::vma::handle_page_fault(pml4 as usize, cr2 as usize, error_code) {
+                        // Resolved — POP_ALL + iretq will retry the instruction.
+                        return;
+                    }
+                }
+            }
+        }
+        // Fall through: genuinely unresolvable — log and terminate.
+    }
+
     log_panic!(
         LOG_ORIGIN,
         "CPU exception: {} (vector={}, from_userspace={})",
@@ -304,28 +332,8 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
             let pf_user = error_code & 0x4 != 0;
 
             // ---------------------------------------------------------------
-            // Demand paging: attempt to resolve the fault before killing
-            // ---------------------------------------------------------------
-            if from_userspace {
-                if let Some(tid) = sched::current_thread() {
-                    // Get the thread's address space (PML4 physical address)
-                    if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
-                        if pml4 != 0 {
-                            let fault_addr = cr2 as usize;
-
-                            // Try demand paging resolution
-                            if mm::vma::handle_page_fault(pml4 as usize, fault_addr, error_code) {
-                                // Fault resolved! Return to re-execute the instruction.
-                                // The assembly stub will POP_ALL + iretq.
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ---------------------------------------------------------------
-            // Unresolvable fault — log and terminate
+            // Unresolvable fault — demand paging was already attempted in
+            // the fast path above; if we reach here the fault is genuine.
             // ---------------------------------------------------------------
             log_panic!(
                 LOG_ORIGIN,
