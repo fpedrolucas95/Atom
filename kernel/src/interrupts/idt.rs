@@ -31,10 +31,87 @@
 // - `verify_mapping` proactively checks VM mappings to catch early boot bugs
 // - Any mismatch between IDT entries and actual handler symbols will lead
 //   to fatal triple faults, making early diagnostics critical
+//
+// ── Architectural constraint: IDT vector partitioning on x86_64 ─────────────
+//
+// The Intel/AMD x86_64 architecture permanently reserves IDT vectors
+// 0x00–0x1F (decimal 0–31) for processor-defined exceptions.  This partition
+// is enforced by the silicon: the CPU decodes the IDT index unconditionally
+// as a bare integer offset into the descriptor table; it does not distinguish
+// between a software-installed "hardware IRQ" gate and a CPU-generated fault.
+//
+// If a hardware interrupt routed by the PIC or local APIC is assigned to a
+// vector in [0x00, 0x1F], the CPU will invoke the corresponding IDT entry for
+// *both* the CPU exception and the hardware IRQ.  Concretely:
+//
+//   • The timer IRQ on vector 0x0D would fire the #GP handler on every tick,
+//     with a fabricated error code pushed by the hardware stub.  The handler
+//     would attempt to decode a protection fault that never occurred, likely
+//     killing an innocent thread or halting the kernel.
+//   • On SMP systems, cross-processor IPI delivery to a conflicted vector
+//     can corrupt the APIC priority model, blocking all future interrupts.
+//
+// The canonical solution is APIC/PIC remapping: during controller
+// initialisation (apic.rs) the legacy 8259A PIC master is initialised with
+// an ICW2 value of 0x20, and the local APIC LVT timer register is programmed
+// with TIMER_INTERRUPT_VECTOR.  Both operations require TIMER_INTERRUPT_VECTOR
+// ≥ 0x20 to be safe.
+//
+// This invariant is enforced at three independent layers:
+//   1. Build time  — kernel/build.rs panics if any vector < 0x20 (runs on
+//                    every `cargo build` before code generation).
+//   2. Compile time — const assertions below reject an invalid generated
+//                    constant without executing a single instruction.
+//   3. Runtime     — asserts at the top of `init()` catch any path that
+//                    bypasses the build script (e.g., out-of-tree builds,
+//                    injected constants, feature-gated overrides).
+//
+// Reference: Intel® 64 and IA-32 Architectures Software Developer's Manual,
+//            Volume 3A, Section 6.3 "Sources of Interrupts and Exceptions",
+//            Table 6-1 "Protected-Mode Exceptions and Interrupts".
 
 use core::mem::size_of;
 use crate::{log_debug, log_info};
 use super::{KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, TIMER_INTERRUPT_VECTOR, USER_TRAP_INTERRUPT_VECTOR};
+
+// ── Compile-time vector safety assertions ────────────────────────────────────
+//
+// These `const` evaluations are checked by the Rust compiler when the kernel
+// crate is compiled, independently of the build script.  They provide a second
+// enforcement layer: even if build.rs is not re-run (e.g., incremental build
+// with a stale vectors.rs, or an out-of-tree build that supplies its own
+// constants), the compiler will reject any binary where a hardware IRQ vector
+// falls inside the CPU-reserved exception range [0x00, 0x1F].
+//
+// A compile-time failure here is intentional and desirable: it is always
+// preferable to a kernel that silently aliases timer interrupts with CPU
+// exception handlers.
+const _: () = assert!(
+    TIMER_INTERRUPT_VECTOR >= 0x20,
+    "TIMER_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
+     for CPU-defined exceptions (#DE, #DB, #NMI, #BP, ... #CP). \
+     A hardware IRQ at this vector aliases a CPU exception handler. \
+     Fix the assignment in kernel/build.rs. \
+     Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+);
+const _: () = assert!(
+    KEYBOARD_INTERRUPT_VECTOR >= 0x20,
+    "KEYBOARD_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
+     for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
+     Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+);
+const _: () = assert!(
+    MOUSE_INTERRUPT_VECTOR >= 0x20,
+    "MOUSE_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
+     for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
+     Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+);
+const _: () = assert!(
+    USER_TRAP_INTERRUPT_VECTOR >= 0x20,
+    "USER_TRAP_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
+     for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
+     Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+);
 
 const IDT_SIZE: usize = 256;
 const DOUBLE_FAULT_IST: u8 = 1;
@@ -134,6 +211,60 @@ const LOG_ORIGIN: &str = "idt";
 const DPL_RING3: u8 = 0x60;
 
 pub fn init() {
+    // ── Runtime vector safety assertions ─────────────────────────────────────
+    //
+    // Belt-and-suspenders defence executed unconditionally at the entry point
+    // of IDT initialisation, before any descriptor is written or `lidt` is
+    // issued.
+    //
+    // Rationale for a runtime assert in addition to build-time and compile-time
+    // checks:
+    //   • Protects against out-of-tree or CI builds that supply pre-generated
+    //     vectors.rs files without re-running build.rs.
+    //   • Catches conditional-compilation paths (feature flags, cfg attributes)
+    //     that might substitute a different constant value at link time.
+    //   • Provides a clear, actionable kernel panic message at boot rather than
+    //     the non-deterministic triple-fault that would occur if an aliased
+    //     vector were actually loaded into the CPU.
+    //
+    // If any assert fires, the kernel halts immediately with an unambiguous
+    // message identifying the offending constant, its actual value, and the
+    // architectural reference.  This is the correct behaviour: a kernel with
+    // an aliased IRQ vector is unsound and must not proceed to load the IDT.
+    assert!(
+        TIMER_INTERRUPT_VECTOR >= 0x20,
+        "IDT init aborted: TIMER_INTERRUPT_VECTOR ({:#04X}) falls inside the \
+         CPU-reserved exception range 0x00-0x1F. A hardware IRQ at this vector \
+         aliases a CPU exception handler, causing non-deterministic faults. \
+         Fix the assignment in kernel/build.rs. \
+         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+        TIMER_INTERRUPT_VECTOR,
+    );
+    assert!(
+        KEYBOARD_INTERRUPT_VECTOR >= 0x20,
+        "IDT init aborted: KEYBOARD_INTERRUPT_VECTOR ({:#04X}) falls inside the \
+         CPU-reserved exception range 0x00-0x1F. \
+         Fix the assignment in kernel/build.rs. \
+         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+        KEYBOARD_INTERRUPT_VECTOR,
+    );
+    assert!(
+        MOUSE_INTERRUPT_VECTOR >= 0x20,
+        "IDT init aborted: MOUSE_INTERRUPT_VECTOR ({:#04X}) falls inside the \
+         CPU-reserved exception range 0x00-0x1F. \
+         Fix the assignment in kernel/build.rs. \
+         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+        MOUSE_INTERRUPT_VECTOR,
+    );
+    assert!(
+        USER_TRAP_INTERRUPT_VECTOR >= 0x20,
+        "IDT init aborted: USER_TRAP_INTERRUPT_VECTOR ({:#04X}) falls inside the \
+         CPU-reserved exception range 0x00-0x1F. \
+         Fix the assignment in kernel/build.rs. \
+         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+        USER_TRAP_INTERRUPT_VECTOR,
+    );
+
     unsafe {
         let idt_addr = core::ptr::addr_of!(IDT) as usize;
         log_debug!(LOG_ORIGIN, "IDT address: 0x{:X}", idt_addr);
