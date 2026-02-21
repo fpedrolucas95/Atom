@@ -661,15 +661,34 @@ impl SharedMemManager {
             return Err(SharedMemError::PermissionDenied);
         }
 
-        if !region.can_destroy() {
-            return Err(SharedMemError::RegionInUse);
-        }
-
+        // Force-destroy: unmap from ALL remaining address spaces first,
+        // then free the physical pages.  This is the correct behavior when
+        // the owner (e.g. compositor) tears down a shared surface — client
+        // processes that still have mappings will see the pages vanish, which
+        // is acceptable (they are being terminated anyway).
         if let Some(mut region) = regions.remove(&region_id) {
+            // Force-unmap all remaining mappings
+            for mapping in region.mappings.drain(..) {
+                for (i, &phys_page) in region.physical_pages.iter().enumerate() {
+                    let virt = mapping.virt_addr + (i * pmm::PAGE_SIZE);
+                    if let Some(pml4) = mapping.pml4_phys {
+                        let _ = vm::unmap_page_in_pml4(pml4, virt);
+                    } else {
+                        let _ = vm::unmap_page(virt);
+                    }
+                    let _ = phys_page; // suppress unused warning
+                }
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Force-unmapped region {} from pml4={:?}",
+                    region_id, mapping.pml4_phys
+                );
+            }
+            region.ref_count = 0;
             region.destroy();
         }
 
-        log_info!(LOG_ORIGIN, "Destroyed region {} by thread {}", region_id, caller);
+        log_info!(LOG_ORIGIN, "Destroyed region {} by owner thread {}", region_id, caller);
 
         Ok(())
     }
@@ -868,12 +887,17 @@ pub fn region_size(region_id: RegionId) -> Option<usize> {
 
 /// Resolve a thread's PML4 physical address into an `Option<usize>`.
 ///
-/// Returns `None` if the thread uses the kernel's own PML4 (address_space == 0
-/// or matches the current kernel CR3).  Returns `Some(pml4_phys)` for
-/// user-space threads that have their own address space.
+/// Returns `None` if the thread uses the kernel's own PML4 (address_space == 0).
+/// Returns `Some(pml4_phys)` for user-space threads that have their own
+/// address space.
+///
+/// NOTE: We intentionally do NOT compare against CR3 here.  During a syscall
+/// the active CR3 holds the calling thread's PML4, so comparing would
+/// incorrectly resolve every user-space caller to `None` (kernel space),
+/// causing unmap/cleanup to fail with `NotMapped`.
 fn resolve_thread_pml4(thread_id: ThreadId) -> Option<usize> {
     let addr_space = crate::thread::get_thread_address_space(thread_id).unwrap_or(0);
-    if addr_space == 0 || addr_space == crate::arch::read_cr3() {
+    if addr_space == 0 {
         None
     } else {
         Some(addr_space as usize)
@@ -921,14 +945,14 @@ fn other_threads_share_address_space(thread_id: ThreadId, addr_space: u64) -> bo
 /// 3. Destroy all owned regions whose ref_count has reached 0.
 pub fn cleanup_thread_shared_memory(thread_id: ThreadId) {
     let addr_space = crate::thread::get_thread_address_space(thread_id).unwrap_or(0);
-    let pml4_opt = if addr_space == 0 || addr_space == crate::arch::read_cr3() {
+    let pml4_opt = if addr_space == 0 {
         None
     } else {
         Some(addr_space as usize)
     };
 
     // Check if sibling threads share this address space.
-    let siblings_alive = if addr_space != 0 && addr_space != crate::arch::read_cr3() {
+    let siblings_alive = if addr_space != 0 {
         other_threads_share_address_space(thread_id, addr_space)
     } else {
         false
@@ -945,17 +969,11 @@ pub fn cleanup_thread_shared_memory(thread_id: ThreadId) {
             regions_to_unmap.push(*region_id);
         }
         if region.owner == thread_id {
-            if region.ref_count == 0 || region.mappings.is_empty() {
-                regions_to_destroy.push(*region_id);
-            } else {
-                log_debug!(
-                    LOG_ORIGIN,
-                    "Region {} owned by thread {} still has {} mappings - deferred cleanup",
-                    region_id,
-                    thread_id,
-                    region.ref_count
-                );
-            }
+            // Owner is terminating — force-destroy all owned regions regardless
+            // of remaining mappings.  Client processes that still have mappings
+            // will see the pages vanish, which is safe (the pages go back to
+            // the PMM and will fault on access, triggering process termination).
+            regions_to_destroy.push(*region_id);
         }
     }
 
@@ -985,21 +1003,36 @@ pub fn cleanup_thread_shared_memory(thread_id: ThreadId) {
         }
     }
 
-    // Destroy all regions owned by this thread that have no remaining references.
+    // Destroy all regions owned by this thread, force-unmapping any remaining
+    // mappings (from other address spaces) before freeing physical pages.
     for region_id in regions_to_destroy {
-        if let Some(region) = regions.get(&region_id) {
-            if region.can_destroy() {
-                if let Some(mut region) = regions.remove(&region_id) {
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "Destroying region {} owned by thread {} ({} physical pages)",
-                        region_id,
-                        thread_id,
-                        region.physical_pages.len()
-                    );
-                    region.destroy();
+        if let Some(mut region) = regions.remove(&region_id) {
+            // Force-unmap from ALL remaining address spaces
+            for mapping in region.mappings.drain(..) {
+                for (i, _) in region.physical_pages.iter().enumerate() {
+                    let virt = mapping.virt_addr + (i * pmm::PAGE_SIZE);
+                    if let Some(pml4) = mapping.pml4_phys {
+                        let _ = vm::unmap_page_in_pml4(pml4, virt);
+                    } else {
+                        let _ = vm::unmap_page(virt);
+                    }
                 }
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Force-unmapped region {} from pml4={:?} during owner cleanup",
+                    region_id, mapping.pml4_phys
+                );
             }
+            region.ref_count = 0;
+
+            log_debug!(
+                LOG_ORIGIN,
+                "Destroying region {} owned by thread {} ({} physical pages)",
+                region_id,
+                thread_id,
+                region.physical_pages.len()
+            );
+            region.destroy();
         }
     }
 }

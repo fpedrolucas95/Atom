@@ -893,22 +893,33 @@ impl ProcessInfo {
     }
 }
 
-/// Get list of all processes/threads for userspace
-/// Returns the number of processes written to the buffer
+/// Get list of all processes/threads for userspace.
+/// Skips threads in Exited state since they are effectively dead
+/// (pending final cleanup by the reaper).
+/// Returns the number of processes written to the buffer.
 pub fn list_processes(buffer: &mut [ProcessInfo]) -> usize {
     let threads = THREAD_LIST.threads.lock();
-    let count = threads.len().min(buffer.len());
+    let mut count = 0;
 
-    for (i, thread) in threads.iter().take(count).enumerate() {
-        buffer[i] = ProcessInfo::from_thread(thread);
+    for thread in threads.iter() {
+        if count >= buffer.len() {
+            break;
+        }
+        // Skip exited/zombie threads - they are pending cleanup
+        if thread.state == ThreadState::Exited {
+            continue;
+        }
+        buffer[count] = ProcessInfo::from_thread(thread);
+        count += 1;
     }
 
     count
 }
 
-/// Get total number of processes/threads
+/// Get total number of active (non-exited) processes/threads
 pub fn process_count() -> usize {
-    THREAD_LIST.count()
+    let threads = THREAD_LIST.threads.lock();
+    threads.iter().filter(|t| t.state != ThreadState::Exited).count()
 }
 
 /// Get information about all threads for OOM killer decisions.
