@@ -94,9 +94,11 @@ unexpected_common:
     PUSH_ALL
 
     mov rcx, rsp           ; arg0 = InterruptFrame*
+    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
     sub rsp, 32            ; Shadow space
+    and rsp, -16           ; Ensure 16-byte alignment
     call rust_unexpected_interrupt_handler
-    add rsp, 32
+    mov rsp, rbp           ; Restore RSP
 
     POP_ALL
     iretq
@@ -130,9 +132,11 @@ irq_handler_32:
     push qword TIMER_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    sub rsp, 32
+    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
+    sub rsp, 32            ; Shadow space
+    and rsp, -16           ; Ensure 16-byte alignment
     call rust_timer_interrupt_handler
-    add rsp, 32
+    mov rsp, rbp           ; Restore RSP
     POP_ALL
     iretq
 
@@ -142,9 +146,11 @@ irq_handler_104:
     push qword USER_TRAP_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    sub rsp, 32
+    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
+    sub rsp, 32            ; Shadow space
+    and rsp, -16           ; Ensure 16-byte alignment
     call rust_user_trap_interrupt_handler
-    add rsp, 32
+    mov rsp, rbp           ; Restore RSP
     POP_ALL
     iretq
 
@@ -154,9 +160,11 @@ irq_handler_33:
     push qword KEYBOARD_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    sub rsp, 32
+    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
+    sub rsp, 32            ; Shadow space
+    and rsp, -16           ; Ensure 16-byte alignment
     call rust_keyboard_interrupt_handler
-    add rsp, 32
+    mov rsp, rbp           ; Restore RSP
     POP_ALL
     iretq
 
@@ -166,9 +174,11 @@ irq_handler_44:
     push qword MOUSE_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    sub rsp, 32
+    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
+    sub rsp, 32            ; Shadow space
+    and rsp, -16           ; Ensure 16-byte alignment
     call rust_mouse_interrupt_handler
-    add rsp, 32
+    mov rsp, rbp           ; Restore RSP
     POP_ALL
     iretq
 
@@ -206,9 +216,11 @@ exception_common:
     PUSH_ALL
 
     mov rcx, rsp           ; arg0 = InterruptFrame*
+    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
     sub rsp, 32            ; Shadow space
+    and rsp, -16           ; Ensure 16-byte alignment
     call rust_exception_handler
-    add rsp, 32
+    mov rsp, rbp           ; Restore RSP
 
     POP_ALL
     iretq
