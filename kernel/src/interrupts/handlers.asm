@@ -57,6 +57,25 @@ extern rust_user_trap_interrupt_handler
 %endmacro
 
 ; ---------------------------------------------------------------------------
+; ABI Compliance Helper Macro
+; ---------------------------------------------------------------------------
+
+; CALL_RUST_HANDLER <handler_name>
+; Ensures MS x64 ABI compliance:
+; 1. Stack is 16-byte aligned before the call.
+; 2. 32 bytes of shadow space (home space) are reserved.
+; Uses RBP as a scratch register to save/restore RSP. This is safe because
+; PUSH_ALL has already saved the original RBP on the stack, and POP_ALL
+; will restore it later.
+%macro CALL_RUST_HANDLER 1
+    mov rbp, rsp           ; Save current stack pointer
+    sub rsp, 32            ; Allocate shadow space
+    and rsp, -16           ; Align to 16-byte boundary
+    call %1                ; Call the actual handler
+    mov rsp, rbp           ; Restore original stack pointer
+%endmacro
+
+; ---------------------------------------------------------------------------
 ; Catch-all interrupt stubs
 ; ---------------------------------------------------------------------------
 
@@ -92,14 +111,8 @@ UNEXPECTED_INTERRUPT_HANDLER vec
 ; ---------------------------------------------------------------------------
 unexpected_common:
     PUSH_ALL
-
     mov rcx, rsp           ; arg0 = InterruptFrame*
-    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
-    sub rsp, 32            ; Shadow space
-    and rsp, -16           ; Ensure 16-byte alignment
-    call rust_unexpected_interrupt_handler
-    mov rsp, rbp           ; Restore RSP
-
+    CALL_RUST_HANDLER rust_unexpected_interrupt_handler
     POP_ALL
     iretq
 
@@ -132,11 +145,7 @@ irq_handler_32:
     push qword TIMER_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
-    sub rsp, 32            ; Shadow space
-    and rsp, -16           ; Ensure 16-byte alignment
-    call rust_timer_interrupt_handler
-    mov rsp, rbp           ; Restore RSP
+    CALL_RUST_HANDLER rust_timer_interrupt_handler
     POP_ALL
     iretq
 
@@ -146,11 +155,7 @@ irq_handler_104:
     push qword USER_TRAP_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
-    sub rsp, 32            ; Shadow space
-    and rsp, -16           ; Ensure 16-byte alignment
-    call rust_user_trap_interrupt_handler
-    mov rsp, rbp           ; Restore RSP
+    CALL_RUST_HANDLER rust_user_trap_interrupt_handler
     POP_ALL
     iretq
 
@@ -160,11 +165,7 @@ irq_handler_33:
     push qword KEYBOARD_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
-    sub rsp, 32            ; Shadow space
-    and rsp, -16           ; Ensure 16-byte alignment
-    call rust_keyboard_interrupt_handler
-    mov rsp, rbp           ; Restore RSP
+    CALL_RUST_HANDLER rust_keyboard_interrupt_handler
     POP_ALL
     iretq
 
@@ -174,11 +175,7 @@ irq_handler_44:
     push qword MOUSE_INTERRUPT_VECTOR
     PUSH_ALL
     mov rcx, rsp
-    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
-    sub rsp, 32            ; Shadow space
-    and rsp, -16           ; Ensure 16-byte alignment
-    call rust_mouse_interrupt_handler
-    mov rsp, rbp           ; Restore RSP
+    CALL_RUST_HANDLER rust_mouse_interrupt_handler
     POP_ALL
     iretq
 
@@ -214,13 +211,7 @@ EXCEPTION_HANDLER_ERR    21   ; #CP Control Protection
 
 exception_common:
     PUSH_ALL
-
     mov rcx, rsp           ; arg0 = InterruptFrame*
-    mov rbp, rsp           ; Save RSP in rbp (non-volatile, saved in PUSH_ALL)
-    sub rsp, 32            ; Shadow space
-    and rsp, -16           ; Ensure 16-byte alignment
-    call rust_exception_handler
-    mov rsp, rbp           ; Restore RSP
-
+    CALL_RUST_HANDLER rust_exception_handler
     POP_ALL
     iretq
