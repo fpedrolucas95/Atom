@@ -31,8 +31,12 @@ const NUM_CLASSES: usize = SIZE_CLASSES.len();
 /// Threshold: allocations larger than this go directly to PMM
 const LARGE_THRESHOLD: usize = 2048;
 
-/// Header prepended to large (page-based) allocations
-const LARGE_HEADER_SIZE: usize = 16; // size + magic, aligned to 16
+/// Header prepended to large (page-based) allocations.
+/// Layout (3 × usize = 24 bytes): [ pages | header_offset | magic ]
+/// `header_offset` is the distance from the PMM base to the user pointer,
+/// rounded up to satisfy the requested alignment. Storing it here lets
+/// `dealloc_large` recover the base without needing the original `Layout`.
+const LARGE_HEADER_SIZE: usize = 24; // 3 × usize: pages + header_offset + magic
 
 /// Magic number for large allocation validation
 const LARGE_MAGIC: usize = 0xA110_CA7E;
@@ -199,7 +203,16 @@ impl SlabAllocator {
     }
 
     fn alloc_large(&mut self, layout: Layout) -> *mut u8 {
-        let total_size = layout.size() + LARGE_HEADER_SIZE;
+        // Compute the byte offset from the PMM-page base to the returned user
+        // pointer.  The base is always page-aligned (PAGE_SIZE = 4096), so
+        //   base + header_offset  is aligned to `layout.align()`
+        // iff header_offset is a multiple of `layout.align()`.  The smallest
+        // such value that still leaves LARGE_HEADER_SIZE bytes before the user
+        // pointer for the header is round_up(LARGE_HEADER_SIZE, align).
+        let align = layout.align();
+        let header_offset = (LARGE_HEADER_SIZE + align - 1) & !(align - 1);
+
+        let total_size = header_offset + layout.size();
         let pages = (total_size + pmm::PAGE_SIZE - 1) / pmm::PAGE_SIZE;
 
         let phys = match pmm::alloc_pages_zeroed(pages) {
@@ -207,37 +220,43 @@ impl SlabAllocator {
             None => return null_mut(),
         };
 
-        let virt = vm::phys_to_virt_ptr(phys);
+        let base = vm::phys_to_virt_ptr(phys);
 
-        // Write header: [size_in_pages | magic]
+        // Write header immediately before the user pointer:
+        //   [ pages | header_offset | magic ]
         unsafe {
-            let header = virt as *mut usize;
-            *header = pages;
-            *header.add(1) = LARGE_MAGIC;
+            let header = (base + header_offset - LARGE_HEADER_SIZE) as *mut usize;
+            *header          = pages;
+            *header.add(1)   = header_offset;
+            *header.add(2)   = LARGE_MAGIC;
         }
 
         self.large_alloc_count += 1;
 
-        // Return pointer past the header
-        (virt + LARGE_HEADER_SIZE) as *mut u8
+        // Return the correctly aligned user pointer
+        (base + header_offset) as *mut u8
     }
 
     fn dealloc_large(&mut self, ptr: *mut u8) {
+        // The header is always placed exactly LARGE_HEADER_SIZE bytes before
+        // `ptr` (guaranteed by alloc_large above).
         let header_ptr = (ptr as usize - LARGE_HEADER_SIZE) as *const usize;
 
         unsafe {
-            let pages = *header_ptr;
-            let magic = *header_ptr.add(1);
+            let pages         = *header_ptr;
+            let header_offset = *header_ptr.add(1);
+            let magic         = *header_ptr.add(2);
 
             if magic != LARGE_MAGIC {
                 // Corruption detected — don't free to avoid damage
                 return;
             }
 
+            // Recover the PMM base: base = user_ptr − header_offset.
             // Convert virtual back to physical via the canonical helper so
             // that this assumption is expressed in one place (vm::virt_to_phys)
             // and remains correct if the VA–PA mapping scheme ever changes.
-            let virt_base = ptr as usize - LARGE_HEADER_SIZE;
+            let virt_base = ptr as usize - header_offset;
             let phys = vm::virt_to_phys(virt_base);
 
             pmm::free_pages(phys, pages);

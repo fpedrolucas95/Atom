@@ -3925,6 +3925,7 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 /// Changes the protection on a virtual memory region.
 fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     use crate::mm::vma::{self, VmaPermissions};
+    use crate::mm::vm::{self, PageFlags};
     use crate::mm::pmm::PAGE_SIZE;
 
     let addr = addr as usize;
@@ -3957,10 +3958,28 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
         perms = perms.union(VmaPermissions::EXEC);
     }
 
-    match vma::set_permissions(pml4, addr, addr + length, perms) {
-        Ok(()) => ESUCCESS,
-        Err(_) => EINVAL,
+    if let Err(_) = vma::set_permissions(pml4, addr, addr + length, perms) {
+        return EINVAL;
     }
+
+    // Update PTEs for all already-resident pages in the affected range.
+    let mut page_flags = PageFlags::PRESENT | PageFlags::USER;
+    if perms.contains(VmaPermissions::WRITE) {
+        page_flags |= PageFlags::WRITABLE;
+    }
+    if !perms.contains(VmaPermissions::EXEC) {
+        page_flags |= PageFlags::NO_EXECUTE;
+    }
+
+    let mut page_addr = addr;
+    while page_addr < addr + length {
+        if let Ok((phys, _old_flags)) = vm::query_mapping_in_pml4(pml4, page_addr) {
+            let _ = vm::remap_page_in_pml4(pml4, page_addr, phys, page_flags);
+        }
+        page_addr += PAGE_SIZE;
+    }
+
+    ESUCCESS
 }
 
 /// brk(new_brk) -> current_brk | errno
@@ -4021,7 +4040,7 @@ fn sys_brk(new_brk: u64) -> u64 {
 
     let new_brk_aligned = ((new_brk as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    if new_brk_aligned < heap_start {
+    if new_brk_aligned <= heap_start {
         return current_brk as u64;
     }
 
