@@ -13,6 +13,25 @@ default rel
 ; Higher-half base: virtual mirror of physical memory
 %define HIGHER_HALF_BASE  0xFFFF800000000000
 
+; Macro: JUMP_TO_HIGHER_HALF label
+; Idempotently jumps to the higher-half mirror of the provided local label.
+;
+; Architectural Note: x86_64 canonical addresses require bits 48-63 to be
+; copies of bit 47. Our higher-half mirror starts at 0xFFFF800000000000,
+; where bit 47 is set. By testing bit 47, we can determine if the current
+; code is already executing in the higher-half mirror. If so, we skip
+; adding HIGHER_HALF_BASE to avoid an overflow that would result in a
+; non-canonical or wrapped address.
+%macro JUMP_TO_HIGHER_HALF 1
+    lea  rax, [rel %1]
+    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
+    jc   %%skip_hh              ; If so, skip adding mirror base
+    mov  r10, HIGHER_HALF_BASE
+    add  rax, r10
+%%skip_hh:
+    jmp  rax
+%endmacro
+
 section .text
 
 ; =================================================
@@ -22,15 +41,7 @@ section .text
 global enter_user
 enter_user:
     cli
-
-    ; ---- jump to higher-half mirror before touching CR3 ----
-    lea  rax, [rel .hh_enter]
-    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
-    jc   .skip_hh_enter         ; If so, skip adding mirror base to avoid overflow
-    mov  r10, HIGHER_HALF_BASE
-    add  rax, r10
-.skip_hh_enter:
-    jmp  rax
+    JUMP_TO_HIGHER_HALF .hh_enter
 .hh_enter:
     ; Load CR3 if non-zero
     test r8, r8
@@ -67,15 +78,7 @@ enter_user:
 global enter_user_first_time
 enter_user_first_time:
     cli
-
-    ; ---- jump to higher-half mirror before touching CR3 ----
-    lea  rax, [rel .hh_first]
-    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
-    jc   .skip_hh_first
-    mov  r10, HIGHER_HALF_BASE
-    add  rax, r10
-.skip_hh_first:
-    jmp  rax
+    JUMP_TO_HIGHER_HALF .hh_first
 .hh_first:
     test r8, r8
     jz .skip_cr3_first
@@ -197,13 +200,7 @@ switch_to_context:
 
 switch_to_context_internal:
     cli
-    lea  rax, [rel .hh_switch]
-    bt   rax, 47                ; Check if bit 47 is set (already in higher half)
-    jc   .skip_hh_switch
-    mov  rcx, HIGHER_HALF_BASE
-    add  rax, rcx
-.skip_hh_switch:
-    jmp  rax
+    JUMP_TO_HIGHER_HALF .hh_switch
 .hh_switch:
     ; Load CR3
     mov rax, [r15 + OFF_CR3]
