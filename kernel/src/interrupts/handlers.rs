@@ -114,37 +114,67 @@ pub struct InterruptStackFrame {
     pub stack_segment: u64,
 }
 
+/// Represents the full CPU state saved during an interrupt or exception.
+/// This structure must exactly match the stack layout created by the assembly
+/// stubs in `handlers.asm` to ensure correct ABI interoperability.
+///
+/// Memory layout (from low to high addresses):
 #[repr(C)]
 pub struct InterruptFrame {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9:  u64,
-    r8:  u64,
-    rbp: u64,
-    rdi: u64,
-    rsi: u64,
-    rdx: u64,
-    rcx: u64,
-    rbx: u64,
-    rax: u64,
+    /* Pushed by PUSH_ALL macro in handlers.asm */
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9:  u64,
+    pub r8:  u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
 
-    exception_number: u64,
-    error_code: u64,
+    /* Pushed by the assembly stub */
+    pub exception_number: u64, // The interrupt vector (e.g., 0x0E for Page Fault)
+    pub error_code: u64,       // Exception-specific error code (or 0 dummy)
 
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-    rsp: u64,
-    ss: u64,
+    /* Pushed by the CPU hardware on interrupt/exception */
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,              // Always pushed in x86_64
+    pub ss: u64,               // Always pushed in x86_64
 }
 
+/// Compile-time validation of the `InterruptFrame` layout.
+/// Ensures that the struct size and field offsets correspond exactly to the
+/// expected x86_64 architectural and assembly-defined stack frames.
 const _: () = {
-    let expected_size = 22 * size_of::<u64>();
-    assert!(size_of::<InterruptFrame>() == expected_size);
+    use core::mem::{size_of, offset_of};
+
+    // Total size check (22 fields * 8 bytes = 176 bytes)
+    const EXPECTED_SIZE: usize = 22 * 8;
+    let _size_check: [u8; EXPECTED_SIZE] = [0u8; size_of::<InterruptFrame>()];
+
+    // Offset checks for each architectural block
+    // 1. Registers pushed by PUSH_ALL (RSP points here initially)
+    assert!(offset_of!(InterruptFrame, r15) == 0);
+    assert!(offset_of!(InterruptFrame, rax) == 14 * 8);
+
+    // 2. Information pushed by the assembly stubs
+    assert!(offset_of!(InterruptFrame, exception_number) == 15 * 8);
+    assert!(offset_of!(InterruptFrame, error_code)       == 16 * 8);
+
+    // 3. Hardware-saved state (IRET frame)
+    assert!(offset_of!(InterruptFrame, rip)    == 17 * 8);
+    assert!(offset_of!(InterruptFrame, cs)     == 18 * 8);
+    assert!(offset_of!(InterruptFrame, rflags) == 19 * 8);
+    assert!(offset_of!(InterruptFrame, rsp)    == 20 * 8);
+    assert!(offset_of!(InterruptFrame, ss)     == 21 * 8);
 };
 
 #[no_mangle]
