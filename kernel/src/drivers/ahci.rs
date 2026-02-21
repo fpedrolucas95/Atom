@@ -1,6 +1,8 @@
 // AHCI (SATA) driver for Atom OS
 // Provides block-level access to SATA disks
 
+#![allow(dead_code, static_mut_refs)]
+
 use crate::mm::pmm;
 use core::ptr;
 

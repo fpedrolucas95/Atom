@@ -1,6 +1,8 @@
 // FAT32 filesystem driver for Atom OS
 // Provides read-only access to FAT32 partitions
 
+#![allow(dead_code, static_mut_refs)]
+
 use super::ahci;
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};

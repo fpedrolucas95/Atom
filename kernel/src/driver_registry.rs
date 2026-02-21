@@ -43,11 +43,13 @@ pub fn get_driver_image(name: &str) -> Option<&'static ExecutableImage> {
 }
 
 /// Get the number of registered drivers
+#[allow(dead_code)]
 pub fn driver_count() -> usize {
     DRIVER_REGISTRY.get().map(|r| r.count).unwrap_or(0)
 }
 
 /// List all driver names
+#[allow(dead_code)]
 pub fn list_drivers() -> impl Iterator<Item = &'static str> {
     DRIVER_REGISTRY.get()
         .map(|r| r.iter())

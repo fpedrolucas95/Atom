@@ -1,8 +1,9 @@
 // USB Core: Device model and enumeration for Atom OS
 
+#![allow(dead_code)]
+
 use crate::drivers::xhci::{self, Trb};
 use crate::log_info;
-use core::ptr;
 
 // USB Descriptor Types
 pub const USB_DESC_DEVICE: u8 = 1;
@@ -51,7 +52,7 @@ pub fn handle_port_connection(port_id: u8, speed: u8) {
     log_info!("usb_core", "New device connected on port {}, speed {}", port_id, speed);
 
     let mut trb = Trb::new();
-    trb.control = (9 << 10); // Enable Slot Command
+    trb.control = 9 << 10; // Enable Slot Command
 
     if let Some(ref mut controller) = *xhci::get_controller().lock() {
         unsafe {

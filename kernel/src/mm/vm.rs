@@ -850,6 +850,7 @@ pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> 
 
 /// Remap an existing page to be accessible from userspace (ring 3)
 /// This adds the USER bit to ALL levels of the page table hierarchy
+#[allow(dead_code)]
 pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
     if !pmm::is_page_aligned(virt) {
         return Err(VmError::Unaligned);
@@ -898,6 +899,7 @@ pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
 }
 
 /// Remap an existing page to add specific flags
+#[allow(dead_code)]
 pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), VmError> {
     if !pmm::is_page_aligned(virt) {
         return Err(VmError::Unaligned);

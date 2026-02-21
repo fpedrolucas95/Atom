@@ -201,14 +201,11 @@ pub use atom_abi::{
     ESUCCESS, EINVAL, ENOSYS, ENOMEM, EPERM, EBUSY,
     EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
     // Filesystem error codes
-    ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY, EBADF,
-    EFBIG, ENOSPC, EROFS, ENAMETOOLONG, EIO, EACCES,
-    EMFILE, EOVERFLOW, ECORRUPTED, EMLINK, EXDEV, EPIPE,
-    ENOTSUP, EAGAIN, EINTR, E2BIG,
-    // Port constants
-    PORT_FS_SERVICE, PORT_BLOCK_SERVICE,
+    ENOENT, EISDIR, ENOTDIR, EBADF, EROFS, ENAMETOOLONG, EIO,
+    EMFILE,
+    ENOTSUP,
     // FS limits
-    FS_MAX_PATH_LEN, FS_MAX_NAME_LEN, FS_MAX_FDS,
+    FS_MAX_PATH_LEN,
 };
 
 extern "C" {
@@ -291,8 +288,8 @@ extern "C" fn rust_syscall_dispatcher(
     arg3: u64,
     arg4: u64,
     arg5: u64,
-    user_rip: u64,
-    user_rsp: u64,
+    _user_rip: u64,
+    _user_rsp: u64,
     _user_rbx: u64,
     _user_rbp: u64,
     _user_r12: u64,
@@ -3314,7 +3311,7 @@ fn spawn_from_image(data: &[u8], name: &str) -> u64 {
 }
 
 /// Load driver from boot-loaded registry
-fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections, u64> {
+fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections<'_>, u64> {
     let driver_image = crate::driver_registry::get_driver_image(name)
         .ok_or(ENOTFOUND)?;
 
@@ -4082,7 +4079,6 @@ fn unmap_vma_pages(pml4: usize, vma: &crate::mm::vma::Vma) {
 // ---------------------------------------------------------------------------
 
 use alloc::vec::Vec;
-use alloc::vec;
 
 // Helper: validate userspace pointer is in canonical range
 #[inline]

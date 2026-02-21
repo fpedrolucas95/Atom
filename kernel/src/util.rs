@@ -9,6 +9,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool};
 
+#[allow(dead_code)]
 #[inline(always)]
 pub fn without_interrupts<F, R>(f: F) -> R
 where
@@ -38,4 +39,5 @@ where
     result
 }
                             
+#[allow(dead_code)]
 pub static UI_DIRTY: AtomicBool = AtomicBool::new(false);
