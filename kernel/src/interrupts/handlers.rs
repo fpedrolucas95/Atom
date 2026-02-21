@@ -146,8 +146,13 @@ pub struct InterruptFrame {
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,
-    pub rsp: u64,              // Always pushed in x86_64
-    pub ss: u64,               // Always pushed in x86_64
+    /// The stack pointer at the time of the interrupt.
+    /// Note: In x86_64 long mode, RSP is always pushed by the hardware,
+    /// ensuring a consistent stack frame layout regardless of privilege changes.
+    pub rsp: u64,
+    /// The stack segment selector at the time of the interrupt.
+    /// Note: In x86_64 long mode, SS is always pushed by the hardware.
+    pub ss: u64,
 }
 
 /// Compile-time validation of the `InterruptFrame` layout.
@@ -157,8 +162,10 @@ const _: () = {
     use core::mem::{size_of, offset_of};
 
     // Total size check (22 fields * 8 bytes = 176 bytes)
-    const EXPECTED_SIZE: usize = 22 * 8;
-    let _size_check: [u8; EXPECTED_SIZE] = [0u8; size_of::<InterruptFrame>()];
+    assert!(
+        size_of::<InterruptFrame>() == 22 * 8,
+        "InterruptFrame size mismatch: expected exactly 176 bytes (22 * 8)"
+    );
 
     // Offset checks for each architectural block
     // 1. Registers pushed by PUSH_ALL (RSP points here initially)
