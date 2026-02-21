@@ -619,6 +619,10 @@ pub fn handle_page_fault(pml4_phys: usize, fault_addr: usize, error_code: u64) -
             log_debug!(LOG_ORIGIN, "PF denied: write to non-writable VMA at 0x{:X}", fault_addr);
             return false;
         }
+        if !write && !vma.perms.contains(VmaPermissions::READ) {
+            log_debug!(LOG_ORIGIN, "PF denied: read on non-readable VMA at 0x{:X}", fault_addr);
+            return false;
+        }
 
         // Validate backing type
         match vma.backing {
