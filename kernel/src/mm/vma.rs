@@ -222,16 +222,22 @@ impl VmaMap {
 
         let mut candidate = align_up(low, align);
 
+        for (_, vma) in self.regions.range(..low).rev().take(1) {
+            if vma.end > candidate {
+                candidate = align_up(vma.end, align);
+            }
+        }
+ 
         for (_, vma) in self.regions.range(low..) {
             if vma.start >= high {
                 break;
             }
-
+ 
             if candidate + size <= vma.start {
                 // Found a gap before this VMA
                 return Some(candidate);
             }
-
+ 
             // Move past this VMA
             candidate = align_up(vma.end, align);
         }
@@ -551,6 +557,11 @@ fn align_up(val: usize, align: usize) -> usize {
 /// Returns `false` if the fault is unresolvable (invalid address, permission
 /// violation, out of memory, etc.).
 ///
+/// The lock on `VMA_REGISTRY` is held only for the VMA lookup and validation
+/// phase.  PMM allocation and page-table manipulation happen *outside* the
+/// lock so that future changes to those subsystems cannot deadlock against
+/// VMA_REGISTRY, and interrupt latency is kept low during bitmap scans.
+///
 /// # Arguments
 /// * `pml4_phys` - The faulting process's PML4 physical address
 /// * `fault_addr` - The virtual address that caused the fault (CR2)
@@ -575,56 +586,70 @@ pub fn handle_page_fault(pml4_phys: usize, fault_addr: usize, error_code: u64) -
         return false;
     }
 
-    // Look up the VMA for this address
-    let mut registry = VMA_REGISTRY.lock();
-    let map = match registry.get_mut(&pml4_phys) {
-        Some(m) => m,
-        None => return false,
-    };
+    // ── Phase 1: hold VMA_REGISTRY only for the lookup / validation ──
+    let vma = {
+        let mut registry = VMA_REGISTRY.lock();
+        let map = match registry.get_mut(&pml4_phys) {
+            Some(m) => m,
+            None => return false,
+        };
 
-    // Find which VMA covers the fault address
-    let vma = match map.find(page_addr) {
-        Some(v) => v.clone(),
-        None => {
-            // Check if this is a stack growth fault:
-            // Look for a stack VMA just above the fault address
-            // (stacks grow downward, so the fault is below the current VMA start)
-            let grew = try_grow_stack(map, fault_addr);
-            if grew {
-                // Stack grew — now the VMA covers fault_addr. Map the page.
-                let vma = match map.find(page_addr) {
-                    Some(v) => v.clone(),
-                    None => return false,
-                };
-                return resolve_anon_fault(map, pml4_phys, page_addr, &vma);
+        // Find which VMA covers the fault address
+        let vma = match map.find(page_addr) {
+            Some(v) => v.clone(),
+            None => {
+                // Check if this is a stack growth fault:
+                // Look for a stack VMA just above the fault address
+                // (stacks grow downward, so the fault is below the current VMA start)
+                let grew = try_grow_stack(map, fault_addr);
+                if grew {
+                    // Stack grew — now the VMA covers fault_addr.
+                    match map.find(page_addr) {
+                        Some(v) => v.clone(),
+                        None => return false,
+                    }
+                } else {
+                    return false;
+                }
             }
+        };
+
+        // Validate permissions
+        if write && !vma.perms.contains(VmaPermissions::WRITE) {
+            log_debug!(LOG_ORIGIN, "PF denied: write to non-writable VMA at 0x{:X}", fault_addr);
             return false;
         }
+
+        // Validate backing type
+        match vma.backing {
+            VmaBacking::Anonymous | VmaBacking::Stack { .. } => {}
+            VmaBacking::Device { .. } => {
+                // Device mappings should already be mapped. If we get a fault,
+                // something is wrong.
+                log_warn!(LOG_ORIGIN, "PF on device VMA at 0x{:X} — unexpected", fault_addr);
+                return false;
+            }
+        }
+
+        // Check resident limit while we still hold the lock
+        if !map.can_map_page() {
+            log_warn!(LOG_ORIGIN, "Resident page limit reached for PML4=0x{:X}", pml4_phys);
+            return false;
+        }
+
+        vma
+        // ── lock dropped here ──
     };
 
-    // Validate permissions
-    if write && !vma.perms.contains(VmaPermissions::WRITE) {
-        log_debug!(LOG_ORIGIN, "PF denied: write to non-writable VMA at 0x{:X}", fault_addr);
-        return false;
-    }
-
-    // Resolve based on backing type
-    match vma.backing {
-        VmaBacking::Anonymous | VmaBacking::Stack { .. } => {
-            resolve_anon_fault(map, pml4_phys, page_addr, &vma)
-        }
-        VmaBacking::Device { .. } => {
-            // Device mappings should already be mapped. If we get a fault,
-            // something is wrong.
-            log_warn!(LOG_ORIGIN, "PF on device VMA at 0x{:X} — unexpected", fault_addr);
-            false
-        }
-    }
+    // ── Phase 2: allocate + map without holding VMA_REGISTRY ──
+    resolve_anon_fault(pml4_phys, page_addr, &vma)
 }
 
-/// Resolve an anonymous (zero-fill) page fault
+/// Resolve an anonymous (zero-fill) page fault.
+///
+/// Called *after* the VMA_REGISTRY lock has been released.  Re-acquires the
+/// lock only briefly at the end to update resident-page accounting.
 fn resolve_anon_fault(
-    map: &mut VmaMap,
     pml4_phys: usize,
     page_addr: usize,
     vma: &Vma,
@@ -632,13 +657,7 @@ fn resolve_anon_fault(
     use crate::mm::pmm;
     use crate::mm::vm::{self, PageFlags};
 
-    // Check resident limit
-    if !map.can_map_page() {
-        log_warn!(LOG_ORIGIN, "Resident page limit reached for PML4=0x{:X}", pml4_phys);
-        return false;
-    }
-
-    // Allocate a zeroed physical page
+    // Allocate a zeroed physical page (no VMA lock held)
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,
         None => {
@@ -656,10 +675,16 @@ fn resolve_anon_fault(
         flags |= PageFlags::NO_EXECUTE;
     }
 
-    // Map the page into the process's address space
+    // Map the page into the process's address space (no VMA lock held)
     match vm::remap_page_in_pml4(pml4_phys, page_addr, phys, flags) {
         Ok(()) => {
-            map.account_map();
+            // ── Phase 3: briefly re-acquire lock for accounting ──
+            {
+                let mut registry = VMA_REGISTRY.lock();
+                if let Some(map) = registry.get_mut(&pml4_phys) {
+                    map.account_map();
+                }
+            }
             log_debug!(
                 LOG_ORIGIN,
                 "Demand-paged: virt=0x{:X} -> phys=0x{:X} ({})",

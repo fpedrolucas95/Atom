@@ -3435,13 +3435,16 @@ fn spawn_process_internal(
     }
 
     // Register text VMA
-    let _ = vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_vma(new_pml4_phys, Vma {
         start: text_base,
         end: text_base + text_size,
         perms: VmaPermissions::read_exec(),
         backing: VmaBacking::Anonymous,
         label: "text",
-    });
+    }).map_err(|e| {
+        log_error!("spawn", "Failed to insert text VMA for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
 
     // Allocate and map data section
     let data_base = align_up(text_base + text_size);
@@ -3473,13 +3476,16 @@ fn spawn_process_internal(
         }
 
         // Register data VMA
-        let _ = vma::insert_vma(new_pml4_phys, Vma {
+        vma::insert_vma(new_pml4_phys, Vma {
             start: data_base,
             end: data_base + data_size,
             perms: VmaPermissions::read_write(),
             backing: VmaBacking::Anonymous,
             label: "data",
-        });
+        }).map_err(|e| {
+            log_error!("spawn", "Failed to insert data VMA for '{}': {:?}", name, e);
+            ENOMEM
+        })?;
     }
 
     // Allocate and map BSS section
@@ -3502,13 +3508,16 @@ fn spawn_process_internal(
     }
 
     // Register BSS VMA
-    let _ = vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_vma(new_pml4_phys, Vma {
         start: bss_base,
         end: bss_base + align_up(bss_size),
         perms: VmaPermissions::read_write(),
         backing: VmaBacking::Anonymous,
         label: "bss",
-    });
+    }).map_err(|e| {
+        log_error!("spawn", "Failed to insert bss VMA for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
 
     // Allocate user stack with demand paging support
     // Only map a small initial portion; the rest grows via page faults.
@@ -3530,7 +3539,7 @@ fn spawn_process_internal(
     // Register stack VMA with growth support.
     // The VMA initially covers only the mapped pages but can grow downward
     // via demand paging when page faults occur below it.
-    let _ = vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_vma(new_pml4_phys, Vma {
         start: user_stack_base,
         end: user_stack_top,
         perms: VmaPermissions::read_write(),
@@ -3538,17 +3547,34 @@ fn spawn_process_internal(
             max_size: USER_STACK_MAX_SIZE,
         },
         label: "stack",
-    });
+    }).map_err(|e| {
+        log_error!("spawn", "Failed to insert stack VMA for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
 
     // Register a heap VMA (starts empty, grows via brk())
     let heap_start = atom_abi::USER_HEAP_START as usize;
-    let _ = vma::insert_vma(new_pml4_phys, Vma {
+    let bss_end = bss_base + align_up(bss_size);
+    if bss_end > heap_start {
+        log_error!(
+            "spawn",
+            "Executable '{}' too large: BSS end 0x{:X} exceeds USER_HEAP_START 0x{:X}",
+            name,
+            bss_end,
+            heap_start
+        );
+        return Err(ENOMEM);
+    }
+    vma::insert_vma(new_pml4_phys, Vma {
         start: heap_start,
         end: heap_start + PAGE_SIZE, // Minimal initial size
         perms: VmaPermissions::read_write(),
         backing: VmaBacking::Anonymous,
         label: "heap",
-    });
+    }).map_err(|e| {
+        log_error!("spawn", "Failed to insert heap VMA for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
 
     // Allocate kernel stack
     // CRITICAL: Use higher-half virtual address for kernel stack, not identity-mapped address.
@@ -4056,8 +4082,12 @@ fn sys_brk(new_brk: u64) -> u64 {
         let shrunk_start = new_brk_aligned;
         let shrunk_end = current_brk;
         for page in (shrunk_start..shrunk_end).step_by(PAGE_SIZE) {
-            let _ = crate::mm::vm::unmap_page_in_pml4(pml4, page);
-            vma::account_unmap(pml4);
+            if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
+                if crate::mm::vm::unmap_page_in_pml4(pml4, page).is_ok() {
+                    crate::mm::pmm::free_page(phys);
+                    vma::account_unmap(pml4);
+                }
+            }
         }
     }
 
