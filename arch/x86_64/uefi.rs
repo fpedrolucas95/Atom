@@ -568,23 +568,33 @@ fn cleanup_pool(bs: &EfiBootServices, buf: &mut *mut c_void) {
     }
 }
 
-/// Load a single driver file and return its name and image
+/// Load a single ATXF file from a given directory on the EFI volume.
+///
+/// `dir_prefix` is the directory path WITH trailing backslash,
+/// e.g. `"\\system\\services\\"` or `"\\apps\\user\\"`.
 fn load_driver_file(
     root: *mut EfiFileProtocol,
+    dir_prefix: &str,
     filename: &[u16],
     bs: &mut EfiBootServices,
 ) -> Option<(ExecutableImage, [u8; MAX_DRIVER_NAME_LEN])> {
-    // Build full path: \drivers\<filename>
+    // Build full path: <dir_prefix><filename>
     let mut path_buf = [0u16; 128];
-    let prefix = "\\drivers\\";
     let mut idx = 0;
-    for c in prefix.chars() {
+    for c in dir_prefix.chars() {
+        if idx >= path_buf.len() - 1 {
+            // dir_prefix alone fills the buffer — path would be truncated; skip.
+            return None;
+        }
         path_buf[idx] = c as u16;
         idx += 1;
     }
     for &c in filename.iter() {
         if c == 0 { break; }
-        if idx >= path_buf.len() - 1 { break; }
+        if idx >= path_buf.len() - 1 {
+            // Combined path is too long to fit — skip rather than silently truncate.
+            return None;
+        }
         path_buf[idx] = c;
         idx += 1;
     }
@@ -671,14 +681,145 @@ fn load_driver_file(
     ))
 }
 
-/// Load all drivers from \drivers\ directory
+/// Scan a single directory on the already-opened root volume for .atxf files
+/// and add each one to `driver_list`.
+///
+/// `dir_path`   — directory path WITHOUT trailing backslash (e.g. `"\\system\\services"`)
+/// `dir_prefix` — directory path WITH    trailing backslash (e.g. `"\\system\\services\\"`)
+///
+/// Missing directories are silently skipped so that a partial disk layout
+/// does not abort the boot sequence.
+fn load_atxf_from_dir(
+    root: *mut EfiFileProtocol,
+    dir_path: &str,
+    dir_prefix: &str,
+    bs: &mut EfiBootServices,
+    driver_list: &mut DriverList,
+) {
+    let mut path_buf = [0u16; 64];
+    // Guard: str_to_utf16 silently truncates; bail out if dir_path doesn't fit
+    // (need room for all chars plus the null terminator).
+    if dir_path.len() >= path_buf.len() {
+        return;
+    }
+    str_to_utf16(dir_path, &mut path_buf);
+
+    let mut dir_handle: *mut EfiFileProtocol = ptr::null_mut();
+    let root_ref = unsafe { &mut *root };
+    let status = (root_ref.open)(
+        root,
+        &mut dir_handle,
+        path_buf.as_ptr(),
+        EFI_FILE_MODE_READ,
+        0,
+    );
+
+    if status != EFI_SUCCESS || dir_handle.is_null() {
+        // Directory absent — skip silently
+        return;
+    }
+
+    let dir_ref = unsafe { &mut *dir_handle };
+    let mut entry_buf = [0u8; 512];
+
+    loop {
+        let mut buf_size: usize = 512;
+        let status = (dir_ref.read)(
+            dir_handle,
+            &mut buf_size,
+            entry_buf.as_mut_ptr() as *mut c_void,
+        );
+
+        if status != EFI_SUCCESS || buf_size == 0 {
+            break;
+        }
+
+        // EFI_FILE_INFO layout:
+        //   Offset  0: Size (u64)
+        //   Offset  8: FileSize (u64)
+        //   Offset 16: PhysicalSize (u64)
+        //   Offset 24: CreateTime (EFI_TIME, 16 bytes)
+        //   Offset 40: LastAccessTime (16 bytes)
+        //   Offset 56: ModificationTime (16 bytes)
+        //   Offset 72: Attribute (u64)
+        //   Offset 80: FileName (CHAR16[])
+
+        let attr = unsafe { *(entry_buf.as_ptr().add(72) as *const u64) };
+
+        // Skip sub-directories
+        if attr & EFI_FILE_DIRECTORY != 0 {
+            continue;
+        }
+
+        // Read filename (UTF-16, null-terminated)
+        let filename_ptr = unsafe { entry_buf.as_ptr().add(80) as *const u16 };
+        let mut filename = [0u16; 64];
+        for i in 0..63 {
+            let c = unsafe { *filename_ptr.add(i) };
+            filename[i] = c;
+            if c == 0 { break; }
+        }
+
+        // Accept only .atxf files
+        let mut len = 0usize;
+        for (i, &c) in filename.iter().enumerate() {
+            if c == 0 { len = i; break; }
+        }
+        let is_atxf = len > 5 && {
+            let e = len - 5;
+            filename[e]   == '.' as u16
+            && (filename[e+1] == 'a' as u16 || filename[e+1] == 'A' as u16)
+            && (filename[e+2] == 't' as u16 || filename[e+2] == 'T' as u16)
+            && (filename[e+3] == 'x' as u16 || filename[e+3] == 'X' as u16)
+            && (filename[e+4] == 'f' as u16 || filename[e+4] == 'F' as u16)
+        };
+
+        if !is_atxf {
+            continue;
+        }
+
+        if driver_list.count >= crate::boot::MAX_BOOT_DRIVERS {
+            break;
+        }
+
+        if let Some((img, name)) = load_driver_file(root, dir_prefix, &filename, bs) {
+            driver_list.drivers[driver_list.count] = DriverImage { name, image: img };
+            driver_list.count += 1;
+        }
+    }
+
+    let _ = (dir_ref.close)(dir_handle);
+}
+
+/// OS partition directories scanned at boot for ATXF executables.
+///
+/// Each entry is `(dir_path, dir_prefix)`:
+///   `dir_path`   — path WITHOUT trailing backslash, passed to EFI directory open
+///   `dir_prefix` — path WITH    trailing backslash, prepended to each filename
+///
+/// This is the single source of truth for the disk layout.  Any change here
+/// must be mirrored in `build.sh` / `build.ps1` (which place the .atxf files)
+/// and `load_atxf_from_dir` / `load_driver_file` (which read them back).
+const OS_ATXF_DIRS: &[(&str, &str)] = &[
+    ("\\system\\services", "\\system\\services\\"),
+    ("\\apps\\system",     "\\apps\\system\\"),
+    ("\\apps\\user",       "\\apps\\user\\"),
+];
+
+/// Load all ATXF executables from the OS partition into the driver registry.
+///
+/// Scans every directory listed in `OS_ATXF_DIRS`.  Missing directories are
+/// silently skipped so that a partial disk layout does not abort the boot
+/// sequence.  The EFI partition (`\EFI\BOOT\`) is intentionally excluded:
+/// `init.atxf` is loaded separately by `load_init_payload()` and is never
+/// exposed to userspace.
 fn load_drivers(
     image: EfiHandle,
     bs: &mut EfiBootServices,
 ) -> DriverList {
     let mut driver_list = DriverList::empty();
 
-    // Get Loaded Image Protocol to find our device handle
+    // Obtain the root volume handle via the Loaded Image Protocol
     let mut loaded_image_ptr: *mut c_void = ptr::null_mut();
     let status = (bs.handle_protocol)(
         image,
@@ -697,7 +838,6 @@ fn load_drivers(
         return driver_list;
     }
 
-    // Get Simple File System Protocol
     let mut fs_ptr: *mut c_void = ptr::null_mut();
     let status = (bs.handle_protocol)(
         device_handle,
@@ -711,7 +851,6 @@ fn load_drivers(
 
     let fs = unsafe { &mut *(fs_ptr as *mut EfiSimpleFileSystemProtocol) };
 
-    // Open root volume
     let mut root: *mut EfiFileProtocol = ptr::null_mut();
     let status = (fs.open_volume)(fs as *mut _, &mut root);
 
@@ -719,103 +858,13 @@ fn load_drivers(
         return driver_list;
     }
 
+    // Scan every OS partition directory listed in OS_ATXF_DIRS.
+    // Each scan is independent — a missing directory is silently skipped.
+    for &(dir_path, dir_prefix) in OS_ATXF_DIRS {
+        load_atxf_from_dir(root, dir_path, dir_prefix, bs, &mut driver_list);
+    }
+
     let root_ref = unsafe { &mut *root };
-
-    // Open drivers directory
-    let mut path_buf = [0u16; 32];
-    str_to_utf16("\\drivers", &mut path_buf);
-
-    let mut drivers_dir: *mut EfiFileProtocol = ptr::null_mut();
-    let status = (root_ref.open)(
-        root,
-        &mut drivers_dir,
-        path_buf.as_ptr(),
-        EFI_FILE_MODE_READ,
-        0,
-    );
-
-    if status != EFI_SUCCESS || drivers_dir.is_null() {
-        let _ = (root_ref.close)(root);
-        return driver_list;
-    }
-
-    let dir_ref = unsafe { &mut *drivers_dir };
-
-    // Read directory entries
-    let mut entry_buf = [0u8; 512];
-
-    loop {
-        let mut buf_size: usize = 512;
-        let status = (dir_ref.read)(
-            drivers_dir,
-            &mut buf_size,
-            entry_buf.as_mut_ptr() as *mut c_void,
-        );
-
-        if status != EFI_SUCCESS || buf_size == 0 {
-            break;
-        }
-
-        // Parse EFI_FILE_INFO structure
-        // Offset 0: Size (u64)
-        // Offset 8: FileSize (u64)
-        // Offset 16: PhysicalSize (u64)
-        // Offset 24: CreateTime (EFI_TIME, 16 bytes)
-        // Offset 40: LastAccessTime (16 bytes)
-        // Offset 56: ModificationTime (16 bytes)
-        // Offset 72: Attribute (u64)
-        // Offset 80: FileName (CHAR16[])
-
-        let attr = unsafe { *(entry_buf.as_ptr().add(72) as *const u64) };
-
-        // Skip directories
-        if attr & EFI_FILE_DIRECTORY != 0 {
-            continue;
-        }
-
-        // Get filename (UTF-16, null-terminated)
-        let filename_ptr = unsafe { entry_buf.as_ptr().add(80) as *const u16 };
-        let mut filename = [0u16; 64];
-        for i in 0..63 {
-            let c = unsafe { *filename_ptr.add(i) };
-            filename[i] = c;
-            if c == 0 { break; }
-        }
-
-        // Check if it's an .atxf file
-        let mut is_atxf = false;
-        let mut len = 0;
-        for (i, &c) in filename.iter().enumerate() {
-            if c == 0 { len = i; break; }
-        }
-        if len > 5 {
-            let ext_start = len - 5;
-            if filename[ext_start] == '.' as u16 &&
-               (filename[ext_start + 1] == 'a' as u16 || filename[ext_start + 1] == 'A' as u16) &&
-               (filename[ext_start + 2] == 't' as u16 || filename[ext_start + 2] == 'T' as u16) &&
-               (filename[ext_start + 3] == 'x' as u16 || filename[ext_start + 3] == 'X' as u16) &&
-               (filename[ext_start + 4] == 'f' as u16 || filename[ext_start + 4] == 'F' as u16) {
-                is_atxf = true;
-            }
-        }
-
-        if !is_atxf {
-            continue;
-        }
-
-        // Load this driver
-        if let Some((img, name)) = load_driver_file(root, &filename, bs) {
-            if driver_list.count < crate::boot::MAX_BOOT_DRIVERS {
-                driver_list.drivers[driver_list.count] = DriverImage {
-                    name,
-                    image: img,
-                };
-                driver_list.count += 1;
-            }
-        }
-    }
-
-    let _ = (dir_ref.close)(drivers_dir);
     let _ = (root_ref.close)(root);
 
     driver_list

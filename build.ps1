@@ -30,7 +30,7 @@ $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 $HOST_TRIPLE = (rustc -vV | Select-String "host: ") -replace "host:\s+", ""
 
 # Apenas as pastas dos drivers (não precisamos mais do nome do binário aqui)
-$USERSPACE_DRIVERS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell", "demo_rects", "demo_text")
+$SYSTEM_APPS_DIRS = @("keyboard", "mouse", "display", "terminal", "ui_shell", "demo_rects", "demo_text")
 
 # Services (incluindo init = PID 1)
 $USERSPACE_SERVICES = @(
@@ -124,7 +124,7 @@ if ($Clean) {
 # Preparar diretórios
 # -------------------------------------------------------------------------
 
-New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\drivers" -Force | Out-Null
+New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\system\services","efi\apps\system","efi\apps\user","efi\user\home","efi\user\config","efi\user\data" -Force | Out-Null
 
 # =========================================================================
 # BUILD ELF2ATXF TOOL
@@ -156,8 +156,9 @@ if (-not $Kernel) {
     Header "USERSPACE BUILD"
 
     # Função auxiliar para build + conversão ATXF
+    # $OutputDir = destino relativo, ex: "efi\apps\system" ou "efi\system\services"
     function Build-And-Convert {
-        param([string]$Path, [string]$Type)  # $Type = "driver" ou "service"
+        param([string]$Path, [string]$Type, [string]$OutputDir)
 
         if (-not (Test-Path "$Path\Cargo.toml")) {
             Write-Warning "$Type em $Path não encontrado, pulando..."
@@ -200,8 +201,8 @@ if (-not $Kernel) {
             return
         }
 
-        $atxfPath = "efi\drivers\$dirName.atxf"
-        Write-Step "Convertendo $binName para ATXF..."
+        $atxfPath = "$OutputDir\$dirName.atxf"
+        Write-Step "Convertendo $binName para ATXF → $OutputDir\"
 
         $elf2atxfFull = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
         if (-not $elf2atxfFull) { Write-ErrorMsg "elf2atxf.exe não encontrado" }
@@ -212,21 +213,23 @@ if (-not $Kernel) {
         Write-Success "$dirName.atxf criado"
     }
 
-    # Drivers - agora usando a mesma função que services
-    foreach ($driverDir in $USERSPACE_DRIVERS_DIRS) {
-        Build-And-Convert "userspace\drivers\$driverDir" "driver"
+    # System apps → efi\apps\system\
+    Write-Step "Building system apps..."
+    foreach ($appDir in $SYSTEM_APPS_DIRS) {
+        Build-And-Convert "userspace\system_apps\$appDir" "system_app" "efi\apps\system"
     }
 
-    # Services
+    # System services → efi\system\services\
+    Write-Step "Building system services..."
     foreach ($service in $USERSPACE_SERVICES) {
-        Build-And-Convert "userspace\services\$service" "service"
+        Build-And-Convert "userspace\services\$service" "service" "efi\system\services"
     }
 
-    # Applications (userspace)
-    Write-Step "Compilando aplicações userspace..."
+    # User applications → efi\apps\user\
+    Write-Step "Compilando aplicações do usuário..."
     foreach ($app in $USERSPACE_APPS) {
         $appPath = "userspace\apps\$app"
-        
+
         if (-not (Test-Path "$appPath\Cargo.toml")) {
             Write-Warning "Aplicação $app não encontrada, pulando..."
             continue
@@ -259,14 +262,12 @@ if (-not $Kernel) {
             $binName = Split-Path $appPath -Leaf
         }
 
-        # Apps compile as x86_64-unknown-none like drivers/services
         $elfPath = "$appPath\target\x86_64-unknown-none\release\$binName"
-
         $appName = Split-Path $appPath -Leaf
-        $atxfPath = "efi\drivers\$appName.atxf"
+        $atxfPath = "efi\apps\user\$appName.atxf"
 
         if (Test-Path $elfPath) {
-            Write-Step "Convertendo $appName para ATXF..."
+            Write-Step "Convertendo $appName para ATXF → efi\apps\user\"
             $elf2atxfFull = Resolve-Path $ELF2ATXF_EXE -ErrorAction SilentlyContinue
             if (-not $elf2atxfFull) { Write-ErrorMsg "elf2atxf.exe não encontrado" }
 
@@ -275,7 +276,7 @@ if (-not $Kernel) {
                 Write-Warning "Falha ao converter $appName para ATXF"
                 Get-Content "$REPO_PATH\build.log" | Write-Host
             } else {
-                Write-Success "$appName.atxf criado"
+                Write-Success "$appName.atxf → apps\user\"
             }
         } else {
             Write-Warning "Binário ELF não encontrado para $appName em $elfPath"
@@ -283,23 +284,13 @@ if (-not $Kernel) {
         }
     }
 
-    # Instalar init.atxf como payload de boot (PID 1)
-    if (Test-Path "efi\drivers\init.atxf") {
-        Copy-Item "efi\drivers\init.atxf" "efi\EFI\BOOT\init.atxf" -Force
-        Write-Success "init.atxf instalado como payload de boot (PID 1)"
+    # init.atxf é o payload PID 1 — deve ficar na partição EFI para que o
+    # bootloader UEFI o carregue antes do ExitBootServices().
+    if (Test-Path "efi\system\services\init.atxf") {
+        Copy-Item "efi\system\services\init.atxf" "efi\EFI\BOOT\init.atxf" -Force
+        Write-Success "init.atxf instalado como payload EFI de boot (PID 1)"
     } else {
         Write-Warning "init.atxf não encontrado - o sistema não irá bootar corretamente!"
-    }
-
-    # Instalar hello_atxf.atxf em efi\apps\ para o smoke test do runtime loader.
-    # O file manager exibe este diretório; ao dar duplo clique, aciona o
-    # app_launcher → SYS_SPAWN_FROM_PATH.
-    New-Item -ItemType Directory -Force -Path "efi\apps" | Out-Null
-    if (Test-Path "efi\drivers\hello_atxf.atxf") {
-        Copy-Item "efi\drivers\hello_atxf.atxf" "efi\apps\hello_atxf.atxf" -Force
-        Write-Success "hello_atxf.atxf copiado para efi\apps\ (smoke test)"
-    } else {
-        Write-Warning "hello_atxf.atxf não encontrado — smoke test pode não funcionar"
     }
 
     Write-Success "Userspace concluído"
@@ -401,19 +392,23 @@ Write-Success "BOOTX64.EFI atualizado"
 
 Header "BUILD COMPLETO"
 
-Write-Host "Kernel:     build\Atom.efi" -ForegroundColor White
-Write-Host "EFI Image:  efi\EFI\BOOT\BOOTX64.EFI" -ForegroundColor White
-Write-Host "Init:       efi\EFI\BOOT\init.atxf" -ForegroundColor White
-Write-Host "Drivers:    efi\drivers\" -ForegroundColor White
+Write-Host "Kernel:          build\Atom.efi" -ForegroundColor White
+Write-Host "EFI Image:       efi\EFI\BOOT\BOOTX64.EFI" -ForegroundColor White
+Write-Host "Init (EFI boot): efi\EFI\BOOT\init.atxf" -ForegroundColor White
+Write-Host "Services:        efi\system\services\" -ForegroundColor White
+Write-Host "System apps:     efi\apps\system\" -ForegroundColor White
+Write-Host "User apps:       efi\apps\user\" -ForegroundColor White
 Write-Host ""
 
-if (Test-Path "efi\drivers") {
-    $files = Get-ChildItem "efi\drivers\*.atxf" -ErrorAction SilentlyContinue
-    if ($files) {
-        Write-Host "Arquivos ATXF gerados:" -ForegroundColor Cyan
-        foreach ($f in $files) {
-            $size = [math]::Round($f.Length / 1KB, 1)
-            Write-Host "  - $($f.Name) ($size KB)" -ForegroundColor White
+foreach ($dir in @("efi\system\services", "efi\apps\system", "efi\apps\user")) {
+    if (Test-Path $dir) {
+        $files = Get-ChildItem "$dir\*.atxf" -ErrorAction SilentlyContinue
+        if ($files) {
+            Write-Host "[$dir]" -ForegroundColor Cyan
+            foreach ($f in $files) {
+                $size = [math]::Round($f.Length / 1KB, 1)
+                Write-Host "  - $($f.Name) ($size KB)" -ForegroundColor White
+            }
         }
     }
 }
