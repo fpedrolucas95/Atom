@@ -147,6 +147,21 @@ pub const SYS_KERN_FS_LIST_DIR: u64 = 201;
 /// Stat a path:        (path_ptr, path_len, stat_ptr) -> 0 | errno
 pub const SYS_KERN_FS_STAT_PATH: u64 = 202;
 
+// ---------------------------------------------------------------------------
+// App launcher syscall — spawn an ATXF executable by filesystem path.
+// Intended for use by the privileged app_launcher service only; the
+// file manager and other unprivileged processes must go through the
+// app_launcher IPC service rather than calling this syscall directly.
+// ---------------------------------------------------------------------------
+
+/// Spawn a process from an ATXF file on the filesystem.
+/// (path_ptr, path_len) -> new_pid | errno
+///
+/// The path must end with ".atxf" and the file must contain a valid ATXF
+/// image.  The process is spawned with the same default capability set as
+/// processes created via SYS_SPAWN_PROCESS.
+pub const SYS_SPAWN_FROM_PATH: u64 = 203;
+
 /// open(path_ptr, path_len, flags, mode) -> fd (u64 handle)
 pub const SYS_FS_OPEN: u64 = 53;
 /// close(fd)
@@ -398,6 +413,9 @@ extern "C" fn rust_syscall_dispatcher(
         SYS_FS_READLINK => sys_fs_readlink(arg0, arg1 as usize, arg2, arg3 as usize),
         SYS_FS_UTIMES   => sys_fs_utimes(arg0, arg1 as usize, arg2 as i64, arg3 as i64),
         SYS_FS_STATVFS  => sys_fs_statvfs(arg0, arg1 as usize, arg2),
+
+        // App launcher — spawn ATXF by path
+        SYS_SPAWN_FROM_PATH => sys_spawn_from_path(arg0 as *const u8, arg1 as usize),
 
         _ => {
             log_warn!(
@@ -3347,6 +3365,9 @@ fn get_static_driver_name(name: &str) -> &'static str {
         "browser" => "browser",
         "files" => "files",
         "settings" => "settings",
+        "app_launcher" => "app_launcher",
+        "app" => "app",
+        "hello_atxf" => "hello_atxf",
         _ => "unknown",
     }
 }
@@ -3678,6 +3699,156 @@ fn spawn_process_internal(
     log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
 
     Ok(pid)
+}
+
+// ---------------------------------------------------------------------------
+// SYS_SPAWN_FROM_PATH — spawn an ATXF executable located at an arbitrary
+// filesystem path.
+//
+// Design rationale:
+//   SYS_SPAWN_PROCESS can only look up drivers by a short name and searches a
+//   fixed directory (/drivers/<name>.atxf).  Applications that are placed in
+//   user-accessible directories (e.g. /apps/hello.atxf, /home/downloads/…)
+//   would never be found that way.  SYS_SPAWN_FROM_PATH accepts a full path
+//   and is the primitive used by the app_launcher service to execute any ATXF
+//   binary that is present on the filesystem at runtime.
+//
+// Security model:
+//   This syscall does NOT perform caller-identity checks itself.  Privilege
+//   restriction is enforced at the IPC layer: only app_launcher (a trusted
+//   system service) is expected to call this syscall.  In a future hardening
+//   pass a capability check (ResourceType::Spawn or similar) can be added
+//   here to prevent rogue processes from abusing it.
+//
+// Error returns:
+//   EINVAL   — path is NULL, empty, too long, or not valid UTF-8
+//   ENOTSUP  — path does not end with ".atxf" (wrong file type)
+//   ENOENT   — file not found on the filesystem
+//   ENOMEM   — not enough physical memory to map the new process
+//   EIO      — FAT32 driver not available
+//
+// ---------------------------------------------------------------------------
+fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
+    const LOG_ORIGIN: &str = "syscall:spawn_from_path";
+    const MAX_PATH: usize = 256;
+
+    // ── 1. Validate raw pointer and length ─────────────────────────────────
+    if path_ptr.is_null() || path_len == 0 || path_len > MAX_PATH {
+        log_warn!(
+            LOG_ORIGIN,
+            "spawn_from_path: invalid arguments (ptr={:p}, len={})",
+            path_ptr,
+            path_len
+        );
+        return EINVAL;
+    }
+
+    // ── 2. Copy path bytes from userspace ──────────────────────────────────
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s.trim_end_matches('\0'),
+        Err(_) => {
+            log_warn!(LOG_ORIGIN, "spawn_from_path: path is not valid UTF-8");
+            return EINVAL;
+        }
+    };
+
+    if path.is_empty() {
+        log_warn!(LOG_ORIGIN, "spawn_from_path: empty path after trimming");
+        return EINVAL;
+    }
+
+    // ── 3. Enforce .atxf extension ─────────────────────────────────────────
+    if !path.ends_with(".atxf") {
+        log_warn!(
+            LOG_ORIGIN,
+            "spawn_from_path: '{}' does not have .atxf extension",
+            path
+        );
+        return ENOTSUP;
+    }
+
+    log_info!(LOG_ORIGIN, "spawn_from_path: loading '{}'", path);
+
+    // ── 4. Read file from FAT32 ────────────────────────────────────────────
+    if !crate::drivers::fat32::is_available() {
+        log_error!(LOG_ORIGIN, "spawn_from_path: FAT32 driver not available");
+        return EIO;
+    }
+
+    let image_data = match crate::drivers::fat32::open(path) {
+        Some(data) => data,
+        None => {
+            log_warn!(LOG_ORIGIN, "spawn_from_path: file not found: '{}'", path);
+            return ENOENT;
+        }
+    };
+
+    log_info!(
+        LOG_ORIGIN,
+        "spawn_from_path: read {} bytes from '{}'",
+        image_data.len(),
+        path
+    );
+
+    // ── 5. Parse the ATXF image ────────────────────────────────────────────
+    let sections = match crate::executable::parse_image(&image_data) {
+        Ok(s) => s,
+        Err(crate::executable::ExecError::InvalidMagic) => {
+            log_warn!(LOG_ORIGIN, "spawn_from_path: '{}' is not a valid ATXF file (bad magic)", path);
+            return EINVAL;
+        }
+        Err(crate::executable::ExecError::UnsupportedVersion(v)) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "spawn_from_path: '{}' uses unsupported ATXF version {}",
+                path,
+                v
+            );
+            return EINVAL;
+        }
+        Err(e) => {
+            log_warn!(LOG_ORIGIN, "spawn_from_path: parse error for '{}': {:?}", path, e);
+            return EINVAL;
+        }
+    };
+
+    log_info!(
+        LOG_ORIGIN,
+        "spawn_from_path: ATXF validated — text={} data={} bss={} entry=0x{:X}",
+        sections.text.len(),
+        sections.data.len(),
+        sections.bss_size,
+        sections.entry_offset
+    );
+
+    // ── 6. Derive a display name from the filename ─────────────────────────
+    // Take the last path component without the ".atxf" suffix.
+    let basename = path.rfind('/').map(|p| &path[p + 1..]).unwrap_or(path);
+    let app_name = basename.strip_suffix(".atxf").unwrap_or(basename);
+
+    // Spawn with generic name — Thread::name is &'static str so we use "app".
+    // The actual path is logged above for diagnostics.
+    match spawn_process_internal("app", &sections) {
+        Ok(pid) => {
+            log_info!(
+                LOG_ORIGIN,
+                "spawn_from_path: '{}' started as pid={}",
+                app_name,
+                pid
+            );
+            pid.raw()
+        }
+        Err(e) => {
+            log_error!(
+                LOG_ORIGIN,
+                "spawn_from_path: failed to spawn '{}': code={}",
+                app_name,
+                e
+            );
+            e
+        }
+    }
 }
 
 /// Get system memory information

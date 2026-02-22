@@ -37,13 +37,15 @@ $USERSPACE_SERVICES = @(
     "init",
     "namesvc",
     "service_manager",
-    "fsd"
+    "fsd",
+    "app_launcher"
 )
 
 # Userspace applications
 $USERSPACE_APPS = @(
     "fileman",
-    "fs_test"
+    "fs_test",
+    "hello_atxf"
 )
 
 # -------------------------------------------------------------------------
@@ -287,6 +289,17 @@ if (-not $Kernel) {
         Write-Success "init.atxf instalado como payload de boot (PID 1)"
     } else {
         Write-Warning "init.atxf não encontrado - o sistema não irá bootar corretamente!"
+    }
+
+    # Instalar hello_atxf.atxf em efi\apps\ para o smoke test do runtime loader.
+    # O file manager exibe este diretório; ao dar duplo clique, aciona o
+    # app_launcher → SYS_SPAWN_FROM_PATH.
+    New-Item -ItemType Directory -Force -Path "efi\apps" | Out-Null
+    if (Test-Path "efi\drivers\hello_atxf.atxf") {
+        Copy-Item "efi\drivers\hello_atxf.atxf" "efi\apps\hello_atxf.atxf" -Force
+        Write-Success "hello_atxf.atxf copiado para efi\apps\ (smoke test)"
+    } else {
+        Write-Warning "hello_atxf.atxf não encontrado — smoke test pode não funcionar"
     }
 
     Write-Success "Userspace concluído"

@@ -91,6 +91,11 @@ pub mod numbers {
     pub const SYS_KERN_FS_READ_FILE: u64 = 200;
     pub const SYS_KERN_FS_LIST_DIR:  u64 = 201;
     pub const SYS_KERN_FS_STAT_PATH: u64 = 202;
+
+    // App launcher — spawn ATXF by absolute filesystem path.
+    // Intended for use by the privileged app_launcher service only; unprivileged
+    // applications must request launches through the app_launcher IPC service.
+    pub const SYS_SPAWN_FROM_PATH: u64 = 203;
 }
 
 /// Raw syscall with no arguments

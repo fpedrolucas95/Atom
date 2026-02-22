@@ -1,0 +1,18 @@
+[package]
+name = "hello_atxf"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Hello-world demo app for the ATXF runtime-loader smoke test"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+
+[[bin]]
+name = "hello_atxf"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

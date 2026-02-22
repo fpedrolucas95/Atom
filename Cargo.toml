@@ -23,6 +23,8 @@ exclude = [
     "userspace/services/namesvc",
     "userspace/services/service_manager",
     "userspace/services/fsd",
+    "userspace/services/app_launcher",
+    "userspace/apps/hello_atxf",
 ]
 resolver = "2"
 

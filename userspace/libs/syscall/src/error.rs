@@ -11,6 +11,8 @@ pub use atom_abi::{
     EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
     SYSCALL_ERROR_THRESHOLD, USER_VA_LIMIT,
     is_syscall_error,
+    // Filesystem / IO error codes — used by spawn_from_path and similar wrappers.
+    ENOENT, ENOTSUP, EIO,
 };
 
 /// Syscall error codes (must match kernel/src/syscall/mod.rs)

@@ -89,6 +89,49 @@ pub fn spawn_process(name: &str) -> SyscallResult<ProcessId> {
     Ok(result)
 }
 
+/// Spawn a new process by loading an ATXF binary from the filesystem.
+///
+/// This is the low-level syscall wrapper used by the privileged `app_launcher`
+/// service.  Unprivileged applications should request launches through the
+/// `app_launcher` IPC service instead of calling this directly.
+///
+/// # Arguments
+/// * `path` - Absolute path to the `.atxf` file (must end in ".atxf")
+///
+/// # Returns
+/// * `Ok(ProcessId)` - PID of the newly spawned process
+/// * `Err(SyscallError)` - If the file cannot be found, parsed, or mapped
+///
+/// # Errors
+/// - `InvalidArgument` — path is invalid, empty, or doesn't end in ".atxf"
+/// - `NotFound`        — file not present on the filesystem
+/// - `OutOfMemory`     — not enough physical memory for the new process
+/// - `NotSupported`    — FAT32 driver unavailable or wrong file type
+pub fn spawn_from_path(path: &str) -> SyscallResult<ProcessId> {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+
+    let result = unsafe { syscall2(SYS_SPAWN_FROM_PATH, path_ptr, path_len) };
+
+    if crate::error::is_syscall_error(result) {
+        // Map filesystem-specific codes that SyscallError::from_raw does not
+        // cover by default (they would become Unknown(v) otherwise).
+        use crate::error::{ENOENT, ENOTSUP, EIO};
+        let err = if result == ENOENT {
+            // Kernel could not locate the file on the FAT32 volume.
+            SyscallError::NotFound
+        } else if result == ENOTSUP || result == EIO {
+            // Wrong extension supplied, or FAT32 driver not initialised.
+            SyscallError::NotImplemented
+        } else {
+            SyscallError::from_raw(result)
+        };
+        return Err(err);
+    }
+
+    Ok(result)
+}
+
 /// List all processes/threads in the system
 ///
 /// # Arguments

@@ -438,6 +438,33 @@ pub enum MessageType {
     FsStatvfsReply = 1143,
     /// Generic filesystem error (sent asynchronously by fsd on errors)
     FsError = 1199,
+
+    // App Launcher Protocol (1200-1299)
+    // ──────────────────────────────────────────────────────────────────────
+    // The app_launcher service listens on a named port registered as
+    // "app_launcher" with the name service.
+    //
+    // Protocol version: 1 (field in AppLaunchRequestMsg; the launcher
+    // rejects unknown versions with status=99 so the ABI can evolve).
+    //
+    // Flow:
+    //   Sender → launcher : AppLaunchRequest (contains reply_port + path)
+    //   Launcher → sender : AppLaunchReply   (sent to reply_port)
+    //
+    // AppLaunchReplyMsg.status codes:
+    //   LAUNCH_OK           = 0   launch succeeded; pid field is valid
+    //   LAUNCH_ERR_NOTFOUND = 1   .atxf file not found on filesystem
+    //   LAUNCH_ERR_INVALID  = 2   file is not a valid ATXF image
+    //   LAUNCH_ERR_NOMEM    = 3   out of physical memory
+    //   LAUNCH_ERR_BADPATH  = 4   path is empty, too long, or wrong extension
+    //   LAUNCH_ERR_NOFS     = 6   filesystem service unavailable
+    //   LAUNCH_ERR_INTERNAL = 99  unspecified launcher-internal error
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Request the app_launcher to start an ATXF application by path.
+    AppLaunchRequest = 1200,
+    /// Response from app_launcher back to the requesting process.
+    AppLaunchReply = 1201,
 }
 
 impl MessageType {
@@ -556,6 +583,9 @@ impl MessageType {
             1142 => Some(Self::FsStatvfs),
             1143 => Some(Self::FsStatvfsReply),
             1199 => Some(Self::FsError),
+            // App Launcher Protocol
+            1200 => Some(Self::AppLaunchRequest),
+            1201 => Some(Self::AppLaunchReply),
             _ => None,
         }
     }
@@ -1522,5 +1552,180 @@ impl NsResponseMsg {
         Some(Self {
             port: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
         })
+    }
+}
+
+// ============================================================================
+// App Launcher Protocol Messages (1200-1299)
+// ============================================================================
+
+/// Status codes returned in AppLaunchReplyMsg.status.
+pub mod launch_status {
+    /// Launch succeeded; `pid` field is valid.
+    pub const LAUNCH_OK: u32 = 0;
+    /// The .atxf file was not found on the filesystem.
+    pub const LAUNCH_ERR_NOTFOUND: u32 = 1;
+    /// The file exists but is not a valid ATXF image (bad magic, truncated,
+    /// unsupported version, etc.).
+    pub const LAUNCH_ERR_INVALID: u32 = 2;
+    /// Not enough physical memory to map the new process.
+    pub const LAUNCH_ERR_NOMEM: u32 = 3;
+    /// Path is empty, exceeds maximum length, or does not end in ".atxf".
+    pub const LAUNCH_ERR_BADPATH: u32 = 4;
+    /// Filesystem service is unavailable (kernel FAT32 not initialised).
+    pub const LAUNCH_ERR_NOFS: u32 = 6;
+    /// Unspecified internal error in the app_launcher.
+    pub const LAUNCH_ERR_INTERNAL: u32 = 99;
+}
+
+/// Maximum path length accepted in an AppLaunchRequestMsg.
+pub const APP_LAUNCH_MAX_PATH: usize = 248;
+
+/// Current protocol version for the app-launcher IPC.
+pub const APP_LAUNCH_VERSION: u32 = 1;
+
+/// Request sent by a client (e.g. file manager) to the `app_launcher` service.
+///
+/// Layout (little-endian, total 264 bytes):
+///   bytes  0..8  : reply_port (u64)
+///   bytes  8..12 : protocol_version (u32) — must be `APP_LAUNCH_VERSION`
+///   bytes 12..16 : path_len (u32)         — byte length of the path
+///   bytes 16..264: path ([u8; 248])        — UTF-8 absolute path, zero-padded
+#[derive(Clone, Copy)]
+pub struct AppLaunchRequestMsg {
+    /// Port the launcher should send `AppLaunchReply` back to.
+    pub reply_port: u64,
+    /// Protocol version — set to `APP_LAUNCH_VERSION` (currently 1).
+    pub protocol_version: u32,
+    /// Byte length of the meaningful prefix of `path`.
+    pub path_len: u32,
+    /// Filesystem path of the ATXF binary to execute, zero-padded.
+    pub path: [u8; APP_LAUNCH_MAX_PATH],
+}
+
+impl AppLaunchRequestMsg {
+    pub const SIZE: usize = 8 + 4 + 4 + APP_LAUNCH_MAX_PATH; // 264
+
+    /// Construct a new request.  Returns `None` if `path` exceeds `APP_LAUNCH_MAX_PATH`.
+    pub fn new(reply_port: u64, path: &str) -> Option<Self> {
+        let path_bytes = path.as_bytes();
+        if path_bytes.len() > APP_LAUNCH_MAX_PATH {
+            return None;
+        }
+        let mut msg = Self {
+            reply_port,
+            protocol_version: APP_LAUNCH_VERSION,
+            path_len: path_bytes.len() as u32,
+            path: [0u8; APP_LAUNCH_MAX_PATH],
+        };
+        msg.path[..path_bytes.len()].copy_from_slice(path_bytes);
+        Some(msg)
+    }
+
+    /// Return the path as a `&str` (without trailing zero bytes).
+    pub fn path_str(&self) -> Option<&str> {
+        let len = self.path_len as usize;
+        if len > APP_LAUNCH_MAX_PATH {
+            return None;
+        }
+        core::str::from_utf8(&self.path[..len]).ok()
+    }
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.protocol_version.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.path_len.to_le_bytes());
+        buf[16..16 + APP_LAUNCH_MAX_PATH].copy_from_slice(&self.path);
+        buf
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        let reply_port = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let protocol_version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+        let path_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+        let mut path = [0u8; APP_LAUNCH_MAX_PATH];
+        path.copy_from_slice(&bytes[16..16 + APP_LAUNCH_MAX_PATH]);
+        Some(Self { reply_port, protocol_version, path_len, path })
+    }
+}
+
+/// Maximum byte length of the human-readable error message in AppLaunchReplyMsg.
+pub const APP_LAUNCH_ERR_MSG_MAX: usize = 60;
+
+/// Reply sent by the `app_launcher` service back to the requesting process.
+///
+/// Layout (little-endian, total 76 bytes):
+///   bytes  0..4  : status (u32)          — 0 = success; see `launch_status`
+///   bytes  4..12 : pid (u64)             — PID of new process (0 on error)
+///   bytes 12..16 : err_msg_len (u32)     — byte length of error message
+///   bytes 16..76 : err_msg ([u8; 60])    — human-readable error, zero-padded
+#[derive(Clone, Copy)]
+pub struct AppLaunchReplyMsg {
+    /// Launch status.  `0` = success.  See `launch_status` constants.
+    pub status: u32,
+    /// PID of the spawned process.  Valid only when `status == LAUNCH_OK`.
+    pub pid: u64,
+    /// Byte length of the human-readable error string.
+    pub err_msg_len: u32,
+    /// Human-readable error message (UTF-8, zero-padded); all-zeros on success.
+    pub err_msg: [u8; APP_LAUNCH_ERR_MSG_MAX],
+}
+
+impl AppLaunchReplyMsg {
+    pub const SIZE: usize = 4 + 8 + 4 + APP_LAUNCH_ERR_MSG_MAX; // 76
+
+    /// Construct a success reply carrying the new process ID.
+    pub fn success(pid: u64) -> Self {
+        Self {
+            status: launch_status::LAUNCH_OK,
+            pid,
+            err_msg_len: 0,
+            err_msg: [0u8; APP_LAUNCH_ERR_MSG_MAX],
+        }
+    }
+
+    /// Construct an error reply with a human-readable message.
+    pub fn error(status: u32, msg: &str) -> Self {
+        let msg_bytes = msg.as_bytes();
+        let len = msg_bytes.len().min(APP_LAUNCH_ERR_MSG_MAX);
+        let mut err_msg = [0u8; APP_LAUNCH_ERR_MSG_MAX];
+        err_msg[..len].copy_from_slice(&msg_bytes[..len]);
+        Self {
+            status,
+            pid: 0,
+            err_msg_len: len as u32,
+            err_msg,
+        }
+    }
+
+    /// Return the error message as a `&str` (empty on success or if not valid UTF-8).
+    pub fn err_msg_str(&self) -> &str {
+        let len = (self.err_msg_len as usize).min(APP_LAUNCH_ERR_MSG_MAX);
+        core::str::from_utf8(&self.err_msg[..len]).unwrap_or("")
+    }
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[0..4].copy_from_slice(&self.status.to_le_bytes());
+        buf[4..12].copy_from_slice(&self.pid.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.err_msg_len.to_le_bytes());
+        buf[16..16 + APP_LAUNCH_ERR_MSG_MAX].copy_from_slice(&self.err_msg);
+        buf
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        let status = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+        let pid = u64::from_le_bytes(bytes[4..12].try_into().ok()?);
+        let err_msg_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+        let mut err_msg = [0u8; APP_LAUNCH_ERR_MSG_MAX];
+        err_msg.copy_from_slice(&bytes[16..16 + APP_LAUNCH_ERR_MSG_MAX]);
+        Some(Self { status, pid, err_msg_len, err_msg })
     }
 }

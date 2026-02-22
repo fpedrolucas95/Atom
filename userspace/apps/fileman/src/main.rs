@@ -37,6 +37,7 @@ use libipc::messages::{
     MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg,
     KeyEvent as IpcKeyEvent, MouseButtonEvent, MouseMoveEvent, MouseButton,
     MouseScrollEvent,
+    AppLaunchRequestMsg, AppLaunchReplyMsg, launch_status,
 };
 
 // ============================================================================
@@ -477,12 +478,140 @@ impl FileManager {
             };
             self.navigate_to(new_path);
         } else {
-            // Show info in status bar (opening requires a process spawn)
-            let msg = format!("open: {} ({}) – double-click to open",
-                self.entries[idx].name, self.entries[idx].size_str());
-            self.status.set(&msg);
-            self.needs_redraw = true;
+            let name = &self.entries[idx].name;
+            if name.ends_with(".atxf") {
+                // Delegate to app_launcher service via IPC
+                let path = self.full_path(idx);
+                self.launch_atxf(&path);
+            } else {
+                // Non-executable: show info in status bar
+                let msg = format!("open: {} ({})",
+                    self.entries[idx].name, self.entries[idx].size_str());
+                self.status.set(&msg);
+                self.needs_redraw = true;
+            }
         }
+    }
+
+    // ─── Launch an ATXF application via app_launcher ────────────────────────
+    //
+    // Security: the file manager does NOT call SYS_SPAWN_FROM_PATH directly.
+    // Instead it sends an IPC request to the `app_launcher` service (which
+    // holds the spawn capability) and waits for a reply with the result.
+    //
+    // The reply is received synchronously with a short timeout; if the
+    // launcher takes longer or is unavailable the call falls back gracefully.
+
+    fn launch_atxf(&mut self, path: &str) {
+        log("fileman: launch_atxf request");
+
+        // ── Resolve the app_launcher port ────────────────────────────────────
+        let launcher_port = match libipc::protocol::lookup_service("app_launcher") {
+            Ok(p) => p,
+            Err(_) => {
+                self.status.set("error: app_launcher not available");
+                self.needs_redraw = true;
+                log("fileman: app_launcher not found in name service");
+                return;
+            }
+        };
+
+        // ── Build the request ────────────────────────────────────────────────
+        let req = match AppLaunchRequestMsg::new(self.local_port, path) {
+            Some(r) => r,
+            None => {
+                let msg = format!("error: path too long ({})", path);
+                self.status.set(&msg);
+                self.needs_redraw = true;
+                return;
+            }
+        };
+
+        // Serialise: MessageHeader + AppLaunchRequestMsg payload
+        let hdr = MessageHeader::new(
+            MessageType::AppLaunchRequest,
+            AppLaunchRequestMsg::SIZE as u32,
+        );
+        let mut buf = [0u8; MessageHeader::SIZE + AppLaunchRequestMsg::SIZE];
+        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+        buf[MessageHeader::SIZE..].copy_from_slice(&req.to_bytes());
+
+        // Update status to show progress
+        let msg = format!("launching {}…", path);
+        self.status.set(&msg);
+        self.needs_redraw = true;
+
+        // ── Send the request (fire and the reply comes to our port) ──────────
+        if let Err(_) = send(launcher_port, &buf) {
+            self.status.set("error: could not contact app_launcher");
+            self.needs_redraw = true;
+            log("fileman: IPC send to app_launcher failed");
+            return;
+        }
+
+        // ── Wait for the reply (poll our port, up to ~2s) ────────────────────
+        let deadline = get_ticks() + 200; // 200 × 10ms = 2 s
+        let mut reply_buf = [0u8; MessageHeader::SIZE + AppLaunchReplyMsg::SIZE + 16];
+        loop {
+            match try_recv(self.local_port, &mut reply_buf) {
+                Ok(Some(len)) if len >= MessageHeader::SIZE => {
+                    if let Some(reply_hdr) = MessageHeader::from_bytes(&reply_buf) {
+                        if reply_hdr.msg_type == MessageType::AppLaunchReply {
+                            self.handle_launch_reply(&reply_buf, len);
+                            return;
+                        }
+                        // Not our reply — re-queue or ignore (edge case)
+                    }
+                }
+                Ok(Some(_)) => { /* too short, ignore */ }
+                Ok(None) => { /* no message yet */ }
+                Err(_) => {
+                    self.status.set("error: IPC error waiting for launch reply");
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+            if get_ticks() >= deadline {
+                self.status.set("error: app_launcher timed out");
+                self.needs_redraw = true;
+                log("fileman: timed out waiting for AppLaunchReply");
+                return;
+            }
+            yield_now();
+        }
+    }
+
+    fn handle_launch_reply(&mut self, buf: &[u8], len: usize) {
+        let payload_start = MessageHeader::SIZE;
+        if len < payload_start + AppLaunchReplyMsg::SIZE {
+            self.status.set("error: truncated launch reply");
+            self.needs_redraw = true;
+            return;
+        }
+        let reply = match AppLaunchReplyMsg::from_bytes(&buf[payload_start..]) {
+            Some(r) => r,
+            None => {
+                self.status.set("error: malformed launch reply");
+                self.needs_redraw = true;
+                return;
+            }
+        };
+
+        if reply.status == launch_status::LAUNCH_OK {
+            let msg = format!("launched (pid={})", reply.pid);
+            self.status.set(&msg);
+        } else {
+            let err_text = reply.err_msg_str();
+            let msg = if err_text.is_empty() {
+                format!("launch error (code={})", reply.status)
+            } else {
+                format!("error: {}", err_text)
+            };
+            self.status.set(&msg);
+            let log_msg = format!("fileman: launch failed — {}", err_text);
+            log(&log_msg);
+        }
+        self.needs_redraw = true;
     }
 
     // ─── File operations ─────────────────────────────────────────────────────
