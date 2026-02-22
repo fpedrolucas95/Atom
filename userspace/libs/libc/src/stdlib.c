@@ -366,6 +366,12 @@ static void qsort_r(unsigned char *base, size_t lo, size_t hi, size_t size,
 {
     if (lo >= hi) return;
 
+    if (hi - lo == 1) {
+        if (cmp(base + lo * size, base + hi * size) > 0)
+            swap_bytes(base + lo * size, base + hi * size, size);
+        return;
+    }
+
     /* Median-of-three pivot selection */
     size_t mid = lo + (hi - lo) / 2;
     if (cmp(base + lo * size, base + mid * size) > 0)

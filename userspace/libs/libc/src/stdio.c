@@ -446,7 +446,7 @@ static int fmt_str(char *buf, int buf_size, int pos, const char *s, int len,
 
 int vsnprintf(char *buf, size_t buf_size, const char *fmt, va_list ap)
 {
-    if (!buf || buf_size == 0) return 0;
+    if (!buf) buf_size = 0;
 
     int out_pos = 0;
 
@@ -937,7 +937,10 @@ int fscanf(FILE *stream, const char *fmt, ...)
 int scanf(const char *fmt, ...)
 {
     va_list ap; va_start(ap, fmt);
-    int r = fscanf(stdin, fmt, ap);
+    char buf[1024];
+    if (!fgets(buf, (int)sizeof(buf), stdin)) return EOF;
+    va_list ap; va_start(ap, fmt);
+    int r = vsscanf(buf, fmt, ap);
     va_end(ap);
     return r;
 }

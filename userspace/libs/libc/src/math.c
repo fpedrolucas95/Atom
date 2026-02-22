@@ -184,6 +184,7 @@ double ldexp(double x, int exp_n)
 double frexp(double x, int *exp_out)
 {
     if (x == 0.0) { *exp_out = 0; return 0.0; }
+    if (isinf(x) || isnan(x)) { *exp_out = 0; return x; }
     int e = 0;
     double v = fabs(x);
     while (v >= 1.0) { v /= 2.0; e++; }
