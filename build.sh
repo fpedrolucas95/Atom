@@ -108,11 +108,13 @@ USERSPACE_SERVICES=(
     "namesvc"
     "service_manager"
     "fsd"
+    "app_launcher"
 )
 
 USERSPACE_APPS=(
     "fileman"
     "fs_test"
+    "hello_atxf"
 )
 
 # =========================================================================
@@ -189,6 +191,7 @@ mkdir -p build
 mkdir -p build/userspace
 mkdir -p efi/EFI/BOOT
 mkdir -p efi/drivers
+mkdir -p efi/apps
 
 # =========================================================================
 # BUILD USERSPACE TOOLS AND DRIVERS
@@ -362,6 +365,19 @@ if [ "$KERNEL_ONLY" != true ]; then
         success "init.atxf installed as boot payload (PID 1)"
     else
         warning "init.atxf not found - system will not boot!"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Install hello_atxf.atxf into efi/apps/ for runtime-loader smoke test.
+    # The file manager will list this directory; double-clicking the file
+    # triggers the app_launcher → SYS_SPAWN_FROM_PATH flow.
+    # -------------------------------------------------------------------------
+    mkdir -p efi/apps
+    if [ -f "efi/drivers/hello_atxf.atxf" ]; then
+        cp efi/drivers/hello_atxf.atxf efi/apps/hello_atxf.atxf
+        success "hello_atxf.atxf copied to efi/apps/ for runtime-loader smoke test"
+    else
+        warning "hello_atxf.atxf not found — smoke test may not work"
     fi
 
     success "Userspace build completed"

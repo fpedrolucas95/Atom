@@ -200,6 +200,14 @@ fn boot_sequence() {
     log("[Phase 1] Spawning service_manager...");
     let _svcmgr_pid = spawn_service("service_manager");
 
+    // Spawn the app_launcher service so that any component that wants to
+    // execute an ATXF binary by path (e.g. the file manager on double-click)
+    // can do so via IPC without needing spawn capabilities themselves.
+    // app_launcher uses the kernel FAT32 driver directly (SYS_SPAWN_FROM_PATH)
+    // and therefore does NOT depend on fsd; it can be started early.
+    log("[Phase 1] Spawning app_launcher...");
+    let _app_launcher_pid = spawn_service("app_launcher");
+
     log("[Phase 1] Core services ready");
 
     // -----------------------------------------------------------------------
@@ -280,6 +288,7 @@ fn boot_sequence() {
     let _terminal_pid = spawn_service("terminal");
     let _rects_pid = spawn_service("demo_rects");
     let _text_pid = spawn_service("demo_text");
+    let _fileman_pid = spawn_service("fileman");
 
     log("[Phase 4] Applications ready");
 

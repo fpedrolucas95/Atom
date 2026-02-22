@@ -1,0 +1,19 @@
+[package]
+name = "app_launcher"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "App Launcher Service — spawns ATXF applications by filesystem path on behalf of unprivileged clients"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+
+[[bin]]
+name = "app_launcher"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
