@@ -174,6 +174,8 @@ impl Application {
                                 let mut inner = surface.inner.borrow_mut();
                                 inner.shared = new_shared;
                                 inner.scale_factor = msg.scale_factor;
+                                // Reset dirty so the app must explicitly redraw into the new surface
+                                inner.dirty = false;
                                 // Signal resize to application
                                 return Event::Window(WindowEvent::Resize {
                                     width: msg.width,

@@ -321,6 +321,46 @@ if [ "$KERNEL_ONLY" != true ]; then
     done
 
     # -------------------------------------------------------------------------
+    # Build libc (C standard library for userspace C programs)
+    # Output → userspace/libs/libc/build/
+    # -------------------------------------------------------------------------
+    step "Building libc (C standard library)..."
+
+    if [ -f "userspace/libs/libc/Makefile" ]; then
+        if make -C userspace/libs/libc 2>build/libc.log; then
+            success "libc.a and crt0.o built"
+        else
+            warning "libc build failed (see build/libc.log)"
+            cat build/libc.log
+        fi
+    else
+        warning "userspace/libs/libc/Makefile not found, skipping libc build"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Build hello_c (C app to validate libc)
+    # Depends on libc being built first; uses its own Makefile
+    # Output → efi/apps/user/
+    # -------------------------------------------------------------------------
+    step "Building hello_c (libc test app)..."
+
+    if [ -f "userspace/apps/hello_c/Makefile" ]; then
+        if make -C userspace/apps/hello_c 2>build/hello_c.log; then
+            if [ -f "userspace/apps/hello_c/hello_c.atxf" ]; then
+                cp userspace/apps/hello_c/hello_c.atxf efi/apps/user/hello_c.atxf
+                success "hello_c.atxf → apps/user/"
+            else
+                warning "hello_c.atxf não gerado (elf2atxf pode estar ausente)"
+            fi
+        else
+            warning "Falha ao compilar hello_c (veja build/hello_c.log)"
+            cat build/hello_c.log
+        fi
+    else
+        warning "userspace/apps/hello_c/Makefile não encontrado, pulando"
+    fi
+
+    # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
     # -------------------------------------------------------------------------
