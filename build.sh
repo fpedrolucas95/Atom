@@ -321,6 +321,23 @@ if [ "$KERNEL_ONLY" != true ]; then
     done
 
     # -------------------------------------------------------------------------
+    # Build libc (C standard library for userspace C programs)
+    # Output → userspace/libs/libc/build/
+    # -------------------------------------------------------------------------
+    step "Building libc (C standard library)..."
+
+    if [ -f "userspace/libs/libc/Makefile" ]; then
+        if make -C userspace/libs/libc 2>build/libc.log; then
+            success "libc.a and crt0.o built"
+        else
+            warning "libc build failed (see build/libc.log)"
+            cat build/libc.log
+        fi
+    else
+        warning "userspace/libs/libc/Makefile not found, skipping libc build"
+    fi
+
+    # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
     # -------------------------------------------------------------------------
