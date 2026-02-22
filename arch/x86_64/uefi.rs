@@ -582,13 +582,19 @@ fn load_driver_file(
     let mut path_buf = [0u16; 128];
     let mut idx = 0;
     for c in dir_prefix.chars() {
-        if idx >= path_buf.len() - 1 { break; }
+        if idx >= path_buf.len() - 1 {
+            // dir_prefix alone fills the buffer — path would be truncated; skip.
+            return None;
+        }
         path_buf[idx] = c as u16;
         idx += 1;
     }
     for &c in filename.iter() {
         if c == 0 { break; }
-        if idx >= path_buf.len() - 1 { break; }
+        if idx >= path_buf.len() - 1 {
+            // Combined path is too long to fit — skip rather than silently truncate.
+            return None;
+        }
         path_buf[idx] = c;
         idx += 1;
     }
@@ -691,6 +697,11 @@ fn load_atxf_from_dir(
     driver_list: &mut DriverList,
 ) {
     let mut path_buf = [0u16; 64];
+    // Guard: str_to_utf16 silently truncates; bail out if dir_path doesn't fit
+    // (need room for all chars plus the null terminator).
+    if dir_path.len() >= path_buf.len() {
+        return;
+    }
     str_to_utf16(dir_path, &mut path_buf);
 
     let mut dir_handle: *mut EfiFileProtocol = ptr::null_mut();
@@ -780,17 +791,28 @@ fn load_atxf_from_dir(
     let _ = (dir_ref.close)(dir_handle);
 }
 
+/// OS partition directories scanned at boot for ATXF executables.
+///
+/// Each entry is `(dir_path, dir_prefix)`:
+///   `dir_path`   — path WITHOUT trailing backslash, passed to EFI directory open
+///   `dir_prefix` — path WITH    trailing backslash, prepended to each filename
+///
+/// This is the single source of truth for the disk layout.  Any change here
+/// must be mirrored in `build.sh` / `build.ps1` (which place the .atxf files)
+/// and `load_atxf_from_dir` / `load_driver_file` (which read them back).
+const OS_ATXF_DIRS: &[(&str, &str)] = &[
+    ("\\system\\services", "\\system\\services\\"),
+    ("\\apps\\system",     "\\apps\\system\\"),
+    ("\\apps\\user",       "\\apps\\user\\"),
+];
+
 /// Load all ATXF executables from the OS partition into the driver registry.
 ///
-/// New disk layout (OS partition):
-///   \system\services\  — system services  (namesvc, fsd, app_launcher, …)
-///   \apps\system\      — system-level apps (ui_shell, display, terminal, …)
-///   \apps\user\        — user-installed apps (fileman, hello_atxf, …)
-///
-/// All three directories are scanned at boot so that every binary is available
-/// in the driver registry and can be spawned by name via spawn_process().
-/// The EFI partition (\EFI\BOOT\) is NOT scanned here; init.atxf is loaded
-/// separately by load_init_payload() and is never exposed to userspace.
+/// Scans every directory listed in `OS_ATXF_DIRS`.  Missing directories are
+/// silently skipped so that a partial disk layout does not abort the boot
+/// sequence.  The EFI partition (`\EFI\BOOT\`) is intentionally excluded:
+/// `init.atxf` is loaded separately by `load_init_payload()` and is never
+/// exposed to userspace.
 fn load_drivers(
     image: EfiHandle,
     bs: &mut EfiBootServices,
@@ -836,11 +858,11 @@ fn load_drivers(
         return driver_list;
     }
 
-    // Scan each OS partition directory for ATXF executables.
+    // Scan every OS partition directory listed in OS_ATXF_DIRS.
     // Each scan is independent — a missing directory is silently skipped.
-    load_atxf_from_dir(root, "\\system\\services", "\\system\\services\\", bs, &mut driver_list);
-    load_atxf_from_dir(root, "\\apps\\system",     "\\apps\\system\\",     bs, &mut driver_list);
-    load_atxf_from_dir(root, "\\apps\\user",       "\\apps\\user\\",       bs, &mut driver_list);
+    for &(dir_path, dir_prefix) in OS_ATXF_DIRS {
+        load_atxf_from_dir(root, dir_path, dir_prefix, bs, &mut driver_list);
+    }
 
     let root_ref = unsafe { &mut *root };
     let _ = (root_ref.close)(root);
