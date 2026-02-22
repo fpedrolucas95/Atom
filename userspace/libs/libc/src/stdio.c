@@ -658,6 +658,7 @@ int vsnprintf(char *buf, size_t buf_size, const char *fmt, va_list ap)
             /* Build fractional part */
             int fidx = 0;
             char fbuf[32];
+            if (prec > 31) prec = 31; /* clamp to buffer size */
             for (int i = 0; i < prec; i++) {
                 fpart *= 10.0;
                 fbuf[fidx++] = '0' + (int)fpart % 10;
