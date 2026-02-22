@@ -12,8 +12,42 @@
 #   make              — build hello_c.elf and hello_c.atxf
 #   make clean        — remove build artifacts
 
-CC  = gcc
-LD  = ld
+# ---------------------------------------------------------------------------
+# Toolchain detection
+# Same logic as userspace/libs/libc/Makefile.
+# On macOS 'gcc' == Apple clang; use -target to emit ELF.
+# Install a proper cross-compiler with: brew install x86_64-elf-gcc
+# ---------------------------------------------------------------------------
+CROSS_GCC := $(shell command -v x86_64-elf-gcc 2>/dev/null)
+ifneq ($(CROSS_GCC),)
+  CC         = x86_64-elf-gcc
+  ARCH_FLAGS = -march=x86-64
+else
+  IS_CLANG   := $(findstring clang,$(shell gcc --version 2>&1))
+  ifneq ($(IS_CLANG),)
+    CC         = clang
+    ARCH_FLAGS = -target x86_64-unknown-none-elf
+  else
+    CC         = gcc
+    ARCH_FLAGS = -march=x86-64
+  endif
+endif
+
+# Linker: x86_64-elf-ld > rust-lld (ELF flavor) > system ld
+CROSS_LD := $(shell command -v x86_64-elf-ld 2>/dev/null)
+ifneq ($(CROSS_LD),)
+  LD       = x86_64-elf-ld
+  LDFLAGS_FLAVOR =
+else
+  RUST_LLD := $(shell find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
+  ifneq ($(RUST_LLD),)
+    LD             = $(RUST_LLD)
+    LDFLAGS_FLAVOR = -flavor ld
+  else
+    LD             = ld
+    LDFLAGS_FLAVOR =
+  endif
+endif
 
 LIBC_DIR  = ../../libs/libc
 LIBC      = $(LIBC_DIR)/build/libc.a
@@ -22,8 +56,8 @@ LDSCRIPT  = ../../userspace.ld
 ELF2ATXF  = ../../../tools/elf2atxf/target/$(shell rustc -vV 2>/dev/null | sed -n 's/host: //p')/release/elf2atxf
 
 CFLAGS = \
+    $(ARCH_FLAGS) \
     -m64 \
-    -march=x86-64 \
     -ffreestanding \
     -fno-stack-protector \
     -fno-pie \
@@ -38,6 +72,7 @@ CFLAGS = \
     -O2
 
 LDFLAGS = \
+    $(LDFLAGS_FLAVOR) \
     -T $(LDSCRIPT) \
     -nostdlib \
     --no-pie \

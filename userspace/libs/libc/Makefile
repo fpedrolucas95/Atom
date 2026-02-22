@@ -8,14 +8,38 @@
 #   make clean    — remove build artifacts
 #   make check    — verify toolchain is available
 
-CC     = gcc
-AR     = ar
+# ---------------------------------------------------------------------------
+# Toolchain detection
+# Priority: x86_64-elf-gcc (bare-metal cross) > clang (Apple/LLVM) > gcc
+# On macOS 'gcc' is Apple clang which requires an explicit ELF target triple
+# instead of -march=x86-64 and generates ELF when -target is set.
+# Install a proper cross-compiler with: brew install x86_64-elf-gcc
+# ---------------------------------------------------------------------------
+CROSS_GCC := $(shell command -v x86_64-elf-gcc 2>/dev/null)
+ifneq ($(CROSS_GCC),)
+  CC         = x86_64-elf-gcc
+  AR         = x86_64-elf-ar
+  ARCH_FLAGS = -march=x86-64
+else
+  IS_CLANG   := $(findstring clang,$(shell gcc --version 2>&1))
+  ifneq ($(IS_CLANG),)
+    # Apple clang / system LLVM clang — emit ELF via explicit target triple
+    CC         = clang
+    AR         = ar
+    ARCH_FLAGS = -target x86_64-unknown-none-elf
+  else
+    CC         = gcc
+    AR         = ar
+    ARCH_FLAGS = -march=x86-64
+  endif
+endif
+
 ARCH   = x86_64
 
 # Freestanding compile flags for AtomOS userspace
 CFLAGS = \
+    $(ARCH_FLAGS) \
     -m64 \
-    -march=x86-64 \
     -ffreestanding \
     -fno-stack-protector \
     -fno-pie \
@@ -32,8 +56,8 @@ CFLAGS = \
 
 # Same flags for assembling .S startup files
 ASFLAGS = \
+    $(ARCH_FLAGS) \
     -m64 \
-    -march=x86-64 \
     -ffreestanding \
     -nostdlib
 

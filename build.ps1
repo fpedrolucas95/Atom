@@ -284,6 +284,64 @@ if (-not $Kernel) {
         }
     }
 
+    # -------------------------------------------------------------------------
+    # Build libc (biblioteca C padrão para programas userspace em C)
+    # Saída → userspace\libs\libc\build\
+    # -------------------------------------------------------------------------
+    Write-Step "Compilando libc (biblioteca C padrão)..."
+
+    if (Test-Path "userspace\libs\libc\Makefile") {
+        $makeCmd = Get-Command "make" -ErrorAction SilentlyContinue
+        if ($makeCmd) {
+            Push-Location "userspace\libs\libc"
+            make *> "$REPO_PATH\build\libc.log"
+            $libcExit = $LASTEXITCODE
+            Pop-Location
+            if ($libcExit -eq 0) {
+                Write-Success "libc.a e crt0.o compilados"
+            } else {
+                Write-Warning "Falha ao compilar libc (veja build\libc.log)"
+                Get-Content "$REPO_PATH\build\libc.log" -Tail 20 | Write-Host
+            }
+        } else {
+            Write-Warning "'make' não encontrado — pulando build da libc (instale MinGW/MSYS2 e adicione ao PATH)"
+        }
+    } else {
+        Write-Warning "userspace\libs\libc\Makefile não encontrado, pulando build da libc"
+    }
+
+    # -------------------------------------------------------------------------
+    # Build hello_c (app C para validar a libc)
+    # Depende da libc já compilada; usa Makefile próprio
+    # Saída → efi\apps\user\
+    # -------------------------------------------------------------------------
+    Write-Step "Compilando hello_c (app de teste da libc)..."
+
+    if (Test-Path "userspace\apps\hello_c\Makefile") {
+        $makeCmd = Get-Command "make" -ErrorAction SilentlyContinue
+        if ($makeCmd) {
+            Push-Location "userspace\apps\hello_c"
+            make *> "$REPO_PATH\build\hello_c.log"
+            $helloCExit = $LASTEXITCODE
+            Pop-Location
+            if ($helloCExit -eq 0) {
+                if (Test-Path "userspace\apps\hello_c\hello_c.atxf") {
+                    Copy-Item "userspace\apps\hello_c\hello_c.atxf" "efi\apps\user\hello_c.atxf" -Force
+                    Write-Success "hello_c.atxf → apps\user\"
+                } else {
+                    Write-Warning "hello_c.atxf não gerado (elf2atxf pode estar ausente)"
+                }
+            } else {
+                Write-Warning "Falha ao compilar hello_c (veja build\hello_c.log)"
+                Get-Content "$REPO_PATH\build\hello_c.log" -Tail 20 | Write-Host
+            }
+        } else {
+            Write-Warning "'make' não encontrado — pulando hello_c (instale MinGW/MSYS2)"
+        }
+    } else {
+        Write-Warning "userspace\apps\hello_c\Makefile não encontrado, pulando"
+    }
+
     # init.atxf é o payload PID 1 — deve ficar na partição EFI para que o
     # bootloader UEFI o carregue antes do ExitBootServices().
     if (Test-Path "efi\system\services\init.atxf") {

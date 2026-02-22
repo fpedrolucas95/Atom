@@ -29,6 +29,10 @@
 #define SYS_GET_TICKS        38
 #define SYS_DEBUG_LOG        39
 
+/* Graphics */
+#define SYS_GET_FRAMEBUFFER  37
+#define SYS_MAP_FRAMEBUFFER  41
+
 /* Spawn */
 #define SYS_SPAWN_PROCESS    45
 
