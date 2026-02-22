@@ -93,7 +93,7 @@ done
 # Userspace drivers list
 # -------------------------------------------------------------------------
 
-USERSPACE_DRIVERS=(
+SYSTEM_APPS=(
     "keyboard"
     "mouse"
     "display"
@@ -190,8 +190,12 @@ fi
 mkdir -p build
 mkdir -p build/userspace
 mkdir -p efi/EFI/BOOT
-mkdir -p efi/drivers
-mkdir -p efi/apps
+mkdir -p efi/system/services
+mkdir -p efi/apps/system
+mkdir -p efi/apps/user
+mkdir -p efi/user/home
+mkdir -p efi/user/config
+mkdir -p efi/user/data
 
 # =========================================================================
 # BUILD USERSPACE TOOLS AND DRIVERS
@@ -225,54 +229,56 @@ if [ "$KERNEL_ONLY" != true ]; then
     ELF2ATXF="tools/elf2atxf/target/$HOST_TRIPLE/release/elf2atxf"
 
     # -------------------------------------------------------------------------
-    # Build userspace drivers and convert to ATXF
+    # Build system apps (ui_shell, display, keyboard, mouse, terminal, …)
+    # Output → efi/apps/system/
     # -------------------------------------------------------------------------
-    step "Building userspace drivers..."
+    step "Building system apps..."
 
-    for driver in "${USERSPACE_DRIVERS[@]}"; do
-        driver_path="userspace/drivers/$driver"
+    for app in "${SYSTEM_APPS[@]}"; do
+        app_path="userspace/system_apps/$app"
 
-        if [ ! -f "$driver_path/Cargo.toml" ]; then
-            warning "Driver $driver not found, skipping..."
+        if [ ! -f "$app_path/Cargo.toml" ]; then
+            warning "System app $app not found, skipping..."
             continue
         fi
 
-        step "  Building $driver driver..."
-        pushd "$driver_path" > /dev/null
+        step "  Building $app..."
+        pushd "$app_path" > /dev/null
 
         if cargo build --release 2>build.log; then
             popd > /dev/null
 
-            bin_name=$(grep -A5 '\[\[bin\]\]' "$driver_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$driver")
+            bin_name=$(grep -A5 '\[\[bin\]\]' "$app_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$app")
             if [ -z "$bin_name" ]; then
-                bin_name="$driver"
+                bin_name="$app"
             fi
 
-            elf_path="$driver_path/target/x86_64-unknown-none/release/$bin_name"
-            atxf_path="efi/drivers/${driver}.atxf"
+            elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
+            atxf_path="efi/apps/system/${app}.atxf"
 
             if [ -f "$elf_path" ]; then
-                step "  Converting $driver to ATXF..."
-                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$driver.log; then
-                    success "$driver.atxf created"
+                step "  Converting $app to ATXF..."
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                    success "$app.atxf → apps/system/"
                 else
-                    warning "Failed to convert $driver to ATXF"
-                    cat build/elf2atxf_$driver.log
+                    warning "Failed to convert $app to ATXF"
+                    cat build/elf2atxf_$app.log
                 fi
             else
                 warning "ELF not found at $elf_path"
             fi
         else
             popd > /dev/null
-            warning "$driver driver failed to build"
-            cat "$driver_path/build.log" 2>/dev/null || true
+            warning "$app failed to build"
+            cat "$app_path/build.log" 2>/dev/null || true
         fi
     done
 
     # -------------------------------------------------------------------------
-    # Build userspace services and convert to ATXF
+    # Build system services and convert to ATXF
+    # Output → efi/system/services/
     # -------------------------------------------------------------------------
-    step "Building userspace services..."
+    step "Building system services..."
 
     for service in "${USERSPACE_SERVICES[@]}"; do
         service_path="userspace/services/$service"
@@ -294,12 +300,12 @@ if [ "$KERNEL_ONLY" != true ]; then
             fi
 
             elf_path="$service_path/target/x86_64-unknown-none/release/$bin_name"
-            atxf_path="efi/drivers/${service}.atxf"
+            atxf_path="efi/system/services/${service}.atxf"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $service to ATXF..."
                 if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$service.log; then
-                    success "$service.atxf created"
+                    success "$service.atxf → system/services/"
                 else
                     warning "Failed to convert $service to ATXF"
                     cat build/elf2atxf_$service.log
@@ -315,9 +321,10 @@ if [ "$KERNEL_ONLY" != true ]; then
     done
 
     # -------------------------------------------------------------------------
-    # Build userspace applications and convert to ATXF
+    # Build user applications and convert to ATXF
+    # Output → efi/apps/user/
     # -------------------------------------------------------------------------
-    step "Building userspace applications..."
+    step "Building user applications..."
 
     for app in "${USERSPACE_APPS[@]}"; do
         app_path="userspace/apps/$app"
@@ -339,12 +346,12 @@ if [ "$KERNEL_ONLY" != true ]; then
             fi
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
-            atxf_path="efi/drivers/${app}.atxf"
+            atxf_path="efi/apps/user/${app}.atxf"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
                 if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
-                    success "$app.atxf created"
+                    success "$app.atxf → apps/user/"
                 else
                     warning "Failed to convert $app to ATXF"
                     cat build/elf2atxf_$app.log
@@ -360,24 +367,13 @@ if [ "$KERNEL_ONLY" != true ]; then
         fi
     done
 
-    if [ -f "efi/drivers/init.atxf" ]; then
-        cp efi/drivers/init.atxf efi/EFI/BOOT/init.atxf
-        success "init.atxf installed as boot payload (PID 1)"
+    # init.atxf is the PID-1 boot payload — it must live on the EFI partition
+    # so the UEFI bootloader can load it before ExitBootServices().
+    if [ -f "efi/system/services/init.atxf" ]; then
+        cp efi/system/services/init.atxf efi/EFI/BOOT/init.atxf
+        success "init.atxf installed as EFI boot payload (PID 1)"
     else
         warning "init.atxf not found - system will not boot!"
-    fi
-
-    # -------------------------------------------------------------------------
-    # Install hello_atxf.atxf into efi/apps/ for runtime-loader smoke test.
-    # The file manager will list this directory; double-clicking the file
-    # triggers the app_launcher → SYS_SPAWN_FROM_PATH flow.
-    # -------------------------------------------------------------------------
-    mkdir -p efi/apps
-    if [ -f "efi/drivers/hello_atxf.atxf" ]; then
-        cp efi/drivers/hello_atxf.atxf efi/apps/hello_atxf.atxf
-        success "hello_atxf.atxf copied to efi/apps/ for runtime-loader smoke test"
-    else
-        warning "hello_atxf.atxf not found — smoke test may not work"
     fi
 
     success "Userspace build completed"
@@ -507,18 +503,41 @@ dd if=/dev/zero of=$DISK_IMG bs=1M count=64 2>/dev/null
 
 mformat -i $DISK_IMG -F ::
 
+# ---- EFI partition (boot-only, not visible to users) ----
 mmd -i $DISK_IMG ::/EFI
 mmd -i $DISK_IMG ::/EFI/BOOT
-mmd -i $DISK_IMG ::/drivers
 
+# ---- OS partition directories ----
+mmd -i $DISK_IMG ::/system
+mmd -i $DISK_IMG ::/system/services
+mmd -i $DISK_IMG ::/apps
+mmd -i $DISK_IMG ::/apps/system
+mmd -i $DISK_IMG ::/apps/user
+mmd -i $DISK_IMG ::/user
+mmd -i $DISK_IMG ::/user/home
+mmd -i $DISK_IMG ::/user/config
+mmd -i $DISK_IMG ::/user/data
+
+# ---- Boot files (EFI partition) ----
 mcopy -i $DISK_IMG build/Atom.efi ::/EFI/BOOT/BOOTX64.EFI
-
-if ls efi/drivers/*.atxf 1> /dev/null 2>&1; then
-    mcopy -i $DISK_IMG efi/drivers/*.atxf ::/drivers/
-fi
 
 if [ -f "efi/EFI/BOOT/init.atxf" ]; then
     mcopy -i $DISK_IMG efi/EFI/BOOT/init.atxf ::/EFI/BOOT/init.atxf
+fi
+
+# ---- System services → /system/services/ ----
+if ls efi/system/services/*.atxf 1>/dev/null 2>&1; then
+    mcopy -i $DISK_IMG efi/system/services/*.atxf ::/system/services/
+fi
+
+# ---- System apps → /apps/system/ ----
+if ls efi/apps/system/*.atxf 1>/dev/null 2>&1; then
+    mcopy -i $DISK_IMG efi/apps/system/*.atxf ::/apps/system/
+fi
+
+# ---- User apps → /apps/user/ ----
+if ls efi/apps/user/*.atxf 1>/dev/null 2>&1; then
+    mcopy -i $DISK_IMG efi/apps/user/*.atxf ::/apps/user/
 fi
 
 success "Imagem de disco criada: $DISK_IMG"
