@@ -1,0 +1,9 @@
+[package]
+name = "desktop_wm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atom_syscall = { path = "../../../../libs/syscall" }
+libipc = { path = "../../../../libs/libipc" }
+desktop_gfx = { path = "../gfx" }

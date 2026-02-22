@@ -1,0 +1,10 @@
+[package]
+name = "desktop_compositor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atom_syscall = { path = "../../../../libs/syscall" }
+desktop_gfx = { path = "../gfx" }
+desktop_wm = { path = "../wm" }
+desktop_shell = { path = "../shell" }

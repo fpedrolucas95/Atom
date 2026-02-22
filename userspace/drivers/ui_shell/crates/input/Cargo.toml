@@ -1,0 +1,11 @@
+[package]
+name = "desktop_input"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atom_syscall = { path = "../../../../libs/syscall" }
+desktop_wm = { path = "../wm" }
+desktop_compositor = { path = "../compositor" }
+desktop_shell = { path = "../shell" }
+desktop_gfx = { path = "../gfx" }

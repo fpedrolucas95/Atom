@@ -1,0 +1,8 @@
+[package]
+name = "desktop_ipc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atom_syscall = { path = "../../../../libs/syscall" }
+libipc = { path = "../../../../libs/libipc" }

@@ -9,7 +9,7 @@ extern crate alloc;
 use crate::color::Color;
 use crate::font::{get_glyph, FONT_WIDTH, FONT_HEIGHT};
 use atom_syscall::graphics::SharedSurface;
-use libipc::messages::{WindowId, WmCreateWindowResponse, WmCommitFrameMsg, MessageType};
+use libipc::messages::{WindowId, WmCreateWindowResponse, SurfacePresentMsg, MessageType};
 use libipc::protocol::send_message_async;
 use atom_syscall::ipc::PortId;
 use alloc::rc::Rc;
@@ -21,6 +21,8 @@ pub(crate) struct SurfaceInner {
     pub shared: SharedSurface,
     pub wm_port: PortId,
     pub dirty: bool,
+    pub dirty_rect: Option<libipc::messages::Rect>,
+    pub sequence: u32,
     pub scale_factor: u32,
 }
 
@@ -41,6 +43,8 @@ impl Surface {
                 shared,
                 wm_port,
                 dirty: false,
+                dirty_rect: None,
+                sequence: 0,
                 scale_factor: 1000, // 1.0 default
             })),
         })
@@ -71,6 +75,21 @@ impl Surface {
         let mut inner = self.inner.borrow_mut();
         let atom_color = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
         inner.shared.draw_pixel(x, y, atom_color);
+
+        let rect = libipc::messages::Rect::new(x as i32, y as i32, 1, 1);
+        Self::update_dirty_rect(&mut inner, rect);
+    }
+
+    fn update_dirty_rect(inner: &mut core::cell::RefMut<SurfaceInner>, new_rect: libipc::messages::Rect) {
+        if let Some(existing) = inner.dirty_rect {
+            let x1 = existing.x.min(new_rect.x);
+            let y1 = existing.y.min(new_rect.y);
+            let x2 = (existing.x + existing.width as i32).max(new_rect.x + new_rect.width as i32);
+            let y2 = (existing.y + existing.height as i32).max(new_rect.y + new_rect.height as i32);
+            inner.dirty_rect = Some(libipc::messages::Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32));
+        } else {
+            inner.dirty_rect = Some(new_rect);
+        }
         inner.dirty = true;
     }
 
@@ -98,8 +117,10 @@ impl Surface {
     pub fn clear(&mut self, color: Color) {
         let mut inner = self.inner.borrow_mut();
         let atom_color = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        let w = inner.shared.width();
+        let h = inner.shared.height();
         inner.shared.clear(atom_color);
-        inner.dirty = true;
+        Self::update_dirty_rect(&mut inner, libipc::messages::Rect::new(0, 0, w, h));
     }
 
     /// Fill a rectangle with a color
@@ -107,7 +128,7 @@ impl Surface {
         let mut inner = self.inner.borrow_mut();
         let atom_color = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
         inner.shared.fill_rect(x, y, width, height, atom_color);
-        inner.dirty = true;
+        Self::update_dirty_rect(&mut inner, libipc::messages::Rect::new(x as i32, y as i32, width, height));
     }
 
     /// Draw a horizontal line
@@ -177,15 +198,40 @@ impl Surface {
         inner.dirty = true;
     }
 
+    /// Invalidate a region of the surface
+    pub fn invalidate_rect(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        let mut inner = self.inner.borrow_mut();
+        let new_rect = libipc::messages::Rect::new(x, y, width, height);
+        if let Some(existing) = inner.dirty_rect {
+            // Simple union
+            let x1 = existing.x.min(new_rect.x);
+            let y1 = existing.y.min(new_rect.y);
+            let x2 = (existing.x + existing.width as i32).max(new_rect.x + new_rect.width as i32);
+            let y2 = (existing.y + existing.height as i32).max(new_rect.y + new_rect.height as i32);
+            inner.dirty_rect = Some(libipc::messages::Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32));
+        } else {
+            inner.dirty_rect = Some(new_rect);
+        }
+        inner.dirty = true;
+    }
+
     /// Present the surface (signal compositor to display)
     pub fn present(&mut self) {
         let mut inner = self.inner.borrow_mut();
         if inner.dirty {
-            let msg = WmCommitFrameMsg {
+            let rect = inner.dirty_rect.unwrap_or(libipc::messages::Rect::new(0, 0, inner.shared.width(), inner.shared.height()));
+            let msg = SurfacePresentMsg {
                 window_id: inner.window_id,
+                sequence: inner.sequence,
+                dirty_x: rect.x,
+                dirty_y: rect.y,
+                dirty_w: rect.width,
+                dirty_h: rect.height,
             };
-            let _ = send_message_async(inner.wm_port, MessageType::WmCommitFrame, &msg.to_bytes());
+            let _ = send_message_async(inner.wm_port, MessageType::SurfacePresent, &msg.to_bytes());
+            inner.sequence = inner.sequence.wrapping_add(1);
             inner.dirty = false;
+            inner.dirty_rect = None;
         }
     }
 }

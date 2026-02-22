@@ -652,13 +652,27 @@ impl TerminateRequestMsg {
 pub struct SurfacePresentMsg {
     /// Window ID that owns this surface
     pub window_id: u32,
+    /// Sequence number for synchronization
+    pub sequence: u32,
+    /// Dirty region coordinates and dimensions
+    pub dirty_x: i32,
+    pub dirty_y: i32,
+    pub dirty_w: u32,
+    pub dirty_h: u32,
 }
 
 impl SurfacePresentMsg {
-    pub const SIZE: usize = 4;
+    pub const SIZE: usize = 24;
 
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
-        self.window_id.to_le_bytes()
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.window_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.sequence.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.dirty_x.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.dirty_y.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.dirty_w.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.dirty_h.to_le_bytes());
+        bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -667,6 +681,11 @@ impl SurfacePresentMsg {
         }
         Some(Self {
             window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            sequence: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            dirty_x: i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            dirty_y: i32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            dirty_w: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+            dirty_h: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
         })
     }
 }

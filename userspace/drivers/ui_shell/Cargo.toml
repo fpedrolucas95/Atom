@@ -2,14 +2,29 @@
 name = "atom_desktop"
 version = "0.1.0"
 edition = "2021"
-authors = ["Atom OS Contributors"]
-description = "Atom Desktop Environment - Compositor and Window Manager"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
-libgui = { path = "../../libs/libgui" }
+desktop_gfx = { path = "crates/gfx" }
+desktop_wm = { path = "crates/wm" }
+desktop_shell = { path = "crates/shell" }
+desktop_compositor = { path = "crates/compositor" }
+desktop_input = { path = "crates/input" }
+desktop_ipc = { path = "crates/ipc_proto" }
+desktop_fs = { path = "crates/fs_integration" }
+
+[workspace]
+members = [
+    "crates/gfx",
+    "crates/compositor",
+    "crates/wm",
+    "crates/shell",
+    "crates/input",
+    "crates/ipc_proto",
+    "crates/fs_integration",
+]
 
 [[bin]]
-name = "atom_desktop"
+name = "ui_shell"
 path = "src/main.rs"
