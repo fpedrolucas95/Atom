@@ -106,7 +106,8 @@ pub fn spawn_process(name: &str) -> SyscallResult<ProcessId> {
 /// - `InvalidArgument` — path is invalid, empty, or doesn't end in ".atxf"
 /// - `NotFound`        — file not present on the filesystem
 /// - `OutOfMemory`     — not enough physical memory for the new process
-/// - `NotSupported`    — FAT32 driver unavailable or wrong file type
+/// - `NotSupported`    — path does not end in ".atxf" (wrong file type)
+/// - `IoError`         — FAT32 driver unavailable (filesystem not initialised)
 pub fn spawn_from_path(path: &str) -> SyscallResult<ProcessId> {
     let path_ptr = path.as_ptr() as u64;
     let path_len = path.len() as u64;
@@ -120,9 +121,12 @@ pub fn spawn_from_path(path: &str) -> SyscallResult<ProcessId> {
         let err = if result == ENOENT {
             // Kernel could not locate the file on the FAT32 volume.
             SyscallError::NotFound
-        } else if result == ENOTSUP || result == EIO {
-            // Wrong extension supplied, or FAT32 driver not initialised.
-            SyscallError::NotImplemented
+        } else if result == ENOTSUP {
+            // Path does not have the required ".atxf" extension.
+            SyscallError::NotSupported
+        } else if result == EIO {
+            // FAT32 driver not initialised — filesystem unavailable.
+            SyscallError::IoError
         } else {
             SyscallError::from_raw(result)
         };

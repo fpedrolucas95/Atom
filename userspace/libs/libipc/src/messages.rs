@@ -457,7 +457,8 @@ pub enum MessageType {
     //   LAUNCH_ERR_INVALID  = 2   file is not a valid ATXF image
     //   LAUNCH_ERR_NOMEM    = 3   out of physical memory
     //   LAUNCH_ERR_BADPATH  = 4   path is empty, too long, or wrong extension
-    //   LAUNCH_ERR_NOFS     = 6   filesystem service unavailable
+    //   LAUNCH_ERR_BADTYPE  = 5   path does not end in ".atxf" (wrong file type)
+    //   LAUNCH_ERR_NOFS     = 6   filesystem service unavailable (FAT32 not ready)
     //   LAUNCH_ERR_INTERNAL = 99  unspecified launcher-internal error
     // ──────────────────────────────────────────────────────────────────────
 
@@ -1570,8 +1571,10 @@ pub mod launch_status {
     pub const LAUNCH_ERR_INVALID: u32 = 2;
     /// Not enough physical memory to map the new process.
     pub const LAUNCH_ERR_NOMEM: u32 = 3;
-    /// Path is empty, exceeds maximum length, or does not end in ".atxf".
+    /// Path is empty, exceeds maximum length, is not absolute, or contains `..`.
     pub const LAUNCH_ERR_BADPATH: u32 = 4;
+    /// Path does not end in ".atxf" — wrong file type.
+    pub const LAUNCH_ERR_BADTYPE: u32 = 5;
     /// Filesystem service is unavailable (kernel FAT32 not initialised).
     pub const LAUNCH_ERR_NOFS: u32 = 6;
     /// Unspecified internal error in the app_launcher.

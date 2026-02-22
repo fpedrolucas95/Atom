@@ -30,6 +30,10 @@ pub enum SyscallError {
     WouldBlock,
     Deadlock,
     NotFound,
+    /// Operation not supported (ENOTSUP) — e.g. wrong file type for a syscall.
+    NotSupported,
+    /// I/O error (EIO) — e.g. block device or filesystem driver unavailable.
+    IoError,
     Unknown(u64),
 }
 

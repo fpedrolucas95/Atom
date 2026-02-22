@@ -3743,8 +3743,38 @@ fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
         return EINVAL;
     }
 
-    // ── 2. Copy path bytes from userspace ──────────────────────────────────
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
+    // ── 2. Validate that the entire range lies within userspace ────────────
+    //
+    // USER_VA_LIMIT is the last byte of the canonical lower-half range on
+    // x86-64 (0x0000_7FFF_FFFF_FFFF).  We ensure:
+    //   a) The start address is non-null (checked above via is_null()).
+    //   b) The computed end address does not wrap around (overflow check).
+    //   c) The end address does not reach into the kernel upper half.
+    {
+        use crate::mm::addrspace::USER_VA_LIMIT;
+        let start = path_ptr as usize;
+        let end = start.wrapping_add(path_len);
+        if end < start || end as u64 > USER_VA_LIMIT {
+            log_warn!(
+                LOG_ORIGIN,
+                "spawn_from_path: path range [{:#x}..{:#x}) is outside userspace",
+                start,
+                end
+            );
+            return EINVAL;
+        }
+    }
+
+    // ── 3. Copy path bytes from userspace into a kernel-owned buffer ───────
+    //
+    // Reading directly through the raw pointer is safe only after the range
+    // check above has confirmed the address lies in the canonical user half.
+    // We copy into a fixed-size stack buffer so that later code never holds
+    // a reference into user memory (which could be concurrently modified).
+    let mut path_buf = [0u8; MAX_PATH];
+    unsafe { core::ptr::copy_nonoverlapping(path_ptr, path_buf.as_mut_ptr(), path_len); }
+    let path_bytes = &path_buf[..path_len];
+
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s.trim_end_matches('\0'),
         Err(_) => {

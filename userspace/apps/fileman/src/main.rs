@@ -29,7 +29,7 @@ mod fs;
 use fs::{Dir, DirEntry, FsOps};
 
 use atom_syscall::graphics::{Color, SharedSurface};
-use atom_syscall::ipc::{create_port, try_recv, send, wait_any, PortId};
+use atom_syscall::ipc::{create_port, close_port, try_recv, send, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now, get_ticks};
 use atom_syscall::debug::log;
 
@@ -307,6 +307,30 @@ impl StatusBuf {
 }
 
 // ============================================================================
+// App-launch error type
+// ============================================================================
+
+/// Errors that can occur while requesting a launch through the `app_launcher`
+/// service.  Used by the `request_app_launch` IPC helper so that `launch_atxf`
+/// remains a thin UI wrapper free of IPC mechanics.
+enum LaunchError {
+    /// Name service did not find `app_launcher`.
+    NoLauncher,
+    /// Path is too long to fit in an `AppLaunchRequestMsg`.
+    PathTooLong,
+    /// IPC send to `app_launcher` failed.
+    SendFailed,
+    /// Unexpected IPC error while waiting for the reply.
+    IpcError,
+    /// Reply did not arrive within the 2-second deadline.
+    Timeout,
+    /// Reply arrived but was shorter than `AppLaunchReplyMsg::SIZE`.
+    TruncatedReply,
+    /// Reply arrived but could not be deserialised.
+    MalformedReply,
+}
+
+// ============================================================================
 // File Manager state
 // ============================================================================
 
@@ -496,38 +520,87 @@ impl FileManager {
     // ─── Launch an ATXF application via app_launcher ────────────────────────
     //
     // Security: the file manager does NOT call SYS_SPAWN_FROM_PATH directly.
-    // Instead it sends an IPC request to the `app_launcher` service (which
-    // holds the spawn capability) and waits for a reply with the result.
-    //
-    // The reply is received synchronously with a short timeout; if the
-    // launcher takes longer or is unavailable the call falls back gracefully.
+    // Instead it delegates to `request_app_launch`, which handles all IPC
+    // mechanics, and then maps the result to a status-bar message.
 
     fn launch_atxf(&mut self, path: &str) {
         log("fileman: launch_atxf request");
 
-        // ── Resolve the app_launcher port ────────────────────────────────────
-        let launcher_port = match libipc::protocol::lookup_service("app_launcher") {
-            Ok(p) => p,
-            Err(_) => {
-                self.status.set("error: app_launcher not available");
-                self.needs_redraw = true;
-                log("fileman: app_launcher not found in name service");
-                return;
-            }
-        };
+        // Update status to show progress before the blocking IPC call.
+        let msg = format!("launching {}…", path);
+        self.status.set(&msg);
+        self.needs_redraw = true;
 
-        // ── Build the request ────────────────────────────────────────────────
-        let req = match AppLaunchRequestMsg::new(self.local_port, path) {
-            Some(r) => r,
-            None => {
+        match self.request_app_launch(path) {
+            Ok(reply) => {
+                if reply.status == launch_status::LAUNCH_OK {
+                    let msg = format!("launched (pid={})", reply.pid);
+                    self.status.set(&msg);
+                } else {
+                    let err_text = reply.err_msg_str();
+                    let msg = if err_text.is_empty() {
+                        format!("launch error (code={})", reply.status)
+                    } else {
+                        format!("error: {}", err_text)
+                    };
+                    self.status.set(&msg);
+                    let log_msg = format!("fileman: launch failed — {}", err_text);
+                    log(&log_msg);
+                }
+            }
+            Err(LaunchError::NoLauncher) => {
+                self.status.set("error: app_launcher not available");
+                log("fileman: app_launcher not found in name service");
+            }
+            Err(LaunchError::PathTooLong) => {
                 let msg = format!("error: path too long ({})", path);
                 self.status.set(&msg);
-                self.needs_redraw = true;
-                return;
             }
-        };
+            Err(LaunchError::SendFailed) => {
+                self.status.set("error: could not contact app_launcher");
+                log("fileman: IPC send to app_launcher failed");
+            }
+            Err(LaunchError::IpcError) => {
+                self.status.set("error: IPC error waiting for launch reply");
+            }
+            Err(LaunchError::Timeout) => {
+                self.status.set("error: app_launcher timed out");
+                log("fileman: timed out waiting for AppLaunchReply");
+            }
+            Err(LaunchError::TruncatedReply) => {
+                self.status.set("error: truncated launch reply");
+            }
+            Err(LaunchError::MalformedReply) => {
+                self.status.set("error: malformed launch reply");
+            }
+        }
+        self.needs_redraw = true;
+    }
 
-        // Serialise: MessageHeader + AppLaunchRequestMsg payload
+    // ─── IPC helper: send a launch request, wait for the reply ──────────────
+    //
+    // A dedicated one-shot reply port is created for each request so that
+    // unrelated messages arriving on `self.local_port` (input events, window
+    // manager notifications, etc.) are never silently discarded.
+    //
+    // The caller (`launch_atxf`) is kept as a thin UI wrapper that only maps
+    // the result to status-bar text.
+
+    fn request_app_launch(&self, path: &str) -> Result<AppLaunchReplyMsg, LaunchError> {
+        // ── 1. Resolve the app_launcher port ────────────────────────────────
+        let launcher_port = libipc::protocol::lookup_service("app_launcher")
+            .map_err(|_| LaunchError::NoLauncher)?;
+
+        // ── 2. Create a dedicated one-shot reply port ────────────────────────
+        //
+        // Using a fresh port means only the AppLaunchReply will ever be
+        // delivered here; no other IPC traffic can interleave and be lost.
+        let reply_port = create_port().map_err(|_| LaunchError::IpcError)?;
+
+        // ── 3. Build and send the request ───────────────────────────────────
+        let req = AppLaunchRequestMsg::new(reply_port, path)
+            .ok_or(LaunchError::PathTooLong)?;
+
         let hdr = MessageHeader::new(
             MessageType::AppLaunchRequest,
             AppLaunchRequestMsg::SIZE as u32,
@@ -536,82 +609,36 @@ impl FileManager {
         buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
         buf[MessageHeader::SIZE..].copy_from_slice(&req.to_bytes());
 
-        // Update status to show progress
-        let msg = format!("launching {}…", path);
-        self.status.set(&msg);
-        self.needs_redraw = true;
-
-        // ── Send the request (fire and the reply comes to our port) ──────────
-        if let Err(_) = send(launcher_port, &buf) {
-            self.status.set("error: could not contact app_launcher");
-            self.needs_redraw = true;
-            log("fileman: IPC send to app_launcher failed");
-            return;
+        if send(launcher_port, &buf).is_err() {
+            let _ = close_port(reply_port);
+            return Err(LaunchError::SendFailed);
         }
 
-        // ── Wait for the reply (poll our port, up to ~2s) ────────────────────
-        let deadline = get_ticks() + 200; // 200 × 10ms = 2 s
+        // ── 4. Poll the reply port until we get the response or time out ────
+        let deadline = get_ticks() + 200; // 200 × 10 ms = 2 s
         let mut reply_buf = [0u8; MessageHeader::SIZE + AppLaunchReplyMsg::SIZE + 16];
-        loop {
-            match try_recv(self.local_port, &mut reply_buf) {
-                Ok(Some(len)) if len >= MessageHeader::SIZE => {
-                    if let Some(reply_hdr) = MessageHeader::from_bytes(&reply_buf) {
-                        if reply_hdr.msg_type == MessageType::AppLaunchReply {
-                            self.handle_launch_reply(&reply_buf, len);
-                            return;
-                        }
-                        // Not our reply — re-queue or ignore (edge case)
+        let result = loop {
+            match try_recv(reply_port, &mut reply_buf) {
+                Ok(Some(len)) if len >= MessageHeader::SIZE + AppLaunchReplyMsg::SIZE => {
+                    let payload_start = MessageHeader::SIZE;
+                    match AppLaunchReplyMsg::from_bytes(&reply_buf[payload_start..]) {
+                        Some(reply) => break Ok(reply),
+                        None => break Err(LaunchError::MalformedReply),
                     }
                 }
-                Ok(Some(_)) => { /* too short, ignore */ }
-                Ok(None) => { /* no message yet */ }
-                Err(_) => {
-                    self.status.set("error: IPC error waiting for launch reply");
-                    self.needs_redraw = true;
-                    return;
-                }
+                Ok(Some(_)) => break Err(LaunchError::TruncatedReply),
+                Ok(None) => { /* no message yet — keep polling */ }
+                Err(_) => break Err(LaunchError::IpcError),
             }
             if get_ticks() >= deadline {
-                self.status.set("error: app_launcher timed out");
-                self.needs_redraw = true;
-                log("fileman: timed out waiting for AppLaunchReply");
-                return;
+                break Err(LaunchError::Timeout);
             }
             yield_now();
-        }
-    }
-
-    fn handle_launch_reply(&mut self, buf: &[u8], len: usize) {
-        let payload_start = MessageHeader::SIZE;
-        if len < payload_start + AppLaunchReplyMsg::SIZE {
-            self.status.set("error: truncated launch reply");
-            self.needs_redraw = true;
-            return;
-        }
-        let reply = match AppLaunchReplyMsg::from_bytes(&buf[payload_start..]) {
-            Some(r) => r,
-            None => {
-                self.status.set("error: malformed launch reply");
-                self.needs_redraw = true;
-                return;
-            }
         };
 
-        if reply.status == launch_status::LAUNCH_OK {
-            let msg = format!("launched (pid={})", reply.pid);
-            self.status.set(&msg);
-        } else {
-            let err_text = reply.err_msg_str();
-            let msg = if err_text.is_empty() {
-                format!("launch error (code={})", reply.status)
-            } else {
-                format!("error: {}", err_text)
-            };
-            self.status.set(&msg);
-            let log_msg = format!("fileman: launch failed — {}", err_text);
-            log(&log_msg);
-        }
-        self.needs_redraw = true;
+        // ── 5. Clean up the one-shot port regardless of outcome ─────────────
+        let _ = close_port(reply_port);
+        result
     }
 
     // ─── File operations ─────────────────────────────────────────────────────

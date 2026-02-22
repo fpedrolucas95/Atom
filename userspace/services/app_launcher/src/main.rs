@@ -195,13 +195,37 @@ fn handle_launch_request(buf: &[u8], len: usize) {
         }
     };
 
+    // ── Validate path is absolute ──────────────────────────────────────────
+    if !path.starts_with('/') {
+        let msg = format!("'{}': path must be absolute (start with '/')", path);
+        log("app_launcher: rejected launch — path is not absolute");
+        send_reply(
+            reply_port,
+            &AppLaunchReplyMsg::error(launch_status::LAUNCH_ERR_BADPATH, &msg),
+        );
+        return;
+    }
+
+    // ── Reject path-traversal components ──────────────────────────────────
+    if path.split('/').any(|component| component == "..") {
+        log("app_launcher: rejected launch — path contains '..' component");
+        send_reply(
+            reply_port,
+            &AppLaunchReplyMsg::error(
+                launch_status::LAUNCH_ERR_BADPATH,
+                "path traversal ('..' component) not allowed",
+            ),
+        );
+        return;
+    }
+
     // ── Validate extension ─────────────────────────────────────────────────
     if !path.ends_with(".atxf") {
         let msg = format!("'{}': not an .atxf file", path);
         log("app_launcher: rejected launch — file is not .atxf");
         send_reply(
             reply_port,
-            &AppLaunchReplyMsg::error(launch_status::LAUNCH_ERR_BADPATH, &msg),
+            &AppLaunchReplyMsg::error(launch_status::LAUNCH_ERR_BADTYPE, &msg),
         );
         return;
     }
@@ -236,11 +260,17 @@ fn handle_launch_request(buf: &[u8], len: usize) {
                     launch_status::LAUNCH_ERR_NOMEM,
                     "out of memory — cannot spawn process",
                 ),
-                // NotImplemented is used for ENOTSUP (wrong extension) and
-                // EIO (FAT32 driver not ready) — both are mapped here by the wrapper.
+                SyscallError::NotSupported => (
+                    launch_status::LAUNCH_ERR_BADTYPE,
+                    "file type not supported — must be an .atxf binary",
+                ),
+                SyscallError::IoError => (
+                    launch_status::LAUNCH_ERR_NOFS,
+                    "filesystem unavailable (FAT32 driver not ready)",
+                ),
                 SyscallError::NotImplemented => (
                     launch_status::LAUNCH_ERR_NOFS,
-                    "filesystem unavailable or wrong file type",
+                    "filesystem unavailable",
                 ),
                 _ => (
                     launch_status::LAUNCH_ERR_INTERNAL,
