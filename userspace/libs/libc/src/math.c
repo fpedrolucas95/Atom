@@ -228,8 +228,8 @@ double atan(double x)
 {
     double r;
     __asm__ volatile (
-        "fld1\n\t"
         "fldl %1\n\t"
+        "fld1\n\t"
         "fpatan\n\t"
         "fstpl %0"
         : "=m"(r) : "m"(x)
@@ -241,8 +241,8 @@ double atan2(double y, double x)
 {
     double r;
     __asm__ volatile (
-        "fldl %2\n\t"
         "fldl %1\n\t"
+        "fldl %2\n\t"
         "fpatan\n\t"
         "fstpl %0"
         : "=m"(r) : "m"(y), "m"(x)

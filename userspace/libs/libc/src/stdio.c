@@ -936,7 +936,6 @@ int fscanf(FILE *stream, const char *fmt, ...)
 
 int scanf(const char *fmt, ...)
 {
-    va_list ap; va_start(ap, fmt);
     char buf[1024];
     if (!fgets(buf, (int)sizeof(buf), stdin)) return EOF;
     va_list ap; va_start(ap, fmt);

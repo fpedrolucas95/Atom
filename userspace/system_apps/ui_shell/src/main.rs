@@ -138,6 +138,9 @@ struct Window {
     surface: Option<SharedSurface>,
     surface_region_id: Option<SharedRegionId>,
     content_dirty: bool,
+    /// True once the app has presented at least one frame into the current surface.
+    /// Prevents blitting a blank/black surface after resize until the app redraws.
+    surface_ready: bool,
     saved_x: i32,
     saved_y: i32,
     saved_width: u32,
@@ -161,6 +164,7 @@ impl Window {
             surface: None,
             surface_region_id: None,
             content_dirty: false,
+            surface_ready: false,
             saved_x: x,
             saved_y: y,
             saved_width: width,
@@ -205,7 +209,8 @@ impl Window {
             process_id: Some(process_id),
             surface_region_id: Some(region_id),
             surface: Some(surface),
-            content_dirty: true,
+            content_dirty: false,
+            surface_ready: false,
             saved_x: x,
             saved_y: y,
             saved_width: width,
@@ -766,6 +771,7 @@ impl Compositor {
                 if let Some(msg) = libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..]) {
                     if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                         window.content_dirty = true;
+                        window.surface_ready = true;
                         self.dirty = true;
                     }
                 }
@@ -776,6 +782,7 @@ impl Compositor {
                     if let Some(msg) = libipc::messages::SurfacePresentMsg::from_bytes(&data[payload_start..]) {
                         if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                             window.content_dirty = true;
+                            window.surface_ready = true;
                             self.dirty = true;
                         }
                     }
@@ -853,6 +860,7 @@ impl Compositor {
                 if let Some(msg) = libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..]) {
                     if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                         window.content_dirty = true;
+                        window.surface_ready = true;
                         self.dirty = true;
                     }
                 }
@@ -890,6 +898,7 @@ impl Compositor {
                     if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
                         if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                             window.content_dirty = true;
+                            window.surface_ready = true;
                         }
                         self.dirty = true;
                     }
@@ -1231,7 +1240,8 @@ impl Compositor {
             let result = if let Some(window) = self.wm.get_window_mut(window_id) {
                 window.surface = Some(new_surface);
                 window.surface_region_id = Some(region_id);
-                window.content_dirty = true;
+                window.content_dirty = false;
+                window.surface_ready = false;
                 window.event_port.map(|port| (port, window.x, window.y))
             } else {
                 None
@@ -1616,14 +1626,16 @@ impl Compositor {
         self.backbuffer_fb.fill_rect(max_x, btn_y, btn_size, btn_size, theme::BTN_MAXIMIZE);
         self.backbuffer_fb.fill_rect(min_x, btn_y, btn_size, btn_size, theme::BTN_MINIMIZE);
 
-        if window.surface.is_none() {
+        if window.surface.is_none() || !window.surface_ready {
             self.backbuffer_fb.fill_rect(window.content_x(), window.content_y(),
                              window.content_width(), window.content_height(),
                              theme::WINDOW_BG);
         }
 
-        if let Some(ref surface) = window.surface {
-            surface.blit_to_framebuffer(&self.backbuffer_fb, window.content_x(), window.content_y());
+        if window.surface_ready {
+            if let Some(ref surface) = window.surface {
+                surface.blit_to_framebuffer(&self.backbuffer_fb, window.content_x(), window.content_y());
+            }
         }
 
         self.backbuffer_fb.draw_rect(window.content_x() - 1, window.content_y() - 1,
