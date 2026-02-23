@@ -110,29 +110,29 @@ pub extern "C" fn _start() -> ! { main() }
 struct Theme;
 impl Theme {
     // Backgrounds
-    const BG:          Color = Color::new(30, 33, 40);
-    const TOOLBAR_BG:  Color = Color::new(22, 25, 31);
-    const STATUS_BG:   Color = Color::new(18, 20, 26);
-    const LIST_HDR_BG: Color = Color::new(28, 32, 40);
-    const SEPARATOR:   Color = Color::new(50, 56, 68);
-    const HOVER_BG:    Color = Color::new(42, 48, 60);
-    const SEL_BG:      Color = Color::new(52, 84, 130);
-    const BTN_BG:      Color = Color::new(48, 54, 66);
-    const BTN_ACTIVE:  Color = Color::new(70, 100, 145);
+    const BG:          Color = Color::new(20, 22, 30);
+    const TOOLBAR_BG:  Color = Color::new(16, 18, 26);
+    const STATUS_BG:   Color = Color::new(14, 16, 22);
+    const LIST_HDR_BG: Color = Color::new(24, 27, 36);
+    const SEPARATOR:   Color = Color::new(42, 48, 64);
+    const HOVER_BG:    Color = Color::new(34, 40, 54);
+    const SEL_BG:      Color = Color::new(40, 68, 120);
+    const BTN_BG:      Color = Color::new(34, 38, 50);
+    const BTN_ACTIVE:  Color = Color::new(55, 80, 140);
     // Text
-    const TEXT:        Color = Color::new(220, 222, 226);
-    const TEXT_DIM:    Color = Color::new(128, 133, 145);
-    const TEXT_PATH:   Color = Color::new(163, 190, 140);
-    const TEXT_ACCENT: Color = Color::new(136, 192, 208);
-    // File type colours
-    const DIR:         Color = Color::new(100, 160, 255);
-    const TXT:         Color = Color::new(100, 210, 100);
-    const IMG:         Color = Color::new(210, 100, 210);
-    const EXEC:        Color = Color::new(220, 90,  90);
-    const ZIP:         Color = Color::new(215, 178, 80);
-    const AUD:         Color = Color::new(80,  205, 175);
-    const VID:         Color = Color::new(155, 100, 215);
-    const OTHER:       Color = Color::new(155, 158, 168);
+    const TEXT:        Color = Color::new(210, 215, 225);
+    const TEXT_DIM:    Color = Color::new(110, 118, 138);
+    const TEXT_PATH:   Color = Color::new(72, 199, 142);
+    const TEXT_ACCENT: Color = Color::new(99, 143, 255);
+    // File type colours (more vibrant)
+    const DIR:         Color = Color::new(99, 143, 255);
+    const TXT:         Color = Color::new(72, 199, 142);
+    const IMG:         Color = Color::new(200, 120, 240);
+    const EXEC:        Color = Color::new(240, 85, 96);
+    const ZIP:         Color = Color::new(245, 189, 65);
+    const AUD:         Color = Color::new(86, 218, 188);
+    const VID:         Color = Color::new(170, 120, 240);
+    const OTHER:       Color = Color::new(140, 148, 165);
 }
 
 // ============================================================================
@@ -819,10 +819,10 @@ impl FileManager {
             self.view_mode == ViewMode::List);
         self.draw_btn(surface, &b_new, "+",   true);
 
-        // Path bar
+        // Path bar (rounded)
         let (pbx, pbw) = path_bar_rect(sw);
-        surface.fill_rect(pbx, TB_BTN_Y, pbw, TB_BTN_H,
-            Color::new(15, 17, 22));
+        surface.fill_rect_rounded(pbx, TB_BTN_Y, pbw, TB_BTN_H, 4,
+            Color::new(12, 14, 20));
         // Path text
         let path = &self.cwd;
         let max_chars = ((pbw.saturating_sub(8)) / CHAR_W) as usize;
@@ -832,11 +832,11 @@ impl FileManager {
             path.as_str()
         };
         surface.draw_string(pbx + 4, TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2,
-            display, Theme::TEXT_PATH, Color::new(15, 17, 22));
+            display, Theme::TEXT_PATH, Color::new(12, 14, 20));
     }
 
     fn draw_btn(&self, surface: &SharedSurface, btn: &Btn, label: &str, _enabled: bool) {
-        surface.fill_rect(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, Theme::BTN_BG);
+        surface.fill_rect_rounded(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, Theme::BTN_BG);
         let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
         let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
         surface.draw_string(tx, ty, label, Theme::TEXT, Theme::BTN_BG);
@@ -845,7 +845,7 @@ impl FileManager {
     fn draw_btn_active(&self, surface: &SharedSurface, btn: &Btn, label: &str, active: bool) {
         let bg = if active { Theme::BTN_ACTIVE } else { Theme::BTN_BG };
         let fg = if active { Theme::TEXT_ACCENT } else { Theme::TEXT };
-        surface.fill_rect(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, bg);
+        surface.fill_rect_rounded(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, bg);
         let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
         let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
         surface.draw_string(tx, ty, label, fg, bg);
@@ -874,12 +874,14 @@ impl FileManager {
             // Cell background
             let is_sel = self.selected == Some(i);
             let cell_bg = if is_sel { Theme::SEL_BG } else { Theme::BG };
-            surface.fill_rect(cx, cell_y, ICON_CELL_W, ICON_CELL_H, cell_bg);
+            if is_sel {
+                surface.fill_rect_rounded(cx + 2, cell_y + 2, ICON_CELL_W - 4, ICON_CELL_H - 4, 6, cell_bg);
+            }
 
-            // Icon box (centred horizontally in cell)
+            // Icon box (rounded, centred horizontally in cell)
             let icon_x = cx + (ICON_CELL_W - ICON_W) / 2;
             let icon_y = cell_y + 6;
-            surface.fill_rect(icon_x, icon_y, ICON_W, ICON_H, entry.kind.color());
+            surface.fill_rect_rounded(icon_x, icon_y, ICON_W, ICON_H, 8, entry.kind.color());
 
             // Type label inside icon (centred)
             let lbl   = entry.kind.label();
@@ -899,7 +901,8 @@ impl FileManager {
             let name_w = name.len() as u32 * CHAR_W;
             let name_x = cx + (ICON_CELL_W.saturating_sub(name_w)) / 2;
             let name_y = icon_y + ICON_H + 4;
-            surface.draw_string(name_x, name_y, name, Theme::TEXT, cell_bg);
+            let name_bg = if is_sel { cell_bg } else { Theme::BG };
+            surface.draw_string(name_x, name_y, name, Theme::TEXT, name_bg);
         }
 
         // Empty directory label
@@ -945,12 +948,12 @@ impl FileManager {
             let is_sel = self.selected == Some(ei);
             let row_bg = if is_sel { Theme::SEL_BG }
                 else if vi % 2 == 0 { Theme::BG }
-                else { Color::new(34, 38, 47) };
+                else { Color::new(24, 27, 36) };
 
             surface.fill_rect(0, row_y, sw, LIST_ROW_H, row_bg);
 
-            // Type colour chip
-            surface.fill_rect(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6,
+            // Type colour chip (rounded)
+            surface.fill_rect_rounded(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6, 3,
                 entry.kind.color());
             let lbl   = entry.kind.label();
             let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;

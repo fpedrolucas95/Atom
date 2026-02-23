@@ -298,6 +298,110 @@ impl Framebuffer {
         self.draw_vline(x + width - 1, y, height, color);
     }
 
+    /// Fill a rectangle with rounded corners (radius in pixels)
+    pub fn fill_rect_rounded(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        // Main body (excluding top and bottom rounded strips)
+        self.fill_rect(x, y + r, width, height.saturating_sub(r * 2), color);
+        // Top and bottom rounded strips
+        for dy in 0..r {
+            let fy = r - dy;
+            // Approximate circle: offset = r - sqrt(r*r - fy*fy)
+            let offset = r - isqrt(r * r - fy * fy);
+            let row_x = x + offset;
+            let row_w = width.saturating_sub(offset * 2);
+            if row_w > 0 {
+                self.fill_rect(row_x, y + dy, row_w, 1, color);
+                self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color);
+            }
+        }
+    }
+
+    /// Draw a rounded rectangle outline
+    pub fn draw_rect_rounded(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.draw_rect(x, y, width, height, color);
+            return;
+        }
+        // Straight edges
+        self.draw_hline(x + r, y, width - r * 2, color);
+        self.draw_hline(x + r, y + height - 1, width - r * 2, color);
+        self.draw_vline(x, y + r, height - r * 2, color);
+        self.draw_vline(x + width - 1, y + r, height - r * 2, color);
+        // Corner arcs
+        for i in 0..r {
+            let fy = r - i;
+            let offset = r - isqrt(r * r - fy * fy);
+            // Top-left
+            self.draw_pixel(x + offset, y + i, color);
+            // Top-right
+            self.draw_pixel(x + width - 1 - offset, y + i, color);
+            // Bottom-left
+            self.draw_pixel(x + offset, y + height - 1 - i, color);
+            // Bottom-right
+            self.draw_pixel(x + width - 1 - offset, y + height - 1 - i, color);
+        }
+    }
+
+    /// Fill a rectangle with alpha blending (alpha 0-255, 255=opaque)
+    pub fn fill_rect_alpha(&self, x: u32, y: u32, width: u32, height: u32, color: Color, alpha: u8) {
+        if alpha == 255 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        if alpha == 0 { return; }
+        let a = alpha as u32;
+        let inv_a = 255 - a;
+        for dy in 0..height {
+            let py = y + dy;
+            if py >= self.info.height { break; }
+            for dx in 0..width {
+                let px = x + dx;
+                if px >= self.info.width { break; }
+                let ptr = self.info.pixel_ptr(px, py);
+                unsafe {
+                    let existing = core::ptr::read_volatile(ptr);
+                    let er = existing & 0xFF;
+                    let eg = (existing >> 8) & 0xFF;
+                    let eb = (existing >> 16) & 0xFF;
+                    let nr = (er * inv_a + color.r as u32 * a) / 255;
+                    let ng = (eg * inv_a + color.g as u32 * a) / 255;
+                    let nb = (eb * inv_a + color.b as u32 * a) / 255;
+                    let blended = (nb << 16) | (ng << 8) | nr;
+                    core::ptr::write_volatile(ptr, blended);
+                }
+            }
+        }
+    }
+
+    /// Fill a rounded rectangle with alpha blending
+    pub fn fill_rect_rounded_alpha(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color, alpha: u8) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.fill_rect_alpha(x, y, width, height, color, alpha);
+            return;
+        }
+        self.fill_rect_alpha(x, y + r, width, height.saturating_sub(r * 2), color, alpha);
+        for dy in 0..r {
+            let fy = r - dy;
+            let offset = r - isqrt(r * r - fy * fy);
+            let row_x = x + offset;
+            let row_w = width.saturating_sub(offset * 2);
+            if row_w > 0 {
+                self.fill_rect_alpha(row_x, y + dy, row_w, 1, color, alpha);
+                self.fill_rect_alpha(row_x, y + height - 1 - dy, row_w, 1, color, alpha);
+            }
+        }
+    }
+
     /// Blit the contents of this framebuffer to another framebuffer.
     /// This is an optimized line-by-line copy.
     pub fn blit(&self, other: &Framebuffer) {
@@ -447,6 +551,21 @@ fn get_font_glyph(ch: u8) -> &'static [u8; 8] {
     };
 
     &FONT_DATA[index]
+}
+
+// ============================================================================
+// Helper: integer square root
+// ============================================================================
+
+fn isqrt(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
 }
 
 // ============================================================================
@@ -721,6 +840,45 @@ impl SharedSurface {
             }
             self.draw_char(offset_x, y, byte, fg, bg);
             offset_x += 8;
+        }
+    }
+
+    /// Draw a horizontal line
+    pub fn draw_hline(&self, x: u32, y: u32, width: u32, color: Color) {
+        self.fill_rect(x, y, width, 1, color);
+    }
+
+    /// Draw a vertical line
+    pub fn draw_vline(&self, x: u32, y: u32, height: u32, color: Color) {
+        self.fill_rect(x, y, 1, height, color);
+    }
+
+    /// Draw a rectangle outline
+    pub fn draw_rect(&self, x: u32, y: u32, width: u32, height: u32, color: Color) {
+        self.draw_hline(x, y, width, color);
+        self.draw_hline(x, y + height.saturating_sub(1), width, color);
+        self.draw_vline(x, y, height, color);
+        self.draw_vline(x + width.saturating_sub(1), y, height, color);
+    }
+
+    /// Fill a rectangle with rounded corners
+    pub fn fill_rect_rounded(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        self.fill_rect(x, y + r, width, height.saturating_sub(r * 2), color);
+        for dy in 0..r {
+            let fy = r - dy;
+            let offset = r - isqrt(r * r - fy * fy);
+            let row_x = x + offset;
+            let row_w = width.saturating_sub(offset * 2);
+            if row_w > 0 {
+                self.fill_rect(row_x, y + dy, row_w, 1, color);
+                self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color);
+            }
         }
     }
 
