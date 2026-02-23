@@ -1,0 +1,37 @@
+warning: unused import: `ToString`
+  --> /home/user/Atom/userspace/libs/syscall/src/fs.rs:26:29
+   |
+26 | use alloc::string::{String, ToString};
+   |                             ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tag`
+  --> /home/user/Atom/userspace/libs/syscall/src/debug.rs:16:19
+   |
+16 | pub fn log_tagged(tag: &str, message: &str) {
+   |                   ^^^ help: if this is intentional, prefix it with an underscore: `_tag`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /home/user/Atom/userspace/libs/syscall/src/input.rs:234:13
+    |
+234 |             DRIVER.init();
+    |             ^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> /home/user/Atom/userspace/libs/syscall/src/input.rs:237:9
+    |
+237 |         DRIVER.poll_event().map(|e| (e.dx, e.dy))
+    |         ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `atom_syscall` (lib) generated 4 warnings (run `cargo fix --lib -p atom_syscall` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.23s
