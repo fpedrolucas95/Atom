@@ -91,30 +91,66 @@ use libipc::protocol::send_message_async;
 mod theme {
     use atom_syscall::graphics::Color;
 
-    pub const DESKTOP_BG: Color = Color::new(30, 33, 40);
-    pub const PANEL_BG: Color = Color::new(20, 22, 28);
-    pub const PANEL_TEXT: Color = Color::new(220, 223, 228);
-    pub const ACCENT: Color = Color::new(136, 192, 208);
-    pub const WINDOW_BG: Color = Color::new(40, 44, 52);
-    pub const WINDOW_HEADER: Color = Color::new(35, 39, 46);
-    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(55, 61, 73);
-    pub const WINDOW_BORDER: Color = Color::new(60, 66, 82);
-    pub const DOCK_BG: Color = Color::new(20, 22, 28);
+    // Desktop
+    pub const DESKTOP_BG: Color = Color::new(18, 20, 28);
+
+    // Panel (top bar)
+    pub const PANEL_BG: Color = Color::new(14, 16, 22);
+    pub const PANEL_BG_ACCENT: Color = Color::new(20, 23, 32);
+    pub const PANEL_TEXT: Color = Color::new(210, 215, 225);
+    pub const PANEL_TEXT_DIM: Color = Color::new(130, 138, 158);
+    pub const PANEL_BORDER: Color = Color::new(38, 42, 56);
+
+    // Accent
+    pub const ACCENT: Color = Color::new(99, 143, 255);
+    pub const ACCENT_DIM: Color = Color::new(70, 105, 200);
+
+    // Windows
+    pub const WINDOW_BG: Color = Color::new(26, 29, 38);
+    pub const WINDOW_HEADER: Color = Color::new(22, 25, 34);
+    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(30, 34, 46);
+    pub const WINDOW_BORDER: Color = Color::new(48, 54, 72);
+    pub const WINDOW_BORDER_FOCUSED: Color = Color::new(65, 75, 100);
+
+    // Dock
+    pub const DOCK_BG: Color = Color::new(16, 18, 26);
+    pub const DOCK_BORDER: Color = Color::new(42, 48, 64);
+    pub const DOCK_ICON_BG: Color = Color::new(32, 36, 48);
+    pub const DOCK_ICON_HOVER: Color = Color::new(44, 50, 66);
+
+    // Cursor
     pub const CURSOR_FILL: Color = Color::WHITE;
     pub const CURSOR_OUTLINE: Color = Color::BLACK;
-    pub const SHADOW: Color = Color::new(8, 9, 12);
-    pub const BTN_CLOSE: Color = Color::new(191, 97, 106);
-    pub const BTN_MAXIMIZE: Color = Color::new(163, 190, 140);
-    pub const BTN_MINIMIZE: Color = Color::new(235, 203, 139);
+
+    // Shadows
+    pub const SHADOW: Color = Color::new(4, 5, 8);
+    pub const SHADOW_LIGHT: Color = Color::new(10, 12, 16);
+
+    // Window buttons (traffic lights)
+    pub const BTN_CLOSE: Color = Color::new(237, 78, 83);
+    pub const BTN_MAXIMIZE: Color = Color::new(72, 199, 142);
+    pub const BTN_MINIMIZE: Color = Color::new(245, 189, 65);
+    pub const BTN_INACTIVE: Color = Color::new(56, 62, 78);
+
+    // Context menu
+    pub const MENU_BG: Color = Color::new(22, 25, 34);
+    pub const MENU_HOVER: Color = Color::new(36, 42, 58);
+    pub const MENU_BORDER: Color = Color::new(48, 54, 72);
+    pub const MENU_TEXT: Color = Color::new(210, 215, 225);
+
+    // Desktop icons
+    pub const ICON_BG: Color = Color::new(28, 32, 44);
+    pub const ICON_BORDER: Color = Color::new(48, 54, 72);
+    pub const ICON_LABEL: Color = Color::new(200, 206, 218);
 }
 
-const WINDOW_HEADER_HEIGHT: u32 = 32;
+const WINDOW_HEADER_HEIGHT: u32 = 36;
 const WINDOW_BORDER_WIDTH: u32 = 1;
-const WINDOW_MIN_WIDTH: u32 = 120;
-const WINDOW_MIN_HEIGHT: u32 = 80;
-const PANEL_HEIGHT: u32 = 32;
-const DOCK_HEIGHT: u32 = 60;
-const DOCK_WIDTH: u32 = 340;
+const WINDOW_MIN_WIDTH: u32 = 150;
+const WINDOW_MIN_HEIGHT: u32 = 100;
+const PANEL_HEIGHT: u32 = 34;
+const DOCK_HEIGHT: u32 = 64;
+const DOCK_WIDTH: u32 = 380;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -496,6 +532,17 @@ enum DragOperation {
     Resize { window_id: WindowId, start_mouse_x: i32, start_mouse_y: i32, start_win_w: u32, start_win_h: u32 },
 }
 
+fn isqrt_helper(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
 struct Compositor {
     fb: Framebuffer,
     backbuffer_fb: Framebuffer,
@@ -538,25 +585,25 @@ impl Compositor {
 
         let mut icons = Vec::new();
         icons.push(DesktopIcon {
-            label: String::from("File Manager"),
+            label: String::from("Files"),
             executable: String::from("fileman"),
-            x: 24,
-            y: PANEL_HEIGHT as i32 + 24,
-            color: Color::new(143, 188, 187),
+            x: 28,
+            y: PANEL_HEIGHT as i32 + 28,
+            color: Color::new(99, 143, 255),
         });
         icons.push(DesktopIcon {
-            label: String::from("Rect Demo"),
+            label: String::from("Rectangles"),
             executable: String::from("demo_rects"),
-            x: 24,
+            x: 28,
             y: PANEL_HEIGHT as i32 + 120,
-            color: Color::new(136, 192, 208),
+            color: Color::new(86, 182, 245),
         });
         icons.push(DesktopIcon {
-            label: String::from("Text Demo"),
+            label: String::from("Text"),
             executable: String::from("demo_text"),
-            x: 24,
-            y: PANEL_HEIGHT as i32 + 216,
-            color: Color::new(163, 190, 140),
+            x: 28,
+            y: PANEL_HEIGHT as i32 + 212,
+            color: Color::new(72, 199, 142),
         });
 
         let fb_size_pixels = (fb.stride() * fb.height()) as usize;
@@ -609,14 +656,14 @@ impl Compositor {
                 height: 240,
                 colors: {
                     let mut v = Vec::new();
-                    v.push(Color::new(30, 33, 40));
-                    v.push(Color::new(46, 52, 64));
-                    v.push(Color::new(59, 66, 82));
-                    v.push(Color::new(76, 86, 106));
-                    v.push(Color::new(136, 192, 208));
-                    v.push(Color::new(143, 188, 187));
-                    v.push(Color::new(163, 190, 140));
-                    v.push(Color::new(191, 97, 106));
+                    v.push(Color::new(18, 20, 28));   // Deep dark
+                    v.push(Color::new(12, 14, 22));   // Darker
+                    v.push(Color::new(24, 28, 42));   // Navy dark
+                    v.push(Color::new(16, 24, 40));   // Deep blue
+                    v.push(Color::new(22, 36, 52));   // Dark teal
+                    v.push(Color::new(28, 18, 36));   // Dark purple
+                    v.push(Color::new(20, 30, 24));   // Dark green
+                    v.push(Color::new(34, 20, 20));   // Dark red
                     v
                 },
             },
@@ -970,11 +1017,11 @@ impl Compositor {
             self.captured_window = Some(id);
 
             if let Some(w) = self.wm.get_window(id) {
-                let btn_y = w.y + 10;
-                let btn_size = 14;
-                let close_x = w.x + w.width as i32 - 26;
-                let max_x = close_x - 24;
-                let min_x = max_x - 24;
+                let btn_y = w.y + (WINDOW_HEADER_HEIGHT as i32 - 12) / 2;
+                let btn_size = 12;
+                let close_x = w.x + w.width as i32 - 22;
+                let max_x = close_x - 20;
+                let min_x = max_x - 20;
 
                 if y >= btn_y && y < btn_y + btn_size {
                     if x >= close_x && x < close_x + btn_size {
@@ -1084,7 +1131,7 @@ impl Compositor {
         self.dock_icon_at(x, y).is_some()
             || {
                 let height = self.fb.height();
-                y >= (height as i32 - DOCK_HEIGHT as i32 - 16)
+                y >= (height as i32 - DOCK_HEIGHT as i32 - 12)
             }
     }
 
@@ -1172,7 +1219,7 @@ impl Compositor {
         let y = PANEL_HEIGHT as i32;
         let w = sw;
         // Subtract panel height and dock area (bottom margin)
-        let h = sh.saturating_sub(PANEL_HEIGHT + DOCK_HEIGHT + 32);
+        let h = sh.saturating_sub(PANEL_HEIGHT + DOCK_HEIGHT + 24);
 
         (x, y, w, h)
     }
@@ -1368,10 +1415,10 @@ impl Compositor {
         let height = self.fb.height();
 
         let dock_x = (width / 2).saturating_sub(DOCK_WIDTH / 2) as i32;
-        let dock_y = height.saturating_sub(DOCK_HEIGHT + 16) as i32;
+        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12) as i32;
 
-        let icon_size = 44i32;
-        let spacing = 24i32;
+        let icon_size = 42i32;
+        let spacing = 20i32;
         let num_icons = 4;
         let total_icons_width = num_icons * icon_size + (num_icons - 1) * spacing;
         let start_x = dock_x + (DOCK_WIDTH as i32 - total_icons_width) / 2;
@@ -1511,16 +1558,25 @@ impl Compositor {
         let pw = self.wallpaper_picker.width;
         let ph = self.wallpaper_picker.height;
 
-        self.backbuffer_fb.fill_rect(px + 4, py + 4, pw, ph, theme::SHADOW);
-        self.backbuffer_fb.fill_rect(px, py, pw, ph, theme::WINDOW_BG);
-        self.backbuffer_fb.draw_rect(px, py, pw, ph, theme::WINDOW_BORDER);
+        // Shadow
+        self.backbuffer_fb.fill_rect_rounded_alpha(px + 2, py + 4, pw + 2, ph + 2, 10, theme::SHADOW, 100);
+        // Background
+        self.backbuffer_fb.fill_rect_rounded(px, py, pw, ph, 10, theme::WINDOW_BG);
+        // Border
+        self.backbuffer_fb.draw_rect_rounded(px, py, pw, ph, 10, theme::WINDOW_BORDER);
 
+        // Header
         self.backbuffer_fb.fill_rect(px + 1, py + 1, pw - 2, 40, theme::WINDOW_HEADER_FOCUSED);
-        self.backbuffer_fb.draw_string(px + 16, py + 12, "Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
+        let title_y = py + (40 - 8) / 2;
+        self.backbuffer_fb.draw_string(px + 16, title_y, "Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
 
-        self.backbuffer_fb.fill_rect(px + pw - 32, py + 12, 20, 20, theme::BTN_CLOSE);
-        self.backbuffer_fb.draw_string(px + pw - 28, py + 12, "X", Color::WHITE, theme::BTN_CLOSE);
+        // Close button (rounded)
+        let close_x = px + pw - 30;
+        let close_y = py + 14;
+        self.backbuffer_fb.fill_rect_rounded(close_x, close_y, 16, 16, 8, theme::BTN_CLOSE);
+        self.backbuffer_fb.draw_string(close_x + 4, close_y + 4, "X", Color::WHITE, theme::BTN_CLOSE);
 
+        // Color tiles (rounded)
         let start_x = px + 30;
         let start_y = py + 60;
         let tile_size = 48u32;
@@ -1530,29 +1586,36 @@ impl Compositor {
             let tx = start_x + (i as u32 % 4) * (tile_size + spacing);
             let ty = start_y + (i as u32 / 4) * (tile_size + spacing);
 
-            self.backbuffer_fb.fill_rect(tx, ty, tile_size, tile_size, *color);
-            self.backbuffer_fb.draw_rect(tx, ty, tile_size, tile_size, theme::WINDOW_BORDER);
+            self.backbuffer_fb.fill_rect_rounded(tx, ty, tile_size, tile_size, 8, *color);
+            self.backbuffer_fb.draw_rect_rounded(tx, ty, tile_size, tile_size, 8, theme::WINDOW_BORDER);
         }
     }
 
     fn draw_context_menu(&self) {
-        let menu_w = 180u32;
+        let menu_w = 200u32;
         let item_h = 32u32;
-        let menu_h = self.context_menu.items.len() as u32 * item_h;
+        let padding_v = 6u32;
+        let menu_h = self.context_menu.items.len() as u32 * item_h + padding_v * 2;
+        let mx = self.context_menu.x as u32;
+        let my = self.context_menu.y as u32;
 
-        self.backbuffer_fb.fill_rect(self.context_menu.x as u32 + 2, self.context_menu.y as u32 + 2, menu_w, menu_h, theme::SHADOW);
-        self.backbuffer_fb.fill_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::PANEL_BG);
-        self.backbuffer_fb.draw_rect(self.context_menu.x as u32, self.context_menu.y as u32, menu_w, menu_h, theme::WINDOW_BORDER);
+        // Shadow
+        self.backbuffer_fb.fill_rect_rounded_alpha(mx + 2, my + 3, menu_w, menu_h, 8, theme::SHADOW, 100);
+        // Background
+        self.backbuffer_fb.fill_rect_rounded(mx, my, menu_w, menu_h, 8, theme::MENU_BG);
+        // Border
+        self.backbuffer_fb.draw_rect_rounded(mx, my, menu_w, menu_h, 8, theme::MENU_BORDER);
 
         for (i, item) in self.context_menu.items.iter().enumerate() {
-            let iy = self.context_menu.y as u32 + (i as u32 * item_h);
-            self.backbuffer_fb.draw_string(self.context_menu.x as u32 + 12, iy + 8, item, theme::PANEL_TEXT, theme::PANEL_BG);
+            let iy = my + padding_v + (i as u32 * item_h);
+            let text_y = iy + (item_h - 8) / 2;
+            self.backbuffer_fb.draw_string(mx + 16, text_y, item, theme::MENU_TEXT, theme::MENU_BG);
         }
     }
 
     fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
         for (i, icon) in self.icons.iter().enumerate() {
-            if x >= icon.x && x < icon.x + 56 && y >= icon.y && y < icon.y + 56 {
+            if x >= icon.x && x < icon.x + 60 && y >= icon.y && y < icon.y + 60 {
                 return Some(i);
             }
         }
@@ -1563,30 +1626,63 @@ impl Compositor {
         for icon in &self.icons {
             let ix = icon.x as u32;
             let iy = icon.y as u32;
-            let size = 56u32;
+            let size = 60u32;
+            let icon_radius = 12u32;
+            let inner_size = 28u32;
 
-            self.backbuffer_fb.fill_rect(ix + 2, iy + 2, size, size, theme::SHADOW);
-            self.backbuffer_fb.fill_rect(ix, iy, size, size, icon.color);
-            self.backbuffer_fb.draw_rect(ix, iy, size, size, theme::WINDOW_BORDER);
+            // Icon shadow
+            self.backbuffer_fb.fill_rect_rounded_alpha(ix + 1, iy + 2, size, size, icon_radius, theme::SHADOW, 70);
 
-            self.backbuffer_fb.draw_rect(ix + 14, iy + 14, 28, 28, Color::WHITE);
+            // Icon background (rounded)
+            self.backbuffer_fb.fill_rect_rounded(ix, iy, size, size, icon_radius, theme::ICON_BG);
 
+            // Colored inner icon (rounded)
+            let inner_x = ix + (size - inner_size) / 2;
+            let inner_y = iy + (size - inner_size) / 2 - 2;
+            self.backbuffer_fb.fill_rect_rounded(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
+
+            // Icon border (subtle)
+            self.backbuffer_fb.draw_rect_rounded(ix, iy, size, size, icon_radius, theme::ICON_BORDER);
+
+            // Label below icon (centered, with slight shadow for readability)
             let label_len = icon.label.len() as u32 * 8;
             let lx = (ix as i32 + (size as i32 - label_len as i32) / 2).max(0) as u32;
-            self.backbuffer_fb.draw_string(lx, iy + size + 8, &icon.label, theme::PANEL_TEXT, self.desktop_bg);
+            let label_y = iy + size + 6;
+            self.backbuffer_fb.draw_string(lx, label_y, &icon.label, theme::ICON_LABEL, self.desktop_bg);
         }
     }
 
     fn draw_panel(&self) {
         let width = self.backbuffer_fb.width();
 
+        // Panel background
         self.backbuffer_fb.fill_rect(0, 0, width, PANEL_HEIGHT, theme::PANEL_BG);
-        self.backbuffer_fb.fill_rect(0, PANEL_HEIGHT - 1, width, 1, theme::WINDOW_BORDER);
+        // Subtle top highlight
+        self.backbuffer_fb.fill_rect(0, 0, width, 1, theme::PANEL_BG_ACCENT);
+        // Bottom border
+        self.backbuffer_fb.fill_rect(0, PANEL_HEIGHT - 1, width, 1, theme::PANEL_BORDER);
 
-        self.backbuffer_fb.draw_string(20, 8, "ATOM OS", theme::ACCENT, theme::PANEL_BG);
+        // Branding: Atom logo area
+        let brand_y = (PANEL_HEIGHT - 8) / 2;
+        // Accent dot
+        self.backbuffer_fb.fill_rect_rounded(14, brand_y - 1, 10, 10, 3, theme::ACCENT);
+        // Brand text
+        self.backbuffer_fb.draw_string(28, brand_y, "Atom", theme::PANEL_TEXT, theme::PANEL_BG);
 
-        let clock_x = width.saturating_sub(80);
-        self.backbuffer_fb.draw_string(clock_x, 8, "12:00", theme::PANEL_TEXT, theme::PANEL_BG);
+        // Center: focused window title (if any)
+        if let Some(focused_id) = self.wm.focused_id {
+            if let Some(w) = self.wm.get_window(focused_id) {
+                let title_len = w.title.len() as u32 * 8;
+                let title_x = (width / 2).saturating_sub(title_len / 2);
+                self.backbuffer_fb.draw_string(title_x, brand_y, &w.title, theme::PANEL_TEXT_DIM, theme::PANEL_BG);
+            }
+        }
+
+        // Right side: clock + status area
+        let clock_x = width.saturating_sub(96);
+        // Status dot (indicates system running)
+        self.backbuffer_fb.fill_rect_rounded(clock_x - 16, brand_y, 8, 8, 4, theme::BTN_MAXIMIZE);
+        self.backbuffer_fb.draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
     fn draw_window(&self, window: &Window) {
@@ -1599,12 +1695,22 @@ impl Compositor {
         let w = window.width;
         let h = window.height;
 
+        // Multi-layer soft shadow (only for non-maximized)
         if window.state != WindowState::Maximized {
-            self.backbuffer_fb.fill_rect(x + 3, y + 3, w + 2, h + 2, theme::SHADOW);
+            self.backbuffer_fb.fill_rect_rounded_alpha(x + 2, y + 4, w + 4, h + 4, 6, theme::SHADOW, 60);
+            self.backbuffer_fb.fill_rect_rounded_alpha(x + 1, y + 2, w + 2, h + 2, 4, theme::SHADOW, 90);
         }
 
-        self.backbuffer_fb.fill_rect(x, y, w, h, theme::WINDOW_BORDER);
+        let border_color = if window.focused {
+            theme::WINDOW_BORDER_FOCUSED
+        } else {
+            theme::WINDOW_BORDER
+        };
 
+        // Window outer border (rounded)
+        self.backbuffer_fb.fill_rect_rounded(x, y, w, h, 6, border_color);
+
+        // Window header
         let header_color = if window.focused {
             theme::WINDOW_HEADER_FOCUSED
         } else {
@@ -1613,34 +1719,60 @@ impl Compositor {
         self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
                          w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
                          header_color);
+        // Header bottom separator
+        self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_HEADER_HEIGHT - 1,
+                         w - WINDOW_BORDER_WIDTH * 2, 1, border_color);
 
-        self.backbuffer_fb.draw_string(x + 16, y + 10, &window.title, theme::PANEL_TEXT, header_color);
+        // Window title (vertically centered in header)
+        let title_y = y + (WINDOW_HEADER_HEIGHT - 8) / 2;
+        let title_color = if window.focused { theme::PANEL_TEXT } else { theme::PANEL_TEXT_DIM };
+        self.backbuffer_fb.draw_string(x + 16, title_y, &window.title, title_color, header_color);
 
-        let btn_y = y + 10;
-        let btn_size = 14;
-        let close_x = x + w - 26;
-        let max_x = close_x - 24;
-        let min_x = max_x - 24;
+        // Traffic light buttons (rounded circles)
+        let btn_y = y + (WINDOW_HEADER_HEIGHT - 12) / 2;
+        let btn_size = 12u32;
+        let btn_radius = 6u32;
+        let close_x = x + w - 22;
+        let max_x = close_x - 20;
+        let min_x = max_x - 20;
 
-        self.backbuffer_fb.fill_rect(close_x, btn_y, btn_size, btn_size, theme::BTN_CLOSE);
-        self.backbuffer_fb.fill_rect(max_x, btn_y, btn_size, btn_size, theme::BTN_MAXIMIZE);
-        self.backbuffer_fb.fill_rect(min_x, btn_y, btn_size, btn_size, theme::BTN_MINIMIZE);
+        if window.focused {
+            self.backbuffer_fb.fill_rect_rounded(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_CLOSE);
+            self.backbuffer_fb.fill_rect_rounded(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MAXIMIZE);
+            self.backbuffer_fb.fill_rect_rounded(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MINIMIZE);
+        } else {
+            self.backbuffer_fb.fill_rect_rounded(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+            self.backbuffer_fb.fill_rect_rounded(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+            self.backbuffer_fb.fill_rect_rounded(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+        }
 
+        // Content area background
         if window.surface.is_none() || !window.surface_ready {
             self.backbuffer_fb.fill_rect(window.content_x(), window.content_y(),
                              window.content_width(), window.content_height(),
                              theme::WINDOW_BG);
         }
 
+        // Blit application surface
         if window.surface_ready {
             if let Some(ref surface) = window.surface {
                 surface.blit_to_framebuffer(&self.backbuffer_fb, window.content_x(), window.content_y());
             }
         }
 
-        self.backbuffer_fb.draw_rect(window.content_x() - 1, window.content_y() - 1,
-                         window.content_width() + 2, window.content_height() + 2,
-                         theme::WINDOW_BORDER);
+        // Bottom rounded corners fill
+        if window.state != WindowState::Maximized {
+            let bottom_y = y + h - 6;
+            for dy in 0..6 {
+                let fy = 6 - dy;
+                let offset = 6u32.saturating_sub(isqrt_helper(6 * 6 - fy * fy));
+                // Fill corner pixels with border color to simulate rounded bottom
+                for cx in 0..offset {
+                    self.backbuffer_fb.draw_pixel(x + cx, bottom_y + dy, self.desktop_bg);
+                    self.backbuffer_fb.draw_pixel(x + w - 1 - cx, bottom_y + dy, self.desktop_bg);
+                }
+            }
+        }
     }
 
     fn draw_dock(&self) {
@@ -1648,34 +1780,50 @@ impl Compositor {
         let height = self.backbuffer_fb.height();
 
         let dock_x = (width / 2).saturating_sub(DOCK_WIDTH / 2);
-        let dock_y = height.saturating_sub(DOCK_HEIGHT + 16);
+        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12);
 
-        self.backbuffer_fb.fill_rect(dock_x + 2, dock_y + 2, DOCK_WIDTH, DOCK_HEIGHT, theme::SHADOW);
-        self.backbuffer_fb.fill_rect(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, theme::DOCK_BG);
-        self.backbuffer_fb.draw_rect(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, theme::WINDOW_BORDER);
+        // Dock shadow
+        self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::SHADOW, 80);
 
-        let icons = [
-            (Color::new(136, 192, 208), "FL"),
-            (Color::new(129, 161, 193), "ST"),
-            (Color::new(94, 129, 172), "BR"),
-            (Color::new(76, 86, 106), ">_"),
+        // Dock background (pill shape)
+        self.backbuffer_fb.fill_rect_rounded(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BG);
+        // Dock border
+        self.backbuffer_fb.draw_rect_rounded(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BORDER);
+        // Top highlight line
+        self.backbuffer_fb.fill_rect(dock_x + 14, dock_y, DOCK_WIDTH - 28, 1, theme::DOCK_BORDER);
+
+        let icons: [(Color, &str, &str); 4] = [
+            (Color::new(99, 143, 255), "FL", "Files"),
+            (Color::new(86, 182, 245), "ST", "Settings"),
+            (Color::new(72, 199, 142), "BR", "Browser"),
+            (Color::new(200, 160, 255), ">_", "Terminal"),
         ];
 
-        let icon_size = 44u32;
-        let spacing = 24u32;
+        let icon_size = 42u32;
+        let icon_radius = 10u32;
+        let spacing = 20u32;
         let total_icons_width = icons.len() as u32 * icon_size + (icons.len() as u32 - 1) * spacing;
         let start_x = dock_x + (DOCK_WIDTH - total_icons_width) / 2;
         let icon_y = dock_y + (DOCK_HEIGHT - icon_size) / 2;
 
-        for (i, (color, label)) in icons.iter().enumerate() {
+        for (i, (color, label, _name)) in icons.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
 
-            self.backbuffer_fb.fill_rect(ix, icon_y, icon_size, icon_size, *color);
+            // Icon background (rounded)
+            self.backbuffer_fb.fill_rect_rounded(ix, icon_y, icon_size, icon_size, icon_radius, *color);
 
+            // Icon label centered
             let label_len = label.len() as u32 * 8;
             let lx = ix + (icon_size - label_len) / 2;
-            let ly = icon_y + (icon_size - 16) / 2;
+            let ly = icon_y + (icon_size - 8) / 2;
             self.backbuffer_fb.draw_string(lx, ly, label, Color::WHITE, *color);
+
+            // Active indicator dot for running apps (optional visual)
+            if i == 3 && self.wm.windows.iter().any(|w| w.title == "Terminal" && w.visible) {
+                let dot_x = ix + icon_size / 2 - 2;
+                let dot_y = icon_y + icon_size + 3;
+                self.backbuffer_fb.fill_rect_rounded(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
+            }
         }
     }
 

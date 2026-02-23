@@ -23,12 +23,29 @@ impl Color {
     pub const CYAN: Color = Color::rgb(0, 255, 255);
     pub const MAGENTA: Color = Color::rgb(255, 0, 255);
 
-    // Nord theme colors
+    // Nord theme colors (legacy)
     pub const NORD_BG: Color = Color::rgb(46, 52, 64);
     pub const NORD_FG: Color = Color::rgb(216, 222, 233);
     pub const NORD_ACCENT: Color = Color::rgb(136, 192, 208);
     pub const NORD_PANEL: Color = Color::rgb(59, 66, 82);
     pub const NORD_HIGHLIGHT: Color = Color::rgb(76, 86, 106);
+
+    // Modern Atom OS design system colors
+    pub const ATOM_BG_DEEP: Color = Color::rgb(16, 18, 24);
+    pub const ATOM_BG: Color = Color::rgb(22, 25, 33);
+    pub const ATOM_BG_ELEVATED: Color = Color::rgb(30, 34, 44);
+    pub const ATOM_BG_SURFACE: Color = Color::rgb(38, 42, 54);
+    pub const ATOM_BORDER: Color = Color::rgb(52, 58, 74);
+    pub const ATOM_BORDER_SUBTLE: Color = Color::rgb(42, 47, 62);
+    pub const ATOM_TEXT: Color = Color::rgb(230, 233, 240);
+    pub const ATOM_TEXT_SECONDARY: Color = Color::rgb(160, 167, 182);
+    pub const ATOM_TEXT_MUTED: Color = Color::rgb(100, 108, 128);
+    pub const ATOM_ACCENT: Color = Color::rgb(99, 143, 255);
+    pub const ATOM_ACCENT_HOVER: Color = Color::rgb(122, 162, 255);
+    pub const ATOM_SUCCESS: Color = Color::rgb(72, 199, 142);
+    pub const ATOM_WARNING: Color = Color::rgb(245, 189, 65);
+    pub const ATOM_ERROR: Color = Color::rgb(240, 85, 96);
+    pub const ATOM_INFO: Color = Color::rgb(86, 182, 245);
 
     /// Create an RGB color (fully opaque)
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {

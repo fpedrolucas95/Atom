@@ -6,42 +6,42 @@
 
 use atom_syscall::graphics::{Color, Framebuffer};
 
-/// Terminal color theme
+/// Terminal color theme - Modern dark
 pub struct Theme;
 impl Theme {
     // Window chrome colors
-    pub const WINDOW_BG: Color = Color::new(30, 30, 30);       // Dark terminal background
-    pub const WINDOW_BORDER: Color = Color::new(60, 60, 60);   // Subtle border
-    pub const TITLE_BAR_BG: Color = Color::new(45, 45, 45);    // Title bar background
-    pub const TITLE_BAR_TEXT: Color = Color::new(200, 200, 200);
+    pub const WINDOW_BG: Color = Color::new(18, 20, 28);       // Deep dark terminal background
+    pub const WINDOW_BORDER: Color = Color::new(42, 48, 64);   // Subtle border
+    pub const TITLE_BAR_BG: Color = Color::new(24, 27, 36);    // Title bar background
+    pub const TITLE_BAR_TEXT: Color = Color::new(180, 186, 200);
 
     // Terminal content colors
-    pub const TEXT_NORMAL: Color = Color::new(220, 220, 220);  // Default text
+    pub const TEXT_NORMAL: Color = Color::new(210, 215, 225);  // Default text
     pub const TEXT_BRIGHT: Color = Color::WHITE;               // Bright/bold text
-    pub const TEXT_DIM: Color = Color::new(128, 128, 128);     // Dimmed text
-    pub const TEXT_ERROR: Color = Color::new(255, 100, 100);   // Error messages
-    pub const TEXT_SUCCESS: Color = Color::new(100, 255, 100); // Success messages
-    pub const TEXT_INFO: Color = Color::new(100, 180, 255);    // Info messages
-    pub const TEXT_WARNING: Color = Color::new(255, 200, 100); // Warning messages
+    pub const TEXT_DIM: Color = Color::new(110, 118, 138);     // Dimmed text
+    pub const TEXT_ERROR: Color = Color::new(240, 85, 96);     // Error messages
+    pub const TEXT_SUCCESS: Color = Color::new(72, 199, 142);  // Success messages
+    pub const TEXT_INFO: Color = Color::new(86, 182, 245);     // Info messages
+    pub const TEXT_WARNING: Color = Color::new(245, 189, 65);  // Warning messages
 
     // Prompt colors
-    pub const PROMPT_USER: Color = Color::new(136, 192, 208);  // User part of prompt
-    pub const PROMPT_PATH: Color = Color::new(163, 190, 140);  // Path part of prompt
-    pub const PROMPT_SYMBOL: Color = Color::new(180, 142, 173);// $ or # symbol
+    pub const PROMPT_USER: Color = Color::new(99, 143, 255);   // User part of prompt
+    pub const PROMPT_PATH: Color = Color::new(72, 199, 142);   // Path part of prompt
+    pub const PROMPT_SYMBOL: Color = Color::new(200, 160, 255);// $ or # symbol
 
     // Cursor
-    pub const CURSOR_BG: Color = Color::new(200, 200, 200);    // Cursor block color
+    pub const CURSOR_BG: Color = Color::new(99, 143, 255);     // Cursor block color (accent)
 
     // Selection (future use)
-    pub const SELECTION_BG: Color = Color::new(70, 100, 130);  // Selected text background
+    pub const SELECTION_BG: Color = Color::new(50, 70, 110);   // Selected text background
 
     // Separator / divider lines in help output
-    pub const SEPARATOR: Color = Color::new(80, 85, 100);
+    pub const SEPARATOR: Color = Color::new(48, 54, 72);
 
     // Scrollbar
-    pub const SCROLLBAR_TRACK: Color = Color::new(38, 40, 50);
-    pub const SCROLLBAR_THUMB: Color = Color::new(80, 90, 120);
-    pub const SCROLLBAR_THUMB_ACTIVE: Color = Color::new(110, 125, 165);
+    pub const SCROLLBAR_TRACK: Color = Color::new(22, 25, 34);
+    pub const SCROLLBAR_THUMB: Color = Color::new(52, 60, 82);
+    pub const SCROLLBAR_THUMB_ACTIVE: Color = Color::new(80, 92, 125);
 }
 
 /// Configuration for window dimensions and layout
@@ -135,9 +135,6 @@ impl TerminalWindow {
     pub fn draw_frame(&self, fb: &Framebuffer) {
         let cfg = &self.config;
 
-        // Drop shadow
-        fb.fill_rect(cfg.x + 4, cfg.y + 4, cfg.width, cfg.height, Color::new(0, 0, 0));
-
         // Window border
         fb.fill_rect(cfg.x, cfg.y, cfg.width, cfg.height, Theme::WINDOW_BORDER);
 
@@ -150,7 +147,7 @@ impl TerminalWindow {
             Theme::TITLE_BAR_BG,
         );
 
-        // Title text
+        // Title text (vertically centered)
         fb.draw_string(
             cfg.x + cfg.padding + cfg.border_width,
             cfg.y + (cfg.title_bar_height - cfg.char_height) / 2,
@@ -159,18 +156,18 @@ impl TerminalWindow {
             Theme::TITLE_BAR_BG,
         );
 
-        // Window control buttons (decorative)
-        let button_y = cfg.y + (cfg.title_bar_height - 12) / 2;
-        let button_x = cfg.x + cfg.width - cfg.padding - 12 - cfg.border_width;
+        // Window control buttons (rounded circles)
+        let button_y = cfg.y + (cfg.title_bar_height - 10) / 2;
+        let button_x = cfg.x + cfg.width - cfg.padding - 10 - cfg.border_width;
 
         // Close button (red)
-        fb.fill_rect(button_x, button_y, 12, 12, Color::new(255, 95, 86));
+        fb.fill_rect_rounded(button_x, button_y, 10, 10, 5, Color::new(237, 78, 83));
 
         // Minimize button (yellow)
-        fb.fill_rect(button_x - 18, button_y, 12, 12, Color::new(255, 189, 46));
+        fb.fill_rect_rounded(button_x - 16, button_y, 10, 10, 5, Color::new(245, 189, 65));
 
         // Maximize button (green)
-        fb.fill_rect(button_x - 36, button_y, 12, 12, Color::new(39, 201, 63));
+        fb.fill_rect_rounded(button_x - 32, button_y, 10, 10, 5, Color::new(72, 199, 142));
 
         // Content area background
         fb.fill_rect(
