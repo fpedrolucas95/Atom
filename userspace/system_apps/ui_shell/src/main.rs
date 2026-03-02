@@ -606,8 +606,10 @@ impl Compositor {
             color: Color::new(72, 199, 142),
         });
 
-        let fb_size_pixels = (fb.stride() * fb.height()) as usize;
-        let mut backbuffer = alloc::vec![0u32; fb_size_pixels];
+        // Allocate at max mode capacity so VideoModeChanged never needs reallocation.
+        const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
+        let init_pixels = (fb.stride() * fb.height()) as usize;
+        let mut backbuffer = alloc::vec![0u32; MAX_BACKBUFFER_PIXELS.max(init_pixels)];
         let backbuffer_fb = Framebuffer::new_custom(
             backbuffer.as_mut_ptr() as usize,
             fb.width(),
@@ -939,6 +941,9 @@ impl Compositor {
                     }
                 }
             }
+            MessageType::VideoModeChanged => {
+                self.handle_video_mode_changed();
+            }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
@@ -1121,6 +1126,37 @@ impl Compositor {
             }
             DragOperation::None => {}
         }
+    }
+
+    /// Called when a `VideoModeChanged` IPC message arrives.
+    ///
+    /// Re-acquires the kernel framebuffer (which reflects the new BGA mode) and
+    /// rebuilds `backbuffer_fb` to point at the same pre-allocated buffer with
+    /// the updated stride and dimensions.  No heap allocation is performed here
+    /// because the buffer was sized for the largest supported mode at startup.
+    fn handle_video_mode_changed(&mut self) {
+        let new_fb = match Framebuffer::new() {
+            Some(fb) => fb,
+            None => return,
+        };
+        let new_backbuffer_fb = match Framebuffer::new_custom(
+            self._backbuffer.as_mut_ptr() as usize,
+            new_fb.width(),
+            new_fb.height(),
+            new_fb.stride(),
+            new_fb.bytes_per_pixel() as u32,
+        ) {
+            Some(fb) => fb,
+            None => return,
+        };
+        self.fb           = new_fb;
+        self.backbuffer_fb = new_backbuffer_fb;
+        // Clamp cursor to new screen extents.
+        let w = self.fb.width()  as i32;
+        let h = self.fb.height() as i32;
+        if self.cursor.x >= w { self.cursor.x = w - 1; }
+        if self.cursor.y >= h { self.cursor.y = h - 1; }
+        self.dirty = true;
     }
 
     fn is_on_panel(&self, y: i32) -> bool {
@@ -1440,6 +1476,9 @@ impl Compositor {
 
     fn handle_dock_click(&mut self, icon_index: usize) {
         match icon_index {
+            1 => {
+                self.spawn_app("display_settings");
+            }
             3 => {
                 self.spawn_app("terminal");
             }
@@ -1454,6 +1493,10 @@ impl Compositor {
         }
         if name == "fileman" {
             self.spawn_fileman();
+            return;
+        }
+        if name == "display_settings" {
+            self.spawn_display_settings();
             return;
         }
 
@@ -1526,6 +1569,39 @@ impl Compositor {
         self.dirty = true;
     }
 
+    fn spawn_display_settings(&mut self) {
+        let pid = match spawn_process("display_settings") {
+            Ok(pid) => pid,
+            Err(_) => return,
+        };
+
+        let offset = (self.wm.windows.len() as i32) * 20;
+        let win_x = 200 + offset;
+        let win_y = 100 + offset;
+        let win_width = 480u32;
+        let win_height = 420u32;
+
+        let window_id = match self.wm.create_window_with_process(
+            "Display Settings",
+            win_x,
+            win_y,
+            win_width,
+            win_height,
+            pid,
+            0,
+        ) {
+            Some(id) => id,
+            None => return,
+        };
+
+        self.pending_windows.push(PendingWindow {
+            pid,
+            window_id,
+        });
+
+        self.dirty = true;
+    }
+
     fn draw_all(&mut self) {
         self.backbuffer_fb.fill_rect(0, 0, self.backbuffer_fb.width(), self.backbuffer_fb.height(), self.desktop_bg);
 
@@ -1561,19 +1637,19 @@ impl Compositor {
         // Shadow
         self.backbuffer_fb.fill_rect_rounded_alpha(px + 2, py + 4, pw + 2, ph + 2, 10, theme::SHADOW, 100);
         // Background
-        self.backbuffer_fb.fill_rect_rounded(px, py, pw, ph, 10, theme::WINDOW_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(px, py, pw, ph, 10, theme::WINDOW_BG);
         // Border
-        self.backbuffer_fb.draw_rect_rounded(px, py, pw, ph, 10, theme::WINDOW_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(px, py, pw, ph, 10, theme::WINDOW_BORDER);
 
-        // Header
-        self.backbuffer_fb.fill_rect(px + 1, py + 1, pw - 2, 40, theme::WINDOW_HEADER_FOCUSED);
+        // Header — top corners rounded to match outer border (radius 10 - border 1 = 9)
+        self.backbuffer_fb.fill_rect_top_rounded_aa(px + 1, py + 1, pw - 2, 40, 9, theme::WINDOW_HEADER_FOCUSED);
         let title_y = py + (40 - 8) / 2;
         self.backbuffer_fb.draw_string(px + 16, title_y, "Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
 
         // Close button (rounded)
         let close_x = px + pw - 30;
         let close_y = py + 14;
-        self.backbuffer_fb.fill_rect_rounded(close_x, close_y, 16, 16, 8, theme::BTN_CLOSE);
+        self.backbuffer_fb.fill_rect_rounded_aa(close_x, close_y, 16, 16, 8, theme::BTN_CLOSE);
         self.backbuffer_fb.draw_string(close_x + 4, close_y + 4, "X", Color::WHITE, theme::BTN_CLOSE);
 
         // Color tiles (rounded)
@@ -1586,8 +1662,8 @@ impl Compositor {
             let tx = start_x + (i as u32 % 4) * (tile_size + spacing);
             let ty = start_y + (i as u32 / 4) * (tile_size + spacing);
 
-            self.backbuffer_fb.fill_rect_rounded(tx, ty, tile_size, tile_size, 8, *color);
-            self.backbuffer_fb.draw_rect_rounded(tx, ty, tile_size, tile_size, 8, theme::WINDOW_BORDER);
+            self.backbuffer_fb.fill_rect_rounded_aa(tx, ty, tile_size, tile_size, 8, *color);
+            self.backbuffer_fb.draw_rect_rounded_aa(tx, ty, tile_size, tile_size, 8, theme::WINDOW_BORDER);
         }
     }
 
@@ -1602,9 +1678,9 @@ impl Compositor {
         // Shadow
         self.backbuffer_fb.fill_rect_rounded_alpha(mx + 2, my + 3, menu_w, menu_h, 8, theme::SHADOW, 100);
         // Background
-        self.backbuffer_fb.fill_rect_rounded(mx, my, menu_w, menu_h, 8, theme::MENU_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(mx, my, menu_w, menu_h, 8, theme::MENU_BG);
         // Border
-        self.backbuffer_fb.draw_rect_rounded(mx, my, menu_w, menu_h, 8, theme::MENU_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(mx, my, menu_w, menu_h, 8, theme::MENU_BORDER);
 
         for (i, item) in self.context_menu.items.iter().enumerate() {
             let iy = my + padding_v + (i as u32 * item_h);
@@ -1634,15 +1710,15 @@ impl Compositor {
             self.backbuffer_fb.fill_rect_rounded_alpha(ix + 1, iy + 2, size, size, icon_radius, theme::SHADOW, 70);
 
             // Icon background (rounded)
-            self.backbuffer_fb.fill_rect_rounded(ix, iy, size, size, icon_radius, theme::ICON_BG);
+            self.backbuffer_fb.fill_rect_rounded_aa(ix, iy, size, size, icon_radius, theme::ICON_BG);
 
             // Colored inner icon (rounded)
             let inner_x = ix + (size - inner_size) / 2;
             let inner_y = iy + (size - inner_size) / 2 - 2;
-            self.backbuffer_fb.fill_rect_rounded(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
+            self.backbuffer_fb.fill_rect_rounded_aa(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
 
             // Icon border (subtle)
-            self.backbuffer_fb.draw_rect_rounded(ix, iy, size, size, icon_radius, theme::ICON_BORDER);
+            self.backbuffer_fb.draw_rect_rounded_aa(ix, iy, size, size, icon_radius, theme::ICON_BORDER);
 
             // Label below icon (centered, with slight shadow for readability)
             let label_len = icon.label.len() as u32 * 8;
@@ -1665,7 +1741,7 @@ impl Compositor {
         // Branding: Atom logo area
         let brand_y = (PANEL_HEIGHT - 8) / 2;
         // Accent dot
-        self.backbuffer_fb.fill_rect_rounded(14, brand_y - 1, 10, 10, 3, theme::ACCENT);
+        self.backbuffer_fb.fill_rect_rounded_aa(14, brand_y - 1, 10, 10, 3, theme::ACCENT);
         // Brand text
         self.backbuffer_fb.draw_string(28, brand_y, "Atom", theme::PANEL_TEXT, theme::PANEL_BG);
 
@@ -1681,7 +1757,7 @@ impl Compositor {
         // Right side: clock + status area
         let clock_x = width.saturating_sub(96);
         // Status dot (indicates system running)
-        self.backbuffer_fb.fill_rect_rounded(clock_x - 16, brand_y, 8, 8, 4, theme::BTN_MAXIMIZE);
+        self.backbuffer_fb.fill_rect_rounded_aa(clock_x - 16, brand_y, 8, 8, 4, theme::BTN_MAXIMIZE);
         self.backbuffer_fb.draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
@@ -1707,18 +1783,20 @@ impl Compositor {
             theme::WINDOW_BORDER
         };
 
-        // Window outer border (rounded)
-        self.backbuffer_fb.fill_rect_rounded(x, y, w, h, 6, border_color);
+        // Window outer shell — full rounded rect (border color fills entire area first)
+        self.backbuffer_fb.fill_rect_rounded_aa(x, y, w, h, 6, border_color);
 
-        // Window header
+        // Window header — top corners rounded to match outer border (radius 6 - border 1 = 5)
         let header_color = if window.focused {
             theme::WINDOW_HEADER_FOCUSED
         } else {
             theme::WINDOW_HEADER
         };
-        self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
-                         w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
-                         header_color);
+        self.backbuffer_fb.fill_rect_top_rounded_aa(
+            x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
+            w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
+            5, header_color,
+        );
         // Header bottom separator
         self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_HEADER_HEIGHT - 1,
                          w - WINDOW_BORDER_WIDTH * 2, 1, border_color);
@@ -1737,39 +1815,47 @@ impl Compositor {
         let min_x = max_x - 20;
 
         if window.focused {
-            self.backbuffer_fb.fill_rect_rounded(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_CLOSE);
-            self.backbuffer_fb.fill_rect_rounded(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MAXIMIZE);
-            self.backbuffer_fb.fill_rect_rounded(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MINIMIZE);
+            self.backbuffer_fb.fill_rect_rounded_aa(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_CLOSE);
+            self.backbuffer_fb.fill_rect_rounded_aa(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MAXIMIZE);
+            self.backbuffer_fb.fill_rect_rounded_aa(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MINIMIZE);
         } else {
-            self.backbuffer_fb.fill_rect_rounded(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
-            self.backbuffer_fb.fill_rect_rounded(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
-            self.backbuffer_fb.fill_rect_rounded(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+            self.backbuffer_fb.fill_rect_rounded_aa(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+            self.backbuffer_fb.fill_rect_rounded_aa(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+            self.backbuffer_fb.fill_rect_rounded_aa(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
         }
 
-        // Content area background
+        // Content area background — bottom corners rounded to match outer border
         if window.surface.is_none() || !window.surface_ready {
-            self.backbuffer_fb.fill_rect(window.content_x(), window.content_y(),
-                             window.content_width(), window.content_height(),
-                             theme::WINDOW_BG);
+            self.backbuffer_fb.fill_rect_bottom_rounded_aa(
+                window.content_x(), window.content_y(),
+                window.content_width(), window.content_height(),
+                5, theme::WINDOW_BG,
+            );
         }
 
         // Blit application surface
         if window.surface_ready {
             if let Some(ref surface) = window.surface {
                 surface.blit_to_framebuffer(&self.backbuffer_fb, window.content_x(), window.content_y());
-            }
-        }
 
-        // Bottom rounded corners fill
-        if window.state != WindowState::Maximized {
-            let bottom_y = y + h - 6;
-            for dy in 0..6 {
-                let fy = 6 - dy;
-                let offset = 6u32.saturating_sub(isqrt_helper(6 * 6 - fy * fy));
-                // Fill corner pixels with border color to simulate rounded bottom
-                for cx in 0..offset {
-                    self.backbuffer_fb.draw_pixel(x + cx, bottom_y + dy, self.desktop_bg);
-                    self.backbuffer_fb.draw_pixel(x + w - 1 - cx, bottom_y + dy, self.desktop_bg);
+                // Mask bottom corners of blitted surface to match window rounding
+                let cx = window.content_x();
+                let cy = window.content_y();
+                let cw = window.content_width();
+                let ch = window.content_height();
+                let r: u32 = 5;
+                for dy in 0..r {
+                    let fy = r - dy;
+                    let n = r * r - fy * fy;
+                    let sq = isqrt_helper(n);
+                    let int_offset = r - sq;
+                    let row_y = cy + ch - 1 - dy;
+                    for cx_off in 0..int_offset {
+                        // Left bottom corner
+                        self.backbuffer_fb.fill_rect_alpha(cx + cx_off, row_y, 1, 1, border_color, 255);
+                        // Right bottom corner
+                        self.backbuffer_fb.fill_rect_alpha(cx + cw - 1 - cx_off, row_y, 1, 1, border_color, 255);
+                    }
                 }
             }
         }
@@ -1786,9 +1872,9 @@ impl Compositor {
         self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::SHADOW, 80);
 
         // Dock background (pill shape)
-        self.backbuffer_fb.fill_rect_rounded(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BG);
         // Dock border
-        self.backbuffer_fb.draw_rect_rounded(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BORDER);
         // Top highlight line
         self.backbuffer_fb.fill_rect(dock_x + 14, dock_y, DOCK_WIDTH - 28, 1, theme::DOCK_BORDER);
 
@@ -1810,7 +1896,7 @@ impl Compositor {
             let ix = start_x + (i as u32 * (icon_size + spacing));
 
             // Icon background (rounded)
-            self.backbuffer_fb.fill_rect_rounded(ix, icon_y, icon_size, icon_size, icon_radius, *color);
+            self.backbuffer_fb.fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, icon_radius, *color);
 
             // Icon label centered
             let label_len = label.len() as u32 * 8;
@@ -1822,7 +1908,7 @@ impl Compositor {
             if i == 3 && self.wm.windows.iter().any(|w| w.title == "Terminal" && w.visible) {
                 let dot_x = ix + icon_size / 2 - 2;
                 let dot_y = icon_y + icon_size + 3;
-                self.backbuffer_fb.fill_rect_rounded(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
+                self.backbuffer_fb.fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
             }
         }
     }
@@ -1884,8 +1970,11 @@ fn main() -> ! {
         None => exit(1),
     };
 
+    // Reserve enough heap for a backbuffer at the largest supported mode (1920×1080×32bpp)
+    // so that on-the-fly mode changes never require a reallocation.
+    const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
     let fb_size = fb_info.stride as usize * fb_info.height as usize * fb_info.bytes_per_pixel as usize;
-    let heap_size = fb_size + 8 * 1024 * 1024;
+    let heap_size = (MAX_BACKBUFFER_PIXELS * 4).max(fb_size) + 8 * 1024 * 1024;
 
     let region_id = match shared_region_create(heap_size) {
         Ok(id) => id,

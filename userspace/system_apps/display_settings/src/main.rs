@@ -1,0 +1,661 @@
+// Atom OS – Display Settings
+//
+// A proper desktop-environment-integrated settings window.
+// Renders into the compositor-provided SharedSurface and communicates
+// exclusively via IPC — no direct framebuffer access.
+//
+// Lifecycle:
+//   1. Create local IPC port.
+//   2. Register with namesvc as "display_settings".
+//   3. Look up "compositor.register" and send AppRegister.
+//   4. Wait for SurfaceAssign → map the shared region.
+//   5. Render UI → SurfacePresent → event loop.
+//
+// Key events handled:
+//   ArrowUp / ArrowDown  — navigate mode list
+//   Enter                — apply selected mode
+//   R                    — restore default (1024×768)
+
+#![no_std]
+#![no_main]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::panic::PanicInfo;
+
+use atom_syscall::graphics::SharedSurface;
+use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
+use atom_syscall::thread::{exit, yield_now};
+use atom_syscall::debug::log;
+
+use libipc::messages::{
+    MessageType, MessageHeader,
+    SurfaceAssignMsg, SurfacePresentMsg,
+    KeyEvent as IpcKeyEvent,
+    MouseButtonEvent,
+    MouseScrollEvent,
+};
+
+// ============================================================================
+// Heap
+// ============================================================================
+
+const HEAP_SIZE: usize = 256 * 1024; // 256 KB — uses SharedSurface, no local backbuffer
+
+struct BumpAllocator {
+    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+    next: AtomicUsize,
+}
+
+unsafe impl Sync for BumpAllocator {}
+
+impl BumpAllocator {
+    const fn new() -> Self {
+        Self { heap: UnsafeCell::new([0; HEAP_SIZE]), next: AtomicUsize::new(0) }
+    }
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let align = layout.align().max(16);
+        loop {
+            let cur = self.next.load(Ordering::Relaxed);
+            let aligned = (cur + align - 1) & !(align - 1);
+            let new_next = aligned + layout.size();
+            if new_next > HEAP_SIZE { return core::ptr::null_mut(); }
+            if self.next.compare_exchange_weak(cur, new_next,
+                    Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                return (self.heap.get() as *mut u8).add(aligned);
+            }
+        }
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[alloc_error_handler]
+fn alloc_error(_: Layout) -> ! { loop {} }
+
+// ============================================================================
+// Theme (matches ui_shell dark palette)
+// ============================================================================
+
+mod theme {
+    use atom_syscall::graphics::Color;
+
+    pub const BG:           Color = Color::new(18,  20,  28);   // window body
+    pub const HEADER_BG:    Color = Color::new(24,  27,  36);   // section headers
+    pub const BORDER:       Color = Color::new(42,  48,  64);   // dividers
+    pub const TEXT:         Color = Color::new(210, 215, 225);  // primary text
+    pub const TEXT_DIM:     Color = Color::new(110, 118, 138);  // secondary / hint text
+    pub const ACCENT:       Color = Color::new(86,  182, 245);  // highlight / accent
+    pub const ACCENT_DIM:   Color = Color::new(50,  110, 160);  // dimmed accent fill
+    pub const SEL_BG:       Color = Color::new(30,  70,  120);  // selected row background
+    pub const SEL_TEXT:     Color = Color::new(255, 255, 255);  // selected row text
+    pub const BTN_APPLY:    Color = Color::new(86,  182, 245);  // Apply button
+    pub const BTN_RESTORE:  Color = Color::new(52,  58,  78);   // Restore button (dark)
+    pub const BTN_TEXT:     Color = Color::new(255, 255, 255);
+    pub const SUCCESS:      Color = Color::new(72,  199, 142);
+    pub const WARNING:      Color = Color::new(245, 189, 65);
+    pub const SCROLLBAR:    Color = Color::new(28,  34,  48);
+    pub const THUMB:        Color = Color::new(72,  84,  116);
+}
+
+// ============================================================================
+// Supported modes (mirrors kernel bga::SUPPORTED_MODES order)
+// ============================================================================
+
+#[derive(Clone, Copy)]
+struct Mode { width: u16, height: u16 }
+
+const MODES: [Mode; 12] = [
+    Mode { width: 640,  height: 480  },
+    Mode { width: 800,  height: 600  },
+    Mode { width: 1024, height: 600  },
+    Mode { width: 1024, height: 768  },
+    Mode { width: 1152, height: 864  },
+    Mode { width: 1280, height: 720  },
+    Mode { width: 1280, height: 800  },
+    Mode { width: 1280, height: 1024 },
+    Mode { width: 1360, height: 768  },
+    Mode { width: 1440, height: 900  },
+    Mode { width: 1600, height: 900  },
+    Mode { width: 1920, height: 1080 },
+];
+
+const DEFAULT_IDX: usize = 3; // 1024×768
+
+// ============================================================================
+// Status message
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusKind { None, Ok, Warn }
+
+struct Status {
+    kind:  StatusKind,
+    text:  [u8; 48],
+    len:   usize,
+    ticks: u32,
+}
+
+impl Status {
+    const fn new() -> Self {
+        Self { kind: StatusKind::None, text: [0; 48], len: 0, ticks: 0 }
+    }
+    fn set(&mut self, kind: StatusKind, msg: &[u8]) {
+        self.kind = kind;
+        self.len  = msg.len().min(47);
+        self.text[..self.len].copy_from_slice(&msg[..self.len]);
+        self.ticks = 180; // ~3 s at ~60 polls/sec
+    }
+    fn tick(&mut self) {
+        if self.ticks > 0 { self.ticks -= 1; }
+        if self.ticks == 0 { self.kind = StatusKind::None; }
+    }
+    fn text_str(&self) -> &str {
+        core::str::from_utf8(&self.text[..self.len]).unwrap_or("")
+    }
+}
+
+// ============================================================================
+// Layout constants
+// ============================================================================
+
+const CHAR_W:       u32 = 8;
+const CHAR_H:       u32 = 8;
+const HDR_H:        u32 = 34;   // header bar height
+const SEC_H:        u32 = 22;   // section label height
+const ROW_H:        u32 = 22;   // each mode row height
+const VISIBLE_ROWS: usize = 9;  // rows visible without scrolling
+const SB_W:         u32 = 8;    // scrollbar width
+const BTN_BAR_H:    u32 = 44;   // button bar height
+const STATUS_H:     u32 = 20;   // status / hint bar height
+const PAD:          u32 = 12;   // horizontal padding
+
+// ============================================================================
+// App state
+// ============================================================================
+
+struct DisplaySettings {
+    window_id:       u32,
+    compositor_port: PortId,
+    local_port:      PortId,
+    surface:         Option<SharedSurface>,
+    surface_w:       u32,
+    surface_h:       u32,
+    selected:        usize,
+    scroll:          usize,
+    dirty:           bool,
+    status:          Status,
+    running:         bool,
+}
+
+impl DisplaySettings {
+    fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
+           surface: SharedSurface) -> Self {
+        let w = surface.width();
+        let h = surface.height();
+        let mut s = Self {
+            window_id, compositor_port, local_port,
+            surface_w: w, surface_h: h,
+            surface: Some(surface),
+            selected: DEFAULT_IDX,
+            scroll: 0,
+            dirty: true,
+            status: Status::new(),
+            running: true,
+        };
+        s.clamp_scroll();
+        s
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn notify_mode_changed(&self) {
+        let hdr = MessageHeader::new(MessageType::VideoModeChanged, 0);
+        let mut buf = [0u8; MessageHeader::SIZE];
+        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+        let _ = send(self.compositor_port, &buf);
+    }
+
+    fn notify_present(&self) {
+        let msg = SurfacePresentMsg { window_id: self.window_id };
+        let hdr = MessageHeader::new(MessageType::SurfacePresent,
+                                     SurfacePresentMsg::SIZE as u32);
+        let mut buf = [0u8; MessageHeader::SIZE + SurfacePresentMsg::SIZE];
+        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+        buf[MessageHeader::SIZE..].copy_from_slice(&msg.to_bytes());
+        let _ = send(self.compositor_port, &buf);
+    }
+
+    fn clamp_scroll(&mut self) {
+        let max_scroll = MODES.len().saturating_sub(VISIBLE_ROWS);
+        if self.scroll > max_scroll { self.scroll = max_scroll; }
+        if self.selected < self.scroll { self.scroll = self.selected; }
+        if self.selected >= self.scroll + VISIBLE_ROWS {
+            self.scroll = self.selected + 1 - VISIBLE_ROWS;
+        }
+    }
+
+    // ── Rendering ────────────────────────────────────────────────────────────
+
+    fn render(&mut self) {
+        if !self.dirty { return; }
+        self.dirty = false;
+
+        let surface = match self.surface { Some(ref s) => s, None => return };
+        let w = self.surface_w;
+        let h = self.surface_h;
+
+        // Background
+        surface.fill_rect(0, 0, w, h, theme::BG);
+
+        // ── Header bar ───────────────────────────────────────────────────────
+        surface.fill_rect(0, 0, w, HDR_H, theme::HEADER_BG);
+        surface.fill_rect(0, HDR_H - 1, w, 1, theme::BORDER);
+
+        // Small monitor icon (pixel-art style)
+        let ix = PAD;
+        let iy = (HDR_H - 14) / 2;
+        surface.fill_rect(ix,     iy,     18, 12, theme::ACCENT_DIM);
+        surface.draw_rect(ix,     iy,     18, 12, theme::ACCENT);
+        surface.fill_rect(ix + 7, iy + 12, 4,  2, theme::ACCENT);
+        surface.fill_rect(ix + 4, iy + 14, 10, 1, theme::ACCENT);
+
+        let title_y = (HDR_H - CHAR_H) / 2;
+        surface.draw_string(PAD + 24, title_y, "Display Settings", theme::TEXT, theme::HEADER_BG);
+
+        // ── Section label ────────────────────────────────────────────────────
+        let sec_y = HDR_H + 4;
+        surface.draw_string(PAD, sec_y + 3, "Available Resolutions", theme::TEXT_DIM, theme::BG);
+        surface.fill_rect(0, sec_y + SEC_H - 1, w, 1, theme::BORDER);
+
+        // ── Mode list ─────────────────────────────────────────────────────────
+        let list_top = HDR_H + SEC_H + 4;
+        let list_w   = w - PAD * 2 - SB_W - 4;
+
+        for i in 0..VISIBLE_ROWS {
+            let idx = self.scroll + i;
+            if idx >= MODES.len() { break; }
+            let m = MODES[idx];
+            let ry = list_top + i as u32 * ROW_H;
+            let sel = idx == self.selected;
+
+            let (row_bg, fg, dim) = if sel {
+                (theme::SEL_BG, theme::SEL_TEXT, theme::ACCENT)
+            } else {
+                (theme::BG, theme::TEXT, theme::TEXT_DIM)
+            };
+
+            surface.fill_rect(PAD, ry, list_w, ROW_H - 1, row_bg);
+            if sel {
+                surface.fill_rect(PAD, ry, 3, ROW_H - 1, theme::ACCENT);
+            }
+
+            // "WWWW x HHHH"
+            let mut lbuf = [0u8; 24];
+            let label = fmt_resolution(&mut lbuf, m.width, m.height);
+            let ty = ry + (ROW_H - CHAR_H) / 2;
+            surface.draw_string(PAD + 8, ty, label, fg, row_bg);
+
+            // right-side bpp hint
+            let bpp = "32bpp";
+            let bx = PAD + list_w - bpp.len() as u32 * CHAR_W - 6;
+            surface.draw_string(bx, ty, bpp, dim, row_bg);
+
+            if !sel {
+                surface.fill_rect(PAD + 8, ry + ROW_H - 1, list_w - 16, 1, theme::BORDER);
+            }
+        }
+
+        // ── Scrollbar ─────────────────────────────────────────────────────────
+        let sb_x   = w - PAD - SB_W;
+        let list_h = VISIBLE_ROWS as u32 * ROW_H;
+        surface.fill_rect(sb_x, list_top, SB_W, list_h, theme::SCROLLBAR);
+
+        let total  = MODES.len() as u32;
+        let vis    = VISIBLE_ROWS as u32;
+        let thumb_h = ((list_h * vis) / total).max(12).min(list_h);
+        let track_h = list_h - thumb_h;
+        let max_sc  = (MODES.len() - VISIBLE_ROWS) as u32;
+        let thumb_y = if max_sc > 0 {
+            list_top + track_h * self.scroll as u32 / max_sc
+        } else {
+            list_top
+        };
+        surface.fill_rect_rounded_aa(sb_x + 1, thumb_y, SB_W - 2, thumb_h, 3, theme::THUMB);
+
+        // ── Info line below list ──────────────────────────────────────────────
+        let info_y = list_top + list_h + 4;
+        let m = MODES[self.selected];
+        let mut ibuf = [0u8; 44];
+        let info = fmt_info(&mut ibuf, m.width, m.height);
+        surface.draw_string(PAD, info_y, info, theme::TEXT_DIM, theme::BG);
+
+        // ── Divider ───────────────────────────────────────────────────────────
+        let div_y = h - BTN_BAR_H - STATUS_H;
+        surface.fill_rect(0, div_y, w, 1, theme::BORDER);
+
+        // ── Button bar ────────────────────────────────────────────────────────
+        let btn_area_y = div_y + 1;
+        surface.fill_rect(0, btn_area_y, w, BTN_BAR_H, theme::BG);
+
+        let btn_h  = 26u32;
+        let btn_vy = btn_area_y + (BTN_BAR_H - btn_h) / 2;
+
+        // Apply button (right-aligned)
+        let aw = 80u32;
+        let ax = w - PAD - aw;
+        surface.fill_rect_rounded_aa(ax, btn_vy, aw, btn_h, 4, theme::BTN_APPLY);
+        let al = "Apply";
+        surface.draw_string(
+            ax + (aw - al.len() as u32 * CHAR_W) / 2,
+            btn_vy + (btn_h - CHAR_H) / 2,
+            al, theme::BTN_TEXT, theme::BTN_APPLY,
+        );
+
+        // Restore button (left of Apply)
+        let rw = 120u32;
+        let rx = ax - PAD - rw;
+        surface.fill_rect_rounded_aa(rx, btn_vy, rw, btn_h, 4, theme::BTN_RESTORE);
+        surface.draw_rect_rounded_aa(rx, btn_vy, rw, btn_h, 4, theme::BORDER);
+        let rl = "Restore Default";
+        surface.draw_string(
+            rx + (rw - rl.len() as u32 * CHAR_W) / 2,
+            btn_vy + (btn_h - CHAR_H) / 2,
+            rl, theme::BTN_TEXT, theme::BTN_RESTORE,
+        );
+
+        // ── Status / hint bar ─────────────────────────────────────────────────
+        let st_y = h - STATUS_H;
+        surface.fill_rect(0, st_y, w, STATUS_H, theme::HEADER_BG);
+        surface.fill_rect(0, st_y, w, 1, theme::BORDER);
+
+        if self.status.kind != StatusKind::None {
+            let col = if self.status.kind == StatusKind::Ok { theme::SUCCESS } else { theme::WARNING };
+            surface.draw_string(PAD, st_y + (STATUS_H - CHAR_H) / 2,
+                                 self.status.text_str(), col, theme::HEADER_BG);
+        } else {
+            let hint = "\x18\x19 Navigate   Enter Apply   R Restore";
+            surface.draw_string(PAD, st_y + (STATUS_H - CHAR_H) / 2,
+                                 hint, theme::TEXT_DIM, theme::HEADER_BG);
+        }
+
+        self.notify_present();
+    }
+
+    // ── Input ─────────────────────────────────────────────────────────────────
+
+    fn apply_selected(&mut self) {
+        let m = MODES[self.selected];
+        match atom_syscall::graphics::set_video_mode(m.width, m.height, 32) {
+            Ok(()) => {
+                self.notify_mode_changed();
+                self.status.set(StatusKind::Ok, b"Mode applied successfully.");
+            }
+            Err(_) => self.status.set(StatusKind::Warn,
+                          b"BGA unavailable or mode rejected."),
+        }
+        self.dirty = true;
+    }
+
+    fn restore_default(&mut self) {
+        self.selected = DEFAULT_IDX;
+        self.clamp_scroll();
+        let m = MODES[DEFAULT_IDX];
+        match atom_syscall::graphics::set_video_mode(m.width, m.height, 32) {
+            Ok(()) => {
+                self.notify_mode_changed();
+                self.status.set(StatusKind::Ok, b"Restored default 1024x768.");
+            }
+            Err(_) => self.status.set(StatusKind::Warn, b"BGA unavailable; selection reset."),
+        }
+        self.dirty = true;
+    }
+
+    fn handle_key(&mut self, ev: &IpcKeyEvent) {
+        // Extended scancodes (character == 0 → use scancode)
+        if ev.character == 0 {
+            match ev.scancode & 0x7F {
+                0x48 => { // Up
+                    if self.selected > 0 { self.selected -= 1; }
+                    self.clamp_scroll(); self.dirty = true;
+                }
+                0x50 => { // Down
+                    if self.selected + 1 < MODES.len() { self.selected += 1; }
+                    self.clamp_scroll(); self.dirty = true;
+                }
+                0x49 => { // Page Up
+                    self.selected = self.selected.saturating_sub(VISIBLE_ROWS);
+                    self.clamp_scroll(); self.dirty = true;
+                }
+                0x51 => { // Page Down
+                    self.selected = (self.selected + VISIBLE_ROWS).min(MODES.len() - 1);
+                    self.clamp_scroll(); self.dirty = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+        match ev.character {
+            b'\n' | b'\r' => self.apply_selected(),
+            b'r' | b'R'   => self.restore_default(),
+            _ => {}
+        }
+    }
+
+    fn handle_scroll(&mut self, dz: i32) {
+        // dz > 0 = wheel up → scroll list up; dz < 0 = wheel down → scroll list down
+        if dz > 0 {
+            if self.scroll > 0 { self.scroll -= 1; }
+        } else if dz < 0 {
+            let max_scroll = MODES.len().saturating_sub(VISIBLE_ROWS);
+            if self.scroll < max_scroll { self.scroll += 1; }
+        }
+        self.dirty = true;
+    }
+
+    fn handle_mouse_down(&mut self, x: i32, y: i32) {
+        let w = self.surface_w as i32;
+        let h = self.surface_h as i32;
+
+        // Button bar hit test
+        let div_y    = h - BTN_BAR_H as i32 - STATUS_H as i32;
+        let btn_vy   = div_y + 1 + (BTN_BAR_H as i32 - 26) / 2;
+        let ax       = w - PAD as i32 - 80;
+        let rx       = ax - PAD as i32 - 120;
+
+        if y >= btn_vy && y < btn_vy + 26 {
+            if x >= ax && x < ax + 80 { self.apply_selected();  return; }
+            if x >= rx && x < rx + 120 { self.restore_default(); return; }
+        }
+
+        // Mode list hit test
+        let list_top = (HDR_H + SEC_H + 4) as i32;
+        let list_h   = (VISIBLE_ROWS as u32 * ROW_H) as i32;
+        let list_w   = w - PAD as i32 * 2 - SB_W as i32 - 4;
+
+        if x >= PAD as i32 && x < PAD as i32 + list_w
+            && y >= list_top && y < list_top + list_h
+        {
+            let row = ((y - list_top) / ROW_H as i32) as usize;
+            let idx = self.scroll + row;
+            if idx < MODES.len() {
+                self.selected = idx;
+                self.clamp_scroll();
+                self.dirty = true;
+            }
+        }
+    }
+
+    // ── Event loop ────────────────────────────────────────────────────────────
+
+    fn process_message(&mut self, buf: &[u8], len: usize) {
+        if len < MessageHeader::SIZE { return; }
+        let hdr = match MessageHeader::from_bytes(buf) { Some(h) => h, None => return };
+        let payload = &buf[MessageHeader::SIZE..len.min(buf.len())];
+
+        match hdr.msg_type {
+            MessageType::TerminateRequest => {
+                log("DisplaySettings: terminate");
+                self.running = false;
+            }
+            MessageType::SurfaceAssign => {
+                if let Some(msg) = SurfaceAssignMsg::from_bytes(payload) {
+                    if let Ok(s) = SharedSurface::from_region(msg.region_id, msg.width, msg.height) {
+                        self.surface_w = msg.width;
+                        self.surface_h = msg.height;
+                        self.surface   = Some(s);
+                        self.dirty     = true;
+                    }
+                }
+            }
+            MessageType::KeyPress => {
+                if let Some(ev) = IpcKeyEvent::from_bytes(payload) {
+                    self.handle_key(&ev);
+                }
+            }
+            MessageType::MouseButtonDown => {
+                if let Some(ev) = MouseButtonEvent::from_bytes(payload) {
+                    self.handle_mouse_down(ev.x, ev.y);
+                }
+            }
+            MessageType::MouseScroll => {
+                if let Some(ev) = MouseScrollEvent::from_bytes(payload) {
+                    self.handle_scroll(ev.dz);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn run(&mut self) {
+        self.render();
+        let mut buf = [0u8; 128];
+        let ports = [self.local_port];
+        while self.running {
+            while let Ok(Some(len)) = try_recv(self.local_port, &mut buf) {
+                self.process_message(&buf, len);
+            }
+            self.status.tick();
+            if self.dirty { self.render(); }
+            let _ = wait_any(&ports, 16);
+        }
+    }
+
+    fn wait_for_surface(port: PortId) -> Option<SurfaceAssignMsg> {
+        let mut buf = [0u8; 128];
+        let ports = [port];
+        for _ in 0..200 {
+            if wait_any(&ports, 50).is_ok() {
+                if let Ok(Some(len)) = try_recv(port, &mut buf) {
+                    if len >= MessageHeader::SIZE {
+                        if let Some(hdr) = MessageHeader::from_bytes(&buf) {
+                            if hdr.msg_type == MessageType::SurfaceAssign {
+                                let p = &buf[MessageHeader::SIZE..];
+                                if let Some(msg) = SurfaceAssignMsg::from_bytes(p) {
+                                    return Some(msg);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+// ============================================================================
+// Number-formatting helpers (no_std, no format!)
+// ============================================================================
+
+fn write_u32(buf: &mut [u8], mut n: u32) -> usize {
+    if n == 0 { buf[0] = b'0'; return 1; }
+    let mut tmp = [0u8; 10];
+    let mut i = 0usize;
+    while n > 0 { tmp[i] = b'0' + (n % 10) as u8; i += 1; n /= 10; }
+    for j in 0..i { buf[j] = tmp[i - 1 - j]; }
+    i
+}
+
+fn fmt_resolution<'a>(buf: &'a mut [u8; 24], w: u16, h: u16) -> &'a str {
+    let mut p = 0usize;
+    p += write_u32(&mut buf[p..], w as u32);
+    buf[p..p + 3].copy_from_slice(b" x "); p += 3;
+    p += write_u32(&mut buf[p..], h as u32);
+    core::str::from_utf8(&buf[..p]).unwrap_or("?")
+}
+
+fn fmt_info<'a>(buf: &'a mut [u8; 44], w: u16, h: u16) -> &'a str {
+    let pre = b"Selected: ";
+    buf[..pre.len()].copy_from_slice(pre);
+    let mut p = pre.len();
+    p += write_u32(&mut buf[p..], w as u32);
+    buf[p..p + 3].copy_from_slice(b" x "); p += 3;
+    p += write_u32(&mut buf[p..], h as u32);
+    let suf = b" @ 32bpp  60Hz";
+    buf[p..p + suf.len()].copy_from_slice(suf); p += suf.len();
+    core::str::from_utf8(&buf[..p]).unwrap_or("?")
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! { main() }
+
+fn main() -> ! {
+    log("DisplaySettings: starting");
+
+    let port = match create_port() {
+        Ok(p) => p,
+        Err(_) => { log("DisplaySettings: create_port failed"); exit(1); }
+    };
+
+    let _ = libipc::protocol::register_service("display_settings", port);
+
+    log("DisplaySettings: looking up compositor.register");
+    let reg_port = loop {
+        match libipc::protocol::lookup_service("compositor.register") {
+            Ok(p) => break p,
+            Err(_) => yield_now(),
+        }
+    };
+
+    // AppRegister: header (16 B) + port (8 B) + pid (8 B)
+    let mut rmsg = [0u8; MessageHeader::SIZE + 16];
+    let hdr = MessageHeader::new(MessageType::AppRegister, 16);
+    rmsg[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+    rmsg[MessageHeader::SIZE..MessageHeader::SIZE + 8].copy_from_slice(&port.to_le_bytes());
+    rmsg[MessageHeader::SIZE + 8..MessageHeader::SIZE + 16].copy_from_slice(&0u64.to_le_bytes());
+    let _ = send(reg_port, &rmsg[..MessageHeader::SIZE + 16]);
+
+    log("DisplaySettings: waiting for surface");
+    let sa = match DisplaySettings::wait_for_surface(port) {
+        Some(sa) => sa,
+        None => { log("DisplaySettings: surface timeout"); exit(1); }
+    };
+
+    let surface = match SharedSurface::from_region(sa.region_id, sa.width, sa.height) {
+        Ok(s) => s,
+        Err(_) => { log("DisplaySettings: surface map failed"); exit(1); }
+    };
+
+    log("DisplaySettings: entering event loop");
+
+    let mut app = DisplaySettings::new(sa.window_id, sa.compositor_port, port, surface);
+    app.run();
+    exit(0);
+}
+
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { log("DisplaySettings: PANIC"); exit(0xFF); }

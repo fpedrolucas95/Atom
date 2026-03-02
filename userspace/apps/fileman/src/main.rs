@@ -821,7 +821,7 @@ impl FileManager {
 
         // Path bar (rounded)
         let (pbx, pbw) = path_bar_rect(sw);
-        surface.fill_rect_rounded(pbx, TB_BTN_Y, pbw, TB_BTN_H, 4,
+        surface.fill_rect_rounded_aa(pbx, TB_BTN_Y, pbw, TB_BTN_H, 4,
             Color::new(12, 14, 20));
         // Path text
         let path = &self.cwd;
@@ -836,7 +836,7 @@ impl FileManager {
     }
 
     fn draw_btn(&self, surface: &SharedSurface, btn: &Btn, label: &str, _enabled: bool) {
-        surface.fill_rect_rounded(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, Theme::BTN_BG);
+        surface.fill_rect_rounded_aa(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, Theme::BTN_BG);
         let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
         let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
         surface.draw_string(tx, ty, label, Theme::TEXT, Theme::BTN_BG);
@@ -845,7 +845,7 @@ impl FileManager {
     fn draw_btn_active(&self, surface: &SharedSurface, btn: &Btn, label: &str, active: bool) {
         let bg = if active { Theme::BTN_ACTIVE } else { Theme::BTN_BG };
         let fg = if active { Theme::TEXT_ACCENT } else { Theme::TEXT };
-        surface.fill_rect_rounded(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, bg);
+        surface.fill_rect_rounded_aa(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, bg);
         let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
         let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
         surface.draw_string(tx, ty, label, fg, bg);
@@ -875,13 +875,13 @@ impl FileManager {
             let is_sel = self.selected == Some(i);
             let cell_bg = if is_sel { Theme::SEL_BG } else { Theme::BG };
             if is_sel {
-                surface.fill_rect_rounded(cx + 2, cell_y + 2, ICON_CELL_W - 4, ICON_CELL_H - 4, 6, cell_bg);
+                surface.fill_rect_rounded_aa(cx + 2, cell_y + 2, ICON_CELL_W - 4, ICON_CELL_H - 4, 6, cell_bg);
             }
 
             // Icon box (rounded, centred horizontally in cell)
             let icon_x = cx + (ICON_CELL_W - ICON_W) / 2;
             let icon_y = cell_y + 6;
-            surface.fill_rect_rounded(icon_x, icon_y, ICON_W, ICON_H, 8, entry.kind.color());
+            surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8, entry.kind.color());
 
             // Type label inside icon (centred)
             let lbl   = entry.kind.label();
@@ -953,7 +953,7 @@ impl FileManager {
             surface.fill_rect(0, row_y, sw, LIST_ROW_H, row_bg);
 
             // Type colour chip (rounded)
-            surface.fill_rect_rounded(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6, 3,
+            surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6, 3,
                 entry.kind.color());
             let lbl   = entry.kind.label();
             let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;

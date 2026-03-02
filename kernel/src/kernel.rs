@@ -122,6 +122,10 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
             graphics::init(fb);
             graphics::init_terminal();
         }
+        // Attempt BGA initialization after VMM is fully set up.
+        // This must happen AFTER mm::init() so the LFB can be mapped.
+        // BGA takes over from GOP if available, enabling dynamic resolution.
+        graphics::init_bga();
     }
 
     gdt::init(current_rsp());

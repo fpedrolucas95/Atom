@@ -1,0 +1,16 @@
+[package]
+name = "display_settings"
+version = "0.1.0"
+edition = "2021"
+description = "Atom OS Display Settings - System configuration UI for screen resolution and color depth"
+
+# Exclude from parent workspace
+[workspace]
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+
+[[bin]]
+name = "display_settings"
+path = "src/main.rs"

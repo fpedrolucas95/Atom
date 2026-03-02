@@ -96,6 +96,19 @@ pub mod numbers {
     // Intended for use by the privileged app_launcher service only; unprivileged
     // applications must request launches through the app_launcher IPC service.
     pub const SYS_SPAWN_FROM_PATH: u64 = 203;
+
+    // ---------------------------------------------------------------------------
+    // Video mode management syscalls (BGA/VBE_DISPI)
+    // ---------------------------------------------------------------------------
+
+    /// Set video mode: packed_res=(height<<16|width), bpp -> ESUCCESS | errno
+    pub const SYS_SET_VIDEO_MODE:         u64 = 77;
+    /// Get available modes into u32 buffer: (buf_ptr, max_count) -> count | errno
+    pub const SYS_GET_VIDEO_MODES:        u64 = 78;
+    /// Get current video mode info into u64 buffer: (buf_ptr) -> ESUCCESS | errno
+    pub const SYS_GET_CURRENT_VIDEO_MODE: u64 = 79;
+    /// Get total count of available modes: () -> count
+    pub const SYS_VIDEO_MODE_COUNT:       u64 = 80;
 }
 
 /// Raw syscall with no arguments
