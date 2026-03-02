@@ -261,6 +261,9 @@ pub enum MessageType {
     FramebufferInfo = 201,
     InvalidateRect = 202,
     Present = 203,
+    /// Sent by a process to the compositor after a successful SYS_SET_VIDEO_MODE.
+    /// The compositor must re-acquire the framebuffer and rebuild its backbuffer.
+    VideoModeChanged = 204,
     CreateSurface = 210,
     DestroySurface = 211,
     BlitSurface = 212,
@@ -490,6 +493,7 @@ impl MessageType {
             201 => Some(Self::FramebufferInfo),
             202 => Some(Self::InvalidateRect),
             203 => Some(Self::Present),
+            204 => Some(Self::VideoModeChanged),
             210 => Some(Self::CreateSurface),
             211 => Some(Self::DestroySurface),
             212 => Some(Self::BlitSurface),

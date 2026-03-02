@@ -217,6 +217,13 @@ impl DisplaySettings {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    fn notify_mode_changed(&self) {
+        let hdr = MessageHeader::new(MessageType::VideoModeChanged, 0);
+        let mut buf = [0u8; MessageHeader::SIZE];
+        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+        let _ = send(self.compositor_port, &buf);
+    }
+
     fn notify_present(&self) {
         let msg = SurfacePresentMsg { window_id: self.window_id };
         let hdr = MessageHeader::new(MessageType::SurfacePresent,
@@ -388,8 +395,10 @@ impl DisplaySettings {
     fn apply_selected(&mut self) {
         let m = MODES[self.selected];
         match atom_syscall::graphics::set_video_mode(m.width, m.height, 32) {
-            Ok(()) => self.status.set(StatusKind::Ok,
-                          b"Mode applied successfully."),
+            Ok(()) => {
+                self.notify_mode_changed();
+                self.status.set(StatusKind::Ok, b"Mode applied successfully.");
+            }
             Err(_) => self.status.set(StatusKind::Warn,
                           b"BGA unavailable or mode rejected."),
         }
@@ -401,7 +410,10 @@ impl DisplaySettings {
         self.clamp_scroll();
         let m = MODES[DEFAULT_IDX];
         match atom_syscall::graphics::set_video_mode(m.width, m.height, 32) {
-            Ok(()) => self.status.set(StatusKind::Ok, b"Restored default 1024x768."),
+            Ok(()) => {
+                self.notify_mode_changed();
+                self.status.set(StatusKind::Ok, b"Restored default 1024x768.");
+            }
             Err(_) => self.status.set(StatusKind::Warn, b"BGA unavailable; selection reset."),
         }
         self.dirty = true;

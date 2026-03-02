@@ -606,8 +606,10 @@ impl Compositor {
             color: Color::new(72, 199, 142),
         });
 
-        let fb_size_pixels = (fb.stride() * fb.height()) as usize;
-        let mut backbuffer = alloc::vec![0u32; fb_size_pixels];
+        // Allocate at max mode capacity so VideoModeChanged never needs reallocation.
+        const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
+        let init_pixels = (fb.stride() * fb.height()) as usize;
+        let mut backbuffer = alloc::vec![0u32; MAX_BACKBUFFER_PIXELS.max(init_pixels)];
         let backbuffer_fb = Framebuffer::new_custom(
             backbuffer.as_mut_ptr() as usize,
             fb.width(),
@@ -939,6 +941,9 @@ impl Compositor {
                     }
                 }
             }
+            MessageType::VideoModeChanged => {
+                self.handle_video_mode_changed();
+            }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
@@ -1121,6 +1126,37 @@ impl Compositor {
             }
             DragOperation::None => {}
         }
+    }
+
+    /// Called when a `VideoModeChanged` IPC message arrives.
+    ///
+    /// Re-acquires the kernel framebuffer (which reflects the new BGA mode) and
+    /// rebuilds `backbuffer_fb` to point at the same pre-allocated buffer with
+    /// the updated stride and dimensions.  No heap allocation is performed here
+    /// because the buffer was sized for the largest supported mode at startup.
+    fn handle_video_mode_changed(&mut self) {
+        let new_fb = match Framebuffer::new() {
+            Some(fb) => fb,
+            None => return,
+        };
+        let new_backbuffer_fb = match Framebuffer::new_custom(
+            self._backbuffer.as_mut_ptr() as usize,
+            new_fb.width(),
+            new_fb.height(),
+            new_fb.stride(),
+            new_fb.bytes_per_pixel() as u32,
+        ) {
+            Some(fb) => fb,
+            None => return,
+        };
+        self.fb           = new_fb;
+        self.backbuffer_fb = new_backbuffer_fb;
+        // Clamp cursor to new screen extents.
+        let w = self.fb.width()  as i32;
+        let h = self.fb.height() as i32;
+        if self.cursor.x >= w { self.cursor.x = w - 1; }
+        if self.cursor.y >= h { self.cursor.y = h - 1; }
+        self.dirty = true;
     }
 
     fn is_on_panel(&self, y: i32) -> bool {
@@ -1924,8 +1960,11 @@ fn main() -> ! {
         None => exit(1),
     };
 
+    // Reserve enough heap for a backbuffer at the largest supported mode (1920×1080×32bpp)
+    // so that on-the-fly mode changes never require a reallocation.
+    const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
     let fb_size = fb_info.stride as usize * fb_info.height as usize * fb_info.bytes_per_pixel as usize;
-    let heap_size = fb_size + 8 * 1024 * 1024;
+    let heap_size = (MAX_BACKBUFFER_PIXELS * 4).max(fb_size) + 8 * 1024 * 1024;
 
     let region_id = match shared_region_create(heap_size) {
         Ok(id) => id,
