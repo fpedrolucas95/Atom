@@ -228,7 +228,7 @@ const SUPPORTED_MODES: [VideoMode; 12] = [
     VideoMode::new(1280, 720),
     VideoMode::new(1280, 800),
     VideoMode::new(1280, 1024),
-    VideoMode::new(1366, 768),
+    VideoMode::new(1360, 768),
     VideoMode::new(1440, 900),
     VideoMode::new(1600, 900),
     VideoMode::new(1920, 1080),

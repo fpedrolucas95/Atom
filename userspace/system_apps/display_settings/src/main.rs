@@ -122,7 +122,7 @@ const MODES: [Mode; 12] = [
     Mode { width: 1280, height: 720  },
     Mode { width: 1280, height: 800  },
     Mode { width: 1280, height: 1024 },
-    Mode { width: 1366, height: 768  },
+    Mode { width: 1360, height: 768  },
     Mode { width: 1440, height: 900  },
     Mode { width: 1600, height: 900  },
     Mode { width: 1920, height: 1080 },
