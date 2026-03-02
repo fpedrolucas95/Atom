@@ -1440,6 +1440,9 @@ impl Compositor {
 
     fn handle_dock_click(&mut self, icon_index: usize) {
         match icon_index {
+            1 => {
+                self.spawn_app("display_settings");
+            }
             3 => {
                 self.spawn_app("terminal");
             }
@@ -1454,6 +1457,10 @@ impl Compositor {
         }
         if name == "fileman" {
             self.spawn_fileman();
+            return;
+        }
+        if name == "display_settings" {
+            self.spawn_display_settings();
             return;
         }
 
@@ -1507,6 +1514,39 @@ impl Compositor {
 
         let window_id = match self.wm.create_window_with_process(
             "Terminal",
+            win_x,
+            win_y,
+            win_width,
+            win_height,
+            pid,
+            0,
+        ) {
+            Some(id) => id,
+            None => return,
+        };
+
+        self.pending_windows.push(PendingWindow {
+            pid,
+            window_id,
+        });
+
+        self.dirty = true;
+    }
+
+    fn spawn_display_settings(&mut self) {
+        let pid = match spawn_process("display_settings") {
+            Ok(pid) => pid,
+            Err(_) => return,
+        };
+
+        let offset = (self.wm.windows.len() as i32) * 20;
+        let win_x = 200 + offset;
+        let win_y = 100 + offset;
+        let win_width = 480u32;
+        let win_height = 420u32;
+
+        let window_id = match self.wm.create_window_with_process(
+            "Display Settings",
             win_x,
             win_y,
             win_width,
