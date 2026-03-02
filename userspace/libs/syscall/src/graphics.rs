@@ -1,7 +1,7 @@
 // Framebuffer and graphics syscalls
 
-use crate::error::{ESUCCESS, EPERM, EINVAL, ENOMEM, EBUSY, SyscallError, SyscallResult};
-use crate::raw::{syscall1, syscall3, numbers::*};
+use crate::error::{ESUCCESS, EPERM, EINVAL, ENOMEM, EBUSY, ENOTSUP, SyscallError, SyscallResult};
+use crate::raw::{syscall0, syscall1, syscall2, syscall3, numbers::*};
 
 // ============================================================================
 // Framebuffer Information
@@ -991,4 +991,168 @@ impl SharedSurfaceInfo {
             bytes_per_pixel: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
         })
     }
+}
+
+// ============================================================================
+// Video Mode Management API
+// ============================================================================
+//
+// These wrappers expose the kernel's BGA/VBE_DISPI video mode management
+// syscalls to userspace. They are used primarily by the display_settings app.
+
+/// A video mode entry as returned by SYS_GET_VIDEO_MODES.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VideoModeEntry {
+    pub width:        u32,
+    pub height:       u32,
+    pub bpp:          u32,
+    pub refresh_rate: u32,
+    /// Flags: bit 0 = LFB available (always 1 for BGA modes)
+    pub flags:        u32,
+}
+
+impl VideoModeEntry {
+    /// Human-readable display string (for UI rendering)
+    pub fn label_bytes(&self) -> ([u8; 32], usize) {
+        let mut buf = [0u8; 32];
+        let len = format_mode_label(&mut buf, self.width, self.height, self.bpp);
+        (buf, len)
+    }
+}
+
+/// Format "WIDTHxHEIGHTxBPP" into a byte buffer.
+/// Returns the number of bytes written (not including null terminator).
+fn format_mode_label(buf: &mut [u8; 32], width: u32, height: u32, bpp: u32) -> usize {
+    let mut pos = 0;
+    pos += write_u32_decimal(buf, pos, width);
+    if pos < 32 { buf[pos] = b'x'; pos += 1; }
+    pos += write_u32_decimal(buf, pos, height);
+    if pos < 32 { buf[pos] = b'x'; pos += 1; }
+    pos += write_u32_decimal(buf, pos, bpp);
+    pos
+}
+
+fn write_u32_decimal(buf: &mut [u8; 32], start: usize, mut n: u32) -> usize {
+    if start >= 32 { return 0; }
+    if n == 0 {
+        buf[start] = b'0';
+        return 1;
+    }
+    // Write digits in reverse, then flip
+    let mut tmp = [0u8; 12];
+    let mut tmp_len = 0;
+    while n > 0 {
+        tmp[tmp_len] = b'0' + (n % 10) as u8;
+        tmp_len += 1;
+        n /= 10;
+    }
+    let available = 32 - start;
+    let write_len = tmp_len.min(available);
+    for i in 0..write_len {
+        buf[start + i] = tmp[tmp_len - 1 - i];
+    }
+    write_len
+}
+
+/// Current video mode info as returned by SYS_GET_CURRENT_VIDEO_MODE.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CurrentVideoMode {
+    /// Physical address of the Linear Framebuffer (may be 0 if BGA not active)
+    pub lfb_phys:         u64,
+    pub width:            u32,
+    pub height:           u32,
+    /// Bytes per scanline (pitch)
+    pub pitch:            u32,
+    pub bytes_per_pixel:  u32,
+    /// 1 if BGA is present and initialized
+    pub bga_available:    u32,
+    /// 1 if a mode has been actively set via SYS_SET_VIDEO_MODE
+    pub mode_active:      u32,
+}
+
+/// Request a video mode change.
+///
+/// # Parameters
+/// - `width`: horizontal resolution (must be divisible by 8)
+/// - `height`: vertical resolution
+/// - `bpp`: bits per pixel (must be 32 for current driver)
+///
+/// # Returns
+/// `Ok(())` on success, `Err(SyscallError)` on failure.
+pub fn set_video_mode(width: u16, height: u16, bpp: u8) -> SyscallResult<()> {
+    let packed = (width as u64) | ((height as u64) << 16);
+    let result = unsafe { syscall2(SYS_SET_VIDEO_MODE, packed, bpp as u64) };
+
+    if result == ESUCCESS {
+        Ok(())
+    } else {
+        match result {
+            x if x == EINVAL   => Err(SyscallError::InvalidArgument),
+            x if x == ENOTSUP  => Err(SyscallError::NotSupported),
+            x if x == ENOMEM   => Err(SyscallError::OutOfMemory),
+            _                   => Err(SyscallError::Unknown(result)),
+        }
+    }
+}
+
+/// Get the total count of available video modes.
+pub fn video_mode_count() -> usize {
+    let result = unsafe { syscall0(SYS_VIDEO_MODE_COUNT) };
+    result as usize
+}
+
+/// Enumerate all available video modes into the provided slice.
+///
+/// Returns the number of modes actually written.
+pub fn get_video_modes(out: &mut [VideoModeEntry]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+
+    // The kernel writes 5 u32 values per mode (20 bytes each).
+    // We pass a u32 slice pointer and mode count.
+    let buf_ptr = out.as_mut_ptr() as *mut u32;
+    let max_modes = out.len() as u64;
+
+    let result = unsafe {
+        crate::raw::syscall2(SYS_GET_VIDEO_MODES, buf_ptr as u64, max_modes)
+    };
+
+    if result > 0x8000_0000_0000_0000u64 {
+        // Error code
+        return 0;
+    }
+    result as usize
+}
+
+/// Get current video mode information from the kernel.
+///
+/// Returns `Some(CurrentVideoMode)` on success, `None` if the syscall fails.
+pub fn get_current_video_mode() -> Option<CurrentVideoMode> {
+    let mut buf = [0u64; 4];
+    let result = unsafe {
+        crate::raw::syscall1(SYS_GET_CURRENT_VIDEO_MODE, buf.as_mut_ptr() as u64)
+    };
+
+    if result != ESUCCESS {
+        return None;
+    }
+
+    // Unpack the four 64-bit words into the CurrentVideoMode struct.
+    // Layout matches what sys_get_current_video_mode() writes:
+    //   buf[0] = lfb_phys
+    //   buf[1] = (height << 32) | width
+    //   buf[2] = (bytes_per_pixel << 32) | pitch
+    //   buf[3] = (mode_active << 32) | bga_available
+    Some(CurrentVideoMode {
+        lfb_phys:        buf[0],
+        width:           (buf[1] & 0xFFFF_FFFF) as u32,
+        height:          ((buf[1] >> 32) & 0xFFFF_FFFF) as u32,
+        pitch:           (buf[2] & 0xFFFF_FFFF) as u32,
+        bytes_per_pixel: ((buf[2] >> 32) & 0xFFFF_FFFF) as u32,
+        bga_available:   (buf[3] & 0xFFFF_FFFF) as u32,
+        mode_active:     ((buf[3] >> 32) & 0xFFFF_FFFF) as u32,
+    })
 }

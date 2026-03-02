@@ -97,6 +97,7 @@ SYSTEM_APPS=(
     "keyboard"
     "mouse"
     "display"
+    "display_settings"
     "terminal"
     "ui_shell"
     "demo_rects"

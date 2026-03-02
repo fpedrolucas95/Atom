@@ -122,6 +122,48 @@ pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specifi
 pub const SYS_GET_CPU_BRAND: u64 = 52;
 
 // ---------------------------------------------------------------------------
+// Video mode management syscalls (BGA/VBE_DISPI)
+// ---------------------------------------------------------------------------
+
+/// Set video mode: (width: u16, height: u16, bpp: u8) -> 0 | errno
+///
+/// width and height are packed into arg0: arg0 = (height << 16) | width
+/// bpp is in arg1. Returns ESUCCESS on success.
+/// Returns ENOTSUP if no backend supports mode changes.
+/// Returns EINVAL if the mode parameters are invalid.
+pub const SYS_SET_VIDEO_MODE: u64 = 77;
+
+/// Get available video modes into a userspace buffer.
+/// arg0 = pointer to array of VideoModeEntry structs (20 bytes each)
+/// arg1 = max number of entries the buffer can hold
+/// Returns number of modes written, or errno.
+///
+/// VideoModeEntry layout (20 bytes, all u32):
+///   [0] width
+///   [1] height
+///   [2] bpp
+///   [3] refresh_rate
+///   [4] flags (0 = LFB supported)
+pub const SYS_GET_VIDEO_MODES: u64 = 78;
+
+/// Get current video mode info into a userspace buffer.
+/// arg0 = pointer to KernelVideoInfo struct (see bga.rs)
+/// Layout (32 bytes):
+///   [0..8]  lfb_phys (u64)
+///   [8..12] width (u32)
+///   [12..16] height (u32)
+///   [16..20] pitch (u32)
+///   [20..24] bytes_per_pixel (u32)
+///   [24..28] bga_available (u32)
+///   [28..32] mode_active (u32)
+/// Returns ESUCCESS on success.
+pub const SYS_GET_CURRENT_VIDEO_MODE: u64 = 79;
+
+/// Get total count of available video modes.
+/// Returns the count (positive), or 0 if unavailable.
+pub const SYS_VIDEO_MODE_COUNT: u64 = 80;
+
+// ---------------------------------------------------------------------------
 // Virtual memory management syscalls
 // ---------------------------------------------------------------------------
 
@@ -416,6 +458,12 @@ extern "C" fn rust_syscall_dispatcher(
 
         // App launcher — spawn ATXF by path
         SYS_SPAWN_FROM_PATH => sys_spawn_from_path(arg0 as *const u8, arg1 as usize),
+
+        // Video mode management (BGA/VBE_DISPI)
+        SYS_SET_VIDEO_MODE         => sys_set_video_mode(arg0, arg1),
+        SYS_GET_VIDEO_MODES        => sys_get_video_modes(arg0 as *mut u32, arg1 as usize),
+        SYS_GET_CURRENT_VIDEO_MODE => sys_get_current_video_mode(arg0 as *mut u64),
+        SYS_VIDEO_MODE_COUNT       => sys_video_mode_count(),
 
         _ => {
             log_warn!(
@@ -5010,4 +5058,139 @@ fn sys_fs_utimes(_path_ptr: u64, _path_len: usize, _atime: i64, _mtime: i64) -> 
 /// Get filesystem statistics
 fn sys_fs_statvfs(_path_ptr: u64, _path_len: usize, _buf_ptr: u64) -> u64 {
     ENOTSUP
+}
+// ============================================================================
+// Video Mode Management Syscall Handlers
+// ============================================================================
+//
+// These syscalls form the kernel interface for the display settings subsystem.
+// They delegate to the graphics module which in turn uses the BGA driver.
+//
+// Security model:
+//   - Mode changes are permitted from any process (no capability check).
+//     In a production system, mode changes would require a DISPLAY capability.
+//     For the current MVP, we trust the display driver (which runs early).
+//   - User pointers are validated before dereferencing.
+
+/// SYS_SET_VIDEO_MODE: Set a new video mode via BGA driver.
+///
+/// arg0 encoding: (height as u64) << 16 | (width as u64)
+///   Bits [15:0]:  width  (u16)
+///   Bits [31:16]: height (u16)
+/// arg1: bpp (u64, must be 32 for current driver)
+///
+/// Returns ESUCCESS on success, or:
+///   EINVAL   – invalid resolution or BPP
+///   ENOTSUP  – backend does not support mode changes (GOP only)
+///   ENOMEM   – LFB too small for requested mode
+fn sys_set_video_mode(packed_res: u64, bpp_raw: u64) -> u64 {
+    let width  = (packed_res & 0xFFFF) as u16;
+    let height = ((packed_res >> 16) & 0xFFFF) as u16;
+    let bpp    = bpp_raw as u8;
+
+    log_debug!("syscall", "SYS_SET_VIDEO_MODE: {}x{}x{}", width, height, bpp);
+
+    match crate::graphics::set_video_mode(width, height, bpp) {
+        Ok(()) => {
+            log_info!("syscall", "Video mode set: {}x{}x{}", width, height, bpp);
+            ESUCCESS
+        }
+        Err(msg) => {
+            log_warn!("syscall", "SYS_SET_VIDEO_MODE failed: {}", msg);
+            // Map specific error strings to appropriate errno values
+            if msg.contains("divisible") || msg.contains("zero") || msg.contains("BPP") {
+                EINVAL
+            } else if msg.contains("backend") || msg.contains("GOP") {
+                ENOTSUP
+            } else if msg.contains("size") || msg.contains("LFB") {
+                ENOMEM
+            } else {
+                EINVAL
+            }
+        }
+    }
+}
+
+/// SYS_GET_VIDEO_MODES: Enumerate available video modes.
+///
+/// arg0: pointer to output buffer (array of 5 × u32 entries)
+/// arg1: maximum number of modes to write
+///
+/// Each mode entry is 5 × u32 = 20 bytes:
+///   [0] width
+///   [1] height
+///   [2] bpp
+///   [3] refresh_rate
+///   [4] flags (bit 0: LFB available — always 1 for BGA modes)
+///
+/// Returns: number of modes written (>= 0), or EINVAL if buf_ptr is null.
+fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
+    if buf_ptr.is_null() {
+        return EINVAL;
+    }
+    if max_modes == 0 {
+        return 0;
+    }
+
+    // Use a kernel-side buffer to avoid writing directly from the mode table
+    let mut kernel_modes = [crate::drivers::bga::VideoMode { width: 0, height: 0, bpp: 0, refresh_rate: 0 }; 32];
+    let count = crate::graphics::get_available_modes(&mut kernel_modes).min(max_modes);
+
+    unsafe {
+        for i in 0..count {
+            let m = &kernel_modes[i];
+            let base = buf_ptr.add(i * 5);
+            // Validate each destination pointer before writing
+            base.add(0).write_volatile(m.width  as u32);
+            base.add(1).write_volatile(m.height as u32);
+            base.add(2).write_volatile(m.bpp    as u32);
+            base.add(3).write_volatile(m.refresh_rate as u32);
+            base.add(4).write_volatile(1u32); // LFB always available
+        }
+    }
+
+    count as u64
+}
+
+/// SYS_GET_CURRENT_VIDEO_MODE: Write current video mode info to userspace.
+///
+/// arg0: pointer to a 32-byte output struct (8 × u32 fields, matching KernelVideoInfo)
+///
+/// Layout written to user buffer:
+///   Bytes [0..8]   lfb_phys        (u64)
+///   Bytes [8..12]  width           (u32)
+///   Bytes [12..16] height          (u32)
+///   Bytes [16..20] pitch           (u32) bytes per scanline
+///   Bytes [20..24] bytes_per_pixel (u32)
+///   Bytes [24..28] bga_available   (u32) 1 if BGA is present
+///   Bytes [28..32] mode_active     (u32) 1 if a mode has been set
+///
+/// Returns ESUCCESS, or EINVAL if buf_ptr is null.
+fn sys_get_current_video_mode(buf_ptr: *mut u64) -> u64 {
+    if buf_ptr.is_null() {
+        return EINVAL;
+    }
+
+    let info = crate::graphics::get_kernel_video_info();
+
+    unsafe {
+        // lfb_phys (u64, 8 bytes)
+        buf_ptr.add(0).write_volatile(info.lfb_phys);
+        // Pack width + height into a single u64 write (little-endian)
+        let wh = (info.width as u64) | ((info.height as u64) << 32);
+        buf_ptr.add(1).write_volatile(wh);
+        // Pack pitch + bytes_per_pixel
+        let pp = (info.pitch as u64) | ((info.bytes_per_pixel as u64) << 32);
+        buf_ptr.add(2).write_volatile(pp);
+        // Pack bga_available + mode_active
+        let flags = (info.bga_available as u64) | ((info.mode_active as u64) << 32);
+        buf_ptr.add(3).write_volatile(flags);
+    }
+
+    ESUCCESS
+}
+
+/// SYS_VIDEO_MODE_COUNT: Return the total number of available video modes.
+fn sys_video_mode_count() -> u64 {
+    crate::graphics::available_mode_count() as u64
 }
