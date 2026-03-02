@@ -161,13 +161,13 @@ impl TerminalWindow {
         let button_x = cfg.x + cfg.width - cfg.padding - 10 - cfg.border_width;
 
         // Close button (red)
-        fb.fill_rect_rounded(button_x, button_y, 10, 10, 5, Color::new(237, 78, 83));
+        fb.fill_rect_rounded_aa(button_x, button_y, 10, 10, 5, Color::new(237, 78, 83));
 
         // Minimize button (yellow)
-        fb.fill_rect_rounded(button_x - 16, button_y, 10, 10, 5, Color::new(245, 189, 65));
+        fb.fill_rect_rounded_aa(button_x - 16, button_y, 10, 10, 5, Color::new(245, 189, 65));
 
         // Maximize button (green)
-        fb.fill_rect_rounded(button_x - 32, button_y, 10, 10, 5, Color::new(72, 199, 142));
+        fb.fill_rect_rounded_aa(button_x - 32, button_y, 10, 10, 5, Color::new(72, 199, 142));
 
         // Content area background
         fb.fill_rect(

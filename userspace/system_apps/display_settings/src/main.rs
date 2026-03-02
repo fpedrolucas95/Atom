@@ -37,6 +37,7 @@ use libipc::messages::{
     SurfaceAssignMsg, SurfacePresentMsg,
     KeyEvent as IpcKeyEvent,
     MouseButtonEvent,
+    MouseScrollEvent,
 };
 
 // ============================================================================
@@ -329,7 +330,7 @@ impl DisplaySettings {
         } else {
             list_top
         };
-        surface.fill_rect(sb_x + 1, thumb_y, SB_W - 2, thumb_h, theme::THUMB);
+        surface.fill_rect_rounded_aa(sb_x + 1, thumb_y, SB_W - 2, thumb_h, 3, theme::THUMB);
 
         // ── Info line below list ──────────────────────────────────────────────
         let info_y = list_top + list_h + 4;
@@ -352,7 +353,7 @@ impl DisplaySettings {
         // Apply button (right-aligned)
         let aw = 80u32;
         let ax = w - PAD - aw;
-        surface.fill_rect(ax, btn_vy, aw, btn_h, theme::BTN_APPLY);
+        surface.fill_rect_rounded_aa(ax, btn_vy, aw, btn_h, 4, theme::BTN_APPLY);
         let al = "Apply";
         surface.draw_string(
             ax + (aw - al.len() as u32 * CHAR_W) / 2,
@@ -363,8 +364,8 @@ impl DisplaySettings {
         // Restore button (left of Apply)
         let rw = 120u32;
         let rx = ax - PAD - rw;
-        surface.fill_rect(rx, btn_vy, rw, btn_h, theme::BTN_RESTORE);
-        surface.draw_rect(rx, btn_vy, rw, btn_h, theme::BORDER);
+        surface.fill_rect_rounded_aa(rx, btn_vy, rw, btn_h, 4, theme::BTN_RESTORE);
+        surface.draw_rect_rounded_aa(rx, btn_vy, rw, btn_h, 4, theme::BORDER);
         let rl = "Restore Default";
         surface.draw_string(
             rx + (rw - rl.len() as u32 * CHAR_W) / 2,
@@ -450,6 +451,17 @@ impl DisplaySettings {
         }
     }
 
+    fn handle_scroll(&mut self, dz: i32) {
+        // dz > 0 = wheel up → scroll list up; dz < 0 = wheel down → scroll list down
+        if dz > 0 {
+            if self.scroll > 0 { self.scroll -= 1; }
+        } else if dz < 0 {
+            let max_scroll = MODES.len().saturating_sub(VISIBLE_ROWS);
+            if self.scroll < max_scroll { self.scroll += 1; }
+        }
+        self.dirty = true;
+    }
+
     fn handle_mouse_down(&mut self, x: i32, y: i32) {
         let w = self.surface_w as i32;
         let h = self.surface_h as i32;
@@ -513,6 +525,11 @@ impl DisplaySettings {
             MessageType::MouseButtonDown => {
                 if let Some(ev) = MouseButtonEvent::from_bytes(payload) {
                     self.handle_mouse_down(ev.x, ev.y);
+                }
+            }
+            MessageType::MouseScroll => {
+                if let Some(ev) = MouseScrollEvent::from_bytes(payload) {
+                    self.handle_scroll(ev.dz);
                 }
             }
             _ => {}

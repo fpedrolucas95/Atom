@@ -402,6 +402,140 @@ impl Framebuffer {
         }
     }
 
+    /// Fill a rectangle with anti-aliased rounded corners.
+    /// Corner edges are sub-pixel blended, eliminating the staircase effect.
+    pub fn fill_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        self.fill_rect(x, y + r, width, height.saturating_sub(r * 2), color);
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
+
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                let ax_l = x + int_offset - 1;
+                let ax_r = x + width - int_offset;
+                self.fill_rect_alpha(ax_l, y + dy,              1, 1, color, aa);
+                self.fill_rect_alpha(ax_r, y + dy,              1, 1, color, aa);
+                self.fill_rect_alpha(ax_l, y + height - 1 - dy, 1, 1, color, aa);
+                self.fill_rect_alpha(ax_r, y + height - 1 - dy, 1, 1, color, aa);
+            }
+
+            let row_x = x + int_offset;
+            let row_w = width.saturating_sub(int_offset * 2);
+            if row_w > 0 {
+                self.fill_rect(row_x, y + dy,              row_w, 1, color);
+                self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color);
+            }
+        }
+    }
+
+    /// Draw an anti-aliased rounded rectangle outline (1-pixel border).
+    pub fn draw_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.draw_rect(x, y, width, height, color);
+            return;
+        }
+        self.draw_hline(x + r, y,              width.saturating_sub(r * 2), color);
+        self.draw_hline(x + r, y + height - 1, width.saturating_sub(r * 2), color);
+        self.draw_vline(x,             y + r, height.saturating_sub(r * 2), color);
+        self.draw_vline(x + width - 1, y + r, height.saturating_sub(r * 2), color);
+
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
+
+            // Main arc pixel
+            let mx_l = x + int_offset;
+            let mx_r = x + width - 1 - int_offset;
+            self.draw_pixel(mx_l, y + dy,              color);
+            self.draw_pixel(mx_r, y + dy,              color);
+            self.draw_pixel(mx_l, y + height - 1 - dy, color);
+            self.draw_pixel(mx_r, y + height - 1 - dy, color);
+
+            // Outer AA pixel
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                let ax_l = x + int_offset - 1;
+                let ax_r = x + width - int_offset;
+                self.fill_rect_alpha(ax_l, y + dy,              1, 1, color, aa);
+                self.fill_rect_alpha(ax_r, y + dy,              1, 1, color, aa);
+                self.fill_rect_alpha(ax_l, y + height - 1 - dy, 1, 1, color, aa);
+                self.fill_rect_alpha(ax_r, y + height - 1 - dy, 1, 1, color, aa);
+            }
+        }
+    }
+
+    /// Fill a rectangle with only the TOP two corners anti-aliased and rounded.
+    /// Bottom edge is flat (no rounding). Used for header bars inside rounded windows.
+    pub fn fill_rect_top_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height);
+        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
+        // Solid lower part (below the rounded top strip)
+        if height > r {
+            self.fill_rect(x, y + r, width, height - r, color);
+        }
+        // Top rounded strip
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                self.fill_rect_alpha(x + int_offset - 1, y + dy, 1, 1, color, aa);
+                self.fill_rect_alpha(x + width - int_offset, y + dy, 1, 1, color, aa);
+            }
+            let row_x = x + int_offset;
+            let row_w = width.saturating_sub(int_offset * 2);
+            if row_w > 0 { self.fill_rect(row_x, y + dy, row_w, 1, color); }
+        }
+    }
+
+    /// Fill a rectangle with only the BOTTOM two corners anti-aliased and rounded.
+    /// Top edge is flat (no rounding). Used for content areas inside rounded windows.
+    pub fn fill_rect_bottom_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height);
+        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
+        // Solid upper part
+        if height > r {
+            self.fill_rect(x, y, width, height - r, color);
+        }
+        // Bottom rounded strip
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
+            let row_y = y + height - 1 - dy;
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                self.fill_rect_alpha(x + int_offset - 1, row_y, 1, 1, color, aa);
+                self.fill_rect_alpha(x + width - int_offset, row_y, 1, 1, color, aa);
+            }
+            let row_x = x + int_offset;
+            let row_w = width.saturating_sub(int_offset * 2);
+            if row_w > 0 { self.fill_rect(row_x, row_y, row_w, 1, color); }
+        }
+    }
+
     /// Blit the contents of this framebuffer to another framebuffer.
     /// This is an optimized line-by-line copy.
     pub fn blit(&self, other: &Framebuffer) {
@@ -566,6 +700,18 @@ fn isqrt(n: u32) -> u32 {
         y = (x + n / x) / 2;
     }
     x
+}
+
+/// Returns the fractional part of sqrt(n) scaled by 256,
+/// given `sq_int = floor(sqrt(n))`. Uses linear interpolation
+/// between consecutive perfect squares — accurate enough for
+/// sub-pixel anti-aliasing.
+#[inline]
+fn frac_sqrt_256(n: u32, sq_int: u32) -> u32 {
+    if sq_int == 0 { return 0; }
+    let step = 2 * sq_int + 1; // distance between sq_int² and (sq_int+1)²
+    let remainder = n - sq_int * sq_int;
+    (remainder * 256) / step
 }
 
 // ============================================================================
@@ -788,6 +934,29 @@ impl SharedSurface {
         }
     }
 
+    /// Draw a pixel with alpha blending over whatever is already on the surface.
+    /// `alpha` = 0 → fully transparent (no-op), 255 → fully opaque (same as draw_pixel).
+    #[inline]
+    fn draw_pixel_blend(&self, x: u32, y: u32, color: Color, alpha: u8) {
+        if x >= self.width || y >= self.height { return; }
+        if alpha == 255 { self.draw_pixel(x, y, color); return; }
+        if alpha == 0   { return; }
+        if let Some(ptr) = self.pixel_ptr(x, y) {
+            unsafe {
+                let existing = core::ptr::read_volatile(ptr);
+                let er = (existing        & 0xFF) as u32;
+                let eg = ((existing >> 8) & 0xFF) as u32;
+                let eb = ((existing >> 16) & 0xFF) as u32;
+                let a    = alpha as u32;
+                let ia   = 255 - a;
+                let nr = (er * ia + color.r as u32 * a) / 255;
+                let ng = (eg * ia + color.g as u32 * a) / 255;
+                let nb = (eb * ia + color.b as u32 * a) / 255;
+                core::ptr::write_volatile(ptr, (nb << 16) | (ng << 8) | nr);
+            }
+        }
+    }
+
     /// Fill a rectangle
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: Color) {
         let pixel = color.to_bgr32();
@@ -879,6 +1048,147 @@ impl SharedSurface {
                 self.fill_rect(row_x, y + dy, row_w, 1, color);
                 self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color);
             }
+        }
+    }
+
+    /// Fill a rectangle with anti-aliased rounded corners.
+    /// Corner edges are sub-pixel blended with whatever is already on the surface,
+    /// eliminating the staircase effect present in `fill_rect_rounded`.
+    pub fn fill_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        // Solid middle band
+        self.fill_rect(x, y + r, width, height.saturating_sub(r * 2), color);
+
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);  // (sqrt(n) - sq) * 256
+
+            // exact offset from edge = r - (sq + frac/256) = int_offset - frac/256
+            let int_offset = r - sq;
+
+            // Anti-alias pixel: one step outside the solid start
+            // coverage = frac/256  →  alpha = frac as u8
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                let ax_l = x + int_offset - 1;
+                let ax_r = x + width - int_offset;
+                self.draw_pixel_blend(ax_l, y + dy,                  color, aa);
+                self.draw_pixel_blend(ax_r, y + dy,                  color, aa);
+                self.draw_pixel_blend(ax_l, y + height - 1 - dy,     color, aa);
+                self.draw_pixel_blend(ax_r, y + height - 1 - dy,     color, aa);
+            }
+
+            // Solid fill for this row
+            let row_x = x + int_offset;
+            let row_w = width.saturating_sub(int_offset * 2);
+            if row_w > 0 {
+                self.fill_rect(row_x, y + dy,                 row_w, 1, color);
+                self.fill_rect(row_x, y + height - 1 - dy,    row_w, 1, color);
+            }
+        }
+    }
+
+    /// Draw an anti-aliased rounded rectangle outline (1-pixel border).
+    /// Each corner arc pixel is sub-pixel blended for smoothness.
+    pub fn draw_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height / 2);
+        if r == 0 {
+            self.draw_rect(x, y, width, height, color);
+            return;
+        }
+        // Straight edges
+        self.draw_hline(x + r, y,                width.saturating_sub(r * 2), color);
+        self.draw_hline(x + r, y + height - 1,   width.saturating_sub(r * 2), color);
+        self.draw_vline(x,                y + r, height.saturating_sub(r * 2), color);
+        self.draw_vline(x + width - 1,    y + r, height.saturating_sub(r * 2), color);
+
+        // Corner arcs — Wu-style: main pixel + outer AA pixel
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+
+            let int_offset = r - sq;
+
+            // Main arc pixel (fully opaque, just inside the mathematical arc)
+            let main_alpha = 255u8;
+            // Outer AA pixel (blended, just outside the arc)
+            let aa_alpha = frac as u8;
+
+            // Left side
+            let mx_l = x + int_offset;
+            let mx_r = x + width - 1 - int_offset;
+            self.draw_pixel_blend(mx_l, y + dy,              color, main_alpha);
+            self.draw_pixel_blend(mx_r, y + dy,              color, main_alpha);
+            self.draw_pixel_blend(mx_l, y + height - 1 - dy, color, main_alpha);
+            self.draw_pixel_blend(mx_r, y + height - 1 - dy, color, main_alpha);
+
+            if aa_alpha > 0 && int_offset > 0 {
+                let ax_l = x + int_offset - 1;
+                let ax_r = x + width - int_offset;
+                self.draw_pixel_blend(ax_l, y + dy,              color, aa_alpha);
+                self.draw_pixel_blend(ax_r, y + dy,              color, aa_alpha);
+                self.draw_pixel_blend(ax_l, y + height - 1 - dy, color, aa_alpha);
+                self.draw_pixel_blend(ax_r, y + height - 1 - dy, color, aa_alpha);
+            }
+        }
+    }
+
+    /// Fill a rectangle with only the TOP two corners anti-aliased and rounded.
+    /// Bottom edge is flat. Used for header bars inside rounded windows.
+    pub fn fill_rect_top_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height);
+        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
+        if height > r { self.fill_rect(x, y + r, width, height - r, color); }
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                self.draw_pixel_blend(x + int_offset - 1,  y + dy, color, aa);
+                self.draw_pixel_blend(x + width - int_offset, y + dy, color, aa);
+            }
+            let row_x = x + int_offset;
+            let row_w = width.saturating_sub(int_offset * 2);
+            if row_w > 0 { self.fill_rect(row_x, y + dy, row_w, 1, color); }
+        }
+    }
+
+    /// Fill a rectangle with only the BOTTOM two corners anti-aliased and rounded.
+    /// Top edge is flat. Used for content areas inside rounded windows.
+    pub fn fill_rect_bottom_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
+        if width == 0 || height == 0 { return; }
+        let r = radius.min(width / 2).min(height);
+        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
+        if height > r { self.fill_rect(x, y, width, height - r, color); }
+        for dy in 0..r {
+            let fy = r - dy;
+            let n    = r * r - fy * fy;
+            let sq   = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
+            let row_y = y + height - 1 - dy;
+            if frac > 0 && int_offset > 0 {
+                let aa = frac as u8;
+                self.draw_pixel_blend(x + int_offset - 1,  row_y, color, aa);
+                self.draw_pixel_blend(x + width - int_offset, row_y, color, aa);
+            }
+            let row_x = x + int_offset;
+            let row_w = width.saturating_sub(int_offset * 2);
+            if row_w > 0 { self.fill_rect(row_x, row_y, row_w, 1, color); }
         }
     }
 
