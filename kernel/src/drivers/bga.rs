@@ -193,9 +193,6 @@ const PCI_BAR_IO_BIT: u32 = 0x01;
 // Supported Video Modes
 // ============================================================================
 
-/// Maximum number of modes in the static table.
-/// Re-exported from `atom_abi` so userspace and kernel always agree.
-pub use atom_abi::VIDEO_MAX_MODES as MAX_VIDEO_MODES;
 
 /// Represents a single display mode.
 /// All modes use 32 BPP (BGRA 8-8-8-8).
