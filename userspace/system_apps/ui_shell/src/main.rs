@@ -511,6 +511,19 @@ struct PendingWindow {
     window_id: WindowId,
 }
 
+/// A window whose close has been requested but whose shared-surface destruction
+/// is deferred so the client has time to notice the TerminateRequest and exit
+/// cleanly (avoiding page faults from accessing unmapped shared memory).
+struct PendingClose {
+    window_id: WindowId,
+    deadline_tick: u32,
+}
+
+/// Grace period (in ~10 ms ticks) before a closing window's shared memory is
+/// actually destroyed.  200 ticks ≈ 2 seconds — plenty of time for any client
+/// to process the TerminateRequest and unmap its side.
+const CLOSE_GRACE_TICKS: u32 = 200;
+
 struct DesktopIcon {
     label: String,
     executable: String,
@@ -562,6 +575,7 @@ struct Compositor {
     event_port: PortId,
     register_port: PortId,
     pending_windows: Vec<PendingWindow>,
+    pending_close: Vec<PendingClose>,
     dirty: bool,
     mouse_left_down: bool,
     mouse_right_down: bool,
@@ -637,6 +651,7 @@ impl Compositor {
             event_port,
             register_port,
             pending_windows: Vec::new(),
+            pending_close: Vec::new(),
             dirty: true,
             mouse_left_down: false,
             mouse_right_down: false,
@@ -701,6 +716,8 @@ impl Compositor {
             }
 
             self.poll_input();
+
+            self.reap_pending_closes();
 
             if self.dirty {
                 self.draw_all();
@@ -1452,8 +1469,56 @@ impl Compositor {
             let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
         }
 
-        self.wm.close_window(id);
+        // Hide the window immediately so it disappears from the screen,
+        // but defer actual destruction (which frees the shared surface) so
+        // the client process has time to receive the TerminateRequest and
+        // stop writing to the shared memory before it is unmapped.
+        if let Some(w) = self.wm.get_window_mut(id) {
+            w.visible = false;
+        }
+
+        // Update focus away from the closing window
+        if self.wm.focused_id == Some(id) {
+            self.wm.focused_id = self.wm.windows.iter()
+                .filter(|w| w.visible && w.id != id && w.state != WindowState::Minimized)
+                .last()
+                .map(|w| w.id);
+            if let Some(new_focus) = self.wm.focused_id {
+                self.wm.focus_window(new_focus);
+            }
+        }
+
+        self.pending_close.push(PendingClose {
+            window_id: id,
+            deadline_tick: self.ticks.wrapping_add(CLOSE_GRACE_TICKS),
+        });
+
         self.dirty = true;
+    }
+
+    /// Reap windows whose close grace period has expired, destroying their
+    /// shared surfaces.  Called every tick from the main loop.
+    fn reap_pending_closes(&mut self) {
+        let current = self.ticks;
+        let mut reaped = false;
+        // Collect IDs whose deadline has passed (handle wrapping arithmetic)
+        let mut to_close: Vec<WindowId> = Vec::new();
+        for pc in self.pending_close.iter() {
+            // wrapping_sub: if current >= deadline (mod 2^32), time has elapsed
+            if current.wrapping_sub(pc.deadline_tick) < 0x8000_0000 {
+                to_close.push(pc.window_id);
+            }
+        }
+        for id in to_close.iter() {
+            self.wm.close_window(*id);
+            reaped = true;
+        }
+        self.pending_close.retain(|pc| {
+            current.wrapping_sub(pc.deadline_tick) >= 0x8000_0000
+        });
+        if reaped {
+            self.dirty = true;
+        }
     }
 
     fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {

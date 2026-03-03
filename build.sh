@@ -363,6 +363,48 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
 
     # -------------------------------------------------------------------------
+    # Build libtinygl (TinyGL 0.4.1 — software OpenGL library)
+    # Depends on libc being built first
+    # Output → userspace/libs/tinygl/build/libtinygl.a
+    # -------------------------------------------------------------------------
+    step "Building libtinygl (TinyGL 0.4.1)..."
+
+    if [ -f "userspace/libs/tinygl/Makefile" ]; then
+        if make -C userspace/libs/tinygl 2>build/libtinygl.log; then
+            success "libtinygl.a built"
+        else
+            warning "libtinygl build failed (see build/libtinygl.log)"
+            cat build/libtinygl.log
+        fi
+    else
+        warning "userspace/libs/tinygl/Makefile not found, skipping libtinygl build"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Build tinygl_demo (TinyGL 0.4.1 gears demo)
+    # Depends on libc + libtinygl being built first; uses its own Makefile
+    # Output → efi/apps/user/
+    # -------------------------------------------------------------------------
+    step "Building tinygl_demo (OpenGL gears)..."
+
+    if [ -f "userspace/apps/tinygl_demo/Makefile" ]; then
+        if make -C userspace/apps/tinygl_demo 2>build/tinygl_demo.log; then
+            if [ -f "userspace/apps/tinygl_demo/tinygl_demo.atxf" ]; then
+                mkdir -p efi/apps/user
+                cp userspace/apps/tinygl_demo/tinygl_demo.atxf efi/apps/user/tinygl_demo.atxf
+                success "tinygl_demo.atxf → apps/user/"
+            else
+                warning "tinygl_demo.atxf não gerado (elf2atxf pode estar ausente)"
+            fi
+        else
+            warning "Falha ao compilar tinygl_demo (veja build/tinygl_demo.log)"
+            cat build/tinygl_demo.log
+        fi
+    else
+        warning "userspace/apps/tinygl_demo/Makefile não encontrado, pulando"
+    fi
+
+    # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
     # -------------------------------------------------------------------------

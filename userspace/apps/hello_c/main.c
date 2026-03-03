@@ -129,7 +129,8 @@ static void hdr_init(MsgHeader *h, uint32_t type, uint32_t psz) {
 #define MSG_WM_REQUEST  800u
 #define MSG_WM_RESPONSE 801u
 #define MSG_WM_COMMIT   803u
-#define MSG_QUIT        402u
+#define MSG_QUIT                402u
+#define MSG_TERMINATE_REQUEST  510u
 #define MSG_KEY_PRESS     3u
 
 /* WmRequestType::CreateWindow = 1 */
@@ -681,7 +682,7 @@ int main(void) {
         int n = ipc_recv(event_port, evbuf, (uint32_t)sizeof(evbuf));
         if (n < (int)HDR_SIZE) { sc0(SYS_THREAD_YIELD); continue; }
         MsgHeader *h = (MsgHeader *)evbuf;
-        if (h->msg_type == MSG_QUIT) break;
+        if (h->msg_type == MSG_QUIT || h->msg_type == MSG_TERMINATE_REQUEST) break;
         /* Redraw on any window event */
         render(&canvas);
         wm_commit(wm_port, win.window_id);

@@ -342,6 +342,65 @@ if (-not $Kernel) {
         Write-Warning "userspace\apps\hello_c\Makefile não encontrado, pulando"
     }
 
+    # -------------------------------------------------------------------------
+    # Build libtinygl (TinyGL 0.4.1 — biblioteca OpenGL software)
+    # Depende da libc já compilada
+    # Saída → userspace\libs\tinygl\build\libtinygl.a
+    # -------------------------------------------------------------------------
+    Write-Step "Compilando libtinygl (TinyGL 0.4.1)..."
+
+    if (Test-Path "userspace\libs\tinygl\Makefile") {
+        $makeCmd = Get-Command "make" -ErrorAction SilentlyContinue
+        if ($makeCmd) {
+            Push-Location "userspace\libs\tinygl"
+            make *> "$REPO_PATH\build\libtinygl.log"
+            $tglExit = $LASTEXITCODE
+            Pop-Location
+            if ($tglExit -eq 0) {
+                Write-Success "libtinygl.a compilada"
+            } else {
+                Write-Warning "Falha ao compilar libtinygl (veja build\libtinygl.log)"
+                Get-Content "$REPO_PATH\build\libtinygl.log" -Tail 20 | Write-Host
+            }
+        } else {
+            Write-Warning "'make' não encontrado — pulando libtinygl (instale MinGW/MSYS2)"
+        }
+    } else {
+        Write-Warning "userspace\libs\tinygl\Makefile não encontrado, pulando build da libtinygl"
+    }
+
+    # -------------------------------------------------------------------------
+    # Build tinygl_demo (demo gears TinyGL 0.4.1)
+    # Depende da libc + libtinygl já compiladas; usa Makefile próprio
+    # Saída → efi\apps\user\
+    # -------------------------------------------------------------------------
+    Write-Step "Compilando tinygl_demo (gears OpenGL)..."
+
+    if (Test-Path "userspace\apps\tinygl_demo\Makefile") {
+        $makeCmd = Get-Command "make" -ErrorAction SilentlyContinue
+        if ($makeCmd) {
+            Push-Location "userspace\apps\tinygl_demo"
+            make *> "$REPO_PATH\build\tinygl_demo.log"
+            $tglDemoExit = $LASTEXITCODE
+            Pop-Location
+            if ($tglDemoExit -eq 0) {
+                if (Test-Path "userspace\apps\tinygl_demo\tinygl_demo.atxf") {
+                    Copy-Item "userspace\apps\tinygl_demo\tinygl_demo.atxf" "efi\apps\user\tinygl_demo.atxf" -Force
+                    Write-Success "tinygl_demo.atxf → apps\user\"
+                } else {
+                    Write-Warning "tinygl_demo.atxf não gerado (elf2atxf pode estar ausente)"
+                }
+            } else {
+                Write-Warning "Falha ao compilar tinygl_demo (veja build\tinygl_demo.log)"
+                Get-Content "$REPO_PATH\build\tinygl_demo.log" -Tail 20 | Write-Host
+            }
+        } else {
+            Write-Warning "'make' não encontrado — pulando tinygl_demo (instale MinGW/MSYS2)"
+        }
+    } else {
+        Write-Warning "userspace\apps\tinygl_demo\Makefile não encontrado, pulando"
+    }
+
     # init.atxf é o payload PID 1 — deve ficar na partição EFI para que o
     # bootloader UEFI o carregue antes do ExitBootServices().
     if (Test-Path "efi\system\services\init.atxf") {
