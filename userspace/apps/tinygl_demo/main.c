@@ -623,7 +623,7 @@ int main(void)
         gears_draw();
 
         /* Blit RGB565 → ARGB32 into the compositor shared surface */
-        tgl_blit_to_argb32(ctx, 0, surface, win.stride);
+        tgl_blit_to_argb32(scratch, tw, th, tw, surface, win.stride);
 
         /* Tell compositor to composite and display the frame */
         wm_commit(wm_port, win.window_id);

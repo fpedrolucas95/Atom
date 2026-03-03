@@ -17,23 +17,14 @@
  */
 
 #include "atomos_tgl.h"
-#include "zbuffer.h"      /* internal TinyGL header — compiled as part of libtinygl */
 #include <stdint.h>
 
-void tgl_blit_to_argb32(ostgl_context *ctx, int buf_idx,
-                          uint32_t *dst, uint32_t dst_stride_px)
+void tgl_blit_to_argb32(const uint16_t *src, uint32_t w, uint32_t h,
+                         uint32_t src_stride_px,
+                         uint32_t *dst, uint32_t dst_stride_px)
 {
-    ZBuffer *zb = (ZBuffer *)ctx->zbs[buf_idx];
-
-    /* TinyGL stores pixels as uint16_t RGB565; linesize is in *bytes*. */
-    const uint16_t *src    = (const uint16_t *)zb->pbuf;
-    uint32_t        w      = (uint32_t)zb->xsize;
-    uint32_t        h      = (uint32_t)zb->ysize;
-    /* src_stride in pixels = linesize / sizeof(uint16_t) */
-    uint32_t        sspx   = (uint32_t)((unsigned)zb->linesize >> 1u);
-
     for (uint32_t y = 0; y < h; y++) {
-        const uint16_t *srow = src + y * sspx;
+        const uint16_t *srow = src + y * src_stride_px;
         uint32_t       *drow = dst + y * dst_stride_px;
 
         for (uint32_t x = 0; x < w; x++) {
