@@ -123,10 +123,10 @@ const DEFAULT_H: u16 = 768;
 ///
 /// Returns the populated mode array and count.  Falls back to an empty list
 /// if the syscall reports zero modes (BGA not available in this environment).
-fn query_modes() -> ([Mode; VIDEO_VIDEO_MAX_MODES], usize) {
-    let count = video_mode_count().min(VIDEO_VIDEO_MAX_MODES);
+fn query_modes() -> ([Mode; VIDEO_MAX_MODES], usize) {
+    let count = video_mode_count().min(VIDEO_MAX_MODES);
     if count == 0 {
-        return ([Mode { width: 0, height: 0 }; VIDEO_VIDEO_MAX_MODES], 0);
+        return ([Mode { width: 0, height: 0 }; VIDEO_MAX_MODES], 0);
     }
 
     let mut raw = [VideoModeEntry::default(); VIDEO_MAX_MODES];
@@ -359,10 +359,12 @@ impl DisplaySettings {
 
         // ── Info line below list ──────────────────────────────────────────────
         let info_y = list_top + list_h + 4;
-        let m = self.modes[self.selected];
-        let mut ibuf = [0u8; 44];
-        let info = fmt_info(&mut ibuf, m.width, m.height);
-        surface.draw_string(PAD, info_y, info, theme::TEXT_DIM, theme::BG);
+        if self.mode_count > 0 {
+            let m = self.modes[self.selected];
+            let mut ibuf = [0u8; 44];
+            let info = fmt_info(&mut ibuf, m.width, m.height);
+            surface.draw_string(PAD, info_y, info, theme::TEXT_DIM, theme::BG);
+        }
 
         // ── Divider ───────────────────────────────────────────────────────────
         let div_y = h - BTN_BAR_H - STATUS_H;
