@@ -64,7 +64,7 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 use core::panic::PanicInfo;
-use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::thread::{sleep_ms, exit};
 use atom_syscall::debug::log;
 use libgui::application::Application;
 use libgui::color::Color;
@@ -120,7 +120,7 @@ fn main() -> ! {
         if x == 0 || x + 50 >= surface.width() { dx = -dx; }
         if y == 0 || y + 50 >= surface.height() { dy = -dy; }
 
-        yield_now();
+        sleep_ms(16);
     }
 }
 
