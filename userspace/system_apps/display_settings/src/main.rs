@@ -27,7 +27,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::panic::PanicInfo;
 
-use atom_syscall::graphics::SharedSurface;
+use atom_syscall::graphics::{SharedSurface, VideoModeEntry, get_video_modes, video_mode_count};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
@@ -108,28 +108,50 @@ mod theme {
 }
 
 // ============================================================================
-// Supported modes (mirrors kernel bga::SUPPORTED_MODES order)
+// Video mode list (queried from the kernel at startup)
 // ============================================================================
+
+/// Maximum number of modes the UI can display.
+/// Must be >= kernel bga::MAX_VIDEO_MODES (currently 16).
+const MAX_MODES: usize = 16;
 
 #[derive(Clone, Copy)]
 struct Mode { width: u16, height: u16 }
 
-const MODES: [Mode; 12] = [
-    Mode { width: 640,  height: 480  },
-    Mode { width: 800,  height: 600  },
-    Mode { width: 1024, height: 600  },
-    Mode { width: 1024, height: 768  },
-    Mode { width: 1152, height: 864  },
-    Mode { width: 1280, height: 720  },
-    Mode { width: 1280, height: 800  },
-    Mode { width: 1280, height: 1024 },
-    Mode { width: 1360, height: 768  },
-    Mode { width: 1440, height: 900  },
-    Mode { width: 1600, height: 900  },
-    Mode { width: 1920, height: 1080 },
-];
+/// Default resolution used by "Restore Default".
+const DEFAULT_W: u16 = 1024;
+const DEFAULT_H: u16 = 768;
 
-const DEFAULT_IDX: usize = 3; // 1024×768
+/// Query available video modes from the kernel.
+///
+/// Returns the populated mode array and count.  Falls back to an empty list
+/// if the syscall reports zero modes (BGA not available in this environment).
+fn query_modes() -> ([Mode; MAX_MODES], usize) {
+    let count = video_mode_count().min(MAX_MODES);
+    if count == 0 {
+        return ([Mode { width: 0, height: 0 }; MAX_MODES], 0);
+    }
+
+    let mut raw = [VideoModeEntry::default(); MAX_MODES];
+    let written = get_video_modes(&mut raw[..count]);
+
+    let mut modes = [Mode { width: 0, height: 0 }; MAX_MODES];
+    for i in 0..written {
+        modes[i] = Mode { width: raw[i].width as u16, height: raw[i].height as u16 };
+    }
+    (modes, written)
+}
+
+/// Find the index of the default resolution (1024×768) in the mode list,
+/// or 0 if it is absent.
+fn default_idx(modes: &[Mode], count: usize) -> usize {
+    for i in 0..count {
+        if modes[i].width == DEFAULT_W && modes[i].height == DEFAULT_H {
+            return i;
+        }
+    }
+    0
+}
 
 // ============================================================================
 // Status message
@@ -190,6 +212,8 @@ struct DisplaySettings {
     surface:         Option<SharedSurface>,
     surface_w:       u32,
     surface_h:       u32,
+    modes:           [Mode; MAX_MODES],
+    mode_count:      usize,
     selected:        usize,
     scroll:          usize,
     dirty:           bool,
@@ -199,14 +223,18 @@ struct DisplaySettings {
 
 impl DisplaySettings {
     fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
-           surface: SharedSurface) -> Self {
+           surface: SharedSurface,
+           modes: [Mode; MAX_MODES], mode_count: usize) -> Self {
         let w = surface.width();
         let h = surface.height();
+        let sel = default_idx(&modes, mode_count);
         let mut s = Self {
             window_id, compositor_port, local_port,
             surface_w: w, surface_h: h,
             surface: Some(surface),
-            selected: DEFAULT_IDX,
+            modes,
+            mode_count,
+            selected: sel,
             scroll: 0,
             dirty: true,
             status: Status::new(),
@@ -236,7 +264,7 @@ impl DisplaySettings {
     }
 
     fn clamp_scroll(&mut self) {
-        let max_scroll = MODES.len().saturating_sub(VISIBLE_ROWS);
+        let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS);
         if self.scroll > max_scroll { self.scroll = max_scroll; }
         if self.selected < self.scroll { self.scroll = self.selected; }
         if self.selected >= self.scroll + VISIBLE_ROWS {
@@ -283,8 +311,8 @@ impl DisplaySettings {
 
         for i in 0..VISIBLE_ROWS {
             let idx = self.scroll + i;
-            if idx >= MODES.len() { break; }
-            let m = MODES[idx];
+            if idx >= self.mode_count { break; }
+            let m = self.modes[idx];
             let ry = list_top + i as u32 * ROW_H;
             let sel = idx == self.selected;
 
@@ -320,11 +348,11 @@ impl DisplaySettings {
         let list_h = VISIBLE_ROWS as u32 * ROW_H;
         surface.fill_rect(sb_x, list_top, SB_W, list_h, theme::SCROLLBAR);
 
-        let total  = MODES.len() as u32;
+        let total  = self.mode_count as u32;
         let vis    = VISIBLE_ROWS as u32;
-        let thumb_h = ((list_h * vis) / total).max(12).min(list_h);
+        let thumb_h = if total > 0 { ((list_h * vis) / total).max(12).min(list_h) } else { list_h };
         let track_h = list_h - thumb_h;
-        let max_sc  = (MODES.len() - VISIBLE_ROWS) as u32;
+        let max_sc  = self.mode_count.saturating_sub(VISIBLE_ROWS) as u32;
         let thumb_y = if max_sc > 0 {
             list_top + track_h * self.scroll as u32 / max_sc
         } else {
@@ -334,7 +362,7 @@ impl DisplaySettings {
 
         // ── Info line below list ──────────────────────────────────────────────
         let info_y = list_top + list_h + 4;
-        let m = MODES[self.selected];
+        let m = self.modes[self.selected];
         let mut ibuf = [0u8; 44];
         let info = fmt_info(&mut ibuf, m.width, m.height);
         surface.draw_string(PAD, info_y, info, theme::TEXT_DIM, theme::BG);
@@ -394,7 +422,8 @@ impl DisplaySettings {
     // ── Input ─────────────────────────────────────────────────────────────────
 
     fn apply_selected(&mut self) {
-        let m = MODES[self.selected];
+        if self.mode_count == 0 { return; }
+        let m = self.modes[self.selected];
         match atom_syscall::graphics::set_video_mode(m.width, m.height, 32) {
             Ok(()) => {
                 self.notify_mode_changed();
@@ -407,9 +436,9 @@ impl DisplaySettings {
     }
 
     fn restore_default(&mut self) {
-        self.selected = DEFAULT_IDX;
+        self.selected = default_idx(&self.modes, self.mode_count);
         self.clamp_scroll();
-        let m = MODES[DEFAULT_IDX];
+        let m = self.modes[self.selected];
         match atom_syscall::graphics::set_video_mode(m.width, m.height, 32) {
             Ok(()) => {
                 self.notify_mode_changed();
@@ -429,7 +458,7 @@ impl DisplaySettings {
                     self.clamp_scroll(); self.dirty = true;
                 }
                 0x50 => { // Down
-                    if self.selected + 1 < MODES.len() { self.selected += 1; }
+                    if self.selected + 1 < self.mode_count { self.selected += 1; }
                     self.clamp_scroll(); self.dirty = true;
                 }
                 0x49 => { // Page Up
@@ -437,7 +466,8 @@ impl DisplaySettings {
                     self.clamp_scroll(); self.dirty = true;
                 }
                 0x51 => { // Page Down
-                    self.selected = (self.selected + VISIBLE_ROWS).min(MODES.len() - 1);
+                    let last = self.mode_count.saturating_sub(1);
+                    self.selected = (self.selected + VISIBLE_ROWS).min(last);
                     self.clamp_scroll(); self.dirty = true;
                 }
                 _ => {}
@@ -456,7 +486,7 @@ impl DisplaySettings {
         if dz > 0 {
             if self.scroll > 0 { self.scroll -= 1; }
         } else if dz < 0 {
-            let max_scroll = MODES.len().saturating_sub(VISIBLE_ROWS);
+            let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS);
             if self.scroll < max_scroll { self.scroll += 1; }
         }
         self.dirty = true;
@@ -487,7 +517,7 @@ impl DisplaySettings {
         {
             let row = ((y - list_top) / ROW_H as i32) as usize;
             let idx = self.scroll + row;
-            if idx < MODES.len() {
+            if idx < self.mode_count {
                 self.selected = idx;
                 self.clamp_scroll();
                 self.dirty = true;
@@ -650,9 +680,13 @@ fn main() -> ! {
         Err(_) => { log("DisplaySettings: surface map failed"); exit(1); }
     };
 
+    // Query available video modes from the kernel so the UI always reflects
+    // the actual set supported by the current hardware/driver.
+    let (modes, mode_count) = query_modes();
     log("DisplaySettings: entering event loop");
 
-    let mut app = DisplaySettings::new(sa.window_id, sa.compositor_port, port, surface);
+    let mut app = DisplaySettings::new(sa.window_id, sa.compositor_port, port, surface,
+                                       modes, mode_count);
     app.run();
     exit(0);
 }

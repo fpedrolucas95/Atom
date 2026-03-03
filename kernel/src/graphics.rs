@@ -79,6 +79,43 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 // ============================================================================
+// Error Type
+// ============================================================================
+
+/// Typed errors returned by `set_video_mode`.
+///
+/// This enum provides a stable, matchable error type that syscall handlers
+/// can map to errno codes without inspecting error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoModeError {
+    /// Resolution is zero, or width is not a multiple of 8.
+    InvalidResolution,
+    /// Bits-per-pixel value is not supported (only 32 BPP accepted).
+    UnsupportedBpp,
+    /// The requested mode exceeds the available framebuffer memory.
+    ExceedsLfbSize,
+    /// The BGA device is not present or not initialised.
+    DeviceNotAvailable,
+    /// The hardware did not accept the programmed mode on readback.
+    HardwareRejected,
+    /// The active graphics backend does not support dynamic mode changes.
+    BackendUnsupported,
+}
+
+impl From<bga::BgaError> for VideoModeError {
+    fn from(e: bga::BgaError) -> Self {
+        match e {
+            bga::BgaError::InvalidResolution => VideoModeError::InvalidResolution,
+            bga::BgaError::WidthMisaligned   => VideoModeError::InvalidResolution,
+            bga::BgaError::UnsupportedBpp    => VideoModeError::UnsupportedBpp,
+            bga::BgaError::ExceedsLfbSize    => VideoModeError::ExceedsLfbSize,
+            bga::BgaError::NotAvailable      => VideoModeError::DeviceNotAvailable,
+            bga::BgaError::HardwareRejected  => VideoModeError::HardwareRejected,
+        }
+    }
+}
+
+// ============================================================================
 // Video Backend Enumeration
 // ============================================================================
 
@@ -263,7 +300,7 @@ pub fn init_bga() {
             }
         }
         Err(e) => {
-            crate::log_warn!("graphics", "BGA mode set failed ({}); keeping GOP", e);
+            crate::log_warn!("graphics", "BGA mode set failed ({:?}); keeping GOP", e);
         }
     }
 }
@@ -279,24 +316,23 @@ pub fn is_initialized() -> bool {
 /// Attempt to set a new video mode. Only BGA backend supports mode changes.
 ///
 /// Returns `Ok(())` on success. Updates VIDEO_MODE_STATE atomically.
-/// Returns `Err` with a descriptive string on failure (EINVAL, ENOTSUP, etc.).
-pub fn set_video_mode(width: u16, height: u16, bpp: u8) -> Result<(), &'static str> {
+/// Returns `Err(VideoModeError)` on failure; callers can match on the variant
+/// to determine the appropriate errno code without string matching.
+pub fn set_video_mode(width: u16, height: u16, bpp: u8) -> Result<(), VideoModeError> {
     let backend = *VIDEO_MODE_STATE.backend.lock();
 
     match backend {
         VideoBackend::Bga => {
-            bga::set_video_mode(width, height, bpp, true)?;
+            bga::set_video_mode(width, height, bpp, true)
+                .map_err(VideoModeError::from)?;
 
             if let Some((lfb_phys, w, h, pitch, bpp_bytes)) = bga::get_current_mode_info() {
                 VIDEO_MODE_STATE.set_from_bga(lfb_phys, w, h, pitch, bpp_bytes);
             }
             Ok(())
         }
-        VideoBackend::UefiGop => {
-            Err("UEFI GOP does not support runtime mode changes; BGA required")
-        }
-        VideoBackend::None => {
-            Err("no graphics backend available")
+        VideoBackend::UefiGop | VideoBackend::None => {
+            Err(VideoModeError::BackendUnsupported)
         }
     }
 }

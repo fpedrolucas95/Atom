@@ -90,6 +90,30 @@ use crate::{log_info, log_warn, log_error};
 use crate::mm::vm;
 
 // ============================================================================
+// Error Type
+// ============================================================================
+
+/// Typed errors returned by BGA mode-setting operations.
+///
+/// Using a typed enum rather than `&'static str` lets callers match on
+/// specific failure modes without brittle substring checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgaError {
+    /// Width or height is zero.
+    InvalidResolution,
+    /// Width is not a multiple of 8 (BGA hardware requirement).
+    WidthMisaligned,
+    /// Only 32 BPP is supported by this driver.
+    UnsupportedBpp,
+    /// The requested mode would exceed the mapped LFB region.
+    ExceedsLfbSize,
+    /// BGA hardware is not present or not initialised.
+    NotAvailable,
+    /// Hardware did not accept the programmed resolution on readback.
+    HardwareRejected,
+}
+
+// ============================================================================
 // VBE DISPI I/O Port Definitions
 // ============================================================================
 
@@ -648,19 +672,19 @@ pub fn is_available() -> bool {
 ///   - Width and height must be > 0
 ///   - The framebuffer must fit in the mapped LFB region
 ///   - Only 32 BPP is supported by this driver
-fn validate_mode(width: u16, height: u16, bpp: u8, lfb_size: usize) -> Result<(), &'static str> {
+fn validate_mode(width: u16, height: u16, bpp: u8, lfb_size: usize) -> Result<(), BgaError> {
     if width == 0 || height == 0 {
-        return Err("resolution cannot be zero");
+        return Err(BgaError::InvalidResolution);
     }
     if width % 8 != 0 {
-        return Err("width must be divisible by 8 (BGA hardware requirement)");
+        return Err(BgaError::WidthMisaligned);
     }
     if bpp != 32 {
-        return Err("only 32 BPP is supported by this driver");
+        return Err(BgaError::UnsupportedBpp);
     }
     let required = (width as usize) * (height as usize) * ((bpp as usize + 7) / 8);
     if required > lfb_size {
-        return Err("requested mode exceeds LFB size");
+        return Err(BgaError::ExceedsLfbSize);
     }
     Ok(())
 }
@@ -679,11 +703,11 @@ fn validate_mode(width: u16, height: u16, bpp: u8, lfb_size: usize) -> Result<()
 /// - Acquires BGA_STATE lock for the duration.
 /// - Issues port I/O to hardware.
 /// - The screen will briefly show garbage during the disable/enable sequence.
-pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(), &'static str> {
+pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(), BgaError> {
     let mut state = BGA_STATE.lock();
 
     if !state.available {
-        return Err("BGA not available");
+        return Err(BgaError::NotAvailable);
     }
 
     validate_mode(width, height, bpp, state.lfb_size)?;
@@ -728,7 +752,7 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
             "Mode verification failed: requested {}x{} but got {}x{}",
             width, height, actual_xres, actual_yres
         );
-        return Err("hardware rejected the requested resolution");
+        return Err(BgaError::HardwareRejected);
     }
 
     // 7. Update state
@@ -751,10 +775,10 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
 /// Preserves the existing VRAM content where possible (NOCLEARMEM flag).
 /// After this call, the caller is responsible for redrawing the framebuffer
 /// since the new resolution may differ from the old one.
-pub fn update_resolution(new_width: u16, new_height: u16) -> Result<(), &'static str> {
+pub fn update_resolution(new_width: u16, new_height: u16) -> Result<(), BgaError> {
     // Validate alignment first
     if new_width % 8 != 0 {
-        return Err("width must be divisible by 8");
+        return Err(BgaError::WidthMisaligned);
     }
     // Preserve VRAM content (no clear) since the compositor will repaint.
     set_video_mode(new_width, new_height, 32, false)

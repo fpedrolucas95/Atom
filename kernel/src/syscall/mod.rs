@@ -5095,17 +5095,15 @@ fn sys_set_video_mode(packed_res: u64, bpp_raw: u64) -> u64 {
             log_info!("syscall", "Video mode set: {}x{}x{}", width, height, bpp);
             ESUCCESS
         }
-        Err(msg) => {
-            log_warn!("syscall", "SYS_SET_VIDEO_MODE failed: {}", msg);
-            // Map specific error strings to appropriate errno values
-            if msg.contains("divisible") || msg.contains("zero") || msg.contains("BPP") {
-                EINVAL
-            } else if msg.contains("backend") || msg.contains("GOP") {
-                ENOTSUP
-            } else if msg.contains("size") || msg.contains("LFB") {
-                ENOMEM
-            } else {
-                EINVAL
+        Err(e) => {
+            log_warn!("syscall", "SYS_SET_VIDEO_MODE failed: {:?}", e);
+            match e {
+                crate::graphics::VideoModeError::InvalidResolution  => EINVAL,
+                crate::graphics::VideoModeError::UnsupportedBpp     => EINVAL,
+                crate::graphics::VideoModeError::ExceedsLfbSize     => ENOMEM,
+                crate::graphics::VideoModeError::DeviceNotAvailable => EINVAL,
+                crate::graphics::VideoModeError::HardwareRejected   => EINVAL,
+                crate::graphics::VideoModeError::BackendUnsupported => ENOTSUP,
             }
         }
     }
