@@ -148,7 +148,7 @@ pub fn current_privilege_level() -> u8 {
 // that file to ensure the assembly encoding is maintained in one place.
 
 #[cfg(target_arch = "x86_64")]
-#[path = "../../arch/x86_64/port_io.rs"]
+#[path = "../../../arch/x86_64/port_io.rs"]
 mod port_io;
 
 #[cfg(target_arch = "x86_64")]

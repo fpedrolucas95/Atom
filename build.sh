@@ -348,6 +348,7 @@ if [ "$KERNEL_ONLY" != true ]; then
     if [ -f "userspace/apps/hello_c/Makefile" ]; then
         if make -C userspace/apps/hello_c 2>build/hello_c.log; then
             if [ -f "userspace/apps/hello_c/hello_c.atxf" ]; then
+                mkdir -p efi/apps/user
                 cp userspace/apps/hello_c/hello_c.atxf efi/apps/user/hello_c.atxf
                 success "hello_c.atxf → apps/user/"
             else

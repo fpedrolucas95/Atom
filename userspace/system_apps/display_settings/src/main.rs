@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{SharedSurface, VideoModeEntry, get_video_modes, video_mode_count,
-                              VIDEO_VIDEO_MAX_MODES};
+                              VIDEO_MAX_MODES};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
