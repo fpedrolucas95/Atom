@@ -405,6 +405,36 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
 
     # -------------------------------------------------------------------------
+    # Build doom (port do Doom clássico via doomgeneric + TinyGL)
+    # Depends on libc + libtinygl; requer doomgeneric_src clonado separadamente.
+    # Output → efi/apps/user/
+    # -------------------------------------------------------------------------
+    step "Building doom (Doom clássico via doomgeneric)..."
+
+    if [ -f "userspace/apps/doom/Makefile" ]; then
+        if [ -d "userspace/libs/doomgeneric_src/doomgeneric" ]; then
+            if make -C userspace/apps/doom 2>build/doom.log; then
+                if [ -f "userspace/apps/doom/doom.atxf" ]; then
+                    mkdir -p efi/apps/user
+                    cp userspace/apps/doom/doom.atxf efi/apps/user/doom.atxf
+                    success "doom.atxf → apps/user/"
+                    warning "Coloque doom1.wad ou doom.wad em efi/apps/user/ para jogar"
+                else
+                    warning "doom.atxf não gerado (elf2atxf pode estar ausente)"
+                fi
+            else
+                warning "Falha ao compilar doom (veja build/doom.log)"
+                cat build/doom.log
+            fi
+        else
+            warning "doomgeneric_src não encontrado — pulando build do Doom"
+            warning "  Clone com: git clone https://github.com/ozkl/doomgeneric userspace/libs/doomgeneric_src"
+        fi
+    else
+        warning "userspace/apps/doom/Makefile não encontrado, pulando"
+    fi
+
+    # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
     # -------------------------------------------------------------------------
