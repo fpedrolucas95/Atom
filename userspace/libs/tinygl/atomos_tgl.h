@@ -20,7 +20,7 @@
  *   // ... draw ...
  *
  *   // 4. Blit to the compositor's 32-bit ARGB surface and commit
- *   tgl_blit_to_argb32(ctx, 0, compositor_surface, stride_in_pixels);
+ *   tgl_blit_to_argb32(scratch, width, height, width, compositor_surface, stride_in_pixels);
  *   wm_commit(...);
  */
 
@@ -28,7 +28,6 @@
 #define ATOMOS_TGL_H
 
 #include <stdint.h>
-#include <GL/oscontext.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,15 +36,18 @@ extern "C" {
 /*
  * tgl_blit_to_argb32 — blit TinyGL framebuffer to AtomOS compositor surface.
  *
- *   ctx           — context created with ostgl_create_context(w, h, 16, ...)
- *   buf_idx       — framebuffer index (0 for single-buffered use)
+ *   src           — pointer to the RGB565 pixel buffer passed to ostgl_create_context
+ *   w             — width in pixels
+ *   h             — height in pixels
+ *   src_stride_px — source stride in *pixels* (usually equal to w)
  *   dst           — pointer to the compositor's shared-surface memory
  *   dst_stride_px — surface stride in *pixels* (WmWindowInfo.stride)
  *
  * The function converts every pixel from RGB565 (TinyGL internal 16-bit) to
- * ARGB32 (0x00RRGGBB).  The destination width and height are taken from ctx.
+ * ARGB32 (0x00RRGGBB).
  */
-void tgl_blit_to_argb32(ostgl_context *ctx, int buf_idx,
+void tgl_blit_to_argb32(const uint16_t *src, uint32_t w, uint32_t h,
+                         uint32_t src_stride_px,
                          uint32_t *dst, uint32_t dst_stride_px);
 
 #ifdef __cplusplus
