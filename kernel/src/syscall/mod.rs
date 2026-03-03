@@ -261,6 +261,7 @@ pub use atom_abi::{
     ENOENT, EISDIR, ENOTDIR, EBADF, EROFS, ENAMETOOLONG, EIO,
     EMFILE,
     ENOTSUP,
+    ENODEV,
     // FS limits
     FS_MAX_PATH_LEN,
 };
@@ -5101,7 +5102,7 @@ fn sys_set_video_mode(packed_res: u64, bpp_raw: u64) -> u64 {
                 crate::graphics::VideoModeError::InvalidResolution  => EINVAL,
                 crate::graphics::VideoModeError::UnsupportedBpp     => EINVAL,
                 crate::graphics::VideoModeError::ExceedsLfbSize     => ENOMEM,
-                crate::graphics::VideoModeError::DeviceNotAvailable => EINVAL,
+                crate::graphics::VideoModeError::DeviceNotAvailable => ENODEV,
                 crate::graphics::VideoModeError::HardwareRejected   => EINVAL,
                 crate::graphics::VideoModeError::BackendUnsupported => ENOTSUP,
             }

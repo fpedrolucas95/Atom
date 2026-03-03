@@ -3,6 +3,10 @@
 use crate::error::{ESUCCESS, EPERM, EINVAL, ENOMEM, EBUSY, ENOTSUP, SyscallError, SyscallResult};
 use crate::raw::{syscall0, syscall1, syscall2, syscall3, numbers::*};
 
+/// Maximum number of video modes reported by the kernel (mirrors `atom_abi::VIDEO_MAX_MODES`).
+/// Use this to size mode buffers in userspace; the value is guaranteed to match the kernel.
+pub use atom_abi::VIDEO_MAX_MODES;
+
 // ============================================================================
 // Framebuffer Information
 // ============================================================================

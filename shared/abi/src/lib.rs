@@ -73,6 +73,7 @@ pub const ENOTSUP: u64 = u64::MAX - 29;
 pub const EAGAIN: u64 = u64::MAX - 30;
 pub const EINTR: u64 = u64::MAX - 31;
 pub const E2BIG: u64 = u64::MAX - 32;
+pub const ENODEV: u64 = u64::MAX - 33;  // No such device
 
 /// Check whether a raw syscall return value represents an error code.
 ///
@@ -105,6 +106,16 @@ pub const USER_HEAP_START: u64 = 0x0000_0010_0000_0000;
 /// Default mmap region for dynamic allocations
 pub const USER_MMAP_START: u64 = 0x0000_2000_0000_0000;
 pub const USER_MMAP_END: u64 = 0x0000_7000_0000_0000;
+
+// ---------------------------------------------------------------------------
+// Graphics / video mode constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of video modes the BGA driver supports and the kernel
+/// will report via SYS_GET_VIDEO_MODES.  Both the kernel (bga.rs) and
+/// userspace callers (e.g. display_settings) must size their mode buffers
+/// to at least this value; keeping the constant here prevents silent drift.
+pub const VIDEO_MAX_MODES: usize = 16;
 
 // ---------------------------------------------------------------------------
 // IPC Port constants

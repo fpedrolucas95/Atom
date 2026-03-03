@@ -27,7 +27,8 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::panic::PanicInfo;
 
-use atom_syscall::graphics::{SharedSurface, VideoModeEntry, get_video_modes, video_mode_count};
+use atom_syscall::graphics::{SharedSurface, VideoModeEntry, get_video_modes, video_mode_count,
+                              VIDEO_VIDEO_MAX_MODES};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
@@ -111,10 +112,6 @@ mod theme {
 // Video mode list (queried from the kernel at startup)
 // ============================================================================
 
-/// Maximum number of modes the UI can display.
-/// Must be >= kernel bga::MAX_VIDEO_MODES (currently 16).
-const MAX_MODES: usize = 16;
-
 #[derive(Clone, Copy)]
 struct Mode { width: u16, height: u16 }
 
@@ -126,16 +123,16 @@ const DEFAULT_H: u16 = 768;
 ///
 /// Returns the populated mode array and count.  Falls back to an empty list
 /// if the syscall reports zero modes (BGA not available in this environment).
-fn query_modes() -> ([Mode; MAX_MODES], usize) {
-    let count = video_mode_count().min(MAX_MODES);
+fn query_modes() -> ([Mode; VIDEO_VIDEO_MAX_MODES], usize) {
+    let count = video_mode_count().min(VIDEO_VIDEO_MAX_MODES);
     if count == 0 {
-        return ([Mode { width: 0, height: 0 }; MAX_MODES], 0);
+        return ([Mode { width: 0, height: 0 }; VIDEO_VIDEO_MAX_MODES], 0);
     }
 
-    let mut raw = [VideoModeEntry::default(); MAX_MODES];
+    let mut raw = [VideoModeEntry::default(); VIDEO_MAX_MODES];
     let written = get_video_modes(&mut raw[..count]);
 
-    let mut modes = [Mode { width: 0, height: 0 }; MAX_MODES];
+    let mut modes = [Mode { width: 0, height: 0 }; VIDEO_MAX_MODES];
     for i in 0..written {
         modes[i] = Mode { width: raw[i].width as u16, height: raw[i].height as u16 };
     }
@@ -212,7 +209,7 @@ struct DisplaySettings {
     surface:         Option<SharedSurface>,
     surface_w:       u32,
     surface_h:       u32,
-    modes:           [Mode; MAX_MODES],
+    modes:           [Mode; VIDEO_MAX_MODES],
     mode_count:      usize,
     selected:        usize,
     scroll:          usize,
@@ -224,7 +221,7 @@ struct DisplaySettings {
 impl DisplaySettings {
     fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
            surface: SharedSurface,
-           modes: [Mode; MAX_MODES], mode_count: usize) -> Self {
+           modes: [Mode; VIDEO_MAX_MODES], mode_count: usize) -> Self {
         let w = surface.width();
         let h = surface.height();
         let sel = default_idx(&modes, mode_count);
@@ -436,6 +433,7 @@ impl DisplaySettings {
     }
 
     fn restore_default(&mut self) {
+        if self.mode_count == 0 { return; }
         self.selected = default_idx(&self.modes, self.mode_count);
         self.clamp_scroll();
         let m = self.modes[self.selected];
