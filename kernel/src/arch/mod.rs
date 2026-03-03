@@ -142,97 +142,31 @@ pub fn current_privilege_level() -> u8 {
 // ============================================================================
 // Port I/O
 // ============================================================================
+//
+// The x86_64 implementations live in the canonical shared file
+// arch/x86_64/port_io.rs. Both this module and arch/x86_64/mod.rs include
+// that file to ensure the assembly encoding is maintained in one place.
 
-/// Write a byte to an x86 I/O port.
-#[allow(dead_code)]
-#[inline(always)]
-pub unsafe fn outb(port: u16, value: u8) {
-    #[cfg(target_arch = "x86_64")]
-    core::arch::asm!(
-        "out dx, al",
-        in("dx") port,
-        in("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
-}
+#[cfg(target_arch = "x86_64")]
+#[path = "../../arch/x86_64/port_io.rs"]
+mod port_io;
 
-/// Read a byte from an x86 I/O port.
-#[allow(dead_code)]
-#[inline(always)]
-pub unsafe fn inb(port: u16) -> u8 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let value: u8;
-        core::arch::asm!(
-            "in al, dx",
-            in("dx") port,
-            out("al") value,
-            options(nomem, nostack, preserves_flags)
-        );
-        value
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; 0 }
-}
+#[cfg(target_arch = "x86_64")]
+pub use port_io::*;
 
-/// Write a 16-bit word to an x86 I/O port.
-#[inline(always)]
-pub unsafe fn outw(port: u16, value: u16) {
-    #[cfg(target_arch = "x86_64")]
-    core::arch::asm!(
-        "out dx, ax",
-        in("dx") port,
-        in("ax") value,
-        options(nomem, nostack, preserves_flags)
-    );
-}
-
-/// Read a 16-bit word from an x86 I/O port.
-#[inline(always)]
-pub unsafe fn inw(port: u16) -> u16 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let value: u16;
-        core::arch::asm!(
-            "in ax, dx",
-            in("dx") port,
-            out("ax") value,
-            options(nomem, nostack, preserves_flags)
-        );
-        value
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; 0 }
-}
-
-/// Write a 32-bit dword to an x86 I/O port.
-#[inline(always)]
-pub unsafe fn outl(port: u16, value: u32) {
-    #[cfg(target_arch = "x86_64")]
-    core::arch::asm!(
-        "out dx, eax",
-        in("dx") port,
-        in("eax") value,
-        options(nomem, nostack, preserves_flags)
-    );
-}
-
-/// Read a 32-bit dword from an x86 I/O port.
-#[inline(always)]
-pub unsafe fn inl(port: u16) -> u32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let value: u32;
-        core::arch::asm!(
-            "in eax, dx",
-            in("dx") port,
-            out("eax") value,
-            options(nomem, nostack, preserves_flags)
-        );
-        value
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; 0 }
-}
+// Fallback stubs for non-x86_64 targets (allow the kernel to compile on
+// other architectures even though port I/O is not meaningful there).
+#[cfg(not(target_arch = "x86_64"))]
+pub unsafe fn inb(_port: u16) -> u8  { 0 }
+#[cfg(not(target_arch = "x86_64"))]
+pub unsafe fn outb(_port: u16, _value: u8) {}
+#[cfg(not(target_arch = "x86_64"))]
+pub unsafe fn inw(_port: u16) -> u16 { 0 }
+#[cfg(not(target_arch = "x86_64"))]
+pub unsafe fn outw(_port: u16, _value: u16) {}
+#[cfg(not(target_arch = "x86_64"))]
+pub unsafe fn inl(_port: u16) -> u32 { 0 }
+#[cfg(not(target_arch = "x86_64"))]
+pub unsafe fn outl(_port: u16, _value: u32) {}
 
 pub mod gdt;

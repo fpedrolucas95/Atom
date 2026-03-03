@@ -13,6 +13,7 @@ pub use atom_abi::{
     is_syscall_error,
     // Filesystem / IO error codes — used by spawn_from_path and similar wrappers.
     ENOENT, ENOTSUP, EIO,
+    ENODEV,
 };
 
 /// Syscall error codes (must match kernel/src/syscall/mod.rs)
@@ -34,6 +35,8 @@ pub enum SyscallError {
     NotSupported,
     /// I/O error (EIO) — e.g. block device or filesystem driver unavailable.
     IoError,
+    /// No such device (ENODEV) — hardware is absent or not initialised.
+    NoDevice,
     Unknown(u64),
 }
 
@@ -52,6 +55,7 @@ impl SyscallError {
             v if v == EWOULDBLOCK => SyscallError::WouldBlock,
             v if v == EDEADLK => SyscallError::Deadlock,
             v if v == ENOTFOUND => SyscallError::NotFound,
+            v if v == ENODEV => SyscallError::NoDevice,
             v => SyscallError::Unknown(v),
         }
     }
