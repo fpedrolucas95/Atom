@@ -1406,7 +1406,9 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8) -> SyscallResult<()> {
             x if x == EINVAL   => Err(SyscallError::InvalidArgument),
             x if x == ENOTSUP  => Err(SyscallError::NotSupported),
             x if x == ENOMEM   => Err(SyscallError::OutOfMemory),
+            x if x == crate::error::ENODEV => Err(SyscallError::NoDevice),
             _                   => Err(SyscallError::Unknown(result)),
+        }
         }
     }
 }
