@@ -47,6 +47,7 @@
 #![allow(dead_code)]
 
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
@@ -107,6 +108,8 @@ struct Scheduler {
     current: Mutex<Option<ThreadId>>,
     idle: Mutex<Option<ThreadId>>,
     initialized: AtomicBool,
+    /// Threads sleeping until a specific tick count.
+    sleep_queue: Mutex<Vec<(ThreadId, u64)>>,
 }
 
 impl Scheduler {
@@ -120,6 +123,7 @@ impl Scheduler {
             current: Mutex::new(None),
             idle: Mutex::new(None),
             initialized: AtomicBool::new(false),
+            sleep_queue: Mutex::new(Vec::new()),
         }
     }
 
@@ -166,6 +170,45 @@ impl Scheduler {
         };
 
         self.apply_switch(next)
+    }
+
+    /// Register a thread to sleep until the given tick.
+    fn sleep_thread(&self, id: ThreadId, wake_tick: u64) {
+        thread::set_thread_state(id, ThreadState::Blocked);
+        self.sleep_queue.lock().push((id, wake_tick));
+    }
+
+    /// Move sleeping threads whose wake tick has been reached back to Ready.
+    ///
+    /// Called from the timer interrupt handler — must not allocate heap memory
+    /// to avoid deadlocking against the kernel heap lock.
+    fn wake_sleeping_threads(&self) {
+        let current_tick = crate::interrupts::get_ticks();
+
+        // Collect IDs into a fixed-size stack buffer so we never touch the
+        // heap allocator inside an interrupt handler.
+        const MAX_WAKE_BATCH: usize = 16;
+        let mut to_wake: [ThreadId; MAX_WAKE_BATCH] = [ThreadId::from_raw(0); MAX_WAKE_BATCH];
+        let mut wake_count: usize = 0;
+
+        {
+            let mut sq = self.sleep_queue.lock();
+            sq.retain(|&(id, wake_tick)| {
+                if current_tick >= wake_tick {
+                    if wake_count < MAX_WAKE_BATCH {
+                        to_wake[wake_count] = id;
+                        wake_count += 1;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        for i in 0..wake_count {
+            self.mark_ready(to_wake[i]);
+        }
     }
 
     fn on_timer_tick(&self) -> (Option<ThreadId>, Option<ThreadId>) {
@@ -395,6 +438,17 @@ pub fn drive_cooperative_tick() {
 
 pub fn mark_thread_ready(id: ThreadId) {
     SCHEDULER.mark_ready(id);
+}
+
+/// Register a thread to sleep until the given tick count.
+pub fn sleep_thread(id: ThreadId, wake_tick: u64) {
+    SCHEDULER.sleep_thread(id, wake_tick);
+}
+
+/// Wake sleeping threads whose deadline has passed.  Called from the
+/// timer interrupt handler on every tick.
+pub fn wake_sleeping_threads() {
+    SCHEDULER.wake_sleeping_threads();
 }
 
 pub fn current_thread() -> Option<ThreadId> {

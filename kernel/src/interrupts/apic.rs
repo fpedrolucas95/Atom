@@ -16,7 +16,6 @@ const APIC_EOI: u32 = 0xB0;
 const APIC_SPURIOUS: u32 = 0xF0;
 const APIC_LVT_TIMER: u32 = 0x320;
 const APIC_TIMER_INIT: u32 = 0x380;
-#[allow(dead_code)]
 const APIC_TIMER_CURRENT: u32 = 0x390;
 const APIC_TIMER_DIV: u32 = 0x3E0;
 const APIC_SW_ENABLE: u32 = 0x100;
@@ -283,13 +282,68 @@ pub fn init_timer(frequency_hz: u32) {
     }
 }
 
-unsafe fn init_apic_timer(_frequency_hz: u32) {
+/// Calibrate the APIC timer against the PIT (known 1.193182 MHz clock) and
+/// configure it to fire at the requested frequency.  Previous code used a
+/// hardcoded initial-count which produced a wildly different tick rate
+/// depending on the host/emulator bus clock.
+unsafe fn init_apic_timer(frequency_hz: u32) {
+    const LOG_ORIGIN: &str = "apic";
+    const PIT_FREQ: u32 = 1_193_182; // PIT oscillator frequency in Hz
+    const CALIBRATE_MS: u32 = 10;    // calibration window
+
+    let pit_count: u16 = (PIT_FREQ * CALIBRATE_MS / 1000) as u16; // ~11 932
+
+    // --- Set APIC timer divider (divide-by-16) ---
     apic_write(APIC_TIMER_DIV, 0x3);
+
+    // Mask the timer LVT so it does not fire during calibration.
+    apic_write(APIC_LVT_TIMER, 0x0001_0000); // masked, one-shot
+
+    // --- Program PIT channel 2 in one-shot (mode 0) ---
+    // Disable gate & speaker first.
+    let port61 = inb(0x61) & 0xFC;
+    outb(0x61, port61);                // gate low, speaker off
+
+    outb(0x43, 0xB0);                  // ch2, lobyte/hibyte, mode 0, binary
+    outb(0x42, (pit_count & 0xFF) as u8);
+    outb(0x42, (pit_count >> 8) as u8);
+
+    // --- Start APIC timer from maximum ---
+    apic_write(APIC_TIMER_INIT, 0xFFFF_FFFF);
+
+    // Trigger PIT: gate low→high starts the countdown.
+    outb(0x61, port61 | 0x01);
+
+    // --- Wait for PIT output (bit 5 of port 0x61) to go high ---
+    while (inb(0x61) & 0x20) == 0 {
+        core::hint::spin_loop();
+    }
+
+    // --- Read how far the APIC timer counted ---
+    let apic_current = apic_read(APIC_TIMER_CURRENT);
+    let elapsed = 0xFFFF_FFFFu32.wrapping_sub(apic_current);
+
+    // Compute the initial count for the requested frequency.
+    // elapsed counts happened in CALIBRATE_MS ms.
+    let freq = frequency_hz.max(1);
+    let ticks_per_sec = (elapsed as u64) * 1000 / CALIBRATE_MS as u64;
+    let initial_count = (ticks_per_sec / freq as u64) as u32;
+    let final_count = if initial_count == 0 { 1 } else { initial_count };
+
+    log_info!(
+        LOG_ORIGIN,
+        "APIC timer calibrated: ~{} ticks/s, init_count={} for {}Hz",
+        ticks_per_sec,
+        final_count,
+        freq
+    );
+
+    // --- Arm the periodic timer ---
     apic_write(
         APIC_LVT_TIMER,
         (TIMER_INTERRUPT_VECTOR as u32) | TIMER_MODE_PERIODIC,
     );
-    apic_write(APIC_TIMER_INIT, 10_000_000);
+    apic_write(APIC_TIMER_INIT, final_count);
 }
 
 /* ---------------- PIC fallback ---------------- */

@@ -62,7 +62,17 @@ unsafe impl GlobalAlloc for BumpAllocator {
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // LIFO optimisation: reclaim the most-recently-allocated block so
+        // transient Vec allocations (IPC buffers etc.) don't exhaust the heap.
+        let heap_start = self.start.load(Ordering::Relaxed);
+        let blk_offset = ptr as usize - heap_start;
+        let blk_end = blk_offset + layout.size();
+
+        let _ = self.next.compare_exchange(
+            blk_end, blk_offset, Ordering::SeqCst, Ordering::Relaxed,
+        );
+    }
 }
 
 #[global_allocator]

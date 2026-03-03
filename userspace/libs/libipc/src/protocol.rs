@@ -10,28 +10,53 @@ use atom_syscall::ipc::{PortId, send, recv, send_async, try_recv, close_port};
 use atom_syscall::SyscallResult;
 use crate::messages::{MessageHeader, MessageType, NsRegisterMsg, NsLookupMsg, NsResponseMsg};
 
-/// Send a typed message with header
+/// Maximum payload that fits in the stack-based send buffer.
+/// Control messages are well under this limit; variable-length data
+/// (e.g. window titles) are only sent during initialization.
+const MAX_STACK_MSG: usize = 240;
+
+/// Send a typed message with header.
+///
+/// Uses a stack buffer for messages up to `MAX_STACK_MSG` bytes to
+/// avoid heap allocations in the hot path (critical for userspace
+/// apps with bump allocators).
 pub fn send_message(port: PortId, msg_type: MessageType, payload: &[u8]) -> SyscallResult<()> {
     let header = MessageHeader::new(msg_type, payload.len() as u32);
     let header_bytes = header.to_bytes();
+    let total = MessageHeader::SIZE + payload.len();
 
-    let mut message = Vec::with_capacity(MessageHeader::SIZE + payload.len());
-    message.extend_from_slice(&header_bytes);
-    message.extend_from_slice(payload);
-
-    send(port, &message)
+    if total <= MAX_STACK_MSG {
+        let mut buf = [0u8; MAX_STACK_MSG];
+        buf[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+        buf[MessageHeader::SIZE..total].copy_from_slice(payload);
+        send(port, &buf[..total])
+    } else {
+        let mut message = Vec::with_capacity(total);
+        message.extend_from_slice(&header_bytes);
+        message.extend_from_slice(payload);
+        send(port, &message)
+    }
 }
 
-/// Send a typed message asynchronously
+/// Send a typed message asynchronously.
+///
+/// Uses a stack buffer for messages up to `MAX_STACK_MSG` bytes.
 pub fn send_message_async(port: PortId, msg_type: MessageType, payload: &[u8]) -> SyscallResult<()> {
     let header = MessageHeader::new(msg_type, payload.len() as u32);
     let header_bytes = header.to_bytes();
+    let total = MessageHeader::SIZE + payload.len();
 
-    let mut message = Vec::with_capacity(MessageHeader::SIZE + payload.len());
-    message.extend_from_slice(&header_bytes);
-    message.extend_from_slice(payload);
-
-    send_async(port, &message)
+    if total <= MAX_STACK_MSG {
+        let mut buf = [0u8; MAX_STACK_MSG];
+        buf[..MessageHeader::SIZE].copy_from_slice(&header_bytes);
+        buf[MessageHeader::SIZE..total].copy_from_slice(payload);
+        send_async(port, &buf[..total])
+    } else {
+        let mut message = Vec::with_capacity(total);
+        message.extend_from_slice(&header_bytes);
+        message.extend_from_slice(payload);
+        send_async(port, &message)
+    }
 }
 
 /// Receive a message and parse its header

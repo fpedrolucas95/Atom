@@ -700,39 +700,15 @@ fn sys_thread_sleep(milliseconds: u64) -> u64 {
     let ticks_to_sleep = (milliseconds + 9) / 10; // Round up
     let wake_tick = crate::interrupts::get_ticks() + ticks_to_sleep;
 
-    // Sleep loop - wait until enough ticks have passed
-    while crate::interrupts::get_ticks() < wake_tick {
-        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Blocked);
+    // Register in the sleep queue.  This sets the thread to Blocked and
+    // records the wake tick.  The timer interrupt handler calls
+    // sched::wake_sleeping_threads() every tick and will move this thread
+    // back to Ready once wake_tick is reached.
+    crate::sched::sleep_thread(tid, wake_tick);
 
-        let (prev, next) = crate::sched::on_timer_tick();
-        if let (Some(prev_id), Some(next_id)) = (prev, next) {
-            if prev_id != next_id {
-                crate::sched::perform_context_switch(prev_id, next_id);
-            } else {
-                // No other thread - halt and wait for timer interrupt
-                unsafe {
-                    core::arch::asm!(
-                        "sti",
-                        "hlt",
-                        "cli",
-                        options(nomem, nostack)
-                    );
-                }
-            }
-        } else {
-            // No threads - halt
-            unsafe {
-                core::arch::asm!(
-                    "sti",
-                    "hlt",
-                    "cli",
-                    options(nomem, nostack)
-                );
-            }
-        }
-
-        crate::thread::set_thread_state(tid, crate::thread::ThreadState::Ready);
-    }
+    // Yield the CPU so another thread can run.  When the timer wakes us
+    // the scheduler will eventually context-switch back here.
+    crate::sched::drive_cooperative_tick();
 
     ESUCCESS
 }

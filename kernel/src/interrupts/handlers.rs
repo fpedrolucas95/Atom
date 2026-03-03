@@ -569,6 +569,9 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
 
     ipc::on_timer_tick(get_ticks());
 
+    // Wake threads whose sleep deadline has been reached.
+    sched::wake_sleeping_threads();
+
     // CRITICAL: EOI must be sent BEFORE driving preemption/scheduling.
     // This allows other interrupts to fire even if we switch away from this thread.
     super::apic::send_eoi();
