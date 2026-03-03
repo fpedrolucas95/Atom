@@ -269,8 +269,12 @@ static void wm_commit(uint64_t wm_port, uint32_t window_id)
 static GLfloat view_rotx = 20.0f;
 static GLfloat view_roty = 30.0f;
 static GLfloat view_rotz =  0.0f;
-static GLint   gear1, gear2, gear3;
 static GLfloat angle = 0.0f;
+
+/* Gear material colours — file-scope so both gears_init and gears_draw can use them */
+static GLfloat gear_red[4]   = { 0.8f,  0.1f,  0.0f, 1.0f };
+static GLfloat gear_green[4] = { 0.0f,  0.8f,  0.2f, 1.0f };
+static GLfloat gear_blue[4]  = { 0.2f,  0.2f,  1.0f, 1.0f };
 
 /*
  * gear() — draw a single gear wheel.
@@ -393,38 +397,18 @@ static void gear(GLfloat inner_radius, GLfloat outer_radius, GLfloat width,
     glEnd();
 }
 
-/* Build the three gear display lists and set up initial GL state. */
+/* Set up lighting and GL state.  The gear geometry is rendered directly each
+ * frame (no display lists) to avoid TinyGL's list-corruption bug that
+ * manifests as "list N: corrupt first_op_list" when glCallList is used. */
 static void gears_init(void)
 {
-    static GLfloat pos[4]   = { 5.0f,  5.0f, 10.0f, 0.0f };
-    static GLfloat red[4]   = { 0.8f,  0.1f,  0.0f, 1.0f };
-    static GLfloat green[4] = { 0.0f,  0.8f,  0.2f, 1.0f };
-    static GLfloat blue[4]  = { 0.2f,  0.2f,  1.0f, 1.0f };
+    static GLfloat pos[4] = { 5.0f, 5.0f, 10.0f, 0.0f };
 
     glLightfv(GL_LIGHT0, GL_POSITION, pos);
     glEnable(GL_CULL_FACE);
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
     glEnable(GL_DEPTH_TEST);
-
-    gear1 = glGenLists(1);
-    glNewList(gear1, GL_COMPILE);
-    glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, red);
-    gear(1.0f, 4.0f, 1.0f, 20, 0.7f);
-    glEndList();
-
-    gear2 = glGenLists(1);
-    glNewList(gear2, GL_COMPILE);
-    glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, green);
-    gear(0.5f, 2.0f, 2.0f, 10, 0.7f);
-    glEndList();
-
-    gear3 = glGenLists(1);
-    glNewList(gear3, GL_COMPILE);
-    glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, blue);
-    gear(1.3f, 2.0f, 0.5f, 10, 0.7f);
-    glEndList();
-
     glEnable(GL_NORMALIZE);
 }
 
@@ -442,7 +426,8 @@ static void gears_reshape(int w, int h)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
-/* Render one frame (no swap — caller handles blit/commit). */
+/* Render one frame (no swap — caller handles blit/commit).
+ * Geometry is submitted directly each frame; display lists are not used. */
 static void gears_draw(void)
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -455,19 +440,22 @@ static void gears_draw(void)
     glPushMatrix();
     glTranslatef(-3.0f, -2.0f, 0.0f);
     glRotatef(angle, 0.0f, 0.0f, 1.0f);
-    glCallList(gear1);
+    glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, gear_red);
+    gear(1.0f, 4.0f, 1.0f, 20, 0.7f);
     glPopMatrix();
 
     glPushMatrix();
     glTranslatef(3.1f, -2.0f, 0.0f);
     glRotatef(-2.0f * angle - 9.0f, 0.0f, 0.0f, 1.0f);
-    glCallList(gear2);
+    glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, gear_green);
+    gear(0.5f, 2.0f, 2.0f, 10, 0.7f);
     glPopMatrix();
 
     glPushMatrix();
     glTranslatef(-3.1f, 4.2f, 0.0f);
     glRotatef(-2.0f * angle - 25.0f, 0.0f, 0.0f, 1.0f);
-    glCallList(gear3);
+    glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, gear_blue);
+    gear(1.3f, 2.0f, 0.5f, 10, 0.7f);
     glPopMatrix();
 
     glPopMatrix();
@@ -528,6 +516,7 @@ int main(void)
         const uint32_t hw = WIN_W, hh = WIN_H;
         uint16_t *scratch = (uint16_t *)malloc((size_t)hw * hh * 2u);
         if (!scratch) { printf("[tinygl_demo] malloc failed\n"); return 1; }
+        memset(scratch, 0, (size_t)hw * hh * 2u);
 
         void     *fbs[1] = { scratch };
         ostgl_context *ctx = ostgl_create_context((int)hw, (int)hh, 16, fbs, 1);
@@ -590,6 +579,11 @@ int main(void)
         ipc_close_port(event_port);
         return 1;
     }
+    /* Zero the pixel buffer before handing it to TinyGL.  Some TinyGL
+     * versions read from pbuf during ZBuffer initialisation; an
+     * uninitialised buffer can leave internal state in an undefined
+     * condition. */
+    memset(scratch, 0, (size_t)tw * th * 2u);
 
     /* ------------------------------------------------------------------ */
     /* 5. Initialise TinyGL context                                        */
