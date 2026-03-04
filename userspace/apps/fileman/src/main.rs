@@ -14,14 +14,13 @@
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 use core::panic::PanicInfo;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use core::arch::asm;
 
 mod error;
 mod fs;
@@ -275,8 +274,8 @@ const STATUS_H:  u32 = 22;
 // Icon view cell
 const ICON_CELL_W: u32 = 90;
 const ICON_CELL_H: u32 = 82;
-const ICON_W:      u32 = 52;
-const ICON_H:      u32 = 46;
+const ICON_W:      u32 = 64;
+const ICON_H:      u32 = 58;
 
 // List view
 const LIST_HDR_H:  u32 = 20;
@@ -999,19 +998,15 @@ impl FileManager {
             let icon_y = cell_y + 6;
 
             if let Some(ref bm) = entry.svg_bitmap {
-                // Draw neutral dark background, then blit the SVG on top
-                surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8,
-                    Color::new(20, 22, 30));
                 bm.blit_surface(surface, icon_x, icon_y);
             } else {
-                // Fallback: coloured rect + type label
-                surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8, entry.icon_color());
+                // Fallback: type label with no icon frame
                 let lbl   = entry.icon_label();
                 let lbl_w = lbl.len() as u32 * CHAR_W;
                 let lbl_x = icon_x + (ICON_W - lbl_w) / 2;
                 let lbl_y = icon_y + (ICON_H - CHAR_H) / 2;
                 surface.draw_string(lbl_x, lbl_y, lbl,
-                    Color::new(255, 255, 255), entry.icon_color());
+                    entry.icon_color(), Theme::BG);
             }
 
             // File name below icon (max ~10 chars, truncated)
@@ -1046,7 +1041,7 @@ impl FileManager {
         let col_name_x = col_icon_x + 48;
         let col_size_x = sw.saturating_sub(160);
         let col_ext_x  = sw.saturating_sub(80);
-        let col_date_x = sw.saturating_sub(40);   // placeholder
+        let _col_date_x = sw.saturating_sub(40);   // placeholder
 
         // Header row
         surface.fill_rect(0, cy, sw, LIST_HDR_H, Theme::LIST_HDR_BG);
@@ -1078,11 +1073,7 @@ impl FileManager {
             // Type colour chip (rounded)
             let chip_h = LIST_ROW_H - 6;
             if let Some(ref bm) = entry.svg_bitmap {
-                // SVG icon scaled to fit the chip area (36 × chip_h)
-                surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, chip_h, 3,
-                    Color::new(20, 22, 30));
-                // Center the bitmap in the chip (it's rendered at ICON_W×ICON_H,
-                // so scale it down by drawing only the top-left corner that fits)
+                // SVG icon scaled to fit 36 × chip_h, with no border/background box
                 let draw_w = bm.width.min(36);
                 let draw_h = bm.height.min(chip_h);
                 for py in 0..draw_h {
@@ -1101,12 +1092,10 @@ impl FileManager {
                     }
                 }
             } else {
-                surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, chip_h, 3,
-                    entry.icon_color());
                 let lbl   = entry.icon_label();
                 let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;
                 surface.draw_string(lbl_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                    lbl, Color::new(255, 255, 255), entry.icon_color());
+                    lbl, entry.icon_color(), row_bg);
             }
 
             // Name (truncate to fit)

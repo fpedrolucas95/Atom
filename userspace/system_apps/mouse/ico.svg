@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Creator: CorelDRAW X6 -->
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="100%" height="100%" version="1.1" style="shape-rendering:geometricPrecision; text-rendering:geometricPrecision; image-rendering:optimizeQuality; fill-rule:evenodd; clip-rule:evenodd"
+viewBox="0 0 500 500"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+ <defs>
+  <style type="text/css">
+   <![CDATA[
+    .str1 {stroke:#303030;stroke-width:10}
+    .str0 {stroke:#303030;stroke-width:10;stroke-linejoin:round}
+    .fil3 {fill:url(#id0)}
+    .fil1 {fill:url(#id1)}
+    .fil0 {fill:url(#id2)}
+    .fil2 {fill:url(#id3)}
+   ]]>
+  </style>
+  <linearGradient id="id0" gradientUnits="userSpaceOnUse" x1="250" y1="215.781" x2="250" y2="117.382">
+   <stop offset="0" style="stop-color:#0081D8"/>
+   <stop offset="0.478431" style="stop-color:#27A9FF"/>
+   <stop offset="1" style="stop-color:#0081D8"/>
+  </linearGradient>
+  <linearGradient id="id1" gradientUnits="userSpaceOnUse" x1="356.871" y1="56.665" x2="284.772" y2="175.331">
+   <stop offset="0" style="stop-color:#F2F2F2"/>
+   <stop offset="1" style="stop-color:#CBCBCB"/>
+  </linearGradient>
+  <linearGradient id="id2" gradientUnits="userSpaceOnUse" xlink:href="#id1" x1="209.656" y1="63.844" x2="148.701" y2="168.152">
+  </linearGradient>
+  <radialGradient id="id3" gradientUnits="objectBoundingBox" cx="57%" cy="53%" r="36.0001%" fx="57%" fy="53%">
+   <stop offset="0" style="stop-color:#F2F2F2"/>
+   <stop offset="1" style="stop-color:#D8D8D8"/>
+  </radialGradient>
+ </defs>
+ <g id="Layer_x0020_1">
+  <metadata id="CorelCorpID_0Corel-Layer"/>
+  <path class="fil0 str0" d="M108 202l0 -17c0,-85 61,-155 135,-155l7 0 0 172 -142 0z"/>
+  <path class="fil1 str0" d="M392 202l0 -17c0,-85 -61,-155 -135,-155l-7 0 0 172 142 0z"/>
+  <path class="fil2 str0" d="M108 202l0 113c0,83 55,155 142,155 87,0 142,-72 142,-155l0 -113 -284 0z"/>
+  <rect class="fil3 str1" x="230" y="107" width="40" height="120" rx="15" ry="18"/>
+ </g>
+</svg>

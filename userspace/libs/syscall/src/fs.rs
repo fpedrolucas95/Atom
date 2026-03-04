@@ -23,7 +23,7 @@ use atom_abi::{
 };
 
 extern crate alloc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 // ── Error type ──────────────────────────────────────────────────────────────

@@ -142,6 +142,7 @@ pub fn send_async(port: PortId, data: &[u8]) -> SyscallResult<()> {
         x if x == ESUCCESS => Ok(()),
         x if x == EINVAL => Err(SyscallError::InvalidArgument),
         x if x == EMSGSIZE => Err(SyscallError::MessageTooLarge),
+        x if x == EWOULDBLOCK => Err(SyscallError::WouldBlock),
         _ => Err(SyscallError::Unknown(result)),
     }
 }
