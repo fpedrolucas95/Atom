@@ -6,6 +6,8 @@
 
 extern crate alloc;
 
+mod svg;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -535,6 +537,7 @@ struct DesktopIcon {
     x: i32,
     y: i32,
     color: Color,
+    svg_bitmap: Option<svg::SvgBitmap>,
 }
 
 struct DockApp {
@@ -543,6 +546,7 @@ struct DockApp {
     color: Color,
     monogram: String,
     has_embedded_icon: bool,
+    svg_bitmap: Option<svg::SvgBitmap>,
 }
 
 struct ContextMenu {
@@ -628,6 +632,7 @@ impl Compositor {
             x: 28,
             y: PANEL_HEIGHT as i32 + 28,
             color: Color::new(99, 143, 255),
+            svg_bitmap: Self::load_icon_bitmap("fileman", 28),
         });
         icons.push(DesktopIcon {
             label: String::from("Rectangles"),
@@ -635,6 +640,7 @@ impl Compositor {
             x: 28,
             y: PANEL_HEIGHT as i32 + 120,
             color: Color::new(86, 182, 245),
+            svg_bitmap: Self::load_icon_bitmap("demo_rects", 28),
         });
         icons.push(DesktopIcon {
             label: String::from("Text"),
@@ -642,6 +648,7 @@ impl Compositor {
             x: 28,
             y: PANEL_HEIGHT as i32 + 212,
             color: Color::new(72, 199, 142),
+            svg_bitmap: Self::load_icon_bitmap("demo_text", 28),
         });
 
         let dock_apps = Self::build_dock_apps();
@@ -1641,6 +1648,19 @@ impl Compositor {
         Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
     }
 
+    /// Load the embedded SVG icon from an ATXF file for the given executable name,
+    /// render it at `size`×`size` pixels, and return the bitmap (or None).
+    fn load_icon_bitmap(exec: &str, size: u32) -> Option<svg::SvgBitmap> {
+        let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
+        let user_path = alloc::format!("/apps/user/{}.atxf", exec);
+        let path = if fs::stat(&sys_path).is_ok() { sys_path }
+                   else if fs::stat(&user_path).is_ok() { user_path }
+                   else { return None; };
+        let atxf_bytes = fs::read_file(&path).ok()?;
+        let icon_svg = Self::extract_embedded_icon_svg(&atxf_bytes)?;
+        svg::SvgBitmap::render(icon_svg, size, size)
+    }
+
     fn build_dock_apps() -> Vec<DockApp> {
         let candidates: [(&str, &str, Color); 5] = [
             ("fileman", "Files", Color::new(99, 143, 255)),
@@ -1667,6 +1687,7 @@ impl Compositor {
             if let Some(path) = atxf_path {
                 let mut color = *fallback_color;
                 let mut has_embedded_icon = false;
+                let mut svg_bitmap: Option<svg::SvgBitmap> = None;
 
                 if let Ok(atxf_bytes) = fs::read_file(&path) {
                     if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
@@ -1674,6 +1695,7 @@ impl Compositor {
                         if let Some(icon_color) = Self::extract_first_hex_color(icon_svg) {
                             color = icon_color;
                         }
+                        svg_bitmap = svg::SvgBitmap::render(icon_svg, 42, 42);
                     }
                 }
 
@@ -1693,6 +1715,7 @@ impl Compositor {
                     color,
                     monogram: mono,
                     has_embedded_icon,
+                    svg_bitmap,
                 });
             }
         }
@@ -1998,15 +2021,22 @@ impl Compositor {
             // Icon background (rounded)
             self.backbuffer_fb.fill_rect_rounded_aa(ix, iy, size, size, icon_radius, theme::ICON_BG);
 
-            // Colored inner icon (rounded)
             let inner_x = ix + (size - inner_size) / 2;
             let inner_y = iy + (size - inner_size) / 2 - 2;
-            self.backbuffer_fb.fill_rect_rounded_aa(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
+
+            if let Some(ref bm) = icon.svg_bitmap {
+                // Colour-tinted inner area, then SVG bitmap on top
+                self.backbuffer_fb.fill_rect_rounded_aa(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
+                bm.blit_fb(&self.backbuffer_fb, inner_x, inner_y);
+            } else {
+                // Fallback: solid coloured inner square
+                self.backbuffer_fb.fill_rect_rounded_aa(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
+            }
 
             // Icon border (subtle)
             self.backbuffer_fb.draw_rect_rounded_aa(ix, iy, size, size, icon_radius, theme::ICON_BORDER);
 
-            // Label below icon (centered, with slight shadow for readability)
+            // Label below icon (centered)
             let label_len = icon.label.len() as u32 * 8;
             let lx = (ix as i32 + (size as i32 - label_len as i32) / 2).max(0) as u32;
             let label_y = iy + size + 6;
@@ -2175,21 +2205,21 @@ impl Compositor {
         for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
 
-            // Icon background (rounded)
+            // Icon background (rounded) – use app colour as tint background
             self.backbuffer_fb.fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, icon_radius, app.color);
 
-            // Icon monogram centered
-            let label_len = app.monogram.len() as u32 * 8;
-            let lx = ix + (icon_size - label_len) / 2;
-            let ly = icon_y + (icon_size - 8) / 2;
-            self.backbuffer_fb.draw_string(lx, ly, &app.monogram, Color::WHITE, app.color);
-
-            // Embedded-icon hint
-            if app.has_embedded_icon {
-                self.backbuffer_fb.fill_rect_rounded_aa(ix + icon_size - 9, icon_y + 3, 6, 6, 3, theme::ACCENT);
+            if let Some(ref bm) = app.svg_bitmap {
+                // Blit the rendered SVG icon on top of the colour background
+                bm.blit_fb(&self.backbuffer_fb, ix, icon_y);
+            } else {
+                // Fallback: monogram text
+                let label_len = app.monogram.len() as u32 * 8;
+                let lx = ix + (icon_size - label_len) / 2;
+                let ly = icon_y + (icon_size - 8) / 2;
+                self.backbuffer_fb.draw_string(lx, ly, &app.monogram, Color::WHITE, app.color);
             }
 
-            // Active indicator dot for running apps (optional visual)
+            // Active indicator dot for running apps
             if self.wm.windows.iter().any(|w| w.title == app.label && w.visible) {
                 let dot_x = ix + icon_size / 2 - 2;
                 let dot_y = icon_y + icon_size + 3;

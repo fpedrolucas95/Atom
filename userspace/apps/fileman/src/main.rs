@@ -25,6 +25,7 @@ use core::arch::asm;
 
 mod error;
 mod fs;
+mod svg;
 
 use fs::{Dir, DirEntry, FsOps};
 
@@ -198,6 +199,7 @@ struct Entry {
     kind: FileKind,
     icon_color_override: Option<Color>,
     has_embedded_icon: bool,
+    svg_bitmap: Option<svg::SvgBitmap>,
 }
 
 impl Entry {
@@ -210,6 +212,7 @@ impl Entry {
             kind,
             icon_color_override: None,
             has_embedded_icon: false,
+            svg_bitmap: None,
         }
     }
 
@@ -466,14 +469,6 @@ impl FileManager {
         best
     }
 
-    fn load_embedded_icon_color(path: &str) -> Option<Color> {
-        if let Ok(data) = atom_fs::read_file(path) {
-            if let Some(svg) = Self::extract_embedded_icon_svg(&data) {
-                return Self::extract_icon_color(svg);
-            }
-        }
-        None
-    }
 
     fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
            surface: SharedSurface) -> Self {
@@ -527,9 +522,16 @@ impl FileManager {
                                 } else {
                                     format!("{}/{}", path, entry.name)
                                 };
-                                if let Some(icon_color) = Self::load_embedded_icon_color(&full_path) {
-                                    entry.has_embedded_icon = true;
-                                    entry.icon_color_override = Some(icon_color);
+                                if let Ok(atxf_bytes) = atom_fs::read_file(&full_path) {
+                                    if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
+                                        entry.has_embedded_icon = true;
+                                        if let Some(c) = Self::extract_icon_color(icon_svg) {
+                                            entry.icon_color_override = Some(c);
+                                        }
+                                        entry.svg_bitmap = svg::SvgBitmap::render(
+                                            icon_svg, ICON_W, ICON_H,
+                                        );
+                                    }
                                 }
                             }
                             self.entries.push(entry);
@@ -995,15 +997,22 @@ impl FileManager {
             // Icon box (rounded, centred horizontally in cell)
             let icon_x = cx + (ICON_CELL_W - ICON_W) / 2;
             let icon_y = cell_y + 6;
-            surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8, entry.icon_color());
 
-            // Type label inside icon (centred)
-            let lbl   = entry.icon_label();
-            let lbl_w = lbl.len() as u32 * CHAR_W;
-            let lbl_x = icon_x + (ICON_W - lbl_w) / 2;
-            let lbl_y = icon_y + (ICON_H - CHAR_H) / 2;
-            surface.draw_string(lbl_x, lbl_y, lbl,
-                Color::new(255, 255, 255), entry.icon_color());
+            if let Some(ref bm) = entry.svg_bitmap {
+                // Draw neutral dark background, then blit the SVG on top
+                surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8,
+                    Color::new(20, 22, 30));
+                bm.blit_surface(surface, icon_x, icon_y);
+            } else {
+                // Fallback: coloured rect + type label
+                surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8, entry.icon_color());
+                let lbl   = entry.icon_label();
+                let lbl_w = lbl.len() as u32 * CHAR_W;
+                let lbl_x = icon_x + (ICON_W - lbl_w) / 2;
+                let lbl_y = icon_y + (ICON_H - CHAR_H) / 2;
+                surface.draw_string(lbl_x, lbl_y, lbl,
+                    Color::new(255, 255, 255), entry.icon_color());
+            }
 
             // File name below icon (max ~10 chars, truncated)
             let max_name = (ICON_CELL_W / CHAR_W).saturating_sub(2) as usize;
@@ -1067,12 +1076,38 @@ impl FileManager {
             surface.fill_rect(0, row_y, sw, LIST_ROW_H, row_bg);
 
             // Type colour chip (rounded)
-            surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6, 3,
-                entry.icon_color());
-            let lbl   = entry.icon_label();
-            let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;
-            surface.draw_string(lbl_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                lbl, Color::new(255, 255, 255), entry.icon_color());
+            let chip_h = LIST_ROW_H - 6;
+            if let Some(ref bm) = entry.svg_bitmap {
+                // SVG icon scaled to fit the chip area (36 × chip_h)
+                surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, chip_h, 3,
+                    Color::new(20, 22, 30));
+                // Center the bitmap in the chip (it's rendered at ICON_W×ICON_H,
+                // so scale it down by drawing only the top-left corner that fits)
+                let draw_w = bm.width.min(36);
+                let draw_h = bm.height.min(chip_h);
+                for py in 0..draw_h {
+                    for px in 0..draw_w {
+                        // Sample bitmap pixel at scaled position
+                        let sx = px * bm.width / draw_w;
+                        let sy = py * bm.height / draw_h;
+                        let p = bm.pixels[(sy * bm.width + sx) as usize];
+                        if p >> 24 >= 128 {
+                            surface.draw_pixel(
+                                col_icon_x + px,
+                                row_y + 3 + py,
+                                Color::new((p >> 16) as u8, (p >> 8) as u8, p as u8),
+                            );
+                        }
+                    }
+                }
+            } else {
+                surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, chip_h, 3,
+                    entry.icon_color());
+                let lbl   = entry.icon_label();
+                let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;
+                surface.draw_string(lbl_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
+                    lbl, Color::new(255, 255, 255), entry.icon_color());
+            }
 
             // Name (truncate to fit)
             let max_name = ((col_size_x - col_name_x).saturating_sub(8) / CHAR_W) as usize;
