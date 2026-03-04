@@ -257,10 +257,18 @@ if [ "$KERNEL_ONLY" != true ]; then
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
             atxf_path="efi/apps/system/${app}.atxf"
+            icon_path="$app_path/ico.svg"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
-                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                if [ -f "$icon_path" ]; then
+                    if "$ELF2ATXF" --icon "$icon_path" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                        success "$app.atxf → apps/system/ (icon embedded)"
+                    else
+                        warning "Failed to convert $app to ATXF"
+                        cat build/elf2atxf_$app.log
+                    fi
+                elif "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
                     success "$app.atxf → apps/system/"
                 else
                     warning "Failed to convert $app to ATXF"
@@ -470,10 +478,18 @@ if [ "$KERNEL_ONLY" != true ]; then
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
             atxf_path="efi/apps/user/${app}.atxf"
+            icon_path="$app_path/ico.svg"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
-                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                if [ -f "$icon_path" ]; then
+                    if "$ELF2ATXF" --icon "$icon_path" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                        success "$app.atxf → apps/user/ (icon embedded)"
+                    else
+                        warning "Failed to convert $app to ATXF"
+                        cat build/elf2atxf_$app.log
+                    fi
+                elif "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
                     success "$app.atxf → apps/user/"
                 else
                     warning "Failed to convert $app to ATXF"

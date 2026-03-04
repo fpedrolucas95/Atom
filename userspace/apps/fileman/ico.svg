@@ -1,0 +1,13 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Pasta aberta simples com cor clássica (amarelo/dourado) -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Parte de trás / aba da pasta -->
+    <path d="M20 30 L108 30 L88 10 L40 10 Z" fill="#f4c430" stroke="#d4a017" stroke-width="10"/>
+    
+    <!-- Parte frontal aberta -->
+    <path d="M20 30 L20 100 L108 100 L108 30" fill="#ffd700" stroke="#d4a017" stroke-width="10"/>
+    
+    <!-- Tab / dobra da pasta -->
+    <path d="M40 10 L40 30" fill="none" stroke="#d4a017" stroke-width="10"/>
+  </g>
+</svg>

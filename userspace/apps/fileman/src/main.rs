@@ -32,6 +32,7 @@ use atom_syscall::graphics::{Color, SharedSurface};
 use atom_syscall::ipc::{create_port, close_port, try_recv, send, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now, get_ticks};
 use atom_syscall::debug::log;
+use atom_syscall::fs as atom_fs;
 
 use libipc::messages::{
     MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg,
@@ -195,12 +196,33 @@ struct Entry {
     is_dir: bool,
     size: u64,
     kind: FileKind,
+    icon_color_override: Option<Color>,
+    has_embedded_icon: bool,
 }
 
 impl Entry {
     fn from_dir_entry(de: &DirEntry) -> Self {
         let kind = FileKind::detect(&de.name, de.is_dir());
-        Self { name: de.name.clone(), is_dir: de.is_dir(), size: de.size, kind }
+        Self {
+            name: de.name.clone(),
+            is_dir: de.is_dir(),
+            size: de.size,
+            kind,
+            icon_color_override: None,
+            has_embedded_icon: false,
+        }
+    }
+
+    fn icon_color(&self) -> Color {
+        self.icon_color_override.unwrap_or(self.kind.color())
+    }
+
+    fn icon_label(&self) -> &'static str {
+        if self.has_embedded_icon && self.kind == FileKind::Exec {
+            "APP"
+        } else {
+            self.kind.label()
+        }
     }
 
     fn size_str(&self) -> String {
@@ -373,6 +395,86 @@ struct FileManager {
 }
 
 impl FileManager {
+    fn extract_embedded_icon_svg(atxf: &[u8]) -> Option<&[u8]> {
+        if atxf.len() < 8 {
+            return None;
+        }
+        let trailer_start = atxf.len() - 8;
+        let icon_len = u32::from_le_bytes([
+            atxf[trailer_start],
+            atxf[trailer_start + 1],
+            atxf[trailer_start + 2],
+            atxf[trailer_start + 3],
+        ]) as usize;
+        let magic = u32::from_le_bytes([
+            atxf[trailer_start + 4],
+            atxf[trailer_start + 5],
+            atxf[trailer_start + 6],
+            atxf[trailer_start + 7],
+        ]);
+
+        const ATXF_ICON_MAGIC: u32 = 0x4154_5849; // "ATXI"
+        if magic != ATXF_ICON_MAGIC || icon_len > trailer_start {
+            return None;
+        }
+
+        let icon_start = trailer_start - icon_len;
+        Some(&atxf[icon_start..trailer_start])
+    }
+
+    fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(10 + b - b'a'),
+            b'A'..=b'F' => Some(10 + b - b'A'),
+            _ => None,
+        }
+    }
+
+    fn extract_icon_color(svg: &[u8]) -> Option<Color> {
+        let mut best: Option<Color> = None;
+        let mut best_score: i32 = -1;
+        let mut i = 0usize;
+        while i + 7 <= svg.len() {
+            if svg[i] == b'#' {
+                if let (Some(h1), Some(h2), Some(h3), Some(h4), Some(h5), Some(h6)) = (
+                    Self::hex_nibble(svg[i + 1]),
+                    Self::hex_nibble(svg[i + 2]),
+                    Self::hex_nibble(svg[i + 3]),
+                    Self::hex_nibble(svg[i + 4]),
+                    Self::hex_nibble(svg[i + 5]),
+                    Self::hex_nibble(svg[i + 6]),
+                ) {
+                    let r = (h1 << 4) | h2;
+                    let g = (h3 << 4) | h4;
+                    let b = (h5 << 4) | h6;
+                    let maxc = r.max(g).max(b) as i32;
+                    let minc = r.min(g).min(b) as i32;
+                    let sat = maxc - minc;
+                    let lum = maxc + minc;
+                    if sat >= 18 {
+                        let score = sat * 4 + maxc - (lum - 255).abs() / 2;
+                        if score > best_score {
+                            best_score = score;
+                            best = Some(Color::new(r, g, b));
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        best
+    }
+
+    fn load_embedded_icon_color(path: &str) -> Option<Color> {
+        if let Ok(data) = atom_fs::read_file(path) {
+            if let Some(svg) = Self::extract_embedded_icon_svg(&data) {
+                return Self::extract_icon_color(svg);
+            }
+        }
+        None
+    }
+
     fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
            surface: SharedSurface) -> Self {
         let w = surface.width();
@@ -418,7 +520,19 @@ impl FileManager {
                     Ok(list) => {
                         for de in &list {
                             if de.name == "." || de.name == ".." { continue; }
-                            self.entries.push(Entry::from_dir_entry(de));
+                            let mut entry = Entry::from_dir_entry(de);
+                            if !entry.is_dir && entry.name.ends_with(".atxf") {
+                                let full_path = if path.ends_with('/') {
+                                    format!("{}{}", path, entry.name)
+                                } else {
+                                    format!("{}/{}", path, entry.name)
+                                };
+                                if let Some(icon_color) = Self::load_embedded_icon_color(&full_path) {
+                                    entry.has_embedded_icon = true;
+                                    entry.icon_color_override = Some(icon_color);
+                                }
+                            }
+                            self.entries.push(entry);
                         }
                         let msg = format!("{} items", self.entries.len());
                         self.status.set(&msg);
@@ -881,15 +995,15 @@ impl FileManager {
             // Icon box (rounded, centred horizontally in cell)
             let icon_x = cx + (ICON_CELL_W - ICON_W) / 2;
             let icon_y = cell_y + 6;
-            surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8, entry.kind.color());
+            surface.fill_rect_rounded_aa(icon_x, icon_y, ICON_W, ICON_H, 8, entry.icon_color());
 
             // Type label inside icon (centred)
-            let lbl   = entry.kind.label();
+            let lbl   = entry.icon_label();
             let lbl_w = lbl.len() as u32 * CHAR_W;
             let lbl_x = icon_x + (ICON_W - lbl_w) / 2;
             let lbl_y = icon_y + (ICON_H - CHAR_H) / 2;
             surface.draw_string(lbl_x, lbl_y, lbl,
-                Color::new(255, 255, 255), entry.kind.color());
+                Color::new(255, 255, 255), entry.icon_color());
 
             // File name below icon (max ~10 chars, truncated)
             let max_name = (ICON_CELL_W / CHAR_W).saturating_sub(2) as usize;
@@ -954,11 +1068,11 @@ impl FileManager {
 
             // Type colour chip (rounded)
             surface.fill_rect_rounded_aa(col_icon_x, row_y + 3, 36, LIST_ROW_H - 6, 3,
-                entry.kind.color());
-            let lbl   = entry.kind.label();
+                entry.icon_color());
+            let lbl   = entry.icon_label();
             let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;
             surface.draw_string(lbl_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                lbl, Color::new(255, 255, 255), entry.kind.color());
+                lbl, Color::new(255, 255, 255), entry.icon_color());
 
             // Name (truncate to fit)
             let max_name = ((col_size_x - col_name_x).saturating_sub(8) / CHAR_W) as usize;

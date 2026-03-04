@@ -1,0 +1,46 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- fundo escuro característico -->
+  <rect width="128" height="128" fill="#0a0a0a"/>
+
+  <!-- borda vermelha clássica do doom -->
+  <rect x="4" y="4" width="120" height="120" fill="none" stroke="#8b0000" stroke-width="8"/>
+
+  <!-- capacete do doomguy estilizado (bem simplificado) -->
+  <g transform="translate(38,32)">
+    <!-- elmo principal -->
+    <rect x="0" y="0" width="52" height="38" rx="4" fill="#4a4a4a"/>
+    <!-- visor verde -->
+    <rect x="8" y="10" width="36" height="18" fill="#1a3c1a" stroke="#00ff41" stroke-width="2"/>
+    <!-- detalhes do visor -->
+    <rect x="12" y="14" width="28" height="10" fill="#00aa22" opacity="0.7"/>
+    <!-- respirador / detalhes -->
+    <circle cx="26" cy="32" r="6" fill="#222"/>
+    <circle cx="26" cy="32" r="3" fill="#555"/>
+  </g>
+
+  <!-- demônio vermelho simplificado (estilo barra lateral / cyberdemon vibe) -->
+  <g transform="translate(72,68)">
+    <circle cx="24" cy="24" r="24" fill="#a00"/>
+    <circle cx="24" cy="24" r="18" fill="#c00"/>
+    <!-- chifres -->
+    <polygon points="12,8 18,0 24,12" fill="#800"/>
+    <polygon points="36,8 30,0 24,12" fill="#800"/>
+    <!-- olho brilhante -->
+    <circle cx="24" cy="20" r="8" fill="#ff8800"/>
+    <circle cx="24" cy="20" r="4" fill="#ffff44"/>
+  </g>
+
+  <!-- texto DOOM em pixel style (muito simplificado) -->
+  <g font-family="Arial Black, sans-serif" fill="#ff0000" font-weight="bold">
+    <text x="24" y="110" font-size="32" letter-spacing="-2">DOOM</text>
+  </g>
+
+  <!-- efeito de scanline retro (opcional - pode remover se quiser mais limpo) -->
+  <rect width="128" height="128" fill="url(#scan)" opacity="0.08"/>
+  <defs>
+    <pattern id="scan" width="100%" height="4" patternUnits="userSpaceOnUse">
+      <rect width="100%" height="2" fill="#000"/>
+    </pattern>
+  </defs>
+
+</svg>
