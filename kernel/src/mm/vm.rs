@@ -62,7 +62,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::mm::pmm;
 use crate::boot::{EfiMemoryDescriptor, MemoryMap};
 
-use crate::{log_debug, log_info, log_error};
+use crate::{log_debug, log_info, log_warn, log_error};
 
 const EFI_LOADER_CODE: u32 = 1;
 const EFI_LOADER_DATA: u32 = 2;
@@ -694,12 +694,47 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
     // ------------------------------------------------------------------
     verify_and_repair_clone(src_pml4, dst_pml4_phys);
 
+    // ------------------------------------------------------------------
+    // Null-page guard: explicitly unmap VA 0x0 from every new user address
+    // space.  The deep copy above replicates the kernel's identity map
+    // which may include physical page 0 (first 4 KiB).  Without this guard
+    // a null function-pointer call in userspace hits a *present* page
+    // (error_code P=1, I/D=1, U=1 → 0x15) instead of the expected
+    // not-present fault (0x14), masking null-deref bugs and making them
+    // look like mysterious instruction-fetch protection violations
+    // (observed: Doom #PF at RIP=0x0, error_code=0x15 immediately after
+    // returning from read()).
+    //
+    // We tolerate VmError::NotMapped silently: if the kernel never mapped
+    // page 0 (e.g. UEFI left address 0 unmapped) there is nothing to clear.
+    // ------------------------------------------------------------------
+    match unmap_page_in_pml4(dst_pml4_phys, 0) {
+        Ok(()) => {
+            log_debug!(
+                LOG_ORIGIN,
+                "clone_kernel_mappings: null-page guard applied (cleared VA 0x0 in PML4 0x{:X})",
+                dst_pml4_phys
+            );
+        }
+        Err(VmError::NotMapped) => {
+            // VA 0 was already absent — nothing to do.
+        }
+        Err(e) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "clone_kernel_mappings: null-page guard failed for PML4 0x{:X}: {:?}",
+                dst_pml4_phys,
+                e
+            );
+        }
+    }
+
     Ok(())
 }
 
 /// Walk `pml4_phys` for virtual address `virt` and return the leaf PTE,
 /// or `None` if any intermediate level is not-present.
-fn read_pte_in_pml4(pml4_phys: usize, virt: usize) -> Option<u64> {
+pub fn read_pte_in_pml4(pml4_phys: usize, virt: usize) -> Option<u64> {
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
 
     let pml4 = unsafe { &*(phys_to_virt_ptr(pml4_phys) as *const PageTable) };

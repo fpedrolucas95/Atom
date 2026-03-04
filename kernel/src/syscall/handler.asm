@@ -36,59 +36,47 @@ syscall_entry:
     push    qword 0x1B               ; CS
     push    rcx                      ; RIP
 
-    ; Save all other GPRs
+    ; Save ALL user GPRs so we can restore them on return.
+    ; The kernel must not leak its internal register values back to userspace.
     push    rbx
     push    rbp
     push    r12
     push    r13
     push    r14
     push    r15
-    push    r8  ; arg4
-    push    r9  ; arg5
+    push    rdi  ; user arg0
+    push    rsi  ; user arg1
+    push    rdx  ; user arg2
+    push    r10  ; user arg3
+    push    r8   ; user arg4
+    push    r9   ; user arg5
 
-    ; Prepare args for Rust (Windows x64 ABI)
-    ; RCX=num, RDX=arg0, R8=arg1, R9=arg2
-    mov     rcx, rax        ; arg0 (num)
-    mov     rax, rdx        ; temp
-    mov     rdx, rdi        ; arg1 (user RDI)
-    mov     r8,  rsi        ; arg2 (user RSI)
-    mov     r9,  rax        ; arg3 (user RDX)
+    ; Bridge to Rust dispatcher using explicit Win64 ABI:
+    ;   RCX = syscall number
+    ;   RDX = pointer to saved syscall frame at current RSP
+    ;
+    ; This avoids brittle 15-argument stack marshalling and keeps
+    ; the saved IRET frame/callee-saved GPRs as a single authoritative
+    ; structure for dispatch + optional debug verification.
+    mov     rcx, rax
+    mov     rdx, rsp
 
-    sub     rsp, 120        ; shadow space + arguments 3-14
-
-    ; Fill stack arguments for dispatcher
-    mov     rax, r10        ; User R10 -> arg3
-    mov     [rsp + 32], rax
-    mov     rax, [rsp + 128] ; User R8  -> arg4
-    mov     [rsp + 40], rax
-    mov     rax, [rsp + 120] ; User R9  -> arg5
-    mov     [rsp + 48], rax
-
-    ; Original user RIP and RSP (for debug)
-    mov     rax, [rsp + 184]
-    mov     [rsp + 56], rax
-    mov     rax, [rsp + 208]
-    mov     [rsp + 64], rax
-
-    ; Original callee-saved registers (for debug/trace)
-    mov     rax, [rsp + 176] ; RBX
-    mov     [rsp + 72], rax
-    mov     rax, [rsp + 168] ; RBP
-    mov     [rsp + 80], rax
-    mov     rax, [rsp + 160] ; R12
-    mov     [rsp + 88], rax
-    mov     rax, [rsp + 152] ; R13
-    mov     [rsp + 96], rax
-    mov     rax, [rsp + 144] ; R14
-    mov     [rsp + 104], rax
-    mov     rax, [rsp + 136] ; R15
-    mov     [rsp + 112], rax
+    ; Win64 call-site requirements:
+    ; - 32 bytes shadow space
+    ; - RSP 16-byte aligned before CALL
+    ; After 17 pushes above, RSP is 8 mod 16, so reserve 40 bytes.
+    sub     rsp, 40
 
     call    rust_syscall_dispatcher
 
-    ; Restore stack and return
-    add     rsp, 120
-    add     rsp, 16 ; skip saved R8, R9
+    ; Restore stack and ALL user GPRs
+    add     rsp, 40
+    pop     r9
+    pop     r8
+    pop     r10
+    pop     rdx
+    pop     rsi
+    pop     rdi
     pop     r15
     pop     r14
     pop     r13

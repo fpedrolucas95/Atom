@@ -405,6 +405,44 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
 
     # -------------------------------------------------------------------------
+    # Build doom (port do Doom clássico via doomgeneric + TinyGL)
+    # Depends on libc + libtinygl; requer doomgeneric_src clonado separadamente.
+    # Output → efi/apps/user/
+    # -------------------------------------------------------------------------
+    step "Building doom (Doom clássico via doomgeneric)..."
+
+    if [ -f "userspace/apps/doom/Makefile" ]; then
+        if [ -d "userspace/libs/doomgeneric_src/doomgeneric" ]; then
+            if make -C userspace/apps/doom 2>build/doom.log; then
+                if [ -f "userspace/apps/doom/doom.atxf" ]; then
+                    mkdir -p efi/apps/user
+                    cp userspace/apps/doom/doom.atxf efi/apps/user/doom.atxf
+                    success "doom.atxf → apps/user/"
+                    warning "Coloque doom1.wad ou doom.wad em efi/apps/user/ para jogar"
+                else
+                    warning "doom.atxf não gerado (elf2atxf pode estar ausente)"
+                fi
+            else
+                warning "Falha ao compilar doom (veja build/doom.log)"
+                cat build/doom.log
+            fi
+        else
+            warning "doomgeneric_src não encontrado — pulando build do Doom"
+            warning "  Clone com: git clone https://github.com/ozkl/doomgeneric userspace/libs/doomgeneric_src"
+        fi
+    else
+        warning "userspace/apps/doom/Makefile não encontrado, pulando"
+    fi
+
+    if [ ! -f "efi/apps/user/doom1.wad" ]; then
+        if [ -f "Doom1.WAD" ]; then
+            cp Doom1.WAD efi/apps/user/doom1.wad
+            success "doom1.wad restaurado de Doom1.WAD"
+        else
+            warning "doom1.wad não encontrado em efi/apps/user/ nem na raiz — coloque o WAD em efi/apps/user/doom1.wad"
+        fi
+    fi
+    # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
     # -------------------------------------------------------------------------
@@ -622,6 +660,14 @@ fi
 # ---- User apps → /apps/user/ ----
 if ls efi/apps/user/*.atxf 1>/dev/null 2>&1; then
     mcopy -i $DISK_IMG efi/apps/user/*.atxf ::/apps/user/
+fi
+
+# ---- User data files (WADs, etc.) → /apps/user/ ----
+if ls efi/apps/user/*.wad 1>/dev/null 2>&1; then
+    for wad in efi/apps/user/*.wad; do
+        mcopy -i $DISK_IMG "$wad" ::/apps/user/
+        success "$(basename $wad) → apps/user/"
+    done
 fi
 
 success "Imagem de disco criada: $DISK_IMG"

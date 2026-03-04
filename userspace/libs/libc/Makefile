@@ -71,7 +71,8 @@ SRCS = \
     src/errno.c \
     src/assert.c \
     src/math.c \
-    src/unistd.c
+    src/unistd.c \
+    src/time.c
 
 OBJS = $(patsubst src/%.c,$(OUTDIR)/%.o,$(SRCS))
 
