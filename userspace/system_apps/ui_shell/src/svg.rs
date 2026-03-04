@@ -518,7 +518,7 @@ fn fill_color(attrs: &[u8]) -> Option<u32> {
 /// Stroke color + pixel width from element attributes, or None if no stroke.
 fn stroke_info(attrs: &[u8], vbw: i32, ow: i32) -> Option<(u32, i32)> {
     let v = get_attr(attrs, b"stroke")?;
-    if v == b"none" || v.starts_with(b"url(") { return None; }
+    if v == b"none" { return None; }
     let (r, g, b, base_a) = parse_color_str(v)?;
     let stroke_op = get_attr(attrs, b"stroke-opacity")
         .map(parse_opacity_u8)
