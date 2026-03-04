@@ -8,7 +8,7 @@
 // - .data section (initialized data, writable)
 // - .bss size (zero-initialized data, writable)
 //
-// Usage: elf2atxf <input.elf> <output.atxf>
+// Usage: elf2atxf [--icon <icon.svg>] <input.elf> <output.atxf>
 
 use std::env;
 use std::fs::{self, File};
@@ -16,6 +16,7 @@ use std::io::{self, Write};
 
 const ATXF_MAGIC: u32 = 0x4154_5846; // "ATXF" in ASCII, little-endian
 const ATXF_VERSION: u16 = 1;
+const ATXF_ICON_MAGIC: u32 = 0x4154_5849; // "ATXI" in ASCII, little-endian
 const PAGE_SIZE: usize = 4096;
 const USER_BASE: u64 = 0x800000; // Expected userspace load address (must be above kernel heap)
 
@@ -106,8 +107,25 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 3 {
-        eprintln!("Usage: {} <input.elf> <output.atxf>", args[0]);
+    let mut icon_path: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 1usize;
+    while i < args.len() {
+        if args[i] == "--icon" {
+            if i + 1 >= args.len() {
+                eprintln!("Error: --icon requires a file path");
+                std::process::exit(1);
+            }
+            icon_path = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+
+    if positional.len() != 2 {
+        eprintln!("Usage: {} [--icon <icon.svg>] <input.elf> <output.atxf>", args[0]);
         eprintln!();
         eprintln!("Convert ELF binary to Atom ATXF executable format.");
         eprintln!();
@@ -117,8 +135,8 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let input_path = &args[1];
-    let output_path = &args[2];
+    let input_path = &positional[0];
+    let output_path = &positional[1];
 
     println!("elf2atxf: Converting {} -> {}", input_path, output_path);
 
@@ -163,6 +181,12 @@ fn main() -> io::Result<()> {
     let mut bss_size: usize = 0;
     let mut text_vaddr: u64 = 0;
     let mut base_addr: u64 = u64::MAX;
+    // Track the virtual base of the data region and the high-water mark of
+    // memory coverage across all non-executable PT_LOAD segments.  These are
+    // needed to correctly fill virtual gaps between segments with zeros and to
+    // compute the BSS size after all file content has been placed.
+    let mut data_vaddr: u64 = 0;
+    let mut max_data_mem_end: u64 = 0;
 
     // First pass: find base address (only considering segments at/above USER_BASE)
     for i in 0..e_phnum as usize {
@@ -225,18 +249,47 @@ fn main() -> io::Result<()> {
                 text_vaddr = p_vaddr;
                 println!("  Text segment: {} bytes at 0x{:X}", file_size, p_vaddr);
             }
-        } else if is_writable || file_size > 0 {
-            // Data segment
-            if end <= elf_data.len() && file_size > 0 {
+        } else if is_writable || file_size > 0 || mem_size > 0 {
+            // Data / BSS segment.
+            //
+            // Multiple non-executable PT_LOAD segments must be placed at their
+            // correct virtual offsets relative to the first one.  Gaps between
+            // segments are filled with zeros so that all subsequent segments
+            // land at the right position inside the data image.
+            if data_vaddr == 0 {
+                data_vaddr = p_vaddr;
+            }
+
+            if file_size > 0 && end <= elf_data.len() {
+                let expected_offset = (p_vaddr - data_vaddr) as usize;
+                if expected_offset > data_data.len() {
+                    // Fill the virtual gap (and any BSS tail of the previous
+                    // segment that falls before the start of this one) with zeros.
+                    data_data.resize(expected_offset, 0u8);
+                }
                 data_data.extend_from_slice(&elf_data[start..end]);
                 println!("  Data segment: {} bytes at 0x{:X}", file_size, p_vaddr);
+            } else if mem_size > 0 {
+                println!("  BSS-only segment: {} bytes at 0x{:X}", mem_size, p_vaddr);
             }
-            // BSS is the difference between memory size and file size
-            if mem_size > file_size {
-                bss_size += mem_size - file_size;
-                println!("  BSS: {} bytes", mem_size - file_size);
+
+            // Update the high-water mark for total memory coverage.
+            let seg_mem_end = p_vaddr + p_memsz;
+            if seg_mem_end > max_data_mem_end {
+                max_data_mem_end = seg_mem_end;
             }
         }
+    }
+
+    // Compute BSS: the zero-initialized memory that follows all file-backed data.
+    // This is the difference between the highest virtual memory address covered
+    // by any data segment and the end of the file-backed data image.
+    if data_vaddr > 0 && max_data_mem_end > data_vaddr {
+        let total_mem = (max_data_mem_end - data_vaddr) as usize;
+        bss_size = total_mem.saturating_sub(data_data.len());
+    }
+    if bss_size > 0 {
+        println!("  BSS: {} bytes", bss_size);
     }
 
     // If text is empty, we have a problem
@@ -304,11 +357,24 @@ fn main() -> io::Result<()> {
         output.write_all(&data_data)?;
     }
 
-    let total_size = if data_size > 0 {
+    let mut total_size = if data_size > 0 {
         data_offset + data_size
     } else {
         text_offset + text_size
     };
+
+    // Optional embedded icon payload trailer:
+    // [icon bytes][icon_len:le u32][magic:le u32="ATXI"]
+    if let Some(icon_path) = icon_path.as_deref() {
+        let icon = fs::read(icon_path)?;
+        if !icon.is_empty() {
+            output.write_all(&icon)?;
+            output.write_all(&(icon.len() as u32).to_le_bytes())?;
+            output.write_all(&ATXF_ICON_MAGIC.to_le_bytes())?;
+            total_size += icon.len() + 8;
+            println!("  Icon:         embedded={} bytes ({})", icon.len(), icon_path);
+        }
+    }
 
     println!();
     println!("ATXF created successfully:");

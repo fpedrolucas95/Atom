@@ -11,6 +11,7 @@
 #   ./build.sh --setup      # Configurar dependências
 
 set -e
+set -o pipefail
 
 # -------------------------------------------------------------------------
 # Cores para output
@@ -256,10 +257,18 @@ if [ "$KERNEL_ONLY" != true ]; then
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
             atxf_path="efi/apps/system/${app}.atxf"
+            icon_path="$app_path/ico.svg"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
-                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                if [ -f "$icon_path" ]; then
+                    if "$ELF2ATXF" --icon "$icon_path" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                        success "$app.atxf → apps/system/ (icon embedded)"
+                    else
+                        warning "Failed to convert $app to ATXF"
+                        cat build/elf2atxf_$app.log
+                    fi
+                elif "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
                     success "$app.atxf → apps/system/"
                 else
                     warning "Failed to convert $app to ATXF"
@@ -469,10 +478,18 @@ if [ "$KERNEL_ONLY" != true ]; then
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
             atxf_path="efi/apps/user/${app}.atxf"
+            icon_path="$app_path/ico.svg"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
-                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                if [ -f "$icon_path" ]; then
+                    if "$ELF2ATXF" --icon "$icon_path" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                        success "$app.atxf → apps/user/ (icon embedded)"
+                    else
+                        warning "Failed to convert $app to ATXF"
+                        cat build/elf2atxf_$app.log
+                    fi
+                elif "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
                     success "$app.atxf → apps/user/"
                 else
                     warning "Failed to convert $app to ATXF"
@@ -514,8 +531,14 @@ fi
 header "KERNEL BUILD"
 
 step "Compilando kernel Rust..."
+mkdir -p target/x86_64-unknown-uefi/release/deps
 if cargo build -p atom-kernel --release 2>&1 | tee build/cargo.log; then
-    success "Kernel Rust compilado"
+    if [ -f "target/x86_64-unknown-uefi/release/libatom.a" ]; then
+        success "Kernel Rust compilado"
+    else
+        error "Build Rust terminou sem gerar libatom.a"
+        exit 1
+    fi
 
     if grep -q "warning:" build/cargo.log; then
         warning "Build teve warnings (veja build/cargo.log)"
@@ -589,6 +612,12 @@ fi
 # =========================================================================
 
 step "Linkando Atom.efi..."
+
+if [ ! -f "target/x86_64-unknown-uefi/release/libatom.a" ]; then
+    error "libatom.a não encontrado em target/x86_64-unknown-uefi/release/"
+    error "Execute o build do kernel Rust novamente para gerar o artefato"
+    exit 1
+fi
 
 RUST_LLD=$(find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
 if [ -z "$RUST_LLD" ]; then

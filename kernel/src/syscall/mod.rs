@@ -4792,6 +4792,10 @@ struct KernelFd {
     is_dir: bool,
     flags: u32,
     offset: usize,
+    /// Cached file data pointer (heap-allocated). 0 = not cached.
+    cache_ptr: usize,
+    /// Cached file data length in bytes.
+    cache_len: usize,
 }
 
 impl KernelFd {
@@ -4802,10 +4806,26 @@ impl KernelFd {
         is_dir: false,
         flags: 0,
         offset: 0,
+        cache_ptr: 0,
+        cache_len: 0,
     };
 
     fn path_str(&self) -> &str {
         core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
+    }
+
+    /// Free the cached file data if present.
+    fn free_cache(&mut self) {
+        if self.cache_ptr != 0 && self.cache_len > 0 {
+            unsafe {
+                let layout = core::alloc::Layout::from_size_align_unchecked(
+                    self.cache_len, 1,
+                );
+                alloc::alloc::dealloc(self.cache_ptr as *mut u8, layout);
+            }
+        }
+        self.cache_ptr = 0;
+        self.cache_len = 0;
     }
 }
 
@@ -4946,6 +4966,7 @@ fn sys_fs_close(fd: u64) -> u64 {
 
     let mut table = KERNEL_FD_TABLE.lock();
     if table[idx].in_use {
+        table[idx].free_cache();
         table[idx].in_use = false;
         ESUCCESS
     } else {
@@ -4954,6 +4975,11 @@ fn sys_fs_close(fd: u64) -> u64 {
 }
 
 /// Read from file descriptor
+///
+/// File data is cached in the fd table on first read to avoid re-reading
+/// the entire file from the FAT32 driver on every read() call.  This is
+/// critical for large files (e.g. 4 MiB WAD) where repeated contiguous
+/// page allocations would fragment physical memory and eventually fail.
 fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
     log_debug!(LOG_ORIGIN, "sys_fs_read(fd={}, buf_ptr={:#X}, count={})", fd, buf_ptr, count);
@@ -4981,169 +5007,118 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return EBADF;
     }
 
-    // Get path and offset without holding lock during FAT32 I/O
-    let (path_buf, path_len, offset, is_dir) = {
-        let table = KERNEL_FD_TABLE.lock();
-        if !table[idx].in_use {
-            return EBADF;
-        }
-        (table[idx].path, table[idx].path_len, table[idx].offset, table[idx].is_dir)
-    };
+    // ── Obtain file data (cached or fresh) ─────────────────────────────────
+    // Keep this lock for the entire read path so cache_ptr/cache_len/offset
+    // remain stable while we dereference and copy to userspace.
+    let mut table = KERNEL_FD_TABLE.lock();
+    if !table[idx].in_use {
+        return EBADF;
+    }
 
-    if is_dir {
+    if table[idx].is_dir {
         return EISDIR;
     }
 
-    let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
-    let is_wad = path.contains("doom1") || path.contains("DOOM1");
+    // Ensure file data is cached
+    if table[idx].cache_ptr == 0 {
+        // Cache miss — read from FAT32 and cache
+        let path_buf = table[idx].path;
+        let path_len = table[idx].path_len;
+        let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
 
-    // Read the file from FAT32
-    match crate::drivers::fat32::open(path) {
-        Some(data) => {
-            let file_len = data.len();
-
-            if is_wad {
-                log_info!(LOG_ORIGIN,
-                    "[WAD-DIAG] read fd={} buf_ptr={:#X} offset={} count={} file_len={}",
-                    fd, buf_ptr, offset, count, file_len);
-            }
-
-            if offset >= file_len {
-                if is_wad {
-                    log_warn!(LOG_ORIGIN, "[WAD-DIAG] read EOF: offset {} >= file_len {}",
-                        offset, file_len);
-                }
-                return 0; // EOF
-            }
-
-            let available = file_len - offset;
-            let to_read = available.min(count);
-
-            // ── DEFENSIVE ASSERT ───────────────────────────────────────────
-            // This is the critical invariant: we must NEVER copy more than
-            // `count` bytes into the user buffer.  A violation here would
-            // overwrite user stack/heap and cause exactly the RIP=0 symptom.
-            debug_assert!(
-                to_read <= count,
-                "BUG: to_read ({}) > count ({})", to_read, count
-            );
-            debug_assert!(
-                to_read <= available,
-                "BUG: to_read ({}) > available ({})", to_read, available
-            );
-            debug_assert!(
-                offset + to_read <= file_len,
-                "BUG: offset+to_read ({}) > file_len ({})", offset + to_read, file_len
-            );
-
-            // Hard-limit: even if logic above is somehow wrong, never exceed count
-            let to_read = to_read.min(count);
-
-            if is_wad {
-                log_info!(LOG_ORIGIN,
-                    "[WAD-DIAG] computed: available={} to_read={} slice=[{}..{}] (of file_len={})",
-                    available, to_read, offset, offset + to_read, file_len);
-            }
-
-            // WAD diagnostic: log first 32 bytes of data being read
-            if is_wad && to_read > 0 {
-                let diag_len = to_read.min(32);
-                let diag_slice = &data[offset..offset + diag_len];
-                let mut hex = alloc::string::String::new();
-                for (i, &b) in diag_slice.iter().enumerate() {
-                    if i > 0 { hex.push(' '); }
-                    hex.push_str(&alloc::format!("{:02X}", b));
-                }
-                log_info!(LOG_ORIGIN, "[WAD-DIAG] first {} bytes at offset {}: [{}]",
-                    diag_len, offset, hex);
-            }
-
-            // ── Pre-fault user pages ───────────────────────────────────────
-            // Touch each target page via the VMA demand-pager so that
-            // copy_nonoverlapping in write_buffer_to_user cannot trigger a
-            // kernel-mode page fault on unmapped user memory.
-            {
-                let page_size: usize = 4096;
-                let start_page = buf_ptr as usize & !(page_size - 1);
-                let end_addr = buf_ptr as usize + to_read;
-                let end_page = if to_read > 0 {
-                    (end_addr - 1) & !(page_size - 1)
+        match crate::drivers::fat32::open(path) {
+            Some(data) => {
+                let flen = data.len();
+                if flen == 0 {
+                    // Empty file — nothing to cache
+                    table[idx].cache_ptr = 0;
+                    table[idx].cache_len = 0;
                 } else {
-                    start_page
-                };
-                let mut page = start_page;
-                while page <= end_page {
-                    if let Some(tid) = crate::sched::current_thread() {
-                        if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
-                            if pml4 != 0 {
-                                let ok = crate::mm::vma::handle_page_fault(
-                                    pml4 as usize, page, 0x6 /* write|user|not-present */);
-                                if !ok && is_wad {
-                                    log_warn!(LOG_ORIGIN,
-                                        "[WAD-DIAG] pre-fault FAILED for page {:#X} (pml4={:#X})",
-                                        page, pml4);
-                                }
-                            }
-                        }
+                    // Allocate cache and copy file data
+                    let layout = unsafe {
+                        core::alloc::Layout::from_size_align_unchecked(flen, 1)
+                    };
+                    let ptr = unsafe { alloc::alloc::alloc(layout) };
+                    if ptr.is_null() {
+                        log_warn!(LOG_ORIGIN,
+                            "sys_fs_read: failed to allocate {} bytes for fd {} cache",
+                            flen, fd);
+                        return EIO;
                     }
-                    page += page_size;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, flen);
+                    }
+
+                    table[idx].cache_ptr = ptr as usize;
+                    table[idx].cache_len = flen;
+
+                    log_debug!(LOG_ORIGIN,
+                        "sys_fs_read: cached {} bytes for fd {}", flen, fd);
                 }
             }
-
-            // Build the source slice — this is the ONLY slice that may be
-            // passed to write_buffer_to_user.  Its length is exactly to_read.
-            let src_slice = &data[offset..offset + to_read];
-
-            // ── SAFETY CHECK: verify slice length matches to_read ──────────
-            if src_slice.len() != to_read {
-                log_error!(LOG_ORIGIN,
-                    "BUG: src_slice.len()={} != to_read={} — aborting read to prevent corruption",
-                    src_slice.len(), to_read);
+            None => {
+                log_warn!(LOG_ORIGIN,
+                    "sys_fs_read: fat32::open failed for fd {}", fd);
                 return EIO;
             }
+        }
+    }
 
-            if is_wad {
-                log_info!(LOG_ORIGIN,
-                    "[WAD-DIAG] COPY: dst={:#X} src_slice.len={} to_read={} count={}",
-                    buf_ptr, src_slice.len(), to_read, count);
-            }
+    let data_ptr = table[idx].cache_ptr;
+    let file_len = table[idx].cache_len;
 
-            if let Err(e) = write_buffer_to_user(buf_ptr, src_slice) {
-                if is_wad {
-                    log_warn!(LOG_ORIGIN, "[WAD-DIAG] write_buffer_to_user FAILED: err={:#X}", e);
-                }
-                return e;
-            }
+    // ── Produce the data slice from cache ──────────────────────────────────
+    if file_len == 0 || data_ptr == 0 {
+        return 0; // empty file
+    }
 
-            if is_wad {
-                log_info!(LOG_ORIGIN,
-                    "[WAD-DIAG] write_buffer_to_user OK: copied {} bytes to {:#X}",
-                    to_read, buf_ptr);
-            }
+    let data: &[u8] = unsafe {
+        core::slice::from_raw_parts(data_ptr as *const u8, file_len)
+    };
 
-            // Update offset
-            {
-                let mut table = KERNEL_FD_TABLE.lock();
-                if table[idx].in_use {
-                    table[idx].offset += to_read;
-                    if is_wad {
-                        log_info!(LOG_ORIGIN,
-                            "[WAD-DIAG] offset updated: {} → {}",
-                            offset, table[idx].offset);
+    let offset = table[idx].offset;
+    if offset >= file_len {
+        return 0; // EOF
+    }
+
+    let available = file_len - offset;
+    let to_read = available.min(count);
+
+    // ── Pre-fault user pages ───────────────────────────────────────────
+    {
+        let page_size: usize = 4096;
+        let start_page = buf_ptr as usize & !(page_size - 1);
+        let end_addr = buf_ptr as usize + to_read;
+        let end_page = if to_read > 0 {
+            (end_addr - 1) & !(page_size - 1)
+        } else {
+            start_page
+        };
+        let mut page = start_page;
+        while page <= end_page {
+            if let Some(tid) = crate::sched::current_thread() {
+                if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                    if pml4 != 0 {
+                        crate::mm::vma::handle_page_fault(
+                            pml4 as usize, page, 0x6 /* write|user|not-present */);
                     }
                 }
             }
-
-            log_debug!(LOG_ORIGIN, "sys_fs_read OK: fd={} returned {} bytes", fd, to_read);
-            to_read as u64
-        }
-        None => {
-            if is_wad {
-                log_warn!(LOG_ORIGIN, "[WAD-DIAG] fat32::open('{}') returned None → EIO", path);
-            }
-            EIO
+            page += page_size;
         }
     }
+
+    // Copy data to user buffer
+    let src_slice = &data[offset..offset + to_read];
+    if let Err(e) = write_buffer_to_user(buf_ptr, src_slice) {
+        return e;
+    }
+
+    // Update offset while still holding fd-table lock
+    table[idx].offset += to_read;
+
+    log_debug!(LOG_ORIGIN, "sys_fs_read OK: fd={} returned {} bytes", fd, to_read);
+    to_read as u64
 }
 
 /// Write to file descriptor (read-only FAT32 — not supported)
@@ -5283,6 +5258,16 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
             cur + offset
         }
         2 => {                        // SEEK_END
+            // Use cached file length if available to avoid a fat32::stat_path call
+            let cached_len = table[idx].cache_len;
+            if cached_len > 0 {
+                let result = cached_len as i64 + offset;
+                if result < 0 {
+                    return EINVAL;
+                }
+                table[idx].offset = result as usize;
+                return result as u64;
+            }
             let (path_buf, path_len) = (table[idx].path, table[idx].path_len);
             drop(table);
             let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };

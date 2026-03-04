@@ -94,6 +94,8 @@ use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
+use atom_syscall::fs;
+use atom_syscall::SyscallError;
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
@@ -160,7 +162,6 @@ const WINDOW_MIN_WIDTH: u32 = 150;
 const WINDOW_MIN_HEIGHT: u32 = 100;
 const PANEL_HEIGHT: u32 = 34;
 const DOCK_HEIGHT: u32 = 64;
-const DOCK_WIDTH: u32 = 380;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -357,16 +358,18 @@ impl WindowManager {
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == prev_id) {
                 w.focused = false;
                 if let Some(port) = w.event_port {
-                    let msg = libipc::messages::WmWindowEventMsg {
-                        window_id: prev_id,
-                        event_type: libipc::messages::WindowEventType::Unfocus,
-                        x: w.x, y: w.y, width: w.width, height: w.height,
-                    };
-                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                    if port != 0 {
+                        let msg = libipc::messages::WmWindowEventMsg {
+                            window_id: prev_id,
+                            event_type: libipc::messages::WindowEventType::Unfocus,
+                            x: w.x, y: w.y, width: w.width, height: w.height,
+                        };
+                        let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                        let mut full_msg = [0u8; 64];
+                        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                        let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                    }
                 }
             }
         }
@@ -380,16 +383,18 @@ impl WindowManager {
             }
 
             if let Some(port) = window.event_port {
-                let msg = libipc::messages::WmWindowEventMsg {
-                    window_id: id,
-                    event_type: libipc::messages::WindowEventType::Focus,
-                    x: window.x, y: window.y, width: window.width, height: window.height,
-                };
-                let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                let mut full_msg = [0u8; 64];
-                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                if port != 0 {
+                    let msg = libipc::messages::WmWindowEventMsg {
+                        window_id: id,
+                        event_type: libipc::messages::WindowEventType::Focus,
+                        x: window.x, y: window.y, width: window.width, height: window.height,
+                    };
+                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                }
             }
 
             self.windows.push(window);
@@ -532,6 +537,14 @@ struct DesktopIcon {
     color: Color,
 }
 
+struct DockApp {
+    label: String,
+    executable: String,
+    color: Color,
+    monogram: String,
+    has_embedded_icon: bool,
+}
+
 struct ContextMenu {
     x: i32,
     y: i32,
@@ -585,6 +598,7 @@ struct Compositor {
     keyboard_shift: bool,
     desktop_bg: Color,
     icons: Vec<DesktopIcon>,
+    dock_apps: Vec<DockApp>,
     ticks: u32,
     click_counter: u32,
     last_click_tick: u32,
@@ -630,6 +644,8 @@ impl Compositor {
             color: Color::new(72, 199, 142),
         });
 
+        let dock_apps = Self::build_dock_apps();
+
         // Allocate at max mode capacity so VideoModeChanged never needs reallocation.
         const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
         let init_pixels = (fb.stride() * fb.height()) as usize;
@@ -661,6 +677,7 @@ impl Compositor {
             keyboard_shift: false,
             desktop_bg: theme::DESKTOP_BG,
             icons,
+            dock_apps,
             ticks: 0,
             click_counter: 0,
             last_click_tick: 0,
@@ -768,18 +785,25 @@ impl Compositor {
             let code = scancode & 0x7F;
 
             match code {
+                // 0xE0 extended-key prefix arrives as 0x60 after masking — skip it
+                0x60 => {}
                 scancodes::LEFT_SHIFT | scancodes::RIGHT_SHIFT => {
                     self.keyboard_shift = pressed;
+                    self.dispatch_key_event(code, 0, pressed);
                 }
-                scancodes::ESCAPE if pressed => {
-                    exit(0);
+                _ => {
+                    // Send ALL keys (press and release) to the focused window so
+                    // that game-style apps (Doom, etc.) can handle non-ASCII keys
+                    // like arrows, Ctrl (fire), Shift, and key-up events.
+                    let ascii = if pressed {
+                        scancode_to_ascii(code, self.keyboard_shift)
+                            .map(|c| c as u8)
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    self.dispatch_key_event(code, ascii, pressed);
                 }
-                _ if pressed => {
-                    if let Some(ascii) = scancode_to_ascii(code, self.keyboard_shift) {
-                        self.dispatch_key_event(scancode, ascii as u8);
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -788,26 +812,32 @@ impl Compositor {
         let target_id = self.captured_window.or_else(|| self.wm.window_at(x, y));
 
         if let Some(id) = target_id {
-            if let Some(w) = self.wm.get_window(id) {
-                if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let rel_x = x - w.content_x() as i32;
-                        let rel_y = y - w.content_y() as i32;
+            let target = self.wm.get_window(id).and_then(|w| {
+                w.event_port.map(|port| (port, w.content_x(), w.content_y()))
+            });
 
-                        let event = MouseMoveEvent {
-                            x: rel_x,
-                            y: rel_y,
-                            dx,
-                            dy,
-                        };
-                        let _ = send_message_async(port, MessageType::MouseMove, &event.to_bytes());
-                    }
-                }
+            if let Some((port, content_x, content_y)) = target {
+                let rel_x = x - content_x as i32;
+                let rel_y = y - content_y as i32;
+
+                let event = MouseMoveEvent {
+                    x: rel_x,
+                    y: rel_y,
+                    dx,
+                    dy,
+                };
+                self.send_window_event_async(id, port, MessageType::MouseMove, &event.to_bytes());
             }
         }
     }
 
-    fn dispatch_key_event(&mut self, scancode: u8, ascii: u8) {
+    /// Dispatch a key event to the focused window.
+    ///
+    /// - Always sends `KeyDown` or `KeyUp` so game-aware apps receive every key.
+    /// - Additionally sends `KeyPress` for printable ASCII key-down events for
+    ///   backward compatibility with apps that rely on that message type (e.g.
+    ///   terminal).
+    fn dispatch_key_event(&mut self, scancode: u8, ascii: u8, pressed: bool) {
         let event = KeyEvent {
             scancode,
             character: ascii,
@@ -819,15 +849,51 @@ impl Compositor {
             },
         };
 
-        let event_port = self.wm.focused_id
-            .and_then(|id| self.wm.get_window(id))
-            .and_then(|w| w.event_port);
+        let target = self.wm.focused_id
+            .and_then(|id| self.wm.get_window(id).and_then(|w| w.event_port.map(|port| (id, port))));
 
-        if let Some(port) = event_port {
-            if port != 0 {
-                let _ = send_message_async(port, MessageType::KeyPress, &event.to_bytes());
+        if let Some((window_id, port)) = target {
+            // Primary: KeyDown / KeyUp for full key tracking
+            let primary_type = if pressed { MessageType::KeyDown } else { MessageType::KeyUp };
+            self.send_window_event_async(window_id, port, primary_type, &event.to_bytes());
+
+            // Compat: also send KeyPress for printable key-down events
+            if pressed && ascii != 0 {
+                self.send_window_event_async(window_id, port, MessageType::KeyPress, &event.to_bytes());
             }
         }
+    }
+
+    fn send_window_event_async(&mut self, window_id: WindowId, port: PortId, msg_type: MessageType, payload: &[u8]) {
+        if port == 0 {
+            return;
+        }
+
+        if let Err(err) = send_message_async(port, msg_type, payload) {
+            if matches!(err, SyscallError::NotFound | SyscallError::InvalidArgument | SyscallError::Unknown(_)) {
+                self.drop_dead_window(window_id);
+            }
+        }
+    }
+
+    fn drop_dead_window(&mut self, window_id: WindowId) {
+        self.pending_close.retain(|pc| pc.window_id != window_id);
+
+        if self.captured_window == Some(window_id) {
+            self.captured_window = None;
+        }
+
+        match self.drag_op {
+            DragOperation::Move { window_id: id, .. } | DragOperation::Resize { window_id: id, .. }
+                if id == window_id =>
+            {
+                self.drag_op = DragOperation::None;
+            }
+            _ => {}
+        }
+
+        self.wm.close_window(window_id);
+        self.dirty = true;
     }
 
     fn handle_register_message(&mut self, data: &[u8]) {
@@ -987,11 +1053,6 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + 3 {
                     if let Some(key_event) = KeyEvent::from_bytes(&data[payload_start..]) {
-                        let scancode = key_event.scancode & 0x7F;
-                        if scancode == 0x01 {
-                            exit(0);
-                        }
-
                         let event_port = if let Some(focused_id) = self.wm.focused_id {
                             if let Some(window) = self.wm.get_window(focused_id) {
                                 window.event_port
@@ -1002,9 +1063,9 @@ impl Compositor {
                             None
                         };
 
-                        if let Some(port) = event_port {
-                            if port != 0 {
-                                let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
+                        if let Some(focused_id) = self.wm.focused_id {
+                            if let Some(port) = event_port {
+                                self.send_window_event_async(focused_id, port, MessageType::KeyPress, &key_event.to_bytes());
                             }
                         }
                     }
@@ -1096,17 +1157,15 @@ impl Compositor {
                 }
 
                 if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let rel_x = x - w.content_x() as i32;
-                        let rel_y = y - w.content_y() as i32;
-                        if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
-                            let event = MouseButtonEvent {
-                                button: MouseButton::Left,
-                                x: rel_x,
-                                y: rel_y,
-                            };
-                            let _ = send_message_async(port, MessageType::MouseButtonDown, &event.to_bytes());
-                        }
+                    let rel_x = x - w.content_x() as i32;
+                    let rel_y = y - w.content_y() as i32;
+                    if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                        let event = MouseButtonEvent {
+                            button: MouseButton::Left,
+                            x: rel_x,
+                            y: rel_y,
+                        };
+                        self.send_window_event_async(id, port, MessageType::MouseButtonDown, &event.to_bytes());
                     }
                 }
             }
@@ -1191,11 +1250,14 @@ impl Compositor {
     }
 
     fn is_on_dock(&self, x: i32, y: i32) -> bool {
-        self.dock_icon_at(x, y).is_some()
-            || {
-                let height = self.fb.height();
-                y >= (height as i32 - DOCK_HEIGHT as i32 - 12)
-            }
+        if let Some((dock_x, dock_y, dock_w, dock_h, _, _, _, _)) = self.dock_layout() {
+            x >= dock_x
+                && x < dock_x + dock_w as i32
+                && y >= dock_y
+                && y < dock_y + dock_h as i32
+        } else {
+            false
+        }
     }
 
     fn handle_right_click(&mut self, x: i32, y: i32) {
@@ -1288,6 +1350,10 @@ impl Compositor {
     }
 
     fn send_surface_assignment(&self, window_id: WindowId, port: PortId, region_id: SharedRegionId, width: u32, height: u32, resize_pos: Option<(i32, i32)>) {
+        if port == 0 {
+            return;
+        }
+
         // 1. Notify client about surface
         let assign = SurfaceAssignMsg {
             window_id,
@@ -1384,17 +1450,15 @@ impl Compositor {
         if let Some(id) = target_id {
             if let Some(w) = self.wm.get_window(id) {
                 if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let rel_x = x - w.content_x() as i32;
-                        let rel_y = y - w.content_y() as i32;
-                        if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
-                            let event = MouseButtonEvent {
-                                button: MouseButton::Left,
-                                x: rel_x,
-                                y: rel_y,
-                            };
-                            let _ = send_message_async(port, MessageType::MouseButtonUp, &event.to_bytes());
-                        }
+                    let rel_x = x - w.content_x() as i32;
+                    let rel_y = y - w.content_y() as i32;
+                    if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                        let event = MouseButtonEvent {
+                            button: MouseButton::Left,
+                            x: rel_x,
+                            y: rel_y,
+                        };
+                        self.send_window_event_async(id, port, MessageType::MouseButtonUp, &event.to_bytes());
                     }
                 }
             }
@@ -1420,8 +1484,14 @@ impl Compositor {
                     let id = self.wm.next_id;
                     self.wm.next_id += 1;
 
+                    // Treat req.width/req.height as the desired *content* area.
+                    // Add decorations so the surface returned equals exactly what
+                    // the client requested.
+                    let outer_w = req.width + WINDOW_BORDER_WIDTH * 2;
+                    let outer_h = req.height + WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH;
+
                     let window = match Window::new_with_process(
-                        id, &req.title, win_x, win_y, req.width, req.height,
+                        id, &req.title, win_x, win_y, outer_w, outer_h,
                         0 as ProcessId, req.reply_port as PortId
                     ) {
                         Some(w) => w,
@@ -1444,7 +1514,9 @@ impl Compositor {
                     let mut full_msg = [0u8; 64];
                     full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
                     full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE].copy_from_slice(&resp.to_bytes());
-                    let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
+                    if req.reply_port != 0 {
+                        let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
+                    }
                 }
             }
             _ => {}
@@ -1458,15 +1530,17 @@ impl Compositor {
         }
 
         if let Some(port) = event_port {
-            let msg = TerminateRequestMsg {
-                window_id: id,
-                reason: 0,
-            };
-            let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
-            let mut full_msg = [0u8; 64];
-            full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-            full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
-            let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+            if port != 0 {
+                let msg = TerminateRequestMsg {
+                    window_id: id,
+                    reason: 0,
+                };
+                let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+            }
         }
 
         // Hide the window immediately so it disappears from the screen,
@@ -1522,24 +1596,13 @@ impl Compositor {
     }
 
     fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {
-        let width = self.fb.width();
-        let height = self.fb.height();
-
-        let dock_x = (width / 2).saturating_sub(DOCK_WIDTH / 2) as i32;
-        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12) as i32;
-
-        let icon_size = 42i32;
-        let spacing = 20i32;
-        let num_icons = 4;
-        let total_icons_width = num_icons * icon_size + (num_icons - 1) * spacing;
-        let start_x = dock_x + (DOCK_WIDTH as i32 - total_icons_width) / 2;
-        let icon_y = dock_y + (DOCK_HEIGHT as i32 - icon_size) / 2;
+        let (_, _, _, _, start_x, icon_y, icon_size, spacing) = self.dock_layout()?;
 
         if y < icon_y || y >= icon_y + icon_size {
             return None;
         }
 
-        for i in 0..4 {
+        for i in 0..self.dock_apps.len() {
             let ix = start_x + (i as i32 * (icon_size + spacing));
             if x >= ix && x < ix + icon_size {
                 return Some(i);
@@ -1550,14 +1613,162 @@ impl Compositor {
     }
 
     fn handle_dock_click(&mut self, icon_index: usize) {
-        match icon_index {
-            1 => {
-                self.spawn_app("display_settings");
+        if icon_index < self.dock_apps.len() {
+            let executable = self.dock_apps[icon_index].executable.clone();
+            self.spawn_app(&executable);
+        }
+    }
+
+    fn dock_layout(&self) -> Option<(i32, i32, u32, u32, i32, i32, i32, i32)> {
+        let count = self.dock_apps.len();
+        if count == 0 {
+            return None;
+        }
+
+        let width = self.fb.width();
+        let height = self.fb.height();
+        let icon_size = 42i32;
+        let spacing = 20i32;
+        let side_padding = 28i32;
+
+        let total_icons_width = count as i32 * icon_size + (count as i32 - 1) * spacing;
+        let dock_width = (total_icons_width + side_padding * 2).max(140) as u32;
+        let dock_x = (width / 2).saturating_sub(dock_width / 2) as i32;
+        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12) as i32;
+        let start_x = dock_x + ((dock_width as i32 - total_icons_width) / 2);
+        let icon_y = dock_y + (DOCK_HEIGHT as i32 - icon_size) / 2;
+
+        Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
+    }
+
+    fn build_dock_apps() -> Vec<DockApp> {
+        let candidates: [(&str, &str, Color); 5] = [
+            ("fileman", "Files", Color::new(99, 143, 255)),
+            ("display_settings", "Settings", Color::new(86, 182, 245)),
+            ("tinygl_demo", "TinyGL", Color::new(72, 199, 142)),
+            ("doom", "Doom", Color::new(200, 82, 82)),
+            ("terminal", "Terminal", Color::new(200, 160, 255)),
+        ];
+
+        let mut apps = Vec::new();
+
+        for (exec, label, fallback_color) in candidates.iter() {
+            let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
+            let user_path = alloc::format!("/apps/user/{}.atxf", exec);
+
+            let atxf_path = if fs::stat(&sys_path).is_ok() {
+                Some(sys_path)
+            } else if fs::stat(&user_path).is_ok() {
+                Some(user_path)
+            } else {
+                None
+            };
+
+            if let Some(path) = atxf_path {
+                let mut color = *fallback_color;
+                let mut has_embedded_icon = false;
+
+                if let Ok(atxf_bytes) = fs::read_file(&path) {
+                    if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
+                        has_embedded_icon = true;
+                        if let Some(icon_color) = Self::extract_first_hex_color(icon_svg) {
+                            color = icon_color;
+                        }
+                    }
+                }
+
+                let mono = if exec.len() >= 2 {
+                    alloc::format!(
+                        "{}{}",
+                        exec.as_bytes()[0] as char,
+                        exec.as_bytes()[1] as char
+                    )
+                } else {
+                    String::from(*exec)
+                };
+
+                apps.push(DockApp {
+                    label: String::from(*label),
+                    executable: String::from(*exec),
+                    color,
+                    monogram: mono,
+                    has_embedded_icon,
+                });
             }
-            3 => {
-                self.spawn_app("terminal");
+        }
+
+        apps
+    }
+
+    fn extract_embedded_icon_svg(atxf: &[u8]) -> Option<&[u8]> {
+        if atxf.len() < 8 {
+            return None;
+        }
+
+        let trailer_start = atxf.len() - 8;
+        let icon_len = u32::from_le_bytes([
+            atxf[trailer_start],
+            atxf[trailer_start + 1],
+            atxf[trailer_start + 2],
+            atxf[trailer_start + 3],
+        ]) as usize;
+        let magic = u32::from_le_bytes([
+            atxf[trailer_start + 4],
+            atxf[trailer_start + 5],
+            atxf[trailer_start + 6],
+            atxf[trailer_start + 7],
+        ]);
+
+        const ATXF_ICON_MAGIC: u32 = 0x4154_5849; // "ATXI"
+        if magic != ATXF_ICON_MAGIC || icon_len > trailer_start {
+            return None;
+        }
+
+        let icon_start = trailer_start - icon_len;
+        Some(&atxf[icon_start..trailer_start])
+    }
+
+    fn extract_first_hex_color(svg: &[u8]) -> Option<Color> {
+        let mut best: Option<Color> = None;
+        let mut best_score: i32 = -1;
+        let mut i = 0usize;
+        while i + 7 <= svg.len() {
+            if svg[i] == b'#' {
+                if let (Some(h1), Some(h2), Some(h3), Some(h4), Some(h5), Some(h6)) = (
+                    Self::hex_nibble(svg[i + 1]),
+                    Self::hex_nibble(svg[i + 2]),
+                    Self::hex_nibble(svg[i + 3]),
+                    Self::hex_nibble(svg[i + 4]),
+                    Self::hex_nibble(svg[i + 5]),
+                    Self::hex_nibble(svg[i + 6]),
+                ) {
+                    let r = (h1 << 4) | h2;
+                    let g = (h3 << 4) | h4;
+                    let b = (h5 << 4) | h6;
+                    let maxc = r.max(g).max(b) as i32;
+                    let minc = r.min(g).min(b) as i32;
+                    let sat = maxc - minc;
+                    let lum = maxc + minc;
+                    if sat >= 18 {
+                        let score = sat * 4 + maxc - (lum - 255).abs() / 2;
+                        if score > best_score {
+                            best_score = score;
+                            best = Some(Color::new(r, g, b));
+                        }
+                    }
+                }
             }
-            _ => {}
+            i += 1;
+        }
+        best
+    }
+
+    fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(10 + b - b'a'),
+            b'A'..=b'F' => Some(10 + b - b'A'),
+            _ => None,
         }
     }
 
@@ -1937,50 +2148,49 @@ impl Compositor {
     }
 
     fn draw_dock(&self) {
-        let width = self.backbuffer_fb.width();
-        let height = self.backbuffer_fb.height();
+        let (dock_x_i32, dock_y_i32, dock_width, dock_height, start_x_i32, icon_y_i32, icon_size_i32, spacing_i32) = match self.dock_layout() {
+            Some(v) => v,
+            None => return,
+        };
 
-        let dock_x = (width / 2).saturating_sub(DOCK_WIDTH / 2);
-        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12);
+        let dock_x = dock_x_i32 as u32;
+        let dock_y = dock_y_i32 as u32;
+        let start_x = start_x_i32 as u32;
+        let icon_y = icon_y_i32 as u32;
+        let icon_size = icon_size_i32 as u32;
+        let spacing = spacing_i32 as u32;
 
         // Dock shadow
-        self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::SHADOW, 80);
+        self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, 14, theme::SHADOW, 80);
 
         // Dock background (pill shape)
-        self.backbuffer_fb.fill_rect_rounded_aa(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, 14, theme::DOCK_BG);
         // Dock border
-        self.backbuffer_fb.draw_rect_rounded_aa(dock_x, dock_y, DOCK_WIDTH, DOCK_HEIGHT, 14, theme::DOCK_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, 14, theme::DOCK_BORDER);
         // Top highlight line
-        self.backbuffer_fb.fill_rect(dock_x + 14, dock_y, DOCK_WIDTH - 28, 1, theme::DOCK_BORDER);
+        self.backbuffer_fb.fill_rect(dock_x + 14, dock_y, dock_width - 28, 1, theme::DOCK_BORDER);
 
-        let icons: [(Color, &str, &str); 4] = [
-            (Color::new(99, 143, 255), "FL", "Files"),
-            (Color::new(86, 182, 245), "ST", "Settings"),
-            (Color::new(72, 199, 142), "BR", "Browser"),
-            (Color::new(200, 160, 255), ">_", "Terminal"),
-        ];
-
-        let icon_size = 42u32;
         let icon_radius = 10u32;
-        let spacing = 20u32;
-        let total_icons_width = icons.len() as u32 * icon_size + (icons.len() as u32 - 1) * spacing;
-        let start_x = dock_x + (DOCK_WIDTH - total_icons_width) / 2;
-        let icon_y = dock_y + (DOCK_HEIGHT - icon_size) / 2;
 
-        for (i, (color, label, _name)) in icons.iter().enumerate() {
+        for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
 
             // Icon background (rounded)
-            self.backbuffer_fb.fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, icon_radius, *color);
+            self.backbuffer_fb.fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, icon_radius, app.color);
 
-            // Icon label centered
-            let label_len = label.len() as u32 * 8;
+            // Icon monogram centered
+            let label_len = app.monogram.len() as u32 * 8;
             let lx = ix + (icon_size - label_len) / 2;
             let ly = icon_y + (icon_size - 8) / 2;
-            self.backbuffer_fb.draw_string(lx, ly, label, Color::WHITE, *color);
+            self.backbuffer_fb.draw_string(lx, ly, &app.monogram, Color::WHITE, app.color);
+
+            // Embedded-icon hint
+            if app.has_embedded_icon {
+                self.backbuffer_fb.fill_rect_rounded_aa(ix + icon_size - 9, icon_y + 3, 6, 6, 3, theme::ACCENT);
+            }
 
             // Active indicator dot for running apps (optional visual)
-            if i == 3 && self.wm.windows.iter().any(|w| w.title == "Terminal" && w.visible) {
+            if self.wm.windows.iter().any(|w| w.title == app.label && w.visible) {
                 let dot_x = ix + icon_size / 2 - 2;
                 let dot_y = icon_y + icon_size + 3;
                 self.backbuffer_fb.fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);

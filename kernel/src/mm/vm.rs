@@ -534,6 +534,21 @@ pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageF
     map_page_internal(pml4_phys, virt, phys, flags)
 }
 
+/// Check whether a page is already present (mapped) in a specific PML4.
+///
+/// This is used by fault handlers and pre-fault paths to avoid replacing
+/// an existing mapping with a freshly zeroed page — which would destroy
+/// live stack/heap data.
+pub fn is_page_present_in_pml4(pml4_phys: usize, virt: usize) -> bool {
+    if pml4_phys == 0 || !pmm::is_page_aligned(virt) {
+        return false;
+    }
+    match walk_to_entry_with_root_user(pml4_phys, virt, false, true) {
+        Ok((entry, _)) => entry.is_present(),
+        Err(_) => false,
+    }
+}
+
 /// Map a page in a specific PML4, overwriting any existing mapping.
 /// This is used when creating new processes that may share page table structures
 /// with the kernel but need their own mappings in user space regions.

@@ -224,7 +224,11 @@ $(TARGET).elf: $(CRT0) $(ALL_OBJS) $(LIBC)
 # Convert ELF → ATXF
 $(TARGET).atxf: $(TARGET).elf
 	@if [ -x "$(ELF2ATXF)" ]; then \
-	    $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
+      if [ -f "ico.svg" ]; then \
+          $(ELF2ATXF) --icon ico.svg $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf (icon embedded)"; \
+      else \
+          $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
+      fi; \
 	else \
 	    echo "WARNING: elf2atxf not found at $(ELF2ATXF); skipping ATXF conversion"; \
 	fi

@@ -17,17 +17,12 @@
 
 void *memcpy(void *dest, const void *src, size_t n)
 {
-    unsigned char       *d = dest;
-    const unsigned char *s = src;
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
 
-    /* Copy 8 bytes at a time when possible */
-    while (n >= 8) {
-        uint64_t v;
-        __builtin_memcpy(&v, s, 8);
-        __builtin_memcpy(d, &v, 8);
-        d += 8; s += 8; n -= 8;
+    while (n-- > 0) {
+        *d++ = *s++;
     }
-    while (n--) *d++ = *s++;
     return dest;
 }
 
@@ -54,20 +49,11 @@ void *memmove(void *dest, const void *src, size_t n)
 void *memset(void *s, int c, size_t n)
 {
     unsigned char *p = s;
-    unsigned char  v = (unsigned char)c;
+    unsigned char v = (unsigned char)c;
 
-    /* Fill 8 bytes at a time */
-    if (n >= 8) {
-        uint64_t fill = (uint64_t)v;
-        fill |= fill << 8;
-        fill |= fill << 16;
-        fill |= fill << 32;
-        while (n >= 8) {
-            __builtin_memcpy(p, &fill, 8);
-            p += 8; n -= 8;
-        }
+    while (n-- > 0) {
+        *p++ = v;
     }
-    while (n--) *p++ = v;
     return s;
 }
 
