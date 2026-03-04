@@ -5008,31 +5008,22 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     }
 
     // ── Obtain file data (cached or fresh) ─────────────────────────────────
-    // We first check if the fd already has cached data.  If not, we read
-    // the file from FAT32 once and cache it in the fd entry.
-    let (cache_ptr, cache_len, offset, is_dir) = {
-        let table = KERNEL_FD_TABLE.lock();
-        if !table[idx].in_use {
-            return EBADF;
-        }
-        (table[idx].cache_ptr, table[idx].cache_len,
-         table[idx].offset, table[idx].is_dir)
-    };
+    // Keep this lock for the entire read path so cache_ptr/cache_len/offset
+    // remain stable while we dereference and copy to userspace.
+    let mut table = KERNEL_FD_TABLE.lock();
+    if !table[idx].in_use {
+        return EBADF;
+    }
 
-    if is_dir {
+    if table[idx].is_dir {
         return EISDIR;
     }
 
     // Ensure file data is cached
-    let (data_ptr, file_len) = if cache_ptr != 0 {
-        // Cache hit
-        (cache_ptr, cache_len)
-    } else {
+    if table[idx].cache_ptr == 0 {
         // Cache miss — read from FAT32 and cache
-        let (path_buf, path_len) = {
-            let table = KERNEL_FD_TABLE.lock();
-            (table[idx].path, table[idx].path_len)
-        };
+        let path_buf = table[idx].path;
+        let path_len = table[idx].path_len;
         let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
 
         match crate::drivers::fat32::open(path) {
@@ -5040,7 +5031,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
                 let flen = data.len();
                 if flen == 0 {
                     // Empty file — nothing to cache
-                    (0usize, 0usize)
+                    table[idx].cache_ptr = 0;
+                    table[idx].cache_len = 0;
                 } else {
                     // Allocate cache and copy file data
                     let layout = unsafe {
@@ -5056,21 +5048,12 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
                     unsafe {
                         core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, flen);
                     }
-                    // Store in fd table
-                    {
-                        let mut table = KERNEL_FD_TABLE.lock();
-                        if table[idx].in_use {
-                            table[idx].cache_ptr = ptr as usize;
-                            table[idx].cache_len = flen;
-                        } else {
-                            // fd was closed between checks — free and bail
-                            unsafe { alloc::alloc::dealloc(ptr, layout); }
-                            return EBADF;
-                        }
-                    }
+
+                    table[idx].cache_ptr = ptr as usize;
+                    table[idx].cache_len = flen;
+
                     log_debug!(LOG_ORIGIN,
                         "sys_fs_read: cached {} bytes for fd {}", flen, fd);
-                    (ptr as usize, flen)
                 }
             }
             None => {
@@ -5079,7 +5062,10 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
                 return EIO;
             }
         }
-    };
+    }
+
+    let data_ptr = table[idx].cache_ptr;
+    let file_len = table[idx].cache_len;
 
     // ── Produce the data slice from cache ──────────────────────────────────
     if file_len == 0 || data_ptr == 0 {
@@ -5090,6 +5076,7 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         core::slice::from_raw_parts(data_ptr as *const u8, file_len)
     };
 
+    let offset = table[idx].offset;
     if offset >= file_len {
         return 0; // EOF
     }
@@ -5127,13 +5114,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return e;
     }
 
-    // Update offset
-    {
-        let mut table = KERNEL_FD_TABLE.lock();
-        if table[idx].in_use {
-            table[idx].offset += to_read;
-        }
-    }
+    // Update offset while still holding fd-table lock
+    table[idx].offset += to_read;
 
     log_debug!(LOG_ORIGIN, "sys_fs_read OK: fd={} returned {} bytes", fd, to_read);
     to_read as u64

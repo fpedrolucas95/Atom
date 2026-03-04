@@ -300,11 +300,11 @@ static unsigned char scancode_to_doomkey(uint8_t sc)
     case 0x0E: return KEY_BACKSPACE;
     case 0x0F: return KEY_TAB;
     case 0x1C: return KEY_ENTER;
-    case 0x1D: return KEY_RCTRL;    /* fire */
+    case 0x1D: return KEY_FIRE;     /* fire */
     case 0x2A: return KEY_RSHIFT;   /* left shift */
     case 0x36: return KEY_RSHIFT;   /* right shift */
     case 0x38: return KEY_RALT;
-    case 0x39: return ' ';          /* spacebar (use) */
+    case 0x39: return KEY_USE;      /* spacebar (use) */
     case 0x3A: return KEY_CAPSLOCK;
     /* Function keys */
     case 0x3B: return KEY_F1;

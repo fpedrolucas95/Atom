@@ -779,9 +779,6 @@ impl Compositor {
                     self.keyboard_shift = pressed;
                     self.dispatch_key_event(code, 0, pressed);
                 }
-                scancodes::ESCAPE if pressed => {
-                    exit(0);
-                }
                 _ => {
                     // Send ALL keys (press and release) to the focused window so
                     // that game-style apps (Doom, etc.) can handle non-ASCII keys
@@ -1044,11 +1041,6 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + 3 {
                     if let Some(key_event) = KeyEvent::from_bytes(&data[payload_start..]) {
-                        let scancode = key_event.scancode & 0x7F;
-                        if scancode == 0x01 {
-                            exit(0);
-                        }
-
                         let event_port = if let Some(focused_id) = self.wm.focused_id {
                             if let Some(window) = self.wm.get_window(focused_id) {
                                 window.event_port
