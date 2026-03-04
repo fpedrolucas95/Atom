@@ -163,6 +163,12 @@ fn main() -> io::Result<()> {
     let mut bss_size: usize = 0;
     let mut text_vaddr: u64 = 0;
     let mut base_addr: u64 = u64::MAX;
+    // Track the virtual base of the data region and the high-water mark of
+    // memory coverage across all non-executable PT_LOAD segments.  These are
+    // needed to correctly fill virtual gaps between segments with zeros and to
+    // compute the BSS size after all file content has been placed.
+    let mut data_vaddr: u64 = 0;
+    let mut max_data_mem_end: u64 = 0;
 
     // First pass: find base address (only considering segments at/above USER_BASE)
     for i in 0..e_phnum as usize {
@@ -225,18 +231,47 @@ fn main() -> io::Result<()> {
                 text_vaddr = p_vaddr;
                 println!("  Text segment: {} bytes at 0x{:X}", file_size, p_vaddr);
             }
-        } else if is_writable || file_size > 0 {
-            // Data segment
-            if end <= elf_data.len() && file_size > 0 {
+        } else if is_writable || file_size > 0 || mem_size > 0 {
+            // Data / BSS segment.
+            //
+            // Multiple non-executable PT_LOAD segments must be placed at their
+            // correct virtual offsets relative to the first one.  Gaps between
+            // segments are filled with zeros so that all subsequent segments
+            // land at the right position inside the data image.
+            if data_vaddr == 0 {
+                data_vaddr = p_vaddr;
+            }
+
+            if file_size > 0 && end <= elf_data.len() {
+                let expected_offset = (p_vaddr - data_vaddr) as usize;
+                if expected_offset > data_data.len() {
+                    // Fill the virtual gap (and any BSS tail of the previous
+                    // segment that falls before the start of this one) with zeros.
+                    data_data.resize(expected_offset, 0u8);
+                }
                 data_data.extend_from_slice(&elf_data[start..end]);
                 println!("  Data segment: {} bytes at 0x{:X}", file_size, p_vaddr);
+            } else if mem_size > 0 {
+                println!("  BSS-only segment: {} bytes at 0x{:X}", mem_size, p_vaddr);
             }
-            // BSS is the difference between memory size and file size
-            if mem_size > file_size {
-                bss_size += mem_size - file_size;
-                println!("  BSS: {} bytes", mem_size - file_size);
+
+            // Update the high-water mark for total memory coverage.
+            let seg_mem_end = p_vaddr + p_memsz;
+            if seg_mem_end > max_data_mem_end {
+                max_data_mem_end = seg_mem_end;
             }
         }
+    }
+
+    // Compute BSS: the zero-initialized memory that follows all file-backed data.
+    // This is the difference between the highest virtual memory address covered
+    // by any data segment and the end of the file-backed data image.
+    if data_vaddr > 0 && max_data_mem_end > data_vaddr {
+        let total_mem = (max_data_mem_end - data_vaddr) as usize;
+        bss_size = total_mem.saturating_sub(data_data.len());
+    }
+    if bss_size > 0 {
+        println!("  BSS: {} bytes", bss_size);
     }
 
     // If text is empty, we have a problem
