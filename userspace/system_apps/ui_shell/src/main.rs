@@ -6,6 +6,8 @@
 
 extern crate alloc;
 
+mod svg;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -92,7 +94,7 @@ use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
-use atom_syscall::process::{spawn_process, ProcessId};
+use atom_syscall::process::{spawn_process, spawn_from_path};
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 use atom_syscall::fs;
 use atom_syscall::SyscallError;
@@ -115,7 +117,6 @@ mod theme {
 
     // Accent
     pub const ACCENT: Color = Color::new(99, 143, 255);
-    pub const ACCENT_DIM: Color = Color::new(70, 105, 200);
 
     // Windows
     pub const WINDOW_BG: Color = Color::new(26, 29, 38);
@@ -127,8 +128,6 @@ mod theme {
     // Dock
     pub const DOCK_BG: Color = Color::new(16, 18, 26);
     pub const DOCK_BORDER: Color = Color::new(42, 48, 64);
-    pub const DOCK_ICON_BG: Color = Color::new(32, 36, 48);
-    pub const DOCK_ICON_HOVER: Color = Color::new(44, 50, 66);
 
     // Cursor
     pub const CURSOR_FILL: Color = Color::WHITE;
@@ -136,7 +135,6 @@ mod theme {
 
     // Shadows
     pub const SHADOW: Color = Color::new(4, 5, 8);
-    pub const SHADOW_LIGHT: Color = Color::new(10, 12, 16);
 
     // Window buttons (traffic lights)
     pub const BTN_CLOSE: Color = Color::new(237, 78, 83);
@@ -146,13 +144,10 @@ mod theme {
 
     // Context menu
     pub const MENU_BG: Color = Color::new(22, 25, 34);
-    pub const MENU_HOVER: Color = Color::new(36, 42, 58);
     pub const MENU_BORDER: Color = Color::new(48, 54, 72);
     pub const MENU_TEXT: Color = Color::new(210, 215, 225);
 
     // Desktop icons
-    pub const ICON_BG: Color = Color::new(28, 32, 44);
-    pub const ICON_BORDER: Color = Color::new(48, 54, 72);
     pub const ICON_LABEL: Color = Color::new(200, 206, 218);
 }
 
@@ -181,7 +176,6 @@ struct Window {
     visible: bool,
     focused: bool,
     event_port: Option<PortId>,
-    process_id: Option<ProcessId>,
     surface: Option<SharedSurface>,
     surface_region_id: Option<SharedRegionId>,
     content_dirty: bool,
@@ -207,7 +201,6 @@ impl Window {
             visible: true,
             focused: false,
             event_port: None,
-            process_id: None,
             surface: None,
             surface_region_id: None,
             content_dirty: false,
@@ -226,7 +219,6 @@ impl Window {
         y: i32,
         width: u32,
         height: u32,
-        process_id: ProcessId,
         event_port: PortId,
     ) -> Option<Self> {
         let width = width.max(WINDOW_MIN_WIDTH);
@@ -253,7 +245,6 @@ impl Window {
             visible: true,
             focused: false,
             event_port: Some(event_port),
-            process_id: Some(process_id),
             surface_region_id: Some(region_id),
             surface: Some(surface),
             content_dirty: false,
@@ -326,13 +317,12 @@ impl WindowManager {
         y: i32,
         width: u32,
         height: u32,
-        process_id: ProcessId,
         event_port: PortId,
     ) -> Option<WindowId> {
         let id = self.next_id;
         self.next_id += 1;
 
-        let window = Window::new_with_process(id, title, x, y, width, height, process_id, event_port)?;
+        let window = Window::new_with_process(id, title, x, y, width, height, event_port)?;
         self.windows.push(window);
         self.focus_window(id);
         Some(id)
@@ -421,16 +411,6 @@ impl WindowManager {
         }
     }
 
-    fn move_window(&mut self, id: WindowId, dx: i32, dy: i32) {
-        if let Some(window) = self.get_window_mut(id) {
-            if window.state == WindowState::Maximized {
-                return;
-            }
-            window.x += dx;
-            window.y += dy;
-        }
-    }
-
     fn resize_window(&mut self, id: WindowId, width: u32, height: u32) {
         if let Some(window) = self.get_window_mut(id) {
             if window.state == WindowState::Maximized {
@@ -493,7 +473,6 @@ impl WindowManager {
 struct CursorState {
     x: i32,
     y: i32,
-    visible: bool,
 }
 
 impl CursorState {
@@ -501,7 +480,6 @@ impl CursorState {
         Self {
             x: (width / 2) as i32,
             y: (height / 2) as i32,
-            visible: true,
         }
     }
 
@@ -512,7 +490,6 @@ impl CursorState {
 }
 
 struct PendingWindow {
-    pid: ProcessId,
     window_id: WindowId,
 }
 
@@ -535,6 +512,7 @@ struct DesktopIcon {
     x: i32,
     y: i32,
     color: Color,
+    svg_bitmap: Option<svg::SvgBitmap>,
 }
 
 struct DockApp {
@@ -542,7 +520,7 @@ struct DockApp {
     executable: String,
     color: Color,
     monogram: String,
-    has_embedded_icon: bool,
+    svg_bitmap: Option<svg::SvgBitmap>,
 }
 
 struct ContextMenu {
@@ -628,6 +606,7 @@ impl Compositor {
             x: 28,
             y: PANEL_HEIGHT as i32 + 28,
             color: Color::new(99, 143, 255),
+            svg_bitmap: Self::load_icon_bitmap("fileman", 48),
         });
         icons.push(DesktopIcon {
             label: String::from("Rectangles"),
@@ -635,6 +614,7 @@ impl Compositor {
             x: 28,
             y: PANEL_HEIGHT as i32 + 120,
             color: Color::new(86, 182, 245),
+            svg_bitmap: Self::load_icon_bitmap("demo_rects", 48),
         });
         icons.push(DesktopIcon {
             label: String::from("Text"),
@@ -642,6 +622,7 @@ impl Compositor {
             x: 28,
             y: PANEL_HEIGHT as i32 + 212,
             color: Color::new(72, 199, 142),
+            svg_bitmap: Self::load_icon_bitmap("demo_text", 48),
         });
 
         let dock_apps = Self::build_dock_apps();
@@ -870,7 +851,12 @@ impl Compositor {
         }
 
         if let Err(err) = send_message_async(port, msg_type, payload) {
-            if matches!(err, SyscallError::NotFound | SyscallError::InvalidArgument | SyscallError::Unknown(_)) {
+            // Only treat NotFound (port closed / process exited) as a
+            // definitive sign the process is dead.  Transient errors such
+            // as WouldBlock (queue full) or InvalidArgument must NOT
+            // destroy the window — the client may still be alive and
+            // rendering into the shared surface.
+            if matches!(err, SyscallError::NotFound) {
                 self.drop_dead_window(window_id);
             }
         }
@@ -1492,7 +1478,7 @@ impl Compositor {
 
                     let window = match Window::new_with_process(
                         id, &req.title, win_x, win_y, outer_w, outer_h,
-                        0 as ProcessId, req.reply_port as PortId
+                        req.reply_port as PortId
                     ) {
                         Some(w) => w,
                         None => return,
@@ -1641,6 +1627,19 @@ impl Compositor {
         Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
     }
 
+    /// Load the embedded SVG icon from an ATXF file for the given executable name,
+    /// render it at `size`×`size` pixels, and return the bitmap (or None).
+    fn load_icon_bitmap(exec: &str, size: u32) -> Option<svg::SvgBitmap> {
+        let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
+        let user_path = alloc::format!("/apps/user/{}.atxf", exec);
+        let path = if fs::stat(&sys_path).is_ok() { sys_path }
+                   else if fs::stat(&user_path).is_ok() { user_path }
+                   else { return None; };
+        let atxf_bytes = fs::read_file(&path).ok()?;
+        let icon_svg = Self::extract_embedded_icon_svg(&atxf_bytes)?;
+        svg::SvgBitmap::render(icon_svg, size, size)
+    }
+
     fn build_dock_apps() -> Vec<DockApp> {
         let candidates: [(&str, &str, Color); 5] = [
             ("fileman", "Files", Color::new(99, 143, 255)),
@@ -1666,14 +1665,14 @@ impl Compositor {
 
             if let Some(path) = atxf_path {
                 let mut color = *fallback_color;
-                let mut has_embedded_icon = false;
+                let mut svg_bitmap: Option<svg::SvgBitmap> = None;
 
                 if let Ok(atxf_bytes) = fs::read_file(&path) {
                     if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
-                        has_embedded_icon = true;
                         if let Some(icon_color) = Self::extract_first_hex_color(icon_svg) {
                             color = icon_color;
                         }
+                        svg_bitmap = svg::SvgBitmap::render(icon_svg, 42, 42);
                     }
                 }
 
@@ -1692,7 +1691,7 @@ impl Compositor {
                     executable: String::from(*exec),
                     color,
                     monogram: mono,
-                    has_embedded_icon,
+                    svg_bitmap,
                 });
             }
         }
@@ -1790,7 +1789,7 @@ impl Compositor {
     }
 
     fn spawn_fileman(&mut self) {
-        let pid = match spawn_process("fileman") {
+        let _pid = match spawn_from_path("/apps/user/fileman.atxf") {
             Ok(pid) => pid,
             Err(_) => return,
         };
@@ -1807,7 +1806,6 @@ impl Compositor {
             win_y,
             win_width,
             win_height,
-            pid,
             0,
         ) {
             Some(id) => id,
@@ -1815,7 +1813,6 @@ impl Compositor {
         };
 
         self.pending_windows.push(PendingWindow {
-            pid,
             window_id,
         });
 
@@ -1823,7 +1820,7 @@ impl Compositor {
     }
 
     fn spawn_terminal(&mut self) {
-        let pid = match spawn_process("terminal") {
+        let _pid = match spawn_process("terminal") {
             Ok(pid) => pid,
             Err(_) => return,
         };
@@ -1840,7 +1837,6 @@ impl Compositor {
             win_y,
             win_width,
             win_height,
-            pid,
             0,
         ) {
             Some(id) => id,
@@ -1848,7 +1844,6 @@ impl Compositor {
         };
 
         self.pending_windows.push(PendingWindow {
-            pid,
             window_id,
         });
 
@@ -1856,7 +1851,7 @@ impl Compositor {
     }
 
     fn spawn_display_settings(&mut self) {
-        let pid = match spawn_process("display_settings") {
+        let _pid = match spawn_process("display_settings") {
             Ok(pid) => pid,
             Err(_) => return,
         };
@@ -1873,7 +1868,6 @@ impl Compositor {
             win_y,
             win_width,
             win_height,
-            pid,
             0,
         ) {
             Some(id) => id,
@@ -1881,7 +1875,6 @@ impl Compositor {
         };
 
         self.pending_windows.push(PendingWindow {
-            pid,
             window_id,
         });
 
@@ -1989,24 +1982,17 @@ impl Compositor {
             let ix = icon.x as u32;
             let iy = icon.y as u32;
             let size = 60u32;
-            let icon_radius = 12u32;
-            let inner_size = 28u32;
+            let icon_size = 48u32;
+            let icon_x = ix + (size - icon_size) / 2;
+            let icon_y = iy + (size - icon_size) / 2 - 2;
 
-            // Icon shadow
-            self.backbuffer_fb.fill_rect_rounded_alpha(ix + 1, iy + 2, size, size, icon_radius, theme::SHADOW, 70);
+            if let Some(ref bm) = icon.svg_bitmap {
+                bm.blit_fb(&self.backbuffer_fb, icon_x, icon_y);
+            } else {
+                self.backbuffer_fb.fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
+            }
 
-            // Icon background (rounded)
-            self.backbuffer_fb.fill_rect_rounded_aa(ix, iy, size, size, icon_radius, theme::ICON_BG);
-
-            // Colored inner icon (rounded)
-            let inner_x = ix + (size - inner_size) / 2;
-            let inner_y = iy + (size - inner_size) / 2 - 2;
-            self.backbuffer_fb.fill_rect_rounded_aa(inner_x, inner_y, inner_size, inner_size, 6, icon.color);
-
-            // Icon border (subtle)
-            self.backbuffer_fb.draw_rect_rounded_aa(ix, iy, size, size, icon_radius, theme::ICON_BORDER);
-
-            // Label below icon (centered, with slight shadow for readability)
+            // Label below icon (centered)
             let label_len = icon.label.len() as u32 * 8;
             let lx = (ix as i32 + (size as i32 - label_len as i32) / 2).max(0) as u32;
             let label_y = iy + size + 6;
@@ -2170,26 +2156,21 @@ impl Compositor {
         // Top highlight line
         self.backbuffer_fb.fill_rect(dock_x + 14, dock_y, dock_width - 28, 1, theme::DOCK_BORDER);
 
-        let icon_radius = 10u32;
-
         for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
 
-            // Icon background (rounded)
-            self.backbuffer_fb.fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, icon_radius, app.color);
-
-            // Icon monogram centered
-            let label_len = app.monogram.len() as u32 * 8;
-            let lx = ix + (icon_size - label_len) / 2;
-            let ly = icon_y + (icon_size - 8) / 2;
-            self.backbuffer_fb.draw_string(lx, ly, &app.monogram, Color::WHITE, app.color);
-
-            // Embedded-icon hint
-            if app.has_embedded_icon {
-                self.backbuffer_fb.fill_rect_rounded_aa(ix + icon_size - 9, icon_y + 3, 6, 6, 3, theme::ACCENT);
+            if let Some(ref bm) = app.svg_bitmap {
+                // Render only the icon (no background box)
+                bm.blit_fb(&self.backbuffer_fb, ix, icon_y);
+            } else {
+                // Fallback: monogram text
+                let label_len = app.monogram.len() as u32 * 8;
+                let lx = ix + (icon_size - label_len) / 2;
+                let ly = icon_y + (icon_size - 8) / 2;
+                self.backbuffer_fb.draw_string(lx, ly, &app.monogram, app.color, theme::DOCK_BG);
             }
 
-            // Active indicator dot for running apps (optional visual)
+            // Active indicator dot for running apps
             if self.wm.windows.iter().any(|w| w.title == app.label && w.visible) {
                 let dot_x = ix + icon_size / 2 - 2;
                 let dot_y = icon_y + icon_size + 3;

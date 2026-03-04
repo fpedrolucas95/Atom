@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Canonical x86_64 Port I/O Primitives
 //
 // This is the single authoritative implementation of raw port-mapped I/O for

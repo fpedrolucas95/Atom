@@ -13,7 +13,7 @@ pub fn log(message: &str) {
 }
 
 /// Log a message with a prefix tag
-pub fn log_tagged(tag: &str, message: &str) {
+pub fn log_tagged(_tag: &str, message: &str) {
     // Simple implementation - just log the message
     // In a real implementation, we might format this differently
     log(message);

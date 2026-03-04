@@ -27,8 +27,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 pub mod messages;
 pub mod protocol;
 pub mod ports;

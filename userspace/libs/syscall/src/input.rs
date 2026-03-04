@@ -226,6 +226,7 @@ impl MouseDriver {
 /// Simple polling function for backward compatibility.
 /// Creates a persistent driver instance internally.
 #[inline]
+#[allow(static_mut_refs)]
 pub fn mouse_poll() -> Option<(i32, i32)> {
     static mut DRIVER: MouseDriver = MouseDriver::new();
     static mut INITIALIZED: bool = false;

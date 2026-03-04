@@ -211,7 +211,12 @@ if [ "$KERNEL_ONLY" != true ]; then
     # -------------------------------------------------------------------------
     step "Building elf2atxf tool..."
 
-    HOST_TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+    HOST_TRIPLE=$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')
+
+    if [ -z "$HOST_TRIPLE" ]; then
+        error "Could not determine Rust host triple (rustc -vV)"
+        exit 1
+    fi
 
     if ! rustup +nightly target list --installed | grep -q "x86_64-unknown-none"; then
         step "Installing x86_64-unknown-none target..."
@@ -219,7 +224,7 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
 
     pushd tools/elf2atxf > /dev/null
-    if cargo build --release --target "$HOST_TRIPLE" 2>build.log; then
+    if CARGO_TARGET_DIR=target cargo build --release --target "$HOST_TRIPLE" 2>build.log; then
         success "elf2atxf built"
     else
         error "Failed to build elf2atxf"
@@ -229,6 +234,11 @@ if [ "$KERNEL_ONLY" != true ]; then
     popd > /dev/null
 
     ELF2ATXF="tools/elf2atxf/target/$HOST_TRIPLE/release/elf2atxf"
+
+    if [ ! -x "$ELF2ATXF" ]; then
+        error "elf2atxf binary not found at expected path: $ELF2ATXF"
+        exit 1
+    fi
 
     # -------------------------------------------------------------------------
     # Build system apps (ui_shell, display, keyboard, mouse, terminal, …)
@@ -355,7 +365,7 @@ if [ "$KERNEL_ONLY" != true ]; then
     step "Building hello_c (libc test app)..."
 
     if [ -f "userspace/apps/hello_c/Makefile" ]; then
-        if make -C userspace/apps/hello_c 2>build/hello_c.log; then
+        if make -C userspace/apps/hello_c ELF2ATXF="../../../$ELF2ATXF" 2>build/hello_c.log; then
             if [ -f "userspace/apps/hello_c/hello_c.atxf" ]; then
                 mkdir -p efi/apps/user
                 cp userspace/apps/hello_c/hello_c.atxf efi/apps/user/hello_c.atxf
@@ -397,7 +407,7 @@ if [ "$KERNEL_ONLY" != true ]; then
     step "Building tinygl_demo (OpenGL gears)..."
 
     if [ -f "userspace/apps/tinygl_demo/Makefile" ]; then
-        if make -C userspace/apps/tinygl_demo 2>build/tinygl_demo.log; then
+        if make -C userspace/apps/tinygl_demo ELF2ATXF="../../../$ELF2ATXF" 2>build/tinygl_demo.log; then
             if [ -f "userspace/apps/tinygl_demo/tinygl_demo.atxf" ]; then
                 mkdir -p efi/apps/user
                 cp userspace/apps/tinygl_demo/tinygl_demo.atxf efi/apps/user/tinygl_demo.atxf
@@ -422,7 +432,7 @@ if [ "$KERNEL_ONLY" != true ]; then
 
     if [ -f "userspace/apps/doom/Makefile" ]; then
         if [ -d "userspace/libs/doomgeneric_src/doomgeneric" ]; then
-            if make -C userspace/apps/doom 2>build/doom.log; then
+            if make -C userspace/apps/doom ELF2ATXF="../../../$ELF2ATXF" 2>build/doom.log; then
                 if [ -f "userspace/apps/doom/doom.atxf" ]; then
                     mkdir -p efi/apps/user
                     cp userspace/apps/doom/doom.atxf efi/apps/user/doom.atxf
