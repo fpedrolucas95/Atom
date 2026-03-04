@@ -661,6 +661,16 @@ fn resolve_anon_fault(
     use crate::mm::pmm;
     use crate::mm::vm::{self, PageFlags};
 
+    // ── Guard: do NOT replace an already-present page ──────────────────
+    // This can happen when handle_page_fault is called with a synthetic
+    // error code (e.g. the pre-fault path in sys_fs_read passes
+    // "not-present" even though the page may already be mapped).
+    // Replacing a live page with a zeroed page would destroy stack data
+    // (return addresses, local variables) and cause RIP=0x0 crashes.
+    if vm::is_page_present_in_pml4(pml4_phys, page_addr) {
+        return true; // already mapped — nothing to do
+    }
+
     // Allocate a zeroed physical page (no VMA lock held)
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,

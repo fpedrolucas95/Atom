@@ -153,8 +153,8 @@ static inline uint64_t atom_syscall1(uint64_t num, uint64_t a1)
     uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=a"(ret)
-        : "0"(num), "D"(a1)
+        : "=a"(ret), "+D"(a1)
+        : "0"(num)
         : "rcx", "r11", "rsi", "rdx", "r8", "r9", "r10", "memory"
     );
     return ret;
@@ -165,8 +165,8 @@ static inline uint64_t atom_syscall2(uint64_t num, uint64_t a1, uint64_t a2)
     uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=a"(ret)
-        : "0"(num), "D"(a1), "S"(a2)
+        : "=a"(ret), "+D"(a1), "+S"(a2)
+        : "0"(num)
         : "rcx", "r11", "rdx", "r8", "r9", "r10", "memory"
     );
     return ret;
@@ -178,8 +178,8 @@ static inline uint64_t atom_syscall3(uint64_t num, uint64_t a1, uint64_t a2,
     uint64_t ret;
     __asm__ volatile (
         "syscall"
-        : "=a"(ret)
-        : "0"(num), "D"(a1), "S"(a2), "d"(a3)
+        : "=a"(ret), "+D"(a1), "+S"(a2), "+d"(a3)
+        : "0"(num)
         : "rcx", "r11", "r8", "r9", "r10", "memory"
     );
     return ret;
@@ -192,8 +192,8 @@ static inline uint64_t atom_syscall4(uint64_t num, uint64_t a1, uint64_t a2,
     register uint64_t r10 __asm__("r10") = a4;
     __asm__ volatile (
         "syscall"
-        : "=a"(ret)
-        : "0"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
+        : "=a"(ret), "+D"(a1), "+S"(a2), "+d"(a3), "+r"(r10)
+        : "0"(num)
         : "rcx", "r11", "r8", "r9", "memory"
     );
     return ret;
@@ -207,8 +207,8 @@ static inline uint64_t atom_syscall5(uint64_t num, uint64_t a1, uint64_t a2,
     register uint64_t r8  __asm__("r8")  = a5;
     __asm__ volatile (
         "syscall"
-        : "=a"(ret)
-        : "0"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8)
+        : "=a"(ret), "+D"(a1), "+S"(a2), "+d"(a3), "+r"(r10), "+r"(r8)
+        : "0"(num)
         : "rcx", "r11", "r9", "memory"
     );
     return ret;
@@ -224,8 +224,8 @@ static inline uint64_t atom_syscall6(uint64_t num, uint64_t a1, uint64_t a2,
     register uint64_t r9  __asm__("r9")  = a6;
     __asm__ volatile (
         "syscall"
-        : "=a"(ret)
-        : "0"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8), "r"(r9)
+        : "=a"(ret), "+D"(a1), "+S"(a2), "+d"(a3), "+r"(r10), "+r"(r8), "+r"(r9)
+        : "0"(num)
         : "rcx", "r11", "memory"
     );
     return ret;

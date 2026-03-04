@@ -128,6 +128,9 @@ typedef struct __attribute__((packed)) {
     uint32_t sequence;
 } MsgHeader;
 
+#define MSG_KEY_DOWN              1u
+#define MSG_KEY_UP                2u
+#define MSG_KEY_PRESS             3u
 #define MSG_NS_LOOKUP           602u
 #define MSG_NS_RESPONSE         610u
 #define MSG_WM_REQUEST          800u
@@ -135,7 +138,6 @@ typedef struct __attribute__((packed)) {
 #define MSG_WM_COMMIT           803u
 #define MSG_QUIT                402u
 #define MSG_TERMINATE_REQUEST   510u
-#define MSG_KEY_PRESS             3u
 #define WM_CREATE_WINDOW          1u
 #define NAME_SERVICE_PORT         1ULL
 
@@ -401,10 +403,31 @@ static bool handle_event(const uint8_t *buf, int len)
     case MSG_QUIT:
     case MSG_TERMINATE_REQUEST:
         return true;
+    case MSG_KEY_DOWN:
+    case MSG_KEY_UP: {
+        /*
+         * Compositor forwards every key press and release via these messages.
+         * payload[0] = scancode (PS/2 Set 1 make code, no 0x80 release bit)
+         * payload[1] = ASCII character (0 for non-printable keys)
+         * payload[2] = modifier flags
+         *
+         * We translate the scancode to a doomkey and push it into the ring
+         * buffer. This is the only reliable keyboard path because the
+         * compositor has already drained SYS_KEYBOARD_POLL.
+         */
+        int plen = len - (int)HDR_SIZE;
+        if (plen >= 1) {
+            uint8_t sc = buf[HDR_SIZE];
+            int pressed = (h->msg_type == MSG_KEY_DOWN) ? 1 : 0;
+            unsigned char dk = scancode_to_doomkey(sc);
+            if (dk) key_push(pressed, dk);
+        }
+        break;
+    }
     case MSG_KEY_PRESS: {
-        /* Compositor also forwards key-press events (without release).
-         * We receive these but prioritise SYS_KEYBOARD_POLL for full
-         * press+release support; just accept quit key (ESC) here as fail-safe. */
+        /* Backward-compat: some paths send KeyPress only (no release).
+         * ESC via this path triggers quit; other keys are ignored here
+         * because they also arrive as MSG_KEY_DOWN above. */
         int plen = len - (int)HDR_SIZE;
         if (plen >= 1) {
             uint8_t sc = buf[HDR_SIZE];
@@ -470,17 +493,22 @@ void DG_DrawFrame(void)
      * doomgeneric rgba8888 format: B=byte0, G=byte1, R=byte2, A=byte3
      *   integer 0x00RRGGBB stored little-endian as [B,G,R,0]
      * AtomOS compositor surface: same 32-bit ARGB layout.
-     * Direct memcpy works when stride matches width; otherwise copy line-by-line.
+     *
+     * The compositor may return a surface smaller than requested (due to
+     * window decorations), so we clamp the copy to the actual surface
+     * dimensions to avoid writing past the shared region.
      */
-    if (g_win.stride == (uint32_t)DOOMGENERIC_RESX) {
-        memcpy(g_surface, DG_ScreenBuffer,
-               (size_t)DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4u);
-    } else {
-        int y;
+    {
+        uint32_t copy_w = (uint32_t)DOOMGENERIC_RESX;
+        uint32_t copy_h = (uint32_t)DOOMGENERIC_RESY;
+        if (copy_w > g_win.width)  copy_w = g_win.width;
+        if (copy_h > g_win.height) copy_h = g_win.height;
+
         const uint32_t *src = DG_ScreenBuffer;
         uint32_t       *dst = g_surface;
-        for (y = 0; y < DOOMGENERIC_RESY; y++) {
-            memcpy(dst, src, (size_t)DOOMGENERIC_RESX * 4u);
+        uint32_t y;
+        for (y = 0; y < copy_h; y++) {
+            memcpy(dst, src, (size_t)copy_w * 4u);
             src += DOOMGENERIC_RESX;
             dst += g_win.stride;
         }
@@ -489,11 +517,14 @@ void DG_DrawFrame(void)
     /* Present the frame */
     wm_commit(g_wm_port, g_win.window_id);
 
-    /* Collect all pending keyboard input into the ring buffer */
-    poll_keyboard();
-
-    /* Drain any queued compositor events (quit, window close, etc.)
-     * Use a short non-blocking receive to avoid stalling the game loop. */
+    /*
+     * Drain all pending compositor events (key down/up, quit, etc.).
+     *
+     * NOTE: SYS_KEYBOARD_POLL is intentionally NOT called here. The
+     * compositor registers itself as the IRQ 1 handler and drains the
+     * kernel PS/2 ring buffer before Doom would see it. All keyboard
+     * input arrives via MSG_KEY_DOWN / MSG_KEY_UP on the event port.
+     */
     {
         uint8_t evbuf[256];
         for (;;) {
@@ -579,5 +610,10 @@ int main(void)
         NULL
     };
     doomgeneric_Create(4, (char **)argv);
+
+    for (;;) {
+        doomgeneric_Tick();
+    }
+
     return 0;
 }

@@ -94,6 +94,7 @@ use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, ProcessId};
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
+use atom_syscall::SyscallError;
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
@@ -357,16 +358,18 @@ impl WindowManager {
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == prev_id) {
                 w.focused = false;
                 if let Some(port) = w.event_port {
-                    let msg = libipc::messages::WmWindowEventMsg {
-                        window_id: prev_id,
-                        event_type: libipc::messages::WindowEventType::Unfocus,
-                        x: w.x, y: w.y, width: w.width, height: w.height,
-                    };
-                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                    if port != 0 {
+                        let msg = libipc::messages::WmWindowEventMsg {
+                            window_id: prev_id,
+                            event_type: libipc::messages::WindowEventType::Unfocus,
+                            x: w.x, y: w.y, width: w.width, height: w.height,
+                        };
+                        let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                        let mut full_msg = [0u8; 64];
+                        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                        let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                    }
                 }
             }
         }
@@ -380,16 +383,18 @@ impl WindowManager {
             }
 
             if let Some(port) = window.event_port {
-                let msg = libipc::messages::WmWindowEventMsg {
-                    window_id: id,
-                    event_type: libipc::messages::WindowEventType::Focus,
-                    x: window.x, y: window.y, width: window.width, height: window.height,
-                };
-                let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                let mut full_msg = [0u8; 64];
-                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                if port != 0 {
+                    let msg = libipc::messages::WmWindowEventMsg {
+                        window_id: id,
+                        event_type: libipc::messages::WindowEventType::Focus,
+                        x: window.x, y: window.y, width: window.width, height: window.height,
+                    };
+                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
+                }
             }
 
             self.windows.push(window);
@@ -768,18 +773,28 @@ impl Compositor {
             let code = scancode & 0x7F;
 
             match code {
+                // 0xE0 extended-key prefix arrives as 0x60 after masking — skip it
+                0x60 => {}
                 scancodes::LEFT_SHIFT | scancodes::RIGHT_SHIFT => {
                     self.keyboard_shift = pressed;
+                    self.dispatch_key_event(code, 0, pressed);
                 }
                 scancodes::ESCAPE if pressed => {
                     exit(0);
                 }
-                _ if pressed => {
-                    if let Some(ascii) = scancode_to_ascii(code, self.keyboard_shift) {
-                        self.dispatch_key_event(scancode, ascii as u8);
-                    }
+                _ => {
+                    // Send ALL keys (press and release) to the focused window so
+                    // that game-style apps (Doom, etc.) can handle non-ASCII keys
+                    // like arrows, Ctrl (fire), Shift, and key-up events.
+                    let ascii = if pressed {
+                        scancode_to_ascii(code, self.keyboard_shift)
+                            .map(|c| c as u8)
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    self.dispatch_key_event(code, ascii, pressed);
                 }
-                _ => {}
             }
         }
     }
@@ -788,26 +803,32 @@ impl Compositor {
         let target_id = self.captured_window.or_else(|| self.wm.window_at(x, y));
 
         if let Some(id) = target_id {
-            if let Some(w) = self.wm.get_window(id) {
-                if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let rel_x = x - w.content_x() as i32;
-                        let rel_y = y - w.content_y() as i32;
+            let target = self.wm.get_window(id).and_then(|w| {
+                w.event_port.map(|port| (port, w.content_x(), w.content_y()))
+            });
 
-                        let event = MouseMoveEvent {
-                            x: rel_x,
-                            y: rel_y,
-                            dx,
-                            dy,
-                        };
-                        let _ = send_message_async(port, MessageType::MouseMove, &event.to_bytes());
-                    }
-                }
+            if let Some((port, content_x, content_y)) = target {
+                let rel_x = x - content_x as i32;
+                let rel_y = y - content_y as i32;
+
+                let event = MouseMoveEvent {
+                    x: rel_x,
+                    y: rel_y,
+                    dx,
+                    dy,
+                };
+                self.send_window_event_async(id, port, MessageType::MouseMove, &event.to_bytes());
             }
         }
     }
 
-    fn dispatch_key_event(&mut self, scancode: u8, ascii: u8) {
+    /// Dispatch a key event to the focused window.
+    ///
+    /// - Always sends `KeyDown` or `KeyUp` so game-aware apps receive every key.
+    /// - Additionally sends `KeyPress` for printable ASCII key-down events for
+    ///   backward compatibility with apps that rely on that message type (e.g.
+    ///   terminal).
+    fn dispatch_key_event(&mut self, scancode: u8, ascii: u8, pressed: bool) {
         let event = KeyEvent {
             scancode,
             character: ascii,
@@ -819,15 +840,51 @@ impl Compositor {
             },
         };
 
-        let event_port = self.wm.focused_id
-            .and_then(|id| self.wm.get_window(id))
-            .and_then(|w| w.event_port);
+        let target = self.wm.focused_id
+            .and_then(|id| self.wm.get_window(id).and_then(|w| w.event_port.map(|port| (id, port))));
 
-        if let Some(port) = event_port {
-            if port != 0 {
-                let _ = send_message_async(port, MessageType::KeyPress, &event.to_bytes());
+        if let Some((window_id, port)) = target {
+            // Primary: KeyDown / KeyUp for full key tracking
+            let primary_type = if pressed { MessageType::KeyDown } else { MessageType::KeyUp };
+            self.send_window_event_async(window_id, port, primary_type, &event.to_bytes());
+
+            // Compat: also send KeyPress for printable key-down events
+            if pressed && ascii != 0 {
+                self.send_window_event_async(window_id, port, MessageType::KeyPress, &event.to_bytes());
             }
         }
+    }
+
+    fn send_window_event_async(&mut self, window_id: WindowId, port: PortId, msg_type: MessageType, payload: &[u8]) {
+        if port == 0 {
+            return;
+        }
+
+        if let Err(err) = send_message_async(port, msg_type, payload) {
+            if matches!(err, SyscallError::NotFound | SyscallError::InvalidArgument | SyscallError::Unknown(_)) {
+                self.drop_dead_window(window_id);
+            }
+        }
+    }
+
+    fn drop_dead_window(&mut self, window_id: WindowId) {
+        self.pending_close.retain(|pc| pc.window_id != window_id);
+
+        if self.captured_window == Some(window_id) {
+            self.captured_window = None;
+        }
+
+        match self.drag_op {
+            DragOperation::Move { window_id: id, .. } | DragOperation::Resize { window_id: id, .. }
+                if id == window_id =>
+            {
+                self.drag_op = DragOperation::None;
+            }
+            _ => {}
+        }
+
+        self.wm.close_window(window_id);
+        self.dirty = true;
     }
 
     fn handle_register_message(&mut self, data: &[u8]) {
@@ -1002,9 +1059,9 @@ impl Compositor {
                             None
                         };
 
-                        if let Some(port) = event_port {
-                            if port != 0 {
-                                let _ = send_message_async(port, MessageType::KeyPress, &key_event.to_bytes());
+                        if let Some(focused_id) = self.wm.focused_id {
+                            if let Some(port) = event_port {
+                                self.send_window_event_async(focused_id, port, MessageType::KeyPress, &key_event.to_bytes());
                             }
                         }
                     }
@@ -1096,17 +1153,15 @@ impl Compositor {
                 }
 
                 if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let rel_x = x - w.content_x() as i32;
-                        let rel_y = y - w.content_y() as i32;
-                        if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
-                            let event = MouseButtonEvent {
-                                button: MouseButton::Left,
-                                x: rel_x,
-                                y: rel_y,
-                            };
-                            let _ = send_message_async(port, MessageType::MouseButtonDown, &event.to_bytes());
-                        }
+                    let rel_x = x - w.content_x() as i32;
+                    let rel_y = y - w.content_y() as i32;
+                    if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                        let event = MouseButtonEvent {
+                            button: MouseButton::Left,
+                            x: rel_x,
+                            y: rel_y,
+                        };
+                        self.send_window_event_async(id, port, MessageType::MouseButtonDown, &event.to_bytes());
                     }
                 }
             }
@@ -1288,6 +1343,10 @@ impl Compositor {
     }
 
     fn send_surface_assignment(&self, window_id: WindowId, port: PortId, region_id: SharedRegionId, width: u32, height: u32, resize_pos: Option<(i32, i32)>) {
+        if port == 0 {
+            return;
+        }
+
         // 1. Notify client about surface
         let assign = SurfaceAssignMsg {
             window_id,
@@ -1384,17 +1443,15 @@ impl Compositor {
         if let Some(id) = target_id {
             if let Some(w) = self.wm.get_window(id) {
                 if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let rel_x = x - w.content_x() as i32;
-                        let rel_y = y - w.content_y() as i32;
-                        if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
-                            let event = MouseButtonEvent {
-                                button: MouseButton::Left,
-                                x: rel_x,
-                                y: rel_y,
-                            };
-                            let _ = send_message_async(port, MessageType::MouseButtonUp, &event.to_bytes());
-                        }
+                    let rel_x = x - w.content_x() as i32;
+                    let rel_y = y - w.content_y() as i32;
+                    if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                        let event = MouseButtonEvent {
+                            button: MouseButton::Left,
+                            x: rel_x,
+                            y: rel_y,
+                        };
+                        self.send_window_event_async(id, port, MessageType::MouseButtonUp, &event.to_bytes());
                     }
                 }
             }
@@ -1420,8 +1477,14 @@ impl Compositor {
                     let id = self.wm.next_id;
                     self.wm.next_id += 1;
 
+                    // Treat req.width/req.height as the desired *content* area.
+                    // Add decorations so the surface returned equals exactly what
+                    // the client requested.
+                    let outer_w = req.width + WINDOW_BORDER_WIDTH * 2;
+                    let outer_h = req.height + WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH;
+
                     let window = match Window::new_with_process(
-                        id, &req.title, win_x, win_y, req.width, req.height,
+                        id, &req.title, win_x, win_y, outer_w, outer_h,
                         0 as ProcessId, req.reply_port as PortId
                     ) {
                         Some(w) => w,
@@ -1444,7 +1507,9 @@ impl Compositor {
                     let mut full_msg = [0u8; 64];
                     full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
                     full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE].copy_from_slice(&resp.to_bytes());
-                    let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
+                    if req.reply_port != 0 {
+                        let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
+                    }
                 }
             }
             _ => {}
@@ -1458,15 +1523,17 @@ impl Compositor {
         }
 
         if let Some(port) = event_port {
-            let msg = TerminateRequestMsg {
-                window_id: id,
-                reason: 0,
-            };
-            let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
-            let mut full_msg = [0u8; 64];
-            full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-            full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
-            let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+            if port != 0 {
+                let msg = TerminateRequestMsg {
+                    window_id: id,
+                    reason: 0,
+                };
+                let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+            }
         }
 
         // Hide the window immediately so it disappears from the screen,
