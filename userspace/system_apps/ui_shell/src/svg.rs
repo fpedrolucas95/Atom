@@ -501,7 +501,7 @@ fn fill_color(attrs: &[u8]) -> Option<u32> {
         Some(v) => v,
         None => b"black", // SVG default fill is black
     };
-    if v == b"none" || v.starts_with(b"url(") { return None; }
+    if v == b"none" { return None; }
 
     let (r, g, b, base_a) = parse_color_str(v)?;
     let fill_op = get_attr(attrs, b"fill-opacity")
