@@ -11,6 +11,7 @@
 #   ./build.sh --setup      # Configurar dependências
 
 set -e
+set -o pipefail
 
 # -------------------------------------------------------------------------
 # Cores para output
@@ -514,8 +515,14 @@ fi
 header "KERNEL BUILD"
 
 step "Compilando kernel Rust..."
+mkdir -p target/x86_64-unknown-uefi/release/deps
 if cargo build -p atom-kernel --release 2>&1 | tee build/cargo.log; then
-    success "Kernel Rust compilado"
+    if [ -f "target/x86_64-unknown-uefi/release/libatom.a" ]; then
+        success "Kernel Rust compilado"
+    else
+        error "Build Rust terminou sem gerar libatom.a"
+        exit 1
+    fi
 
     if grep -q "warning:" build/cargo.log; then
         warning "Build teve warnings (veja build/cargo.log)"
@@ -589,6 +596,12 @@ fi
 # =========================================================================
 
 step "Linkando Atom.efi..."
+
+if [ ! -f "target/x86_64-unknown-uefi/release/libatom.a" ]; then
+    error "libatom.a não encontrado em target/x86_64-unknown-uefi/release/"
+    error "Execute o build do kernel Rust novamente para gerar o artefato"
+    exit 1
+fi
 
 RUST_LLD=$(find ~/.rustup/toolchains/nightly-*/lib/rustlib/*/bin/rust-lld 2>/dev/null | head -1)
 if [ -z "$RUST_LLD" ]; then
