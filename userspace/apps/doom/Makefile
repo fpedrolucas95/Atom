@@ -1,49 +1,20 @@
-# Makefile — DOOM para AtomOS (via doomgeneric)
+# Makefile for doom — AtomOS doomgeneric port
 #
-# Porta o Doom clássico para o desktop environment do AtomOS usando
-# doomgeneric como camada de abstração portável e TinyGL para a
-# integração com o compositor.
+# Builds doomgeneric (all core Doom C files) together with the AtomOS
+# platform layer (doomgeneric_atom.c) and links against libc.
 #
-# ───────────────────────────────────────────────────────────────────────
-# PRÉ-REQUISITOS
-# ───────────────────────────────────────────────────────────────────────
-#  1. Clonar doomgeneric na pasta esperada:
-#       git clone https://github.com/ozkl/doomgeneric \
-#           userspace/libs/doomgeneric_src
-#     (a variável DOOMGENERIC_SRC aponta para o subdiretório interno)
+# Prerequisites:
+#   1. userspace/libs/libc must be built first:
+#        make -C ../../libs/libc
+#   2. elf2atxf tool must be built for the host:
+#        cd tools/elf2atxf && cargo build --release --target $(host triple)
 #
-#  2. Obter um IWAD (arquivo de dados do Doom):
-#       doom1.wad  — shareware gratuito (Doom 1 episódio 1)
-#       doom.wad   — comercial (Doom 1 completo)
-#     Coloque o WAD em efi/apps/user/ (ou outro caminho acessível pelo FS).
-#
-#  3. Build das dependências:
-#       make -C ../../libs/libc
-#       make -C ../../libs/tinygl
-#
-#  4. elf2atxf compilado:
-#       cd ../../../tools/elf2atxf && cargo build --release \
-#           --target $(rustc -vV | sed -n 's/host: //p')
-#
-# Uso:
-#   make              — compila doom.elf e doom.atxf
-#   make clean        — remove artefatos
+# Usage:
+#   make          — builds doom.elf and doom.atxf
+#   make clean    — removes build artifacts
 
 # ---------------------------------------------------------------------------
-# Resolução interna do Doom e da janela
-#   DOOM_W × DOOM_H  — o que o software renderer do Doom produz
-#   WIN_W  × WIN_H   — tamanho da janela do compositor (2× DOOM, 640×400)
-# ---------------------------------------------------------------------------
-DOOM_W ?= 320
-DOOM_H ?= 200
-
-# ---------------------------------------------------------------------------
-# Localização do código-fonte do doomgeneric
-# ---------------------------------------------------------------------------
-DOOMGENERIC_SRC ?= ../../libs/doomgeneric_src/doomgeneric
-
-# ---------------------------------------------------------------------------
-# Detecção do toolchain (mesma lógica que tinygl_demo e libc)
+# Toolchain detection  (identical logic to tinygl_demo/Makefile)
 # ---------------------------------------------------------------------------
 CROSS_GCC := $(shell command -v x86_64-elf-gcc 2>/dev/null)
 ifneq ($(CROSS_GCC),)
@@ -76,34 +47,19 @@ else
 endif
 
 # ---------------------------------------------------------------------------
-# Diretórios de dependências
+# Dependency directories
 # ---------------------------------------------------------------------------
 LIBC_DIR   = ../../libs/libc
-TINYGL_DIR = ../../libs/tinygl
-TINYGL_SRC = ../../libs/tinygl_src
+DOOM_SRC   = ../../libs/doomgeneric_src/doomgeneric
 
-LIBC      = $(LIBC_DIR)/build/libc.a
-CRT0      = $(LIBC_DIR)/build/crt0.o
-LIBTINYGL = $(TINYGL_DIR)/build/libtinygl.a
-LDSCRIPT  = ../../userspace.ld
+LIBC     = $(LIBC_DIR)/build/libc.a
+CRT0     = $(LIBC_DIR)/build/crt0.o
+LDSCRIPT = ../../userspace.ld
 
-ELF2ATXF  = ../../../tools/elf2atxf/target/$(shell rustc -vV 2>/dev/null \
-             | sed -n 's/host: //p')/release/elf2atxf
-
-OUTDIR = build
+ELF2ATXF = ../../../tools/elf2atxf/target/$(shell rustc -vV 2>/dev/null | sed -n 's/host: //p')/release/elf2atxf
 
 # ---------------------------------------------------------------------------
-# Flags de compilação
-#
-# Flags importantes para o doomgeneric:
-#   -DDOOMGENERIC_RESX / -DDOOMGENERIC_RESY
-#       Resolução do framebuffer produzida pelo Doom (320×200 clássico).
-#   -DNOMIXER
-#       Desabilita mistura de áudio (AtomOS ainda não tem driver de som).
-#   -DFEATURE_MULTIPLAYER=0 / -DNET_DISABLED
-#       Desabilita código de rede (não necessário para o port básico).
-#   -Wno-*
-#       O código-fonte legado do Doom produz vários avisos inofensivos.
+# Compiler flags
 # ---------------------------------------------------------------------------
 CFLAGS = \
     $(ARCH_FLAGS) \
@@ -115,22 +71,19 @@ CFLAGS = \
     -mno-red-zone \
     -nostdlib \
     -nostdinc \
-    -std=c99 \
-    -DDOOMGENERIC_RESX=$(DOOM_W) \
-    -DDOOMGENERIC_RESY=$(DOOM_H) \
-    -DNOMIXER \
-    -DNO_JOYSTICK \
+    -std=gnu89 \
     -O2 \
-    -I$(LIBC_DIR)/include \
-    -I$(TINYGL_SRC)/include \
-    -I$(TINYGL_DIR) \
-    -I$(DOOMGENERIC_SRC) \
-    -I. \
+    -Wall \
+    -Wno-unused-function \
+    -Wno-unused-variable \
     -Wno-unused-parameter \
-    -Wno-sign-compare \
-    -Wno-implicit-fallthrough \
-    -Wno-misleading-indentation \
-    -Wno-missing-field-initializers
+    -Wno-incompatible-pointer-types \
+    -Wno-unused-but-set-variable \
+    -DNORMALUNIX \
+    -DLINUX \
+    -D_DEFAULT_SOURCE \
+    -I$(LIBC_DIR)/include \
+    -I$(DOOM_SRC)
 
 # ---------------------------------------------------------------------------
 # Linker flags
@@ -143,60 +96,138 @@ LDFLAGS = \
     -static
 
 # ---------------------------------------------------------------------------
-# Fontes: todos os .c do doomgeneric + nosso backend AtomOS
+# Source files
+#
+# All core Doom sources from doomgeneric (mirror of SRC_DOOM in upstream
+# Makefile) minus the upstream X11 platform layer (doomgeneric_xlib.c),
+# plus our AtomOS platform layer.
 # ---------------------------------------------------------------------------
-DOOM_SRCS  := $(wildcard $(DOOMGENERIC_SRC)/*.c)
-LOCAL_SRCS := atomos_backend.c
-ALL_SRCS   := $(DOOM_SRCS) $(LOCAL_SRCS)
+DOOM_SRCS = \
+    $(DOOM_SRC)/dummy.c \
+    $(DOOM_SRC)/am_map.c \
+    $(DOOM_SRC)/doomdef.c \
+    $(DOOM_SRC)/doomstat.c \
+    $(DOOM_SRC)/dstrings.c \
+    $(DOOM_SRC)/d_event.c \
+    $(DOOM_SRC)/d_items.c \
+    $(DOOM_SRC)/d_iwad.c \
+    $(DOOM_SRC)/d_loop.c \
+    $(DOOM_SRC)/d_main.c \
+    $(DOOM_SRC)/d_mode.c \
+    $(DOOM_SRC)/d_net.c \
+    $(DOOM_SRC)/f_finale.c \
+    $(DOOM_SRC)/f_wipe.c \
+    $(DOOM_SRC)/g_game.c \
+    $(DOOM_SRC)/hu_lib.c \
+    $(DOOM_SRC)/hu_stuff.c \
+    $(DOOM_SRC)/info.c \
+    $(DOOM_SRC)/i_cdmus.c \
+    $(DOOM_SRC)/i_endoom.c \
+    $(DOOM_SRC)/i_joystick.c \
+    $(DOOM_SRC)/i_scale.c \
+    $(DOOM_SRC)/i_sound.c \
+    $(DOOM_SRC)/i_system.c \
+    $(DOOM_SRC)/i_timer.c \
+    $(DOOM_SRC)/memio.c \
+    $(DOOM_SRC)/m_argv.c \
+    $(DOOM_SRC)/m_bbox.c \
+    $(DOOM_SRC)/m_cheat.c \
+    $(DOOM_SRC)/m_config.c \
+    $(DOOM_SRC)/m_controls.c \
+    $(DOOM_SRC)/m_fixed.c \
+    $(DOOM_SRC)/m_menu.c \
+    $(DOOM_SRC)/m_misc.c \
+    $(DOOM_SRC)/m_random.c \
+    $(DOOM_SRC)/p_ceilng.c \
+    $(DOOM_SRC)/p_doors.c \
+    $(DOOM_SRC)/p_enemy.c \
+    $(DOOM_SRC)/p_floor.c \
+    $(DOOM_SRC)/p_inter.c \
+    $(DOOM_SRC)/p_lights.c \
+    $(DOOM_SRC)/p_map.c \
+    $(DOOM_SRC)/p_maputl.c \
+    $(DOOM_SRC)/p_mobj.c \
+    $(DOOM_SRC)/p_plats.c \
+    $(DOOM_SRC)/p_pspr.c \
+    $(DOOM_SRC)/p_saveg.c \
+    $(DOOM_SRC)/p_setup.c \
+    $(DOOM_SRC)/p_sight.c \
+    $(DOOM_SRC)/p_spec.c \
+    $(DOOM_SRC)/p_switch.c \
+    $(DOOM_SRC)/p_telept.c \
+    $(DOOM_SRC)/p_tick.c \
+    $(DOOM_SRC)/p_user.c \
+    $(DOOM_SRC)/r_bsp.c \
+    $(DOOM_SRC)/r_data.c \
+    $(DOOM_SRC)/r_draw.c \
+    $(DOOM_SRC)/r_main.c \
+    $(DOOM_SRC)/r_plane.c \
+    $(DOOM_SRC)/r_segs.c \
+    $(DOOM_SRC)/r_sky.c \
+    $(DOOM_SRC)/r_things.c \
+    $(DOOM_SRC)/sha1.c \
+    $(DOOM_SRC)/sounds.c \
+    $(DOOM_SRC)/statdump.c \
+    $(DOOM_SRC)/st_lib.c \
+    $(DOOM_SRC)/st_stuff.c \
+    $(DOOM_SRC)/s_sound.c \
+    $(DOOM_SRC)/tables.c \
+    $(DOOM_SRC)/v_video.c \
+    $(DOOM_SRC)/wi_stuff.c \
+    $(DOOM_SRC)/w_checksum.c \
+    $(DOOM_SRC)/w_file.c \
+    $(DOOM_SRC)/w_main.c \
+    $(DOOM_SRC)/w_wad.c \
+    $(DOOM_SRC)/z_zone.c \
+    $(DOOM_SRC)/w_file_stdc.c \
+    $(DOOM_SRC)/i_input.c \
+    $(DOOM_SRC)/i_video.c \
+    $(DOOM_SRC)/doomgeneric.c
 
-DOOM_OBJS  := $(patsubst $(DOOMGENERIC_SRC)/%.c,$(OUTDIR)/doom/%.o,$(DOOM_SRCS))
-LOCAL_OBJS := $(patsubst %.c,$(OUTDIR)/%.o,$(LOCAL_SRCS))
-ALL_OBJS   := $(DOOM_OBJS) $(LOCAL_OBJS)
+# AtomOS platform layer (replaces doomgeneric_xlib.c)
+PLATFORM_SRC = doomgeneric_atom.c
+
+ALL_SRCS = $(DOOM_SRCS) $(PLATFORM_SRC)
+
+# Build object files in a local build/ subdirectory to avoid polluting the
+# doomgeneric_src tree.
+OBJDIR = build
+
+# Derive object paths relative to OBJDIR:
+# For doom sources, flatten the basename (all names are unique in the list above)
+DOOM_OBJS    = $(patsubst %.c,$(OBJDIR)/doom_%.o,$(notdir $(DOOM_SRCS)))
+PLATFORM_OBJ = $(OBJDIR)/$(PLATFORM_SRC:.c=.o)
+ALL_OBJS     = $(DOOM_OBJS) $(PLATFORM_OBJ)
 
 TARGET = doom
 
-.PHONY: all clean check-src
+.PHONY: all clean
 
-all: check-src $(TARGET).atxf
+all: $(TARGET).atxf
 
-# Verificar se o código-fonte do doomgeneric está disponível
-check-src:
-	@if [ ! -d "$(DOOMGENERIC_SRC)" ]; then \
-	    echo ""; \
-	    echo "ERRO: doomgeneric não encontrado em $(DOOMGENERIC_SRC)"; \
-	    echo ""; \
-	    echo "  Clone o repositório com:"; \
-	    echo "    git clone https://github.com/ozkl/doomgeneric \\"; \
-	    echo "        userspace/libs/doomgeneric_src"; \
-	    echo ""; \
-	    exit 1; \
-	fi
+# Create object directory
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
 
-$(OUTDIR)/doom:
-	mkdir -p $(OUTDIR)/doom
-
-$(OUTDIR):
-	mkdir -p $(OUTDIR)
-
-# Compilar fontes do doomgeneric
-$(OUTDIR)/doom/%.o: $(DOOMGENERIC_SRC)/%.c | $(OUTDIR)/doom
+# Compile doom source files (from doomgeneric_src tree)
+$(OBJDIR)/doom_%.o: $(DOOM_SRC)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Compilar backend AtomOS
-$(OUTDIR)/%.o: %.c | $(OUTDIR)
+# Compile our own platform layer
+$(OBJDIR)/doomgeneric_atom.o: doomgeneric_atom.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Linkar: crt0 + doomgeneric + backend + libtinygl + libc
-# Ordem de link: libtinygl antes de libc (resolve malloc/free)
-$(TARGET).elf: $(CRT0) $(ALL_OBJS) $(LIBTINYGL) $(LIBC)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0) $(ALL_OBJS) $(LIBTINYGL) $(LIBC)
+# Link: crt0 + all objects + libc
+$(TARGET).elf: $(CRT0) $(ALL_OBJS) $(LIBC)
+	$(LD) $(LDFLAGS) -o $@ $(CRT0) $(ALL_OBJS) $(LIBC)
 
+# Convert ELF → ATXF
 $(TARGET).atxf: $(TARGET).elf
 	@if [ -x "$(ELF2ATXF)" ]; then \
 	    $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
 	else \
-	    echo "AVISO: elf2atxf não encontrado; gerou apenas $(TARGET).elf"; \
+	    echo "WARNING: elf2atxf not found at $(ELF2ATXF); skipping ATXF conversion"; \
 	fi
 
 clean:
-	rm -rf $(OUTDIR) $(TARGET).elf $(TARGET).atxf
+	rm -rf $(OBJDIR) $(TARGET).elf $(TARGET).atxf

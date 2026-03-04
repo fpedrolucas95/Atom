@@ -308,7 +308,16 @@ long ftell(FILE *stream)
                                  0,
                                  1 /* SEEK_CUR */);
     if (atom_is_error(ret)) { atom_set_errno(ret); return -1L; }
-    return (long)ret;
+
+    /* The kernel tracks the raw file offset (advanced by every read syscall).
+     * If the libc read buffer (rbuf) still has unconsumed bytes, the kernel
+     * offset is ahead of the application's logical position.  Subtract the
+     * buffered-but-unread bytes so callers see the correct position.
+     */
+    long pos = (long)ret;
+    int buffered = stream->rbuf_len - stream->rbuf_pos;
+    if (buffered > 0) pos -= buffered;
+    return pos;
 }
 
 void rewind(FILE *stream)

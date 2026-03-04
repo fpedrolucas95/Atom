@@ -616,11 +616,31 @@ impl SharedMemManager {
     }
 
     /// Validate that an explicit (user-provided) virtual address is sane:
-    /// page-aligned, within the user canonical range, and won't overflow.
+    /// page-aligned, non-null, within the user canonical range, and won't
+    /// overflow.
+    ///
+    /// Note: callers pass virt_addr == 0 to `map_region_in_pml4` as the
+    /// auto-assign sentinel; that case is intercepted *before* this function
+    /// is called (the `if virt_addr == 0 { find_free_va }` branch).
+    /// This guard therefore never sees 0, but it defends against any future
+    /// refactor that accidentally removes that early-out.
     fn validate_explicit_va(virt_addr: usize, region_size: usize) -> Result<(), SharedMemError> {
         let user_canonical_max = atom_abi::USER_CANONICAL_MAX as usize;
 
         if !pmm::is_page_aligned(virt_addr) {
+            return Err(SharedMemError::Unaligned);
+        }
+
+        // Guard the null page and the entire first-page range.  Mapping
+        // shared memory over VA 0x0 would cause null-pointer calls to land
+        // on live data (potentially executed if NX is not set), hiding
+        // bugs and enabling privilege escalation.
+        if virt_addr < pmm::PAGE_SIZE {
+            log_debug!(
+                LOG_ORIGIN,
+                "validate_explicit_va: rejected virt=0x{:X} — null-page guard (< PAGE_SIZE)",
+                virt_addr
+            );
             return Err(SharedMemError::Unaligned);
         }
         if virt_addr > user_canonical_max {

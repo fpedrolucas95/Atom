@@ -123,6 +123,19 @@
  *   rcx, r11 clobbered by CPU
  * ----------------------------------------------------------------------- */
 
+/*
+ * CRITICAL: The kernel's syscall handler (handler.asm) does NOT preserve the
+ * caller-saved registers rdi, rsi, rdx, r10, r8, r9 across the syscall.
+ * Only the callee-saved registers (rbx, rbp, r12-r15) are saved and restored.
+ * The CPU itself clobbers rcx (saved RIP) and r11 (saved RFLAGS).
+ *
+ * Every register that is NOT used as an input operand in a given wrapper and
+ * is NOT preserved by the kernel MUST appear in the clobber list.  Failure to
+ * do so lets the compiler keep a live value in that register across the
+ * syscall, which the kernel will silently overwrite — causing downstream
+ * corruption (e.g. free(0x19) page faults).
+ */
+
 static inline uint64_t atom_syscall0(uint64_t num)
 {
     uint64_t ret;
@@ -130,7 +143,7 @@ static inline uint64_t atom_syscall0(uint64_t num)
         "syscall"
         : "=a"(ret)
         : "0"(num)
-        : "rcx", "r11", "memory"
+        : "rcx", "r11", "rdi", "rsi", "rdx", "r8", "r9", "r10", "memory"
     );
     return ret;
 }
@@ -142,7 +155,7 @@ static inline uint64_t atom_syscall1(uint64_t num, uint64_t a1)
         "syscall"
         : "=a"(ret)
         : "0"(num), "D"(a1)
-        : "rcx", "r11", "memory"
+        : "rcx", "r11", "rsi", "rdx", "r8", "r9", "r10", "memory"
     );
     return ret;
 }
@@ -154,7 +167,7 @@ static inline uint64_t atom_syscall2(uint64_t num, uint64_t a1, uint64_t a2)
         "syscall"
         : "=a"(ret)
         : "0"(num), "D"(a1), "S"(a2)
-        : "rcx", "r11", "memory"
+        : "rcx", "r11", "rdx", "r8", "r9", "r10", "memory"
     );
     return ret;
 }
@@ -167,7 +180,7 @@ static inline uint64_t atom_syscall3(uint64_t num, uint64_t a1, uint64_t a2,
         "syscall"
         : "=a"(ret)
         : "0"(num), "D"(a1), "S"(a2), "d"(a3)
-        : "rcx", "r11", "memory"
+        : "rcx", "r11", "r8", "r9", "r10", "memory"
     );
     return ret;
 }
@@ -181,7 +194,7 @@ static inline uint64_t atom_syscall4(uint64_t num, uint64_t a1, uint64_t a2,
         "syscall"
         : "=a"(ret)
         : "0"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
-        : "rcx", "r11", "memory"
+        : "rcx", "r11", "r8", "r9", "memory"
     );
     return ret;
 }
@@ -196,7 +209,7 @@ static inline uint64_t atom_syscall5(uint64_t num, uint64_t a1, uint64_t a2,
         "syscall"
         : "=a"(ret)
         : "0"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8)
-        : "rcx", "r11", "memory"
+        : "rcx", "r11", "r9", "memory"
     );
     return ret;
 }

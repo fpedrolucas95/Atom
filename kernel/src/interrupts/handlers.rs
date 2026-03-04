@@ -252,12 +252,14 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
     let from_userspace = (frame.cs & 0x3) == 0x3;
 
     // -----------------------------------------------------------------------
-    // Fast path: silently resolve demand-paged user-space page faults
-    // (error code 0x6 = write + user + not-present).  Normal BSS zero-fill
-    // and stack-growth faults all fall here and are handled with no logging.
+    // Fast path: silently resolve demand-paged user-space page faults.
+    // This handles both:
+    //   - User-mode faults (error code 0x6 = write + user + not-present)
+    //   - Kernel-mode faults on user-space addresses (e.g., during
+    //     copy_nonoverlapping in write_buffer_to_user / syscall handlers)
     // Only fall through to the diagnostic path for unresolvable faults.
     // -----------------------------------------------------------------------
-    if exception_number == 14 && from_userspace {
+    if exception_number == 14 {
         let cr2: u64;
         unsafe {
             core::arch::asm!(
@@ -266,12 +268,18 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 options(nomem, nostack, preserves_flags)
             );
         }
-        if let Some(tid) = sched::current_thread() {
-            if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
-                if pml4 != 0 {
-                    if mm::vma::handle_page_fault(pml4 as usize, cr2 as usize, error_code) {
-                        // Resolved — POP_ALL + iretq will retry the instruction.
-                        return;
+
+        // Try demand paging for any page fault on user-space addresses,
+        // regardless of whether the CPU was in user mode or kernel mode
+        let is_user_addr = cr2 <= atom_abi::USER_CANONICAL_MAX;
+        if is_user_addr || from_userspace {
+            if let Some(tid) = sched::current_thread() {
+                if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                    if pml4 != 0 {
+                        if mm::vma::handle_page_fault(pml4 as usize, cr2 as usize, error_code) {
+                            // Resolved — POP_ALL + iretq will retry the instruction.
+                            return;
+                        }
                     }
                 }
             }
@@ -327,9 +335,17 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 );
             }
 
-            let pf_present = error_code & 0x1 != 0;
-            let pf_write = error_code & 0x2 != 0;
-            let pf_user = error_code & 0x4 != 0;
+            let cr3: u64 = unsafe {
+                let v: u64;
+                core::arch::asm!("mov {0}, cr3", out(reg) v, options(nomem, nostack, preserves_flags));
+                v
+            };
+
+            let pf_present  = error_code & 0x1  != 0;
+            let pf_write    = error_code & 0x2  != 0;
+            let pf_user     = error_code & 0x4  != 0;
+            let pf_reserved = error_code & 0x8  != 0;
+            let pf_ifetch   = error_code & 0x10 != 0;
 
             // ---------------------------------------------------------------
             // Unresolvable fault — demand paging was already attempted in
@@ -341,19 +357,219 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 cr2
             );
 
-            log_debug!(
+            log_panic!(
                 LOG_ORIGIN,
-                "PF flags: present={}, write={}, user={}, reserved={}, instr_fetch={}",
+                "Faulting instruction RIP={:#016X} RSP={:#016X}",
+                frame.rip,
+                frame.rsp
+            );
+
+            // Decode error code for rapid diagnosis.
+            log_panic!(
+                LOG_ORIGIN,
+                "PF error_code={:#X}: present={} write={} user={} reserved={} ifetch={}",
+                error_code,
                 pf_present,
                 pf_write,
                 pf_user,
-                error_code & 0x8 != 0,
-                error_code & 0x10 != 0
+                pf_reserved,
+                pf_ifetch
             );
+
+            // CR3 identifies which address space faulted.
+            let tid_opt = sched::current_thread();
+            log_panic!(
+                LOG_ORIGIN,
+                "CR2={:#016X}  CR3={:#016X}  TID={:?}  from_userspace={}",
+                cr2,
+                cr3,
+                tid_opt,
+                from_userspace
+            );
+
+            // ---------------------------------------------------------------
+            // NULL FUNCTION POINTER CALL DETECTION
+            //
+            // When a userspace thread executes `CALL RAX` (or any indirect
+            // call/jump) with RAX==0, the CPU pushes the return address onto
+            // the user stack and then attempts to fetch the instruction at
+            // VA 0x0.  With the null-page guard active (VA 0 unmapped), this
+            // produces:
+            //   CR2 = 0x0  (faulting address)
+            //   RIP = 0x0  (instruction pointer == faulting address for ifetch)
+            //   error_code bit 4 (I/D) = 1  (instruction fetch)
+            //   error_code bit 2 (U/S) = 1  (CPL=3, userspace)
+            //   error_code bit 0 (P)   = 0  (page not present)
+            //
+            // The return address at [RSP] tells us which CALL instruction
+            // triggered the null pointer call.  We safely translate RSP
+            // through the process page tables to read it from kernel space,
+            // avoiding any risk of double fault from directly dereferencing
+            // an unmapped user address.
+            //
+            // With the null page mapped (pre-guard-page patch), the same
+            // scenario produces P=1 and I/D=1 instead (NX violation or
+            // supervisor-only page execution attempt).
+            // ---------------------------------------------------------------
+            let is_null_call = cr2 == 0
+                && frame.rip == 0
+                && pf_ifetch
+                && pf_user
+                && from_userspace;
+
+            // Also detect the pre-guard variant (null page still present)
+            let is_null_call_present = cr2 == 0
+                && frame.rip == 0
+                && pf_ifetch
+                && pf_present
+                && pf_user
+                && from_userspace;
+
+            if is_null_call || is_null_call_present {
+                log_panic!(
+                    LOG_ORIGIN,
+                    "=== NULL FUNCTION POINTER CALL DETECTED (userspace) ==="
+                );
+
+                if is_null_call_present {
+                    log_panic!(
+                        LOG_ORIGIN,
+                        "DIAGNOSIS: null page is PRESENT in CR3={:#X} — \
+                         ensure clone_kernel_mappings applies null-page guard \
+                         (unmap_page_in_pml4(dst_pml4, 0)).",
+                        cr3
+                    );
+                }
+
+                // Log all GPRs for maximum diagnostic value. Any register
+                // could have been the source of the null indirect call.
+                log_panic!(
+                    LOG_ORIGIN,
+                    "GPRs: RAX={:#018X} RBX={:#018X} RCX={:#018X} RDX={:#018X}",
+                    frame.rax, frame.rbx, frame.rcx, frame.rdx
+                );
+                log_panic!(
+                    LOG_ORIGIN,
+                    "GPRs: RSI={:#018X} RDI={:#018X} RBP={:#018X} RSP={:#018X}",
+                    frame.rsi, frame.rdi, frame.rbp, frame.rsp
+                );
+                log_panic!(
+                    LOG_ORIGIN,
+                    "GPRs: R8={:#018X}  R9={:#018X}  R10={:#018X} R11={:#018X}",
+                    frame.r8, frame.r9, frame.r10, frame.r11
+                );
+                log_panic!(
+                    LOG_ORIGIN,
+                    "GPRs: R12={:#018X} R13={:#018X} R14={:#018X} R15={:#018X}",
+                    frame.r12, frame.r13, frame.r14, frame.r15
+                );
+
+                // Extract return address from user stack.
+                // The CALL instruction pushed the return address at [RSP]
+                // before jumping to address 0.  We walk the faulting
+                // process's page tables (CR3) to translate the user RSP
+                // to a physical address, then access it via the kernel's
+                // higher-half identity map — no risk of double fault.
+                let user_rsp = frame.rsp;
+
+                // Validate RSP is in the user canonical range and aligned
+                let rsp_aligned = (user_rsp & 0x7) == 0;
+                let rsp_in_user_range = user_rsp > 0 && user_rsp <= 0x0000_7FFF_FFFF_FFF8;
+
+                if rsp_aligned && rsp_in_user_range {
+                    // Walk the page tables to translate user RSP → physical
+                    let rsp_page = (user_rsp & !0xFFF) as usize;
+                    let rsp_offset = (user_rsp & 0xFFF) as usize;
+
+                    // Ensure the 8-byte read doesn't cross a page boundary
+                    let crosses_page = rsp_offset > (0x1000 - 8);
+
+                    if !crosses_page {
+                        // Use the process's own PML4 (from CR3) to translate
+                        if let Some(pte_raw) = mm::vm::read_pte_in_pml4(cr3 as usize, rsp_page) {
+                            let pte_present = pte_raw & 0x1 != 0;
+                            if pte_present {
+                                let phys_base = (pte_raw & 0x000F_FFFF_FFFF_F000) as usize;
+                                let phys_addr = phys_base + rsp_offset;
+
+                                // Access via kernel's higher-half mapping
+                                let virt_addr = mm::vm::phys_to_virt_ptr(phys_addr);
+                                let ret_addr = unsafe { *(virt_addr as *const u64) };
+
+                                log_panic!(
+                                    LOG_ORIGIN,
+                                    "NULL CALL return address: {:#018X}  (from user RSP={:#X})",
+                                    ret_addr,
+                                    user_rsp
+                                );
+                                log_panic!(
+                                    LOG_ORIGIN,
+                                    ">>> Run: addr2line -e doom.elf {:#X}  (or doom.atxf)",
+                                    ret_addr
+                                );
+
+                                // Dump a few more stack words for call-chain context
+                                // (up to 8 words, staying within the same page)
+                                let remaining_in_page = 0x1000 - rsp_offset;
+                                let max_words = core::cmp::min(remaining_in_page / 8, 8);
+                                if max_words > 1 {
+                                    log_panic!(LOG_ORIGIN, "User stack dump (top {} words):", max_words);
+                                    for i in 0..max_words {
+                                        let word_offset = rsp_offset + i * 8;
+                                        let word_virt = mm::vm::phys_to_virt_ptr(phys_base + word_offset);
+                                        let word_val = unsafe { *(word_virt as *const u64) };
+                                        log_panic!(
+                                            LOG_ORIGIN,
+                                            "  [RSP+{:#04X}] = {:#018X}{}",
+                                            i * 8,
+                                            word_val,
+                                            if i == 0 { "  <-- return address (CALL site)" } else { "" }
+                                        );
+                                    }
+                                }
+                            } else {
+                                log_panic!(
+                                    LOG_ORIGIN,
+                                    "Cannot read return address: RSP page {:#X} not present in PML4 {:#X}",
+                                    rsp_page,
+                                    cr3
+                                );
+                            }
+                        } else {
+                            log_panic!(
+                                LOG_ORIGIN,
+                                "Cannot read return address: page table walk failed for RSP={:#X} in PML4 {:#X}",
+                                user_rsp,
+                                cr3
+                            );
+                        }
+                    } else {
+                        log_panic!(
+                            LOG_ORIGIN,
+                            "Cannot read return address: RSP={:#X} crosses page boundary (offset={:#X})",
+                            user_rsp,
+                            rsp_offset
+                        );
+                    }
+                } else {
+                    log_panic!(
+                        LOG_ORIGIN,
+                        "Cannot read return address: RSP={:#X} invalid (aligned={}, in_user_range={})",
+                        user_rsp,
+                        rsp_aligned,
+                        rsp_in_user_range
+                    );
+                }
+
+                log_panic!(
+                    LOG_ORIGIN,
+                    "=== END NULL CALL DIAGNOSIS ==="
+                );
+            }
 
             // If from userspace, kill the thread instead of halting the system
             if from_userspace {
-                if let Some(tid) = sched::current_thread() {
+                if let Some(tid) = tid_opt {
                     log_panic!(
                         LOG_ORIGIN,
                         "User-space page fault (unresolvable) - terminating thread {}",

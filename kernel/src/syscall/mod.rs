@@ -337,31 +337,106 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
+#[repr(C)]
+struct SyscallSavedFrame {
+    user_r9: u64,
+    user_r8: u64,
+    user_r10: u64,
+    user_rdx: u64,
+    user_rsi: u64,
+    user_rdi: u64,
+    user_r15: u64,
+    user_r14: u64,
+    user_r13: u64,
+    user_r12: u64,
+    user_rbp: u64,
+    user_rbx: u64,
+    user_rip: u64,
+    user_cs: u64,
+    user_rflags: u64,
+    user_rsp: u64,
+    user_ss: u64,
+}
+
 #[no_mangle]
-extern "C" fn rust_syscall_dispatcher(
+extern "win64" fn rust_syscall_dispatcher(
     syscall_num: u64,
-    arg0: u64,
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-    arg4: u64,
-    arg5: u64,
-    _user_rip: u64,
-    _user_rsp: u64,
-    _user_rbx: u64,
-    _user_rbp: u64,
-    _user_r12: u64,
-    _user_r13: u64,
-    _user_r14: u64,
-    _user_r15: u64,
+    frame_ptr: *const SyscallSavedFrame,
 ) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
+    if frame_ptr.is_null() {
+        log_panic!(LOG_ORIGIN, "SYSCALL bridge bug: null frame_ptr");
+    }
+
+    let frame = unsafe { &*frame_ptr };
+    let arg0 = frame.user_rdi;
+    let arg1 = frame.user_rsi;
+    let arg2 = frame.user_rdx;
+    let arg3 = frame.user_r10;
+    let arg4 = frame.user_r8;
+    let arg5 = frame.user_r9;
+
+    #[cfg(feature = "syscall-frame-debug")]
+    let frame_before = (
+        frame.user_rip,
+        frame.user_rsp,
+        frame.user_rbx,
+        frame.user_rbp,
+        frame.user_r12,
+        frame.user_r13,
+        frame.user_r14,
+        frame.user_r15,
+    );
+
+    // ----------------------------------------------------------------
+    // Syscall entry instrumentation.
+    //
+    // user_rip == the user RIP at the time of SYSCALL (saved by
+    //              handler.asm as `push rcx` in the IRET frame, then
+    //              read from the saved syscall frame). IRETQ will
+    //              restore execution there on return.
+    // ----------------------------------------------------------------
+    let entry_cr3: u64 = unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {0}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+        cr3
+    };
+
+    // Guard: a zero return RIP means IRETQ will resume Doom at 0x0 —
+    // the classic null-deref vector.  Log loudly so it can be diagnosed.
+    if frame.user_rip == 0 {
+        log_warn!(
+            LOG_ORIGIN,
+            "SYSCALL-ENTRY ANOMALY: user_rip=0x0 \
+             (tid={:?} syscall={} user_rsp={:#X} cr3={:#X}) \
+             — null user RIP! Thread stack may be corrupted.",
+            crate::sched::current_thread(),
+            syscall_num,
+            frame.user_rsp,
+            entry_cr3,
+        );
+    } else if frame.user_rip > atom_abi::USER_CANONICAL_MAX {
+        log_warn!(
+            LOG_ORIGIN,
+            "SYSCALL-ENTRY ANOMALY: non-canonical user_rip={:#X} \
+             (tid={:?} syscall={})",
+            frame.user_rip,
+            crate::sched::current_thread(),
+            syscall_num,
+        );
+    }
+
     log_debug!(
         LOG_ORIGIN,
-        "Syscall entry (TID={:?}): num={} args=({:#X}, {:#X}, {:#X}, {:#X}, {:#X}, {:#X})",
+        "Syscall entry (TID={:?}): num={} user_rip={:#X} user_rsp={:#X} cr3={:#X} \
+         args=({:#X}, {:#X}, {:#X}, {:#X}, {:#X}, {:#X})",
         crate::sched::current_thread(),
-        syscall_num, arg0, arg1, arg2, arg3, arg4, arg5
+        syscall_num,
+        frame.user_rip,
+        frame.user_rsp,
+        entry_cr3,
+        arg0, arg1, arg2, arg3, arg4, arg5
     );
 
     let result = match syscall_num {
@@ -475,6 +550,59 @@ extern "C" fn rust_syscall_dispatcher(
             ENOSYS
         }
     };
+
+
+    #[cfg(feature = "syscall-frame-debug")]
+    {
+        let frame_after = unsafe { &*frame_ptr };
+        let after = (
+            frame_after.user_rip,
+            frame_after.user_rsp,
+            frame_after.user_rbx,
+            frame_after.user_rbp,
+            frame_after.user_r12,
+            frame_after.user_r13,
+            frame_after.user_r14,
+            frame_after.user_r15,
+        );
+
+        if frame_before != after {
+            log_warn!(
+                LOG_ORIGIN,
+                "SYSCALL-FRAME CORRUPTION: before={:?} after={:?} syscall={} tid={:?}",
+                frame_before,
+                after,
+                syscall_num,
+                crate::sched::current_thread(),
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Syscall exit instrumentation.
+    // Verify the IRET return RIP has not been clobbered during this call.
+    // ----------------------------------------------------------------
+    if frame.user_rip == 0 {
+        log_warn!(
+            LOG_ORIGIN,
+            "SYSCALL-EXIT ANOMALY: return user_rip=0x0 \
+             (tid={:?} syscall={} result={:#X}) \
+             — IRETQ will resume at null address!",
+            crate::sched::current_thread(),
+            syscall_num,
+            result,
+        );
+    }
+
+    log_debug!(
+        LOG_ORIGIN,
+        "Syscall exit  (TID={:?}): num={} return_rip={:#X} return_rsp={:#X} result={:#X}",
+        crate::sched::current_thread(),
+        syscall_num,
+        frame.user_rip,
+        frame.user_rsp,
+        result,
+    );
 
     result
 }
@@ -2379,6 +2507,37 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         flags_raw
     );
 
+    // ----------------------------------------------------------------
+    // Address validation.
+    //
+    // virt_addr == 0  →  auto-assign (kernel picks a safe VA from the
+    //                    shared-memory window starting at 0x20000000+).
+    //                    This is the normal path and is safe.
+    //
+    // virt_addr in (0, PAGE_SIZE)  →  reject.  This range includes any
+    //                    byte offset into the null page.  No legitimate
+    //                    mapping should ever live here.
+    //
+    // virt_addr uncanonical  →  reject.  SYSRET / IRETQ would explode.
+    // ----------------------------------------------------------------
+    const PAGE_SIZE: u64 = 4096;
+    if virt_addr != 0 && virt_addr < PAGE_SIZE {
+        log_warn!(
+            "syscall",
+            "shared_region_map: rejected virt={:#x} — falls inside null-page guard [0, PAGE_SIZE)",
+            virt_addr
+        );
+        return EINVAL;
+    }
+    if virt_addr != 0 && virt_addr > atom_abi::USER_CANONICAL_MAX {
+        log_warn!(
+            "syscall",
+            "shared_region_map: rejected virt={:#x} — exceeds USER_CANONICAL_MAX",
+            virt_addr
+        );
+        return EINVAL;
+    }
+
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
@@ -2417,11 +2576,23 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
 
     match crate::shared_mem::map_region_in_pml4(region_id, caller, caller_pml4, virt_addr as usize, flags) {
         Ok(mapped_va) => {
-            log_debug!(
+            // Sanity-check: the kernel must never hand userspace the null address.
+            // find_free_va starts above the identity-map ceiling (>= 0x20000000)
+            // so this should never trigger, but we assert defensively.
+            if mapped_va == 0 {
+                log_error!(
+                    "syscall",
+                    "shared_region_map: BUG — mapped_va=0 for region {:?}! Rejecting.",
+                    region_id
+                );
+                return EINVAL;
+            }
+            log_info!(
                 "syscall",
-                "shared_region_map: mapped region {:?} to virt=0x{:X}",
+                "shared_region_map: region {:?} mapped at actual_va={:#X} (requested={:#x})",
                 region_id,
-                mapped_va
+                mapped_va,
+                virt_addr
             );
             // Return the actual mapped VA.  For auto-assign (virt_addr==0) the
             // caller needs this to know where the mapping ended up.  For
@@ -4404,6 +4575,27 @@ fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
         return Err(EINVAL);
     }
 
+    // Validate the end of the range too (prevent writing past user address space)
+    let end_ptr = dst_ptr.saturating_add(src.len() as u64).saturating_sub(1);
+    if !validate_user_pointer(end_ptr) {
+        return Err(EINVAL);
+    }
+
+    // Overflow check: dst_ptr + src.len() must not wrap around
+    if (dst_ptr as usize).checked_add(src.len()).is_none() {
+        return Err(EINVAL);
+    }
+
+    // Sanity cap: reject absurdly large copies (> 64 MB) that are almost
+    // certainly the result of a length calculation bug somewhere upstream.
+    const MAX_SINGLE_COPY: usize = 64 * 1024 * 1024;
+    if src.len() > MAX_SINGLE_COPY {
+        log_error!("write_buf",
+            "write_buffer_to_user: rejecting copy of {} bytes (max {})",
+            src.len(), MAX_SINGLE_COPY);
+        return Err(EINVAL);
+    }
+
     unsafe {
         core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr as *mut u8, src.len());
     }
@@ -4729,6 +4921,16 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
     };
 
     log_debug!(LOG_ORIGIN, "sys_fs_open OK: fd={} dir={}", fd, is_dir);
+
+    // WAD diagnostic: log file size on open
+    if path.contains("doom1") || path.contains("DOOM1") {
+        let trimmed = path.trim_start_matches('/');
+        match crate::drivers::fat32::stat_path(trimmed) {
+            Some(st) => log_info!(LOG_ORIGIN, "[WAD-DIAG] opened '{}' fd={} file_size={}", path, fd, st.size),
+            None => log_warn!(LOG_ORIGIN, "[WAD-DIAG] opened '{}' fd={} but stat_path FAILED", path, fd),
+        }
+    }
+
     fd
 }
 
@@ -4754,9 +4956,23 @@ fn sys_fs_close(fd: u64) -> u64 {
 /// Read from file descriptor
 fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
-    log_debug!(LOG_ORIGIN, "sys_fs_read(fd={}, count={})", fd, count);
+    log_debug!(LOG_ORIGIN, "sys_fs_read(fd={}, buf_ptr={:#X}, count={})", fd, buf_ptr, count);
 
-    if count == 0 || !validate_user_pointer(buf_ptr) {
+    // ── Argument validation ────────────────────────────────────────────────
+    if count == 0 {
+        return 0; // POSIX: read(count=0) returns 0, not EINVAL
+    }
+
+    if !validate_user_pointer(buf_ptr) {
+        log_warn!(LOG_ORIGIN, "sys_fs_read: buf_ptr={:#X} fails validate_user_pointer", buf_ptr);
+        return EINVAL;
+    }
+
+    // Validate that the ENTIRE destination range lies in userspace
+    let buf_end = buf_ptr.saturating_add(count as u64).saturating_sub(1);
+    if !validate_user_pointer(buf_end) {
+        log_warn!(LOG_ORIGIN, "sys_fs_read: buf range [{:#X}..{:#X}] exceeds user canonical max",
+            buf_ptr, buf_end);
         return EINVAL;
     }
 
@@ -4779,18 +4995,130 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     }
 
     let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+    let is_wad = path.contains("doom1") || path.contains("DOOM1");
 
     // Read the file from FAT32
     match crate::drivers::fat32::open(path) {
         Some(data) => {
-            if offset >= data.len() {
+            let file_len = data.len();
+
+            if is_wad {
+                log_info!(LOG_ORIGIN,
+                    "[WAD-DIAG] read fd={} buf_ptr={:#X} offset={} count={} file_len={}",
+                    fd, buf_ptr, offset, count, file_len);
+            }
+
+            if offset >= file_len {
+                if is_wad {
+                    log_warn!(LOG_ORIGIN, "[WAD-DIAG] read EOF: offset {} >= file_len {}",
+                        offset, file_len);
+                }
                 return 0; // EOF
             }
-            let available = data.len() - offset;
+
+            let available = file_len - offset;
             let to_read = available.min(count);
 
-            if let Err(e) = write_buffer_to_user(buf_ptr, &data[offset..offset + to_read]) {
+            // ── DEFENSIVE ASSERT ───────────────────────────────────────────
+            // This is the critical invariant: we must NEVER copy more than
+            // `count` bytes into the user buffer.  A violation here would
+            // overwrite user stack/heap and cause exactly the RIP=0 symptom.
+            debug_assert!(
+                to_read <= count,
+                "BUG: to_read ({}) > count ({})", to_read, count
+            );
+            debug_assert!(
+                to_read <= available,
+                "BUG: to_read ({}) > available ({})", to_read, available
+            );
+            debug_assert!(
+                offset + to_read <= file_len,
+                "BUG: offset+to_read ({}) > file_len ({})", offset + to_read, file_len
+            );
+
+            // Hard-limit: even if logic above is somehow wrong, never exceed count
+            let to_read = to_read.min(count);
+
+            if is_wad {
+                log_info!(LOG_ORIGIN,
+                    "[WAD-DIAG] computed: available={} to_read={} slice=[{}..{}] (of file_len={})",
+                    available, to_read, offset, offset + to_read, file_len);
+            }
+
+            // WAD diagnostic: log first 32 bytes of data being read
+            if is_wad && to_read > 0 {
+                let diag_len = to_read.min(32);
+                let diag_slice = &data[offset..offset + diag_len];
+                let mut hex = alloc::string::String::new();
+                for (i, &b) in diag_slice.iter().enumerate() {
+                    if i > 0 { hex.push(' '); }
+                    hex.push_str(&alloc::format!("{:02X}", b));
+                }
+                log_info!(LOG_ORIGIN, "[WAD-DIAG] first {} bytes at offset {}: [{}]",
+                    diag_len, offset, hex);
+            }
+
+            // ── Pre-fault user pages ───────────────────────────────────────
+            // Touch each target page via the VMA demand-pager so that
+            // copy_nonoverlapping in write_buffer_to_user cannot trigger a
+            // kernel-mode page fault on unmapped user memory.
+            {
+                let page_size: usize = 4096;
+                let start_page = buf_ptr as usize & !(page_size - 1);
+                let end_addr = buf_ptr as usize + to_read;
+                let end_page = if to_read > 0 {
+                    (end_addr - 1) & !(page_size - 1)
+                } else {
+                    start_page
+                };
+                let mut page = start_page;
+                while page <= end_page {
+                    if let Some(tid) = crate::sched::current_thread() {
+                        if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                            if pml4 != 0 {
+                                let ok = crate::mm::vma::handle_page_fault(
+                                    pml4 as usize, page, 0x6 /* write|user|not-present */);
+                                if !ok && is_wad {
+                                    log_warn!(LOG_ORIGIN,
+                                        "[WAD-DIAG] pre-fault FAILED for page {:#X} (pml4={:#X})",
+                                        page, pml4);
+                                }
+                            }
+                        }
+                    }
+                    page += page_size;
+                }
+            }
+
+            // Build the source slice — this is the ONLY slice that may be
+            // passed to write_buffer_to_user.  Its length is exactly to_read.
+            let src_slice = &data[offset..offset + to_read];
+
+            // ── SAFETY CHECK: verify slice length matches to_read ──────────
+            if src_slice.len() != to_read {
+                log_error!(LOG_ORIGIN,
+                    "BUG: src_slice.len()={} != to_read={} — aborting read to prevent corruption",
+                    src_slice.len(), to_read);
+                return EIO;
+            }
+
+            if is_wad {
+                log_info!(LOG_ORIGIN,
+                    "[WAD-DIAG] COPY: dst={:#X} src_slice.len={} to_read={} count={}",
+                    buf_ptr, src_slice.len(), to_read, count);
+            }
+
+            if let Err(e) = write_buffer_to_user(buf_ptr, src_slice) {
+                if is_wad {
+                    log_warn!(LOG_ORIGIN, "[WAD-DIAG] write_buffer_to_user FAILED: err={:#X}", e);
+                }
                 return e;
+            }
+
+            if is_wad {
+                log_info!(LOG_ORIGIN,
+                    "[WAD-DIAG] write_buffer_to_user OK: copied {} bytes to {:#X}",
+                    to_read, buf_ptr);
             }
 
             // Update offset
@@ -4798,13 +5126,23 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
                 let mut table = KERNEL_FD_TABLE.lock();
                 if table[idx].in_use {
                     table[idx].offset += to_read;
+                    if is_wad {
+                        log_info!(LOG_ORIGIN,
+                            "[WAD-DIAG] offset updated: {} → {}",
+                            offset, table[idx].offset);
+                    }
                 }
             }
 
-            log_debug!(LOG_ORIGIN, "sys_fs_read OK: {} bytes", to_read);
+            log_debug!(LOG_ORIGIN, "sys_fs_read OK: fd={} returned {} bytes", fd, to_read);
             to_read as u64
         }
-        None => EIO,
+        None => {
+            if is_wad {
+                log_warn!(LOG_ORIGIN, "[WAD-DIAG] fat32::open('{}') returned None → EIO", path);
+            }
+            EIO
+        }
     }
 }
 
@@ -4938,16 +5276,49 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
         return EBADF;
     }
 
-    let new_offset = match whence {
-        0 => offset as usize,        // SEEK_SET
+    let new_offset: i64 = match whence {
+        0 => offset,                 // SEEK_SET
         1 => {                        // SEEK_CUR
             let cur = table[idx].offset as i64;
-            (cur + offset) as usize
+            cur + offset
+        }
+        2 => {                        // SEEK_END
+            let (path_buf, path_len) = (table[idx].path, table[idx].path_len);
+            drop(table);
+            let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+            let trimmed = path.trim_start_matches('/');
+            let file_size = match crate::drivers::fat32::stat_path(trimmed) {
+                Some(st) => st.size as i64,
+                None => {
+                    // WAD diagnostic
+                    if path.contains("doom1") || path.contains("DOOM1") {
+                        log_warn!("fs_syscall", "[WAD-DIAG] SEEK_END stat_path('{}') FAILED → ENOENT", trimmed);
+                    }
+                    return ENOENT;
+                }
+            };
+            let result = file_size + offset;
+            // WAD diagnostic
+            if path.contains("doom1") || path.contains("DOOM1") {
+                log_info!("fs_syscall", "[WAD-DIAG] SEEK_END fd={} path='{}' file_size={} offset={} result={}",
+                    fd, trimmed, file_size, offset, result);
+            }
+            // Re-acquire lock to update offset
+            let mut table = KERNEL_FD_TABLE.lock();
+            if result < 0 {
+                return EINVAL;
+            }
+            table[idx].offset = result as usize;
+            return result as u64;
         }
         _ => return EINVAL,
     };
 
-    table[idx].offset = new_offset;
+    if new_offset < 0 {
+        return EINVAL;
+    }
+
+    table[idx].offset = new_offset as usize;
     new_offset as u64
 }
 

@@ -434,6 +434,14 @@ if [ "$KERNEL_ONLY" != true ]; then
         warning "userspace/apps/doom/Makefile não encontrado, pulando"
     fi
 
+    if [ ! -f "efi/apps/user/doom1.wad" ]; then
+        if [ -f "Doom1.WAD" ]; then
+            cp Doom1.WAD efi/apps/user/doom1.wad
+            success "doom1.wad restaurado de Doom1.WAD"
+        else
+            warning "doom1.wad não encontrado em efi/apps/user/ nem na raiz — coloque o WAD em efi/apps/user/doom1.wad"
+        fi
+    fi
     # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
@@ -652,6 +660,14 @@ fi
 # ---- User apps → /apps/user/ ----
 if ls efi/apps/user/*.atxf 1>/dev/null 2>&1; then
     mcopy -i $DISK_IMG efi/apps/user/*.atxf ::/apps/user/
+fi
+
+# ---- User data files (WADs, etc.) → /apps/user/ ----
+if ls efi/apps/user/*.wad 1>/dev/null 2>&1; then
+    for wad in efi/apps/user/*.wad; do
+        mcopy -i $DISK_IMG "$wad" ::/apps/user/
+        success "$(basename $wad) → apps/user/"
+    done
 fi
 
 success "Imagem de disco criada: $DISK_IMG"
