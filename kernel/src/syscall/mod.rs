@@ -628,15 +628,38 @@ fn sys_mouse_get_id() -> u64 {
     crate::input::get_mouse_id() as u64
 }
 
+/// Validates that the calling thread holds an IoPort capability for `port` with
+/// the specified permission. Returns `Ok(())` on success or `Err(EPERM)` on
+/// failure, logging a warning with context in the denial case.
+fn validate_io_port_access(
+    port: u16,
+    required_perm: crate::cap::CapPermissions,
+) -> Result<(), u64> {
+    let caller = crate::sched::current_thread().ok_or(EPERM)?;
+    let has_permission = crate::thread::validate_thread_capability_by_type(
+        caller,
+        required_perm,
+        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port: p } if *p == port),
+    );
+    if !has_permission {
+        log_warn!(
+            "syscall",
+            "io_port access denied: port=0x{:X} perm={:?} caller={}",
+            port,
+            required_perm,
+            caller
+        );
+        return Err(EPERM);
+    }
+    Ok(())
+}
+
 /// Read a byte from an IO port (privileged operation for drivers)
 fn sys_io_port_read(port: u16, _size: u8) -> u64 {
-    // Allow specific PS/2 controller ports for usermode drivers
-    let allowed_ports = [0x60, 0x64]; // PS/2 data and status/command ports
-    
-    if !allowed_ports.contains(&port) {
-        return EPERM;
+    if let Err(e) = validate_io_port_access(port, crate::cap::CapPermissions::READ) {
+        return e;
     }
-    
+
     let value: u8 = unsafe {
         let mut val: u8;
         core::arch::asm!(
@@ -647,19 +670,16 @@ fn sys_io_port_read(port: u16, _size: u8) -> u64 {
         );
         val
     };
-    
+
     value as u64
 }
 
 /// Write a byte to an IO port (privileged operation for drivers)
 fn sys_io_port_write(port: u16, value: u8) -> u64 {
-    // Allow specific PS/2 controller ports for usermode drivers
-    let allowed_ports = [0x60, 0x64]; // PS/2 data and status/command ports
-    
-    if !allowed_ports.contains(&port) {
-        return EPERM;
+    if let Err(e) = validate_io_port_access(port, crate::cap::CapPermissions::WRITE) {
+        return e;
     }
-    
+
     unsafe {
         core::arch::asm!(
             "out dx, al",
@@ -668,7 +688,7 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
             options(nomem, nostack, preserves_flags)
         );
     }
-    
+
     ESUCCESS
 }
 
@@ -733,28 +753,6 @@ fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
     }
 
     ESUCCESS
-}
-
-#[allow(dead_code)]
-fn validate_required_capability(
-    _resource_type: crate::cap::ResourceType,
-    required_permission: crate::cap::CapPermissions,
-) -> Result<crate::thread::ThreadId, u64> {
-    const LOG_ORIGIN: &str = "cap";
-
-    let caller = match crate::sched::current_thread() {
-        Some(tid) => tid,
-        None => return Err(EINVAL),
-    };
-
-    log_debug!(
-        LOG_ORIGIN,
-        "Capability check: thread={} requires permission={:?}",
-        caller,
-        required_permission
-    );
-
-    Ok(caller)
 }
 
 fn sys_thread_yield() -> u64 {
@@ -2159,7 +2157,7 @@ fn sys_cap_check(handle_raw: u64, required_perms: u64) -> u64 {
         required_perms
     );
 
-    let _caller = match crate::sched::current_thread() {
+    let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
             log_error!("syscall", "cap_check: no current thread");
@@ -2167,23 +2165,16 @@ fn sys_cap_check(handle_raw: u64, required_perms: u64) -> u64 {
         }
     };
 
-    let _handle = crate::cap::CapHandle::from_raw(handle_raw);
-    let _perms = crate::cap::CapPermissions::from_bits(required_perms as u32);
+    let handle = crate::cap::CapHandle::from_raw(handle_raw);
+    let perms = crate::cap::CapPermissions::from_bits(required_perms as u32);
 
-    match crate::cap::get_capability_stats() {
-        stats if stats.total > 0 => {
-            log_debug!(
-                "syscall",
-                "cap_check: validation passed (MVP, total_caps={})",
-                stats.total
-            );
+    match crate::thread::validate_thread_capability(caller, handle, perms) {
+        Ok(()) => {
+            log_debug!("syscall", "cap_check: validated handle={:#x} perms={:#x}", handle_raw, required_perms);
             1
         }
-        _ => {
-            log_warn!(
-                "syscall",
-                "cap_check: no capabilities found (MVP)"
-            );
+        Err(e) => {
+            log_warn!("syscall", "cap_check: denied handle={:#x} perms={:#x} reason={:?}", handle_raw, required_perms, e);
             0
         }
     }
@@ -2848,31 +2839,9 @@ fn sys_map_region(
 
     let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
 
-    let has_permission = crate::thread::validate_thread_capability_by_type(
-        caller,
-        crate::cap::CapPermissions::WRITE,
-        |resource| {
-            matches!(
-                resource,
-                crate::cap::ResourceType::MemoryRegion {
-                    virt_addr: v,
-                    phys_addr: p,
-                    size: s,
-                } if *v == virt_addr
-                    && *p == phys_addr
-                    && *s as u64 == size
-            )
-        },
-    );
-
-    if !has_permission {
-        log_warn!(
-            "syscall",
-            "map_region: no exact MemRegionCap found, proceeding anyway (MVP)"
-        );
-    } else {
-        log_debug!("syscall", "map_region: memory region capability validated");
-    }
+    // Security: memory isolation enforced by AddressSpaceManager::is_owned_by()
+    // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
+    // range-based redesign is future work.
 
     let mut flags = crate::mm::vm::PageFlags::from_bits(flags_raw);
     flags |= crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::USER;
@@ -2923,31 +2892,9 @@ fn sys_unmap_region(as_id_raw: u64, virt_addr: u64, size: u64) -> u64 {
 
     let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
 
-    let has_permission = crate::thread::validate_thread_capability_by_type(
-        caller,
-        crate::cap::CapPermissions::WRITE,
-        |resource| {
-            matches!(
-                resource,
-                crate::cap::ResourceType::MemoryRegion {
-                    virt_addr: v,
-                    ..
-                } if *v == virt_addr
-            )
-        },
-    );
-
-    if !has_permission {
-        log_warn!(
-            "syscall",
-            "unmap_region: no MemRegionCap found, proceeding anyway (MVP)"
-        );
-    } else {
-        log_debug!(
-            "syscall",
-            "unmap_region: memory region capability validated"
-        );
-    }
+    // Security: memory isolation enforced by AddressSpaceManager::is_owned_by()
+    // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
+    // range-based redesign is future work.
 
     match crate::mm::addrspace::unmap_region(
         as_id,
@@ -3003,31 +2950,9 @@ fn sys_remap_region(as_id_raw: u64, old_virt: u64, new_virt: u64, size: u64) -> 
 
     let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
 
-    let has_permission = crate::thread::validate_thread_capability_by_type(
-        caller,
-        crate::cap::CapPermissions::WRITE,
-        |resource| {
-            matches!(
-                resource,
-                crate::cap::ResourceType::MemoryRegion {
-                    virt_addr: v,
-                    ..
-                } if *v == old_virt
-            )
-        },
-    );
-
-    if !has_permission {
-        log_warn!(
-            "syscall",
-            "remap_region: no MemRegionCap found, proceeding anyway (MVP)"
-        );
-    } else {
-        log_debug!(
-            "syscall",
-            "remap_region: memory region capability validated"
-        );
-    }
+    // Security: memory isolation enforced by AddressSpaceManager::is_owned_by()
+    // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
+    // range-based redesign is future work.
 
     match crate::mm::addrspace::remap_region(
         as_id,
@@ -3896,6 +3821,11 @@ fn spawn_process_internal(
         is_userspace: true,
     };
 
+    // The thread must exist in THREAD_LIST before capabilities can be inserted
+    // into its capability table. mark_thread_ready is deferred until all grants
+    // are complete so the thread cannot be scheduled before it has its caps.
+    crate::thread::add_thread(thread);
+
     // Grant capabilities
     // Framebuffer capability
     if let Some((address, width, height, stride, bpp)) = crate::graphics::get_framebuffer_info() {
@@ -3928,8 +3858,17 @@ fn spawn_process_internal(
         let _ = crate::thread::add_thread_capability(pid, cap);
     }
 
-    // Add thread to scheduler
-    crate::thread::add_thread(thread);
+    // I/O port capabilities for PS/2 hardware access
+    // TODO: restrict IoPort caps to PS/2 driver only (least privilege)
+    let io_perms = CapPermissions::READ.union(CapPermissions::WRITE);
+    for &port in &[0x60u16, 0x64u16] {
+        let io_resource = ResourceType::IoPort { port };
+        if let Ok(cap) = cap::create_root_capability(io_resource, pid, io_perms) {
+            let _ = crate::thread::add_thread_capability(pid, cap);
+        }
+    }
+
+    // Thread is fully initialized — mark it schedulable
     crate::sched::mark_thread_ready(pid);
 
     log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
