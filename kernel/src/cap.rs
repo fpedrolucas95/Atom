@@ -230,6 +230,11 @@ pub enum ResourceType {
         namespace_id: u64,
         inode: u64,
     },
+    /// I/O port access capability — grants direct hardware port I/O.
+    /// READ = in (port read); WRITE = out (port write).
+    IoPort {
+        port: u16,
+    },
 }
 
 /// Type of input device for capability granting
@@ -472,7 +477,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 12];
+        let mut by_type = [0usize; 13];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -488,6 +493,7 @@ impl CapabilityManager {
                 ResourceType::FsNamespace { .. } => 9,
                 ResourceType::FsDir { .. } => 10,
                 ResourceType::FsFile { .. } => 11,
+                ResourceType::IoPort { .. } => 12,
             };
             by_type[idx] += 1;
         }
@@ -505,6 +511,7 @@ impl CapabilityManager {
             fs_namespace_caps: by_type[9],
             fs_dir_caps: by_type[10],
             fs_file_caps: by_type[11],
+            io_port_caps: by_type[12],
         }
     }
 }
@@ -523,6 +530,7 @@ pub struct CapabilityStats {
     pub fs_namespace_caps: usize,
     pub fs_dir_caps: usize,
     pub fs_file_caps: usize,
+    pub io_port_caps: usize,
 }
 
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();
