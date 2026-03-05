@@ -1364,6 +1364,7 @@ fn perform_final_cleanup(
                 address_space_cr3,
                 thread_id
             );
+            CLEANED_ADDRESS_SPACES.lock().remove(&address_space_cr3);
             0
         } else {
             // Close and release all FDs owned by this address space before reusing PML4.
@@ -1412,9 +1413,6 @@ fn perform_final_cleanup(
 pub fn reap_zombies() {
     let zombies = {
         let mut list = ZOMBIE_THREADS.lock();
-        if list.is_empty() {
-            return;
-        }
         core::mem::take(&mut *list)
     };
 
