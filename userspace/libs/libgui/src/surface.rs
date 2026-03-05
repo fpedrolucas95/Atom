@@ -177,6 +177,113 @@ impl Surface {
         inner.dirty = true;
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Advanced drawing — rounded rectangles, alpha, gradients, shadows
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Fill a rectangle with anti-aliased rounded corners.
+    pub fn fill_rect_rounded_aa(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                radius: u32, color: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let c = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        inner.shared.fill_rect_rounded_aa(x, y, width, height, radius, c);
+        inner.dirty = true;
+    }
+
+    /// Draw an anti-aliased rounded rectangle outline (1-pixel border).
+    pub fn draw_rect_rounded_aa(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                radius: u32, color: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let c = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        inner.shared.draw_rect_rounded_aa(x, y, width, height, radius, c);
+        inner.dirty = true;
+    }
+
+    /// Fill a rectangle with only the top two corners rounded (AA).
+    pub fn fill_rect_top_rounded_aa(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                    radius: u32, color: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let c = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        inner.shared.fill_rect_top_rounded_aa(x, y, width, height, radius, c);
+        inner.dirty = true;
+    }
+
+    /// Fill a rectangle with only the bottom two corners rounded (AA).
+    pub fn fill_rect_bottom_rounded_aa(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                       radius: u32, color: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let c = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        inner.shared.fill_rect_bottom_rounded_aa(x, y, width, height, radius, c);
+        inner.dirty = true;
+    }
+
+    /// Fill a rectangle with an alpha-blended solid colour (`alpha` 0–255).
+    pub fn fill_rect_alpha(&mut self, x: u32, y: u32, width: u32, height: u32,
+                           color: Color, alpha: u8) {
+        let mut inner = self.inner.borrow_mut();
+        let c = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        inner.shared.fill_rect_alpha(x, y, width, height, c, alpha);
+        inner.dirty = true;
+    }
+
+    /// Fill a rounded rectangle with an alpha-blended colour.
+    pub fn fill_rect_rounded_alpha(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                   radius: u32, color: Color, alpha: u8) {
+        let mut inner = self.inner.borrow_mut();
+        let c = atom_syscall::graphics::Color::new(color.r, color.g, color.b);
+        inner.shared.fill_rect_rounded_alpha(x, y, width, height, radius, c, alpha);
+        inner.dirty = true;
+    }
+
+    /// Fill a rectangle with a **vertical linear gradient**.
+    ///
+    /// `color_start` at the top row, `color_end` at the bottom row.
+    pub fn fill_rect_gradient_v(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                color_start: Color, color_end: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let cs = atom_syscall::graphics::Color::new(color_start.r, color_start.g, color_start.b);
+        let ce = atom_syscall::graphics::Color::new(color_end.r,   color_end.g,   color_end.b);
+        inner.shared.fill_rect_gradient_v(x, y, width, height, cs, ce);
+        inner.dirty = true;
+    }
+
+    /// Fill an AA rounded rectangle with a vertical gradient.
+    pub fn fill_rect_rounded_aa_gradient_v(&mut self, x: u32, y: u32, width: u32, height: u32,
+                                           radius: u32,
+                                           color_start: Color, color_end: Color) {
+        let mut inner = self.inner.borrow_mut();
+        let cs = atom_syscall::graphics::Color::new(color_start.r, color_start.g, color_start.b);
+        let ce = atom_syscall::graphics::Color::new(color_end.r,   color_end.g,   color_end.b);
+        inner.shared.fill_rect_rounded_aa_gradient_v(x, y, width, height, radius, cs, ce);
+        inner.dirty = true;
+    }
+
+    /// Draw a multi-layer drop-shadow / glow halo around a rectangle.
+    ///
+    /// See `atom_syscall::graphics::SharedSurface::draw_shadow_layers` for
+    /// parameter semantics.  Pass token values from `atom_theme::shadows`:
+    ///
+    /// ```ignore
+    /// use atom_theme::shadows;
+    /// let spec = shadows::SOFT;
+    /// surface.draw_shadow_layers(x, y, w, h, r, shadow_color,
+    ///     spec.offset_y, spec.layers, spec.alpha);
+    /// ```
+    pub fn draw_shadow_layers(&mut self,
+                              x: i32, y: i32,
+                              width: u32, height: u32,
+                              corner_radius: u32,
+                              shadow_color: Color,
+                              offset_y: i32,
+                              layers: u32,
+                              base_alpha: u8) {
+        let mut inner = self.inner.borrow_mut();
+        let sc = atom_syscall::graphics::Color::new(shadow_color.r, shadow_color.g, shadow_color.b);
+        inner.shared.draw_shadow_layers(x, y, width, height, corner_radius, sc,
+                                        offset_y, layers, base_alpha);
+        inner.dirty = true;
+    }
+
     /// Present the surface (signal compositor to display)
     pub fn present(&mut self) {
         let mut inner = self.inner.borrow_mut();

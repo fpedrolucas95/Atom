@@ -1,14 +1,14 @@
 [package]
-name = "libgui"
-version = "0.1.0"
+name = "atom_ui"
+version = "1.0.0"
 edition = "2021"
 authors = ["Atom OS Contributors"]
-description = "GUI library for Atom OS userspace applications"
+description = "Atom UI — production-ready widget toolkit for the Atom Design System v1.0"
 
 [dependencies]
 atom_syscall = { path = "../syscall" }
 atom_theme   = { path = "../atom_theme" }
-libipc       = { path = "../libipc" }
+libgui       = { path = "../libgui" }
 
 [lib]
 crate-type = ["rlib"]

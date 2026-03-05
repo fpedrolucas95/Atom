@@ -102,53 +102,89 @@ use atom_syscall::SyscallError;
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
 
+/// Shell visual theme — all values sourced from `atom_theme` (DS v1.0 Luminous Dark).
+///
+/// **No hard-coded RGB values.**  Every constant is an alias or a
+/// direct mapping of an `atom_theme::colors` token to the
+/// `atom_syscall::graphics::Color` type used by the compositor.
+///
+/// ## Shell-specific metrics
+///
+/// Layout numbers (panel height, dock height, etc.) come from
+/// `atom_theme::shell`.  The raw `const` values below are kept for
+/// backward-compatibility with the rest of the file; they match the DS spec.
 mod theme {
+    // Import DS token source
+    use atom_theme::colors as ds;
     use atom_syscall::graphics::Color;
 
-    // Desktop
-    pub const DESKTOP_BG: Color = Color::new(18, 20, 28);
+    // ── Desktop ───────────────────────────────────────────────────────────
+    /// Main desktop background (DS: ATOM_COLOR_BG  #0B0E13)
+    pub const DESKTOP_BG: Color = ds::ATOM_COLOR_BG;
 
-    // Panel (top bar)
-    pub const PANEL_BG: Color = Color::new(14, 16, 22);
-    pub const PANEL_BG_ACCENT: Color = Color::new(20, 23, 32);
-    pub const PANEL_TEXT: Color = Color::new(210, 215, 225);
-    pub const PANEL_TEXT_DIM: Color = Color::new(130, 138, 158);
-    pub const PANEL_BORDER: Color = Color::new(38, 42, 56);
+    // ── Top bar / panel ───────────────────────────────────────────────────
+    /// Panel background (DS: ATOM_COLOR_BG — darkest layer)
+    pub const PANEL_BG: Color = ds::ATOM_COLOR_BG;
+    /// Panel background accent row (DS: ATOM_COLOR_SURFACE)
+    pub const PANEL_BG_ACCENT: Color = ds::ATOM_COLOR_SURFACE;
+    /// Panel text (DS: ATOM_COLOR_TEXT_PRIMARY)
+    pub const PANEL_TEXT: Color = ds::ATOM_COLOR_TEXT_PRIMARY;
+    /// Panel dimmed text (DS: ATOM_COLOR_TEXT_SECONDARY)
+    pub const PANEL_TEXT_DIM: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
+    /// Panel border (DS: ATOM_COLOR_BORDER)
+    pub const PANEL_BORDER: Color = ds::ATOM_COLOR_BORDER;
 
-    // Accent
-    pub const ACCENT: Color = Color::new(99, 143, 255);
+    // ── Accent ────────────────────────────────────────────────────────────
+    /// Primary accent blue (DS: ATOM_COLOR_ACCENT  #4C8DFF)
+    pub const ACCENT: Color = ds::ATOM_COLOR_ACCENT;
 
-    // Windows
-    pub const WINDOW_BG: Color = Color::new(26, 29, 38);
-    pub const WINDOW_HEADER: Color = Color::new(22, 25, 34);
-    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(30, 34, 46);
-    pub const WINDOW_BORDER: Color = Color::new(48, 54, 72);
-    pub const WINDOW_BORDER_FOCUSED: Color = Color::new(65, 75, 100);
+    // ── Windows ───────────────────────────────────────────────────────────
+    /// Window content background (DS: ATOM_COLOR_SURFACE_ALT)
+    pub const WINDOW_BG: Color = ds::ATOM_COLOR_WIN_BG;
+    /// Window title bar — unfocused (DS: ATOM_COLOR_WIN_HDR)
+    pub const WINDOW_HEADER: Color = ds::ATOM_COLOR_WIN_HDR;
+    /// Window title bar — focused (DS: ATOM_COLOR_WIN_HDR_FOC)
+    pub const WINDOW_HEADER_FOCUSED: Color = ds::ATOM_COLOR_WIN_HDR_FOC;
+    /// Window border — unfocused (DS: ATOM_COLOR_BORDER)
+    pub const WINDOW_BORDER: Color = ds::ATOM_COLOR_WIN_BORDER;
+    /// Window border — focused (DS: ATOM_COLOR_WIN_BORDER_FOC)
+    pub const WINDOW_BORDER_FOCUSED: Color = ds::ATOM_COLOR_WIN_BORDER_FOC;
 
-    // Dock
-    pub const DOCK_BG: Color = Color::new(16, 18, 26);
-    pub const DOCK_BORDER: Color = Color::new(42, 48, 64);
+    // ── Dock ──────────────────────────────────────────────────────────────
+    /// Dock background (DS: ATOM_COLOR_DOCK_BG)
+    pub const DOCK_BG: Color = ds::ATOM_COLOR_DOCK_BG;
+    /// Dock border (DS: ATOM_COLOR_DOCK_BORDER)
+    pub const DOCK_BORDER: Color = ds::ATOM_COLOR_DOCK_BORDER;
 
-    // Cursor
-    pub const CURSOR_FILL: Color = Color::WHITE;
+    // ── Cursor ────────────────────────────────────────────────────────────
+    pub const CURSOR_FILL: Color    = Color::WHITE;
     pub const CURSOR_OUTLINE: Color = Color::BLACK;
 
-    // Shadows
-    pub const SHADOW: Color = Color::new(4, 5, 8);
+    // ── Shadows ───────────────────────────────────────────────────────────
+    /// Shadow base colour (DS: ATOM_COLOR_SHADOW — near-black blue tint)
+    pub const SHADOW: Color = ds::ATOM_COLOR_SHADOW;
 
-    // Window buttons (traffic lights)
-    pub const BTN_CLOSE: Color = Color::new(237, 78, 83);
-    pub const BTN_MAXIMIZE: Color = Color::new(72, 199, 142);
-    pub const BTN_MINIMIZE: Color = Color::new(245, 189, 65);
-    pub const BTN_INACTIVE: Color = Color::new(56, 62, 78);
+    // ── Window traffic-light buttons ──────────────────────────────────────
+    /// Close button (DS: ATOM_COLOR_ERROR  #EF4444)
+    pub const BTN_CLOSE: Color    = ds::ATOM_COLOR_BTN_CLOSE;
+    /// Maximise button (DS: ATOM_COLOR_SUCCESS  #22C55E)
+    pub const BTN_MAXIMIZE: Color = ds::ATOM_COLOR_BTN_MAX;
+    /// Minimise button (DS: ATOM_COLOR_WARNING  #F59E0B)
+    pub const BTN_MINIMIZE: Color = ds::ATOM_COLOR_BTN_MIN;
+    /// Inactive button (unfocused window)
+    pub const BTN_INACTIVE: Color = ds::ATOM_COLOR_BTN_INACTIVE;
 
-    // Context menu
-    pub const MENU_BG: Color = Color::new(22, 25, 34);
-    pub const MENU_BORDER: Color = Color::new(48, 54, 72);
-    pub const MENU_TEXT: Color = Color::new(210, 215, 225);
+    // ── Context menu ─────────────────────────────────────────────────────
+    /// Menu panel background (DS: ATOM_COLOR_SURFACE)
+    pub const MENU_BG: Color     = ds::ATOM_COLOR_MENU_BG;
+    /// Menu border (DS: ATOM_COLOR_BORDER)
+    pub const MENU_BORDER: Color = ds::ATOM_COLOR_MENU_BORDER;
+    /// Menu text (DS: ATOM_COLOR_TEXT_PRIMARY)
+    pub const MENU_TEXT: Color   = ds::ATOM_COLOR_MENU_TEXT;
 
-    // Desktop icons
-    pub const ICON_LABEL: Color = Color::new(200, 206, 218);
+    // ── Desktop icon labels ───────────────────────────────────────────────
+    /// Icon label text (DS: ATOM_COLOR_TEXT_SECONDARY)
+    pub const ICON_LABEL: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
 }
 
 const WINDOW_HEADER_HEIGHT: u32 = 36;

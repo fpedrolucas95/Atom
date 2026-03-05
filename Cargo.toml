@@ -5,6 +5,8 @@ members = [
     "userspace/libs/syscall",
     "userspace/libs/libipc",
     "userspace/libs/libgui",
+    "userspace/libs/atom_theme",
+    "userspace/libs/atom_ui",
 ]
 # Os drivers userspace serao compilados separadamente como binarios ATXF
 # quando o loader de executaveis estiver pronto.
