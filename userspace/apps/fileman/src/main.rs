@@ -24,8 +24,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod error;
 mod fs;
-mod svg;
 
+use libsvg::SvgBitmap;
 use fs::{Dir, DirEntry, FsOps};
 
 use atom_syscall::graphics::{Color, SharedSurface};
@@ -198,7 +198,7 @@ struct Entry {
     kind: FileKind,
     icon_color_override: Option<Color>,
     has_embedded_icon: bool,
-    svg_bitmap: Option<svg::SvgBitmap>,
+    svg_bitmap: Option<SvgBitmap>,
 }
 
 impl Entry {
@@ -527,7 +527,7 @@ impl FileManager {
                                         if let Some(c) = Self::extract_icon_color(icon_svg) {
                                             entry.icon_color_override = Some(c);
                                         }
-                                        entry.svg_bitmap = svg::SvgBitmap::render(
+                                        entry.svg_bitmap = SvgBitmap::render(
                                             icon_svg, ICON_W, ICON_H,
                                         );
                                     }

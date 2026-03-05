@@ -374,13 +374,13 @@ impl Framebuffer {
                 let ptr = self.info.pixel_ptr(px, py);
                 unsafe {
                     let existing = core::ptr::read_volatile(ptr);
-                    let er = existing & 0xFF;
+                    let eb = existing & 0xFF;
                     let eg = (existing >> 8) & 0xFF;
-                    let eb = (existing >> 16) & 0xFF;
+                    let er = (existing >> 16) & 0xFF;
                     let nr = (er * inv_a + color.r as u32 * a) / 255;
                     let ng = (eg * inv_a + color.g as u32 * a) / 255;
                     let nb = (eb * inv_a + color.b as u32 * a) / 255;
-                    let blended = (nb << 16) | (ng << 8) | nr;
+                    let blended = (nr << 16) | (ng << 8) | nb;
                     core::ptr::write_volatile(ptr, blended);
                 }
             }

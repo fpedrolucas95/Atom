@@ -1,0 +1,11 @@
+[package]
+name = "libsvg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atom_syscall = { path = "../syscall" }
+
+[profile.release]
+opt-level = "z"
+lto = true

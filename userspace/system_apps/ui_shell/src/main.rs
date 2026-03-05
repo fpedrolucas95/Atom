@@ -6,7 +6,7 @@
 
 extern crate alloc;
 
-mod svg;
+use libsvg::SvgBitmap;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -548,7 +548,7 @@ struct DesktopIcon {
     x: i32,
     y: i32,
     color: Color,
-    svg_bitmap: Option<svg::SvgBitmap>,
+    svg_bitmap: Option<SvgBitmap>,
 }
 
 struct DockApp {
@@ -556,7 +556,7 @@ struct DockApp {
     executable: String,
     color: Color,
     monogram: String,
-    svg_bitmap: Option<svg::SvgBitmap>,
+    svg_bitmap: Option<SvgBitmap>,
 }
 
 struct ContextMenu {
@@ -1665,7 +1665,7 @@ impl Compositor {
 
     /// Load the embedded SVG icon from an ATXF file for the given executable name,
     /// render it at `size`×`size` pixels, and return the bitmap (or None).
-    fn load_icon_bitmap(exec: &str, size: u32) -> Option<svg::SvgBitmap> {
+    fn load_icon_bitmap(exec: &str, size: u32) -> Option<SvgBitmap> {
         let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
         let user_path = alloc::format!("/apps/user/{}.atxf", exec);
         let path = if fs::stat(&sys_path).is_ok() { sys_path }
@@ -1673,7 +1673,7 @@ impl Compositor {
                    else { return None; };
         let atxf_bytes = fs::read_file(&path).ok()?;
         let icon_svg = Self::extract_embedded_icon_svg(&atxf_bytes)?;
-        svg::SvgBitmap::render(icon_svg, size, size)
+        SvgBitmap::render(icon_svg, size, size)
     }
 
     fn build_dock_apps() -> Vec<DockApp> {
@@ -1701,14 +1701,14 @@ impl Compositor {
 
             if let Some(path) = atxf_path {
                 let mut color = *fallback_color;
-                let mut svg_bitmap: Option<svg::SvgBitmap> = None;
+                let mut svg_bitmap: Option<SvgBitmap> = None;
 
                 if let Ok(atxf_bytes) = fs::read_file(&path) {
                     if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
                         if let Some(icon_color) = Self::extract_first_hex_color(icon_svg) {
                             color = icon_color;
                         }
-                        svg_bitmap = svg::SvgBitmap::render(icon_svg, atom_theme::shell::DOCK_ITEM_SIZE, atom_theme::shell::DOCK_ITEM_SIZE);
+                        svg_bitmap = SvgBitmap::render(icon_svg, atom_theme::shell::DOCK_ITEM_SIZE, atom_theme::shell::DOCK_ITEM_SIZE);
                     }
                 }
 
