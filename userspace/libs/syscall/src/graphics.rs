@@ -226,13 +226,15 @@ impl Framebuffer {
 
         let ptr = self.info.pixel_ptr(x, y);
         unsafe {
-            core::ptr::write_volatile(ptr, color.to_bgr32());
+            // BGRX framebuffer (UEFI GOP format 1): in LE u32 R occupies bits 16-23,
+            // G bits 8-15, B bits 0-7  →  value = (R<<16)|(G<<8)|B = to_rgb32().
+            core::ptr::write_volatile(ptr, color.to_rgb32());
         }
     }
 
     /// Fill a rectangle
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: Color) {
-        let pixel = color.to_bgr32();
+        let pixel = color.to_rgb32();
         
         for dy in 0..height {
             let py = y + dy;
@@ -1031,7 +1033,8 @@ impl SharedSurface {
 
         if let Some(ptr) = self.pixel_ptr(x, y) {
             unsafe {
-                core::ptr::write_volatile(ptr, color.to_bgr32());
+                // BGRX: (R<<16)|(G<<8)|B in LE u32
+                core::ptr::write_volatile(ptr, color.to_rgb32());
             }
         }
     }
@@ -1045,16 +1048,17 @@ impl SharedSurface {
         if alpha == 0   { return; }
         if let Some(ptr) = self.pixel_ptr(x, y) {
             unsafe {
+                // Pixel layout is RGB32: R in bits 16-23, G in 8-15, B in 0-7.
                 let existing = core::ptr::read_volatile(ptr);
-                let er = (existing        & 0xFF) as u32;
-                let eg = ((existing >> 8) & 0xFF) as u32;
-                let eb = ((existing >> 16) & 0xFF) as u32;
-                let a    = alpha as u32;
-                let ia   = 255 - a;
-                let nr = (er * ia + color.r as u32 * a) / 255;
-                let ng = (eg * ia + color.g as u32 * a) / 255;
+                let eb = (existing         & 0xFF) as u32;  // B in LSB
+                let eg = ((existing >> 8)  & 0xFF) as u32;  // G in mid
+                let er = ((existing >> 16) & 0xFF) as u32;  // R in MSB
+                let a  = alpha as u32;
+                let ia = 255 - a;
                 let nb = (eb * ia + color.b as u32 * a) / 255;
-                core::ptr::write_volatile(ptr, (nb << 16) | (ng << 8) | nr);
+                let ng = (eg * ia + color.g as u32 * a) / 255;
+                let nr = (er * ia + color.r as u32 * a) / 255;
+                core::ptr::write_volatile(ptr, (nr << 16) | (ng << 8) | nb);
             }
         }
     }
@@ -1068,7 +1072,7 @@ impl SharedSurface {
         let Some(base) = self.mapped_addr else { return };
         if x >= self.width || y >= self.height || width == 0 || height == 0 { return; }
 
-        let pixel    = color.to_bgr32();
+        let pixel    = color.to_rgb32();
         let x_end    = (x + width).min(self.width);
         let y_end    = (y + height).min(self.height);
         let row_count = (x_end - x) as usize;
@@ -1306,7 +1310,7 @@ impl SharedSurface {
         let Some(base) = self.mapped_addr else { return };
         if x >= self.width || y >= self.height { return; }
 
-        let pixel     = color.to_bgr32();
+        let pixel     = color.to_rgb32();
         let x_end     = (x + width).min(self.width);
         let y_end     = (y + height).min(self.height);
         let row_count = (x_end - x) as usize;
@@ -1366,7 +1370,7 @@ impl SharedSurface {
         for dy in 0..(y_end - y) {
             let t     = ((dy * 255) / total) as u8;
             let color = lerp_color(color_start, color_end, t);
-            let pixel = color.to_bgr32();
+            let pixel = color.to_rgb32();
             let row_ptr = (base + self.pixel_offset(x, y + dy)) as *mut u32;
             // SAFETY: bounds checked above.
             unsafe { fill_row(row_ptr, row_count, pixel); }
@@ -1403,7 +1407,7 @@ impl SharedSurface {
             let row_count = (x_end - x) as usize;
             for dy in mid_start..mid_end {
                 let color = row_color(dy);
-                let pixel = color.to_bgr32();
+                let pixel = color.to_rgb32();
                 let row_ptr = (base + self.pixel_offset(x, y + dy)) as *mut u32;
                 unsafe { fill_row(row_ptr, row_count, pixel); }
             }
