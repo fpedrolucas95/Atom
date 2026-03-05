@@ -4843,7 +4843,6 @@ impl KernelFd {
 }
 
 /// Global fd table in .bss — no heap allocation.
-/// TODO: close all FDs owned by terminating process (owner_pml4)
 static KERNEL_FD_TABLE: spin::Mutex<[KernelFd; MAX_KERNEL_FDS]> =
     spin::Mutex::new([KernelFd::EMPTY; MAX_KERNEL_FDS]);
 
@@ -4884,6 +4883,32 @@ fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> u64 
     }
 
     ESUCCESS
+}
+
+fn validate_fd_ownership_with_owner(
+    idx: usize,
+    table: &[KernelFd; MAX_KERNEL_FDS],
+    caller_pml4: u64,
+) -> u64 {
+    if table[idx].owner_pml4 != caller_pml4 {
+        return EBADF;
+    }
+
+    ESUCCESS
+}
+
+pub(crate) fn close_fds_for_owner(owner_pml4: u64) {
+    if owner_pml4 == 0 {
+        return;
+    }
+
+    let mut table = KERNEL_FD_TABLE.lock();
+    for fd in table.iter_mut() {
+        if fd.in_use && fd.owner_pml4 == owner_pml4 {
+            fd.free_cache();
+            *fd = KernelFd::EMPTY;
+        }
+    }
 }
 
 /// Allocate an fd slot (returns 3..MAX_KERNEL_FDS-1, or EMFILE on full).
@@ -5046,6 +5071,11 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return EBADF;
     }
 
+    let caller_pml4 = match current_owner_pml4() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+
     // ── Obtain file data (cached or fresh) ─────────────────────────────────
     // Keep this lock for the entire read path so cache_ptr/cache_len/offset
     // remain stable while we dereference and copy to userspace.
@@ -5054,7 +5084,7 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return EBADF;
     }
 
-    let err = validate_fd_ownership(idx, &table);
+    let err = validate_fd_ownership_with_owner(idx, &table, caller_pml4);
     if err != ESUCCESS {
         return err;
     }
@@ -5140,14 +5170,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         };
         let mut page = start_page;
         while page <= end_page {
-            if let Some(tid) = crate::sched::current_thread() {
-                if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
-                    if pml4 != 0 {
-                        crate::mm::vma::handle_page_fault(
-                            pml4 as usize, page, 0x6 /* write|user|not-present */);
-                    }
-                }
-            }
+            crate::mm::vma::handle_page_fault(
+                caller_pml4 as usize, page, 0x6 /* write|user|not-present */);
             page += page_size;
         }
     }
@@ -5169,11 +5193,11 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
 fn sys_fs_write(fd: u64, _buf_ptr: u64, _count: usize) -> u64 {
     let idx = fd as usize;
 
-    let table = KERNEL_FD_TABLE.lock();
-
     if idx >= MAX_KERNEL_FDS {
         return EBADF;
     }
+
+    let table = KERNEL_FD_TABLE.lock();
 
     if !table[idx].in_use {
         return EBADF;
@@ -5212,10 +5236,6 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     // Get path and is_dir without holding lock during FAT32 I/O
     let (path_buf, path_len, is_dir) = {
         let table = KERNEL_FD_TABLE.lock();
-
-        if idx >= MAX_KERNEL_FDS {
-            return EBADF;
-        }
 
         if !table[idx].in_use {
             return EBADF;
@@ -5310,11 +5330,11 @@ fn sys_fs_rename(_old_path_ptr: u64, _old_path_len: usize, _new_path_ptr: u64, _
 fn sys_fs_fsync(fd: u64) -> u64 {
     let idx = fd as usize;
 
-    let table = KERNEL_FD_TABLE.lock();
-
     if idx >= MAX_KERNEL_FDS {
         return EBADF;
     }
+
+    let table = KERNEL_FD_TABLE.lock();
 
     if !table[idx].in_use {
         return EBADF;
@@ -5434,10 +5454,6 @@ fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
     let (path_buf, path_len) = {
         let table = KERNEL_FD_TABLE.lock();
 
-        if idx >= MAX_KERNEL_FDS {
-            return EBADF;
-        }
-
         if !table[idx].in_use {
             return EBADF;
         }
@@ -5465,11 +5481,11 @@ fn sys_fs_rmdir(_path_ptr: u64, _path_len: usize) -> u64 {
 fn sys_fs_truncate(fd: u64, _length: u64) -> u64 {
     let idx = fd as usize;
 
-    let table = KERNEL_FD_TABLE.lock();
-
     if idx >= MAX_KERNEL_FDS {
         return EBADF;
     }
+
+    let table = KERNEL_FD_TABLE.lock();
 
     if !table[idx].in_use {
         return EBADF;
@@ -5504,11 +5520,11 @@ fn sys_fs_chmod(_path_ptr: u64, _path_len: usize, _mode: u32) -> u64 {
 fn sys_fs_dup(fd: u64) -> u64 {
     let idx = fd as usize;
 
-    let table = KERNEL_FD_TABLE.lock();
-
     if idx >= MAX_KERNEL_FDS {
         return EBADF;
     }
+
+    let table = KERNEL_FD_TABLE.lock();
 
     if !table[idx].in_use {
         return EBADF;
@@ -5529,11 +5545,11 @@ fn sys_fs_dup2(oldfd: u64, newfd: u64) -> u64 {
     let old_idx = oldfd as usize;
     let new_idx = newfd as usize;
 
-    let table = KERNEL_FD_TABLE.lock();
-
     if old_idx >= MAX_KERNEL_FDS || new_idx >= MAX_KERNEL_FDS {
         return EBADF;
     }
+
+    let table = KERNEL_FD_TABLE.lock();
 
     if !table[old_idx].in_use {
         return EBADF;

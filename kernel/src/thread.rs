@@ -1304,6 +1304,9 @@ fn perform_final_cleanup(
     }
 
     let pages_freed = if address_space_cr3 != 0 && address_space_cr3 != current_cr3 {
+        // Close and release all FDs owned by this address space before reusing PML4.
+        crate::syscall::close_fds_for_owner(address_space_cr3);
+
         // Destroy VMA map for this address space (must happen before freeing pages)
         crate::mm::vma::destroy_vma_map(address_space_cr3 as usize);
 
