@@ -1364,6 +1364,8 @@ fn perform_final_cleanup(
                 address_space_cr3,
                 thread_id
             );
+            // Roll back teardown claim so a later final thread can clean up.
+            CLEANED_ADDRESS_SPACES.lock().remove(&address_space_cr3);
             0
         } else {
             // Close and release all FDs owned by this address space before reusing PML4.
@@ -1379,6 +1381,9 @@ fn perform_final_cleanup(
             // Free the PML4 itself
             crate::mm::pmm::free_page(address_space_cr3 as usize);
             log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
+
+            // Teardown is complete; allow future reuse of this physical address.
+            CLEANED_ADDRESS_SPACES.lock().remove(&address_space_cr3);
 
             user_pages
         }
