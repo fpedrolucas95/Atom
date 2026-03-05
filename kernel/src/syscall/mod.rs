@@ -608,7 +608,7 @@ extern "win64" fn rust_syscall_dispatcher(
 }
 
 fn sys_mouse_poll(out_ptr: *mut u8) -> u64 {
-    if out_ptr.is_null() {
+    if !validate_user_write_range(out_ptr as u64, 1) {
         return EINVAL;
     }
 
@@ -674,7 +674,7 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
 
 /// Poll keyboard buffer for input (raw scancode)
 fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
-    if out_ptr.is_null() {
+    if !validate_user_write_range(out_ptr as u64, 1) {
         return EINVAL;
     }
 
@@ -689,7 +689,7 @@ fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
 
 /// Get framebuffer information for userspace graphics
 fn sys_get_framebuffer(info_ptr: *mut u64) -> u64 {
-    if info_ptr.is_null() {
+    if !validate_user_write_range(info_ptr as u64, 5 * core::mem::size_of::<u64>()) {
         return EINVAL;
     }
     
@@ -716,7 +716,11 @@ fn sys_get_ticks() -> u64 {
 
 /// Debug log from userspace
 fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
-    if msg_ptr.is_null() || len > 256 {
+    if len == 0 {
+        return ESUCCESS;
+    }
+
+    if len > 256 || !validate_user_read_range(msg_ptr as u64, len) {
         return EINVAL;
     }
 
@@ -1201,6 +1205,8 @@ fn sys_ipc_send(
         port_id
     );
 
+    // TODO: sys_ipc_send ignores payload_len — always sends empty payload.
+    // sys_ipc_send_async is the only send path that actually copies user data.
     let payload = alloc::vec::Vec::new();
     let message = crate::ipc::Message::new(sender, msg_type as u32, payload);
 
@@ -1316,6 +1322,9 @@ fn sys_ipc_recv(
             core::cmp::min(msg.payload.len(), buffer_size as usize);
 
         if buffer_ptr != 0 && bytes_to_copy > 0 {
+            if !validate_user_write_range(buffer_ptr, bytes_to_copy) {
+                return EINVAL;
+            }
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     msg.payload.as_ptr(),
@@ -1502,6 +1511,9 @@ fn sys_ipc_send_async(
 
     let mut payload = alloc::vec::Vec::new();
     if payload_len > 0 && payload_ptr != 0 {
+        if !validate_user_read_range(payload_ptr, payload_len as usize) {
+            return EINVAL;
+        }
         payload.resize(payload_len as usize, 0);
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -1599,6 +1611,9 @@ fn sys_ipc_try_recv(
                 core::cmp::min(msg.payload.len(), buffer_size as usize);
 
             if buffer_ptr != 0 && bytes_to_copy > 0 {
+                if !validate_user_write_range(buffer_ptr, bytes_to_copy) {
+                    return EINVAL;
+                }
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         msg.payload.as_ptr(),
@@ -1686,6 +1701,13 @@ fn sys_ipc_trace_read(buffer_ptr: u64, max_events: u64) -> u64 {
 
     if buffer_ptr != 0 {
         let to_copy = core::cmp::min(available, max_events as usize);
+        let write_bytes = match to_copy.checked_mul(core::mem::size_of::<RawIpcTraceEvent>()) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
+        if !validate_user_write_range(buffer_ptr, write_bytes) {
+            return EINVAL;
+        }
         unsafe {
             let buffer = buffer_ptr as *mut RawIpcTraceEvent;
             for (idx, event) in events.iter().take(to_copy).enumerate() {
@@ -1744,6 +1766,9 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
             );
 
             if stats_ptr != 0 {
+                if !validate_user_write_range(stats_ptr, core::mem::size_of::<RawIpcPortStats>()) {
+                    return EINVAL;
+                }
                 unsafe {
                     (stats_ptr as *mut RawIpcPortStats).write(stats.into());
                 }
@@ -1771,6 +1796,7 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
 }
 
 fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
+    // TODO(#94): validate messages_ptr range when implementation reads from user memory
     log_info!(
         "syscall",
         "ipc_send_batch(port={}, messages={:#x}, count={})",
@@ -1847,6 +1873,7 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
 }
 
 fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 {
+    // TODO(#94): validate buffer_ptr range when implementation writes to user memory
     log_info!(
         "syscall",
         "ipc_recv_batch(port={}, buffer={:#x}, max={})",
@@ -3237,6 +3264,10 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
 
     // Write info to user buffer if provided
     if user_buffer != 0 {
+        if !validate_user_write_range(user_buffer, 6 * core::mem::size_of::<u64>()) {
+            return EINVAL;
+        }
+
         let info_ptr = user_buffer as *mut u64;
         unsafe {
             core::ptr::write_volatile(info_ptr, address as u64);
@@ -3317,6 +3348,15 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         Some(tid) => tid,
         None => return EINVAL,
     };
+
+    // Validate user-space read range for the port ID array
+    let read_bytes = match (count as usize).checked_mul(core::mem::size_of::<u64>()) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if !validate_user_read_range(ports_ptr, read_bytes) {
+        return EINVAL;
+    }
 
     // Read port IDs from userspace
     let mut ports = alloc::vec::Vec::with_capacity(count as usize);
@@ -3433,7 +3473,7 @@ fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
     log_info!(LOG_ORIGIN, "spawn_process(name_ptr={:p}, name_len={})", name_ptr, name_len);
 
     // Validate arguments
-    if name_ptr.is_null() || name_len == 0 || name_len > 64 {
+    if name_len == 0 || name_len > 64 || !validate_user_read_range(name_ptr as u64, name_len) {
         log_warn!(LOG_ORIGIN, "spawn_process: invalid arguments");
         return EINVAL;
     }
@@ -4087,7 +4127,7 @@ fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
 /// * ESUCCESS if successful
 /// * EINVAL if pointer is invalid
 fn sys_get_memory_info(info_ptr: *mut u64) -> u64 {
-    if info_ptr.is_null() {
+    if !validate_user_write_range(info_ptr as u64, 2 * core::mem::size_of::<u64>()) {
         return EINVAL;
     }
 
@@ -4122,6 +4162,16 @@ fn sys_list_processes(buffer: *mut crate::thread::ProcessInfo, max_count: usize)
     }; 32]; // Support up to 32 processes
 
     let actual_count = max_count.min(32);
+
+    // Validate the full user-space write range with checked arithmetic
+    let write_bytes = match actual_count.checked_mul(core::mem::size_of::<crate::thread::ProcessInfo>()) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if !validate_user_write_range(buffer as u64, write_bytes) {
+        return EINVAL;
+    }
+
     let count = crate::thread::list_processes(&mut temp_buffer[..actual_count]);
 
     // Copy to userspace buffer
@@ -4148,7 +4198,7 @@ fn sys_get_process_count() -> u64 {
 /// # Returns
 /// * Number of bytes written, or EINVAL if buffer is null
 fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
-    if buffer.is_null() || max_len == 0 {
+    if max_len == 0 || !validate_user_write_range(buffer as u64, max_len) {
         return EINVAL;
     }
 
@@ -4171,7 +4221,7 @@ fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
 /// # Returns
 /// * Number of bytes written, or EINVAL if buffer is null
 fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
-    if buffer.is_null() || max_len == 0 {
+    if max_len == 0 || !validate_user_write_range(buffer as u64, max_len) {
         return EINVAL;
     }
 
@@ -4532,13 +4582,46 @@ fn validate_user_pointer(ptr: u64) -> bool {
     ptr <= atom_abi::USER_CANONICAL_MAX
 }
 
+/// Validate that a memory range [`ptr`, `ptr + size - 1`] stays within user
+/// canonical space.  Uses `checked_add` so that overflow returns `false`
+/// instead of silently wrapping.
+#[inline]
+fn validate_user_range(ptr: u64, size: usize) -> bool {
+    if size == 0 {
+        return true;
+    }
+    if ptr == 0 {
+        return false;
+    }
+    if !validate_user_pointer(ptr) {
+        return false;
+    }
+    let end = match ptr.checked_add(size as u64 - 1) {
+        Some(v) => v,
+        None => return false,
+    };
+    validate_user_pointer(end)
+}
+
+/// Semantic alias — validate a user-space write target of `size` bytes.
+#[inline]
+fn validate_user_write_range(ptr: u64, size: usize) -> bool {
+    validate_user_range(ptr, size)
+}
+
+/// Semantic alias — validate a user-space read source of `size` bytes.
+#[inline]
+fn validate_user_read_range(ptr: u64, size: usize) -> bool {
+    validate_user_range(ptr, size)
+}
+
 // Helper: safely copy string from userspace
 fn copy_string_from_user(ptr: u64, len: usize) -> Result<alloc::string::String, u64> {
     if len == 0 || len > FS_MAX_PATH_LEN {
         return Err(ENAMETOOLONG);
     }
 
-    if !validate_user_pointer(ptr) {
+    if !validate_user_range(ptr, len) {
         return Err(EINVAL);
     }
 
@@ -4556,7 +4639,7 @@ fn copy_buffer_from_user(ptr: u64, len: usize, max_len: usize) -> Result<Vec<u8>
         return Err(EINVAL);
     }
 
-    if !validate_user_pointer(ptr) {
+    if !validate_user_range(ptr, len) {
         return Err(EINVAL);
     }
 
@@ -4571,21 +4654,6 @@ fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
         return Ok(());
     }
 
-    if !validate_user_pointer(dst_ptr) {
-        return Err(EINVAL);
-    }
-
-    // Validate the end of the range too (prevent writing past user address space)
-    let end_ptr = dst_ptr.saturating_add(src.len() as u64).saturating_sub(1);
-    if !validate_user_pointer(end_ptr) {
-        return Err(EINVAL);
-    }
-
-    // Overflow check: dst_ptr + src.len() must not wrap around
-    if (dst_ptr as usize).checked_add(src.len()).is_none() {
-        return Err(EINVAL);
-    }
-
     // Sanity cap: reject absurdly large copies (> 64 MB) that are almost
     // certainly the result of a length calculation bug somewhere upstream.
     const MAX_SINGLE_COPY: usize = 64 * 1024 * 1024;
@@ -4593,6 +4661,10 @@ fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
         log_error!("write_buf",
             "write_buffer_to_user: rejecting copy of {} bytes (max {})",
             src.len(), MAX_SINGLE_COPY);
+        return Err(EINVAL);
+    }
+
+    if !validate_user_range(dst_ptr, src.len()) {
         return Err(EINVAL);
     }
 
@@ -5610,11 +5682,19 @@ fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
     let mut kernel_modes = [crate::drivers::bga::VideoMode { width: 0, height: 0, bpp: 0, refresh_rate: 0 }; 32];
     let count = crate::graphics::get_available_modes(&mut kernel_modes).min(max_modes);
 
+    // Validate the full user-space write range with checked arithmetic
+    let write_bytes = match count.checked_mul(5).and_then(|v| v.checked_mul(core::mem::size_of::<u32>())) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if !validate_user_write_range(buf_ptr as u64, write_bytes) {
+        return EINVAL;
+    }
+
     unsafe {
         for i in 0..count {
             let m = &kernel_modes[i];
             let base = buf_ptr.add(i * 5);
-            // Validate each destination pointer before writing
             base.add(0).write_volatile(m.width  as u32);
             base.add(1).write_volatile(m.height as u32);
             base.add(2).write_volatile(m.bpp    as u32);
@@ -5641,7 +5721,7 @@ fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
 ///
 /// Returns ESUCCESS, or EINVAL if buf_ptr is null.
 fn sys_get_current_video_mode(buf_ptr: *mut u64) -> u64 {
-    if buf_ptr.is_null() {
+    if !validate_user_write_range(buf_ptr as u64, 4 * core::mem::size_of::<u64>()) {
         return EINVAL;
     }
 
