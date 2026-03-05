@@ -628,27 +628,36 @@ fn sys_mouse_get_id() -> u64 {
     crate::input::get_mouse_id() as u64
 }
 
-/// Read a byte from an IO port (privileged operation for drivers)
-fn sys_io_port_read(port: u16, _size: u8) -> u64 {
-    let caller = match crate::sched::current_thread() {
-        Some(tid) => tid,
-        None => return EPERM,
-    };
-
+/// Validates that the calling thread holds an IoPort capability for `port` with
+/// the specified permission. Returns `Ok(())` on success or `Err(EPERM)` on
+/// failure, logging a warning with context in the denial case.
+fn validate_io_port_access(
+    port: u16,
+    required_perm: crate::cap::CapPermissions,
+) -> Result<(), u64> {
+    let caller = crate::sched::current_thread().ok_or(EPERM)?;
     let has_permission = crate::thread::validate_thread_capability_by_type(
         caller,
-        crate::cap::CapPermissions::READ,
+        required_perm,
         |resource| matches!(resource, crate::cap::ResourceType::IoPort { port: p } if *p == port),
     );
-
     if !has_permission {
         log_warn!(
             "syscall",
-            "io_port_read: denied port=0x{:X} caller={} (missing IoPort READ cap)",
+            "io_port access denied: port=0x{:X} perm={:?} caller={}",
             port,
+            required_perm,
             caller
         );
-        return EPERM;
+        return Err(EPERM);
+    }
+    Ok(())
+}
+
+/// Read a byte from an IO port (privileged operation for drivers)
+fn sys_io_port_read(port: u16, _size: u8) -> u64 {
+    if let Err(e) = validate_io_port_access(port, crate::cap::CapPermissions::READ) {
+        return e;
     }
 
     let value: u8 = unsafe {
@@ -667,25 +676,8 @@ fn sys_io_port_read(port: u16, _size: u8) -> u64 {
 
 /// Write a byte to an IO port (privileged operation for drivers)
 fn sys_io_port_write(port: u16, value: u8) -> u64 {
-    let caller = match crate::sched::current_thread() {
-        Some(tid) => tid,
-        None => return EPERM,
-    };
-
-    let has_permission = crate::thread::validate_thread_capability_by_type(
-        caller,
-        crate::cap::CapPermissions::WRITE,
-        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port: p } if *p == port),
-    );
-
-    if !has_permission {
-        log_warn!(
-            "syscall",
-            "io_port_write: denied port=0x{:X} caller={} (missing IoPort WRITE cap)",
-            port,
-            caller
-        );
-        return EPERM;
+    if let Err(e) = validate_io_port_access(port, crate::cap::CapPermissions::WRITE) {
+        return e;
     }
 
     unsafe {
@@ -2110,9 +2102,6 @@ fn sys_cap_create(resource_type: u64, resource_id: u64, permissions: u64) -> u64
             crate::cap::ResourceType::Irq {
                 irq_num: resource_id as u8,
             }
-        }
-        12 => {
-            crate::cap::ResourceType::IoPort { port: resource_id as u16 }
         }
         _ => {
             log_warn!(
@@ -3832,6 +3821,11 @@ fn spawn_process_internal(
         is_userspace: true,
     };
 
+    // The thread must exist in THREAD_LIST before capabilities can be inserted
+    // into its capability table. mark_thread_ready is deferred until all grants
+    // are complete so the thread cannot be scheduled before it has its caps.
+    crate::thread::add_thread(thread);
+
     // Grant capabilities
     // Framebuffer capability
     if let Some((address, width, height, stride, bpp)) = crate::graphics::get_framebuffer_info() {
@@ -3874,8 +3868,7 @@ fn spawn_process_internal(
         }
     }
 
-    // Add thread to scheduler
-    crate::thread::add_thread(thread);
+    // Thread is fully initialized — mark it schedulable
     crate::sched::mark_thread_ready(pid);
 
     log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
