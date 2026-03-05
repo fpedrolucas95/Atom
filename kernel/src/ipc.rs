@@ -869,7 +869,7 @@ impl IpcManager {
         }
 
         for (tid, port_id) in expired {
-            log_warn!(LOG_ORIGIN, "Timeout waking blocked thread {} on {}", tid, port_id);
+            log_debug!(LOG_ORIGIN, "Timeout waking blocked thread {} on {}", tid, port_id);
             crate::sched::mark_thread_ready(tid);
             self.restore_priority(tid);
         }

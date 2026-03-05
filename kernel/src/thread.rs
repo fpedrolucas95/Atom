@@ -1284,6 +1284,29 @@ struct ZombieInfo {
 }
 
 static ZOMBIE_THREADS: Mutex<Vec<ZombieInfo>> = Mutex::new(Vec::new());
+static CLEANED_ADDRESS_SPACES: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+
+#[inline]
+fn other_threads_share_address_space_locked(
+    current_tid: ThreadId,
+    address_space_cr3: u64,
+    threads: &[Thread],
+) -> bool {
+    if address_space_cr3 == 0 {
+        return false;
+    }
+
+    threads.iter().any(|t| {
+        t.id != current_tid
+            && t.address_space == address_space_cr3
+            && t.state != ThreadState::Exited
+    })
+}
+
+fn other_threads_share_address_space(current_tid: ThreadId, address_space_cr3: u64) -> bool {
+    let threads = THREAD_LIST.threads.lock();
+    other_threads_share_address_space_locked(current_tid, address_space_cr3, &threads)
+}
 
 /// Performs the final, dangerous cleanup operations (freeing stack and PML4)
 /// that cannot be done while the thread is still running.
@@ -1303,19 +1326,63 @@ fn perform_final_cleanup(
         log_panic!(LOG_ORIGIN, "REAPER ERROR: Attempting to free active PML4 0x{:X}", address_space_cr3);
     }
 
-    let pages_freed = if address_space_cr3 != 0 && address_space_cr3 != current_cr3 {
-        // Destroy VMA map for this address space (must happen before freeing pages)
-        crate::mm::vma::destroy_vma_map(address_space_cr3 as usize);
+    let should_cleanup_address_space = if address_space_cr3 != 0 && address_space_cr3 != current_cr3 {
+        let threads = THREAD_LIST.threads.lock();
+        let shared = other_threads_share_address_space_locked(thread_id, address_space_cr3, &threads);
 
-        // Thread has its own PML4 (userspace thread)
-        let user_pages = free_user_space_pages(address_space_cr3 as usize);
-        log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);
+        if shared {
+            log_debug!(
+                LOG_ORIGIN,
+                "Skipping address-space teardown for TID {} (PML4 0x{:X}) - other active threads still share it",
+                thread_id,
+                address_space_cr3
+            );
+            false
+        } else {
+            let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
+            if cleaned.contains(&address_space_cr3) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Address-space teardown already completed for PML4 0x{:X} - skipping duplicate cleanup",
+                    address_space_cr3
+                );
+                false
+            } else {
+                cleaned.insert(address_space_cr3);
+                true
+            }
+        }
+    } else {
+        false
+    };
 
-        // Free the PML4 itself
-        crate::mm::pmm::free_page(address_space_cr3 as usize);
-        log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
+    let pages_freed = if should_cleanup_address_space {
+        if other_threads_share_address_space(thread_id, address_space_cr3) {
+            log_error!(
+                LOG_ORIGIN,
+                "Refusing to destroy VMA/PML4 0x{:X} for TID {} because it is still shared",
+                address_space_cr3,
+                thread_id
+            );
+            CLEANED_ADDRESS_SPACES.lock().remove(&address_space_cr3);
+            0
+        } else {
+            // Close and release all FDs owned by this address space before reusing PML4.
+            crate::syscall::close_fds_for_owner(address_space_cr3);
 
-        user_pages
+            // Destroy VMA map for this address space (must happen before freeing pages)
+            crate::mm::vma::destroy_vma_map(address_space_cr3 as usize);
+
+            // Thread has its own PML4 (userspace thread)
+            let user_pages = free_user_space_pages(address_space_cr3 as usize);
+            log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);
+
+            // Free the PML4 itself
+            crate::mm::pmm::free_page(address_space_cr3 as usize);
+            log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
+
+            user_pages
+        }
     } else {
         0
     };
@@ -1346,9 +1413,6 @@ fn perform_final_cleanup(
 pub fn reap_zombies() {
     let zombies = {
         let mut list = ZOMBIE_THREADS.lock();
-        if list.is_empty() {
-            return;
-        }
         core::mem::take(&mut *list)
     };
 
@@ -1364,6 +1428,8 @@ pub fn reap_zombies() {
 
         RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
     }
+
+    CLEANED_ADDRESS_SPACES.lock().clear();
 }
 
 pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {

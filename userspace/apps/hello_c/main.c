@@ -87,10 +87,10 @@ static int ipc_recv(uint64_t port, void *buf, uint32_t len) {
                      (uint64_t)(uintptr_t)buf, (uint64_t)len, 0ULL);
     return is_err(r) ? -1 : (int)r;
 }
-/* non-blocking recv: timeout=1ms */
+/* true non-blocking recv */
 static int ipc_try_recv(uint64_t port, void *buf, uint32_t len) {
-    uint64_t r = sc4(SYS_IPC_RECV, port,
-                     (uint64_t)(uintptr_t)buf, (uint64_t)len, 1ULL);
+    uint64_t r = sc3(SYS_IPC_TRY_RECV, port,
+                     (uint64_t)(uintptr_t)buf, (uint64_t)len);
     return is_err(r) ? -1 : (int)r;
 }
 /* map shared region: SYS_SHARED_REGION_MAP(region_id, 0=auto_va, flags=3=rw) */
