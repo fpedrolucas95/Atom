@@ -716,6 +716,10 @@ fn sys_get_ticks() -> u64 {
 
 /// Debug log from userspace
 fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
+    if len == 0 {
+        return ESUCCESS;
+    }
+
     if len > 256 || !validate_user_read_range(msg_ptr as u64, len) {
         return EINVAL;
     }
@@ -1317,7 +1321,7 @@ fn sys_ipc_recv(
         let bytes_to_copy =
             core::cmp::min(msg.payload.len(), buffer_size as usize);
 
-        if bytes_to_copy > 0 {
+        if buffer_ptr != 0 && bytes_to_copy > 0 {
             if !validate_user_write_range(buffer_ptr, bytes_to_copy) {
                 return EINVAL;
             }
@@ -1606,7 +1610,7 @@ fn sys_ipc_try_recv(
             let bytes_to_copy =
                 core::cmp::min(msg.payload.len(), buffer_size as usize);
 
-            if bytes_to_copy > 0 {
+            if buffer_ptr != 0 && bytes_to_copy > 0 {
                 if !validate_user_write_range(buffer_ptr, bytes_to_copy) {
                     return EINVAL;
                 }
@@ -3259,11 +3263,11 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
     // For now, just return the info - the framebuffer is identity-mapped
 
     // Write info to user buffer if provided
-    if !validate_user_write_range(user_buffer, 6 * core::mem::size_of::<u64>()) {
-        return EINVAL;
-    }
+    if user_buffer != 0 {
+        if !validate_user_write_range(user_buffer, 6 * core::mem::size_of::<u64>()) {
+            return EINVAL;
+        }
 
-    {
         let info_ptr = user_buffer as *mut u64;
         unsafe {
             core::ptr::write_volatile(info_ptr, address as u64);
