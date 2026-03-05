@@ -4872,17 +4872,17 @@ fn path_buf_as_str(buf: &[u8; MAX_PATH_BUF], len: usize) -> &str {
     unsafe { core::str::from_utf8_unchecked(&buf[..len]) }
 }
 
-fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> u64 {
+fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Result<(), u64> {
     let caller = match current_owner_pml4() {
         Some(p) => p,
-        None => return EBADF,
+        None => return Err(EBADF),
     };
 
     if table[idx].owner_pml4 != caller {
-        return EBADF;
+        return Err(EBADF);
     }
 
-    ESUCCESS
+    Ok(())
 }
 
 fn validate_fd_ownership_with_owner(
@@ -4895,6 +4895,24 @@ fn validate_fd_ownership_with_owner(
     }
 
     ESUCCESS
+}
+
+fn get_fd_entry(
+    idx: usize,
+) -> Result<(spin::MutexGuard<'static, [KernelFd; MAX_KERNEL_FDS]>, usize), u64> {
+    if idx >= MAX_KERNEL_FDS {
+        return Err(EBADF);
+    }
+
+    let table = KERNEL_FD_TABLE.lock();
+
+    if !table[idx].in_use {
+        return Err(EBADF);
+    }
+
+    validate_fd_ownership(idx, &table)?;
+
+    Ok((table, idx))
 }
 
 pub(crate) fn close_fds_for_owner(owner_pml4: u64) {
@@ -5018,19 +5036,10 @@ fn sys_fs_close(fd: u64) -> u64 {
     log_debug!(LOG_ORIGIN, "sys_fs_close(fd={})", fd);
 
     let idx = fd as usize;
-    if idx >= MAX_KERNEL_FDS {
-        return EBADF;
-    }
-
-    let mut table = KERNEL_FD_TABLE.lock();
-    if !table[idx].in_use {
-        return EBADF;
-    }
-
-    let err = validate_fd_ownership(idx, &table);
-    if err != ESUCCESS {
-        return err;
-    }
+    let (mut table, idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     table[idx].free_cache();
     table[idx].owner_pml4 = 0;
@@ -5192,23 +5201,10 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
 /// Write to file descriptor (read-only FAT32 — not supported)
 fn sys_fs_write(fd: u64, _buf_ptr: u64, _count: usize) -> u64 {
     let idx = fd as usize;
-
-    if idx >= MAX_KERNEL_FDS {
-        return EBADF;
-    }
-
-    let table = KERNEL_FD_TABLE.lock();
-
-    if !table[idx].in_use {
-        return EBADF;
-    }
-
-    let err = validate_fd_ownership(idx, &table);
-    if err != ESUCCESS {
-        return err;
-    }
-
-    drop(table);
+    let (_table, _idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     EROFS
 }
@@ -5241,9 +5237,8 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
             return EBADF;
         }
 
-        let err = validate_fd_ownership(idx, &table);
-        if err != ESUCCESS {
-            return err;
+        if let Err(e) = validate_fd_ownership(idx, &table) {
+            return e;
         }
 
         (table[idx].path, table[idx].path_len, table[idx].is_dir)
@@ -5329,23 +5324,10 @@ fn sys_fs_rename(_old_path_ptr: u64, _old_path_len: usize, _new_path_ptr: u64, _
 /// Synchronize file to disk (no-op for read-only)
 fn sys_fs_fsync(fd: u64) -> u64 {
     let idx = fd as usize;
-
-    if idx >= MAX_KERNEL_FDS {
-        return EBADF;
-    }
-
-    let table = KERNEL_FD_TABLE.lock();
-
-    if !table[idx].in_use {
-        return EBADF;
-    }
-
-    let err = validate_fd_ownership(idx, &table);
-    if err != ESUCCESS {
-        return err;
-    }
-
-    drop(table);
+    let (_table, _idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     ESUCCESS
 }
@@ -5355,19 +5337,10 @@ fn sys_fs_fsync(fd: u64) -> u64 {
 /// Seek in file descriptor
 fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
     let idx = fd as usize;
-    if idx >= MAX_KERNEL_FDS {
-        return EBADF;
-    }
-
-    let mut table = KERNEL_FD_TABLE.lock();
-    if !table[idx].in_use {
-        return EBADF;
-    }
-
-    let err = validate_fd_ownership(idx, &table);
-    if err != ESUCCESS {
-        return err;
-    }
+    let (mut table, idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let new_offset: i64 = match whence {
         0 => offset,                 // SEEK_SET
@@ -5409,17 +5382,12 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
             // Re-acquire lock to update offset
             let mut table = KERNEL_FD_TABLE.lock();
 
-            if idx >= MAX_KERNEL_FDS {
-                return EBADF;
-            }
-
             if !table[idx].in_use {
                 return EBADF;
             }
 
-            let err = validate_fd_ownership(idx, &table);
-            if err != ESUCCESS {
-                return err;
+            if let Err(e) = validate_fd_ownership(idx, &table) {
+                return e;
             }
 
             if result < 0 {
@@ -5458,9 +5426,8 @@ fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
             return EBADF;
         }
 
-        let err = validate_fd_ownership(idx, &table);
-        if err != ESUCCESS {
-            return err;
+        if let Err(e) = validate_fd_ownership(idx, &table) {
+            return e;
         }
 
         (table[idx].path, table[idx].path_len)
@@ -5480,23 +5447,10 @@ fn sys_fs_rmdir(_path_ptr: u64, _path_len: usize) -> u64 {
 /// Truncate file
 fn sys_fs_truncate(fd: u64, _length: u64) -> u64 {
     let idx = fd as usize;
-
-    if idx >= MAX_KERNEL_FDS {
-        return EBADF;
-    }
-
-    let table = KERNEL_FD_TABLE.lock();
-
-    if !table[idx].in_use {
-        return EBADF;
-    }
-
-    let err = validate_fd_ownership(idx, &table);
-    if err != ESUCCESS {
-        return err;
-    }
-
-    drop(table);
+    let (_table, _idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     ENOTSUP
 }
@@ -5519,23 +5473,10 @@ fn sys_fs_chmod(_path_ptr: u64, _path_len: usize, _mode: u32) -> u64 {
 /// Duplicate file descriptor
 fn sys_fs_dup(fd: u64) -> u64 {
     let idx = fd as usize;
-
-    if idx >= MAX_KERNEL_FDS {
-        return EBADF;
-    }
-
-    let table = KERNEL_FD_TABLE.lock();
-
-    if !table[idx].in_use {
-        return EBADF;
-    }
-
-    let err = validate_fd_ownership(idx, &table);
-    if err != ESUCCESS {
-        return err;
-    }
-
-    drop(table);
+    let (_table, _idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     ENOTSUP
 }
@@ -5555,15 +5496,13 @@ fn sys_fs_dup2(oldfd: u64, newfd: u64) -> u64 {
         return EBADF;
     }
 
-    let err = validate_fd_ownership(old_idx, &table);
-    if err != ESUCCESS {
-        return err;
+    if let Err(e) = validate_fd_ownership(old_idx, &table) {
+        return e;
     }
 
     if table[new_idx].in_use {
-        let err = validate_fd_ownership(new_idx, &table);
-        if err != ESUCCESS {
-            return err;
+        if let Err(e) = validate_fd_ownership(new_idx, &table) {
+            return e;
         }
     }
 
