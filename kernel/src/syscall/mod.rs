@@ -4586,6 +4586,9 @@ fn validate_user_range(ptr: u64, size: usize) -> bool {
     if size == 0 {
         return true;
     }
+    if ptr == 0 {
+        return false;
+    }
     if !validate_user_pointer(ptr) {
         return false;
     }
