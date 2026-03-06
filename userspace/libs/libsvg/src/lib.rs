@@ -1650,13 +1650,30 @@ fn parse_css_rules(svg: &[u8]) -> Vec<CssRule> {
                 if svg[k..].starts_with(b"</style>") { end = Some(k); break; }
                 k += 1;
             }
-            if let Some(ce) = end { parse_css_block(&svg[cs..ce], &mut out); i = ce + 8; }
+            if let Some(ce) = end {
+                let block = &svg[cs..ce];
+                // Strip CDATA wrapper if present: <![CDATA[ ... ]]>
+                let block = if let Some(inner) = strip_cdata(block) { inner } else { block };
+                parse_css_block(block, &mut out);
+                i = ce + 8;
+            }
             else { break; }
             continue;
         }
         i += 1;
     }
     out
+}
+
+fn strip_cdata(s: &[u8]) -> Option<&[u8]> {
+    let s = trim_ascii(s);
+    if !s.starts_with(b"<![CDATA[") { return None; }
+    let inner = &s[9..];
+    if let Some(pos) = inner.windows(3).position(|w| w == b"]]>") {
+        Some(&inner[..pos])
+    } else {
+        Some(inner)
+    }
 }
 
 fn parse_css_block(block: &[u8], out: &mut Vec<CssRule>) {
@@ -1791,8 +1808,8 @@ fn get_attr_raw<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 fn get_style_prop<'a>(style: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     for part in style.split(|&c| c == b';') {
         let mut kv = part.splitn(2, |&c| c == b':');
-        let key = trim_ascii(kv.next()?);
-        let val = trim_ascii(kv.next()?);
+        let key = match kv.next() { Some(k) => trim_ascii(k), None => continue };
+        let val = match kv.next() { Some(v) => trim_ascii(v), None => continue };
         if key.eq_ignore_ascii_case(name) {
             return Some(val);
         }
@@ -1917,7 +1934,7 @@ fn parse_all_gradients(svg: &[u8], viewport_w: i32, viewport_h: i32) -> Vec<Grad
             } else { i = ae + 1; }
         } else { i = ae + 1; }
         out.push(GradientDef { id, kind, stops, object_bbox: obj_bbox, grad_tx });
-        if let Some(link) = href.and_then(parse_url_id_slice) {
+        if let Some(link) = href.and_then(|v| parse_href_id_slice(v).or_else(|| parse_url_id_slice(v))) {
             if let Some(base_stops) = out.iter().find(|g| g.id == link).map(|g| g.stops.clone()) {
                 if let Some(cur) = out.last_mut() {
                     if cur.stops.is_empty() { cur.stops = base_stops; }
@@ -2410,9 +2427,19 @@ fn stroke_linejoin_attr(attrs: &[u8], ctx: &RenderContext) -> LineJoin {
     (c.3 as u32) << 24 | (c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32
 }
 
-#[inline] fn alpha_mul_argb(c: u32, alpha: u8) -> u32 {
-    let a = mul_alpha(((c >> 24) & 0xFF) as u8, alpha);
-    (a as u32) << 24 | (c & 0x00FFFFFF)
+#[inline]
+fn alpha_mul_argb(c: u32, alpha: u8) -> u32 {
+    let a0 = ((c >> 24) & 0xFF) as u32;
+    let r0 = ((c >> 16) & 0xFF) as u32;
+    let g0 = ((c >> 8) & 0xFF) as u32;
+    let b0 = (c & 0xFF) as u32;
+
+    let a = (a0 * alpha as u32 + 127) / 255;
+    let r = (r0 * alpha as u32 + 127) / 255;
+    let g = (g0 * alpha as u32 + 127) / 255;
+    let b = (b0 * alpha as u32 + 127) / 255;
+
+    (a << 24) | (r << 16) | (g << 8) | b
 }
 
 #[inline] fn mul_alpha(a: u8, b: u8) -> u8 {
