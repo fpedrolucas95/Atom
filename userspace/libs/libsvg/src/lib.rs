@@ -160,7 +160,14 @@ impl SvgBitmap {
                 let p = self.pixels[(py * self.width + px) as usize];
                 let a = (p >> 24) as u8;
                 if a == 0 { continue; }
-                let c = Color::new((p >> 16) as u8, (p >> 8) as u8, p as u8);
+                let c = if a == 255 {
+                    Color::new((p >> 16) as u8, (p >> 8) as u8, p as u8)
+                } else {
+                    let r = (((p >> 16) & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                    let g = (((p >> 8) & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                    let b = ((p & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                    Color::new(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8)
+                };
                 if a == 255 { fb.draw_pixel(dx + px, dy + py, c); }
                 else { fb.fill_rect_alpha(dx + px, dy + py, 1, 1, c, a); }
             }
@@ -174,7 +181,14 @@ impl SvgBitmap {
                 let p = self.pixels[(py * self.width + px) as usize];
                 let a = (p >> 24) as u8;
                 if a == 0 { continue; }
-                let c = Color::new((p >> 16) as u8, (p >> 8) as u8, p as u8);
+                let c = if a == 255 {
+                    Color::new((p >> 16) as u8, (p >> 8) as u8, p as u8)
+                } else {
+                    let r = (((p >> 16) & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                    let g = (((p >> 8) & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                    let b = ((p & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                    Color::new(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8)
+                };
                 if a == 255 { surface.draw_pixel(dx + px, dy + py, c); }
                 else { surface.fill_rect_alpha(dx + px, dy + py, 1, 1, c, a); }
             }
@@ -199,21 +213,19 @@ fn downsample_premul(
                     let si = ((y * factor + oy) * src_w + (x * factor + ox)) as usize;
                     if si >= src.len() { continue; }
                     let p = src[si];
-                    let a = ((p >> 24) & 0xFF) as u64;
-                    sa += a;
-                    sr += ((p >> 16) & 0xFF) as u64 * a;
-                    sg += ((p >> 8) & 0xFF) as u64 * a;
-                    sb += (p & 0xFF) as u64 * a;
+                    sa += ((p >> 24) & 0xFF) as u64;
+                    sr += ((p >> 16) & 0xFF) as u64;
+                    sg += ((p >> 8) & 0xFF) as u64;
+                    sb += (p & 0xFF) as u64;
                 }
             }
             let di = (y * dst_w + x) as usize;
             if di >= dst.len() { continue; }
             let aa = (sa + samples / 2) / samples;
-            if aa == 0 { dst[di] = 0; continue; }
-            let r = ((sr * 255 + sa / 2) / sa).min(255) as u32;
-            let g = ((sg * 255 + sa / 2) / sa).min(255) as u32;
-            let b = ((sb * 255 + sa / 2) / sa).min(255) as u32;
-            dst[di] = (aa.min(255) as u32) << 24 | r << 16 | g << 8 | b;
+            let rr = (sr + samples / 2) / samples;
+            let gg = (sg + samples / 2) / samples;
+            let bb = (sb + samples / 2) / samples;
+            dst[di] = (aa.min(255) as u32) << 24 | (rr.min(255) as u32) << 16 | (gg.min(255) as u32) << 8 | (bb.min(255) as u32);
         }
     }
 }
@@ -2254,10 +2266,11 @@ fn resolve_paint_url_color(v: &[u8], rctx: &RenderContext) -> Option<(u8,u8,u8,u
         if g.id == id {
             if let Some(&(_off, argb)) = g.stops.last() {
                 let a = ((argb >> 24) & 0xFF) as u8;
-                let r = ((argb >> 16) & 0xFF) as u8;
-                let g = ((argb >> 8) & 0xFF) as u8;
-                let b = (argb & 0xFF) as u8;
-                return Some((r, g, b, a));
+                if a == 0 { return Some((0, 0, 0, 0)); }
+                let r = (((argb >> 16) & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                let g = (((argb >> 8) & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                let b = ((argb & 0xFF) * 255 + a as u32 / 2) / a as u32;
+                return Some((r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, a));
             }
         }
     }
@@ -2424,7 +2437,11 @@ fn stroke_linejoin_attr(attrs: &[u8], ctx: &RenderContext) -> LineJoin {
 }
 
 #[inline] fn to_argb(c: (u8,u8,u8,u8)) -> u32 {
-    (c.3 as u32) << 24 | (c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32
+    let a = c.3 as u32;
+    let r = (c.0 as u32 * a + 127) / 255;
+    let g = (c.1 as u32 * a + 127) / 255;
+    let b = (c.2 as u32 * a + 127) / 255;
+    (a << 24) | (r << 16) | (g << 8) | b
 }
 
 #[inline]
@@ -2826,14 +2843,13 @@ fn alpha_blend_over(dst: u32, src: u32) -> u32 {
     let sa = (src >> 24) & 0xFF;
     if sa == 0 { return dst; }
     if sa == 255 { return src; }
-    let da = (dst >> 24) & 0xFF;
-    let inv = 255 - sa;
-    let oa = sa + (da * inv + 127) / 255;
-    let blend = |sc: u32, dc: u32| -> u32 { (sc * sa + dc * inv + 127) / 255 };
+    let inv_sa = 255 - sa;
+    let blend = |sc: u32, dc: u32| -> u32 { sc + (dc * inv_sa + 127) / 255 };
+    let oa = blend(sa, (dst >> 24) & 0xFF);
     let or = blend((src >> 16) & 0xFF, (dst >> 16) & 0xFF);
     let og = blend((src >> 8) & 0xFF, (dst >> 8) & 0xFF);
     let ob = blend(src & 0xFF, dst & 0xFF);
-    (oa << 24) | (or << 16) | (og << 8) | ob
+    (oa.min(255) << 24) | (or.min(255) << 16) | (og.min(255) << 8) | ob.min(255)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
