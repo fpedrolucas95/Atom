@@ -7,8 +7,10 @@ description = "Atom Desktop Environment - Compositor and Window Manager"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
-libipc = { path = "../../libs/libipc" }
-libgui = { path = "../../libs/libgui" }
+libsvg       = { path = "../../libs/libsvg" }
+atom_theme   = { path = "../../libs/atom_theme" }
+libipc       = { path = "../../libs/libipc" }
+libgui       = { path = "../../libs/libgui" }
 
 [[bin]]
 name = "atom_desktop"

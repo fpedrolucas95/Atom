@@ -1,0 +1,12 @@
+[package]
+name = "atom_theme"
+version = "1.0.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Atom Design System v1.0 (Luminous Dark) — design tokens and theme primitives"
+
+[dependencies]
+atom_syscall = { path = "../syscall" }
+
+[lib]
+crate-type = ["rlib"]

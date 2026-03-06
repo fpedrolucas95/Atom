@@ -6,8 +6,10 @@ authors = ["Atom OS Contributors"]
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
-libipc = { path = "../../libs/libipc" }
-libgui = { path = "../../libs/libgui" }
+libipc       = { path = "../../libs/libipc" }
+libgui       = { path = "../../libs/libgui" }
+atom_theme   = { path = "../../libs/atom_theme" }
+atom_ui      = { path = "../../libs/atom_ui" }
 
 [[bin]]
 name = "demo_rects"

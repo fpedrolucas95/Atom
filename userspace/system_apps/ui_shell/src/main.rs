@@ -6,10 +6,12 @@
 
 extern crate alloc;
 
-mod svg;
-
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+mod svg;
+
+use svg::SvgBitmap;
 
 struct BumpAllocator {
     start: AtomicUsize,
@@ -102,61 +104,97 @@ use atom_syscall::SyscallError;
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
 
+/// Shell visual theme — all values sourced from `atom_theme` (DS v1.0 Luminous Dark).
+///
+/// **No hard-coded RGB values.**  Every constant is an alias or a
+/// direct mapping of an `atom_theme::colors` token to the
+/// `atom_syscall::graphics::Color` type used by the compositor.
+///
+/// ## Shell-specific metrics
+///
+/// Layout numbers (panel height, dock height, etc.) come from
+/// `atom_theme::shell`.  The raw `const` values below are kept for
+/// backward-compatibility with the rest of the file; they match the DS spec.
 mod theme {
+    // Import DS token source
+    use atom_theme::colors as ds;
     use atom_syscall::graphics::Color;
 
-    // Desktop
-    pub const DESKTOP_BG: Color = Color::new(18, 20, 28);
+    // ── Desktop ───────────────────────────────────────────────────────────
+    /// Main desktop background (DS: ATOM_COLOR_BG  #0B0E13)
+    pub const DESKTOP_BG: Color = ds::ATOM_COLOR_BG;
 
-    // Panel (top bar)
-    pub const PANEL_BG: Color = Color::new(14, 16, 22);
-    pub const PANEL_BG_ACCENT: Color = Color::new(20, 23, 32);
-    pub const PANEL_TEXT: Color = Color::new(210, 215, 225);
-    pub const PANEL_TEXT_DIM: Color = Color::new(130, 138, 158);
-    pub const PANEL_BORDER: Color = Color::new(38, 42, 56);
+    // ── Top bar / panel ───────────────────────────────────────────────────
+    /// Panel background (DS: ATOM_COLOR_BG — darkest layer)
+    pub const PANEL_BG: Color = ds::ATOM_COLOR_BG;
+    /// Panel background accent row (DS: ATOM_COLOR_SURFACE)
+    pub const PANEL_BG_ACCENT: Color = ds::ATOM_COLOR_SURFACE;
+    /// Panel text (DS: ATOM_COLOR_TEXT_PRIMARY)
+    pub const PANEL_TEXT: Color = ds::ATOM_COLOR_TEXT_PRIMARY;
+    /// Panel dimmed text (DS: ATOM_COLOR_TEXT_SECONDARY)
+    pub const PANEL_TEXT_DIM: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
+    /// Panel border (DS: ATOM_COLOR_BORDER)
+    pub const PANEL_BORDER: Color = ds::ATOM_COLOR_BORDER;
 
-    // Accent
-    pub const ACCENT: Color = Color::new(99, 143, 255);
+    // ── Accent ────────────────────────────────────────────────────────────
+    /// Primary accent blue (DS: ATOM_COLOR_ACCENT  #4C8DFF)
+    pub const ACCENT: Color = ds::ATOM_COLOR_ACCENT;
 
-    // Windows
-    pub const WINDOW_BG: Color = Color::new(26, 29, 38);
-    pub const WINDOW_HEADER: Color = Color::new(22, 25, 34);
-    pub const WINDOW_HEADER_FOCUSED: Color = Color::new(30, 34, 46);
-    pub const WINDOW_BORDER: Color = Color::new(48, 54, 72);
-    pub const WINDOW_BORDER_FOCUSED: Color = Color::new(65, 75, 100);
+    // ── Windows ───────────────────────────────────────────────────────────
+    /// Window content background (DS: ATOM_COLOR_SURFACE_ALT)
+    pub const WINDOW_BG: Color = ds::ATOM_COLOR_WIN_BG;
+    /// Window title bar — unfocused (DS: ATOM_COLOR_WIN_HDR)
+    pub const WINDOW_HEADER: Color = ds::ATOM_COLOR_WIN_HDR;
+    /// Window title bar — focused (DS: ATOM_COLOR_WIN_HDR_FOC)
+    pub const WINDOW_HEADER_FOCUSED: Color = ds::ATOM_COLOR_WIN_HDR_FOC;
+    /// Window border — unfocused (DS: ATOM_COLOR_BORDER)
+    pub const WINDOW_BORDER: Color = ds::ATOM_COLOR_WIN_BORDER;
+    /// Window border — focused (DS: ATOM_COLOR_WIN_BORDER_FOC)
+    pub const WINDOW_BORDER_FOCUSED: Color = ds::ATOM_COLOR_WIN_BORDER_FOC;
 
-    // Dock
-    pub const DOCK_BG: Color = Color::new(16, 18, 26);
-    pub const DOCK_BORDER: Color = Color::new(42, 48, 64);
+    // ── Dock ──────────────────────────────────────────────────────────────
+    /// Dock background (DS: ATOM_COLOR_DOCK_BG)
+    pub const DOCK_BG: Color = ds::ATOM_COLOR_DOCK_BG;
+    /// Dock border (DS: ATOM_COLOR_DOCK_BORDER)
+    pub const DOCK_BORDER: Color = ds::ATOM_COLOR_DOCK_BORDER;
 
-    // Cursor
-    pub const CURSOR_FILL: Color = Color::WHITE;
+    // ── Cursor ────────────────────────────────────────────────────────────
+    pub const CURSOR_FILL: Color    = Color::WHITE;
     pub const CURSOR_OUTLINE: Color = Color::BLACK;
 
-    // Shadows
-    pub const SHADOW: Color = Color::new(4, 5, 8);
+    // ── Shadows ───────────────────────────────────────────────────────────
+    /// Shadow base colour (DS: ATOM_COLOR_SHADOW — near-black blue tint)
+    pub const SHADOW: Color = ds::ATOM_COLOR_SHADOW;
 
-    // Window buttons (traffic lights)
-    pub const BTN_CLOSE: Color = Color::new(237, 78, 83);
-    pub const BTN_MAXIMIZE: Color = Color::new(72, 199, 142);
-    pub const BTN_MINIMIZE: Color = Color::new(245, 189, 65);
-    pub const BTN_INACTIVE: Color = Color::new(56, 62, 78);
+    // ── Window traffic-light buttons ──────────────────────────────────────
+    /// Close button (DS: ATOM_COLOR_ERROR  #EF4444)
+    pub const BTN_CLOSE: Color    = ds::ATOM_COLOR_BTN_CLOSE;
+    /// Maximise button (DS: ATOM_COLOR_SUCCESS  #22C55E)
+    pub const BTN_MAXIMIZE: Color = ds::ATOM_COLOR_BTN_MAX;
+    /// Minimise button (DS: ATOM_COLOR_WARNING  #F59E0B)
+    pub const BTN_MINIMIZE: Color = ds::ATOM_COLOR_BTN_MIN;
+    /// Inactive button (unfocused window)
+    pub const BTN_INACTIVE: Color = ds::ATOM_COLOR_BTN_INACTIVE;
 
-    // Context menu
-    pub const MENU_BG: Color = Color::new(22, 25, 34);
-    pub const MENU_BORDER: Color = Color::new(48, 54, 72);
-    pub const MENU_TEXT: Color = Color::new(210, 215, 225);
+    // ── Context menu ─────────────────────────────────────────────────────
+    /// Menu panel background (DS: ATOM_COLOR_SURFACE)
+    pub const MENU_BG: Color     = ds::ATOM_COLOR_MENU_BG;
+    /// Menu border (DS: ATOM_COLOR_BORDER)
+    pub const MENU_BORDER: Color = ds::ATOM_COLOR_MENU_BORDER;
+    /// Menu text (DS: ATOM_COLOR_TEXT_PRIMARY)
+    pub const MENU_TEXT: Color   = ds::ATOM_COLOR_MENU_TEXT;
 
-    // Desktop icons
-    pub const ICON_LABEL: Color = Color::new(200, 206, 218);
+    // ── Desktop icon labels ───────────────────────────────────────────────
+    /// Icon label text (DS: ATOM_COLOR_TEXT_SECONDARY)
+    pub const ICON_LABEL: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
 }
 
-const WINDOW_HEADER_HEIGHT: u32 = 36;
-const WINDOW_BORDER_WIDTH: u32 = 1;
-const WINDOW_MIN_WIDTH: u32 = 150;
-const WINDOW_MIN_HEIGHT: u32 = 100;
-const PANEL_HEIGHT: u32 = 34;
-const DOCK_HEIGHT: u32 = 64;
+const WINDOW_HEADER_HEIGHT: u32 = atom_theme::shell::WINDOW_TITLE_HEIGHT; // 36 px
+const WINDOW_BORDER_WIDTH: u32  = 1;
+const WINDOW_MIN_WIDTH: u32     = 150;
+const WINDOW_MIN_HEIGHT: u32    = 100;
+const PANEL_HEIGHT: u32         = atom_theme::shell::TOP_BAR_HEIGHT;       // 32 px
+const DOCK_HEIGHT: u32          = atom_theme::shell::DOCK_HEIGHT;          // 64 px
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -512,7 +550,7 @@ struct DesktopIcon {
     x: i32,
     y: i32,
     color: Color,
-    svg_bitmap: Option<svg::SvgBitmap>,
+    svg_bitmap: Option<SvgBitmap>,
 }
 
 struct DockApp {
@@ -520,7 +558,7 @@ struct DockApp {
     executable: String,
     color: Color,
     monogram: String,
-    svg_bitmap: Option<svg::SvgBitmap>,
+    svg_bitmap: Option<SvgBitmap>,
 }
 
 struct ContextMenu {
@@ -605,24 +643,24 @@ impl Compositor {
             executable: String::from("fileman"),
             x: 28,
             y: PANEL_HEIGHT as i32 + 28,
-            color: Color::new(99, 143, 255),
-            svg_bitmap: Self::load_icon_bitmap("fileman", 48),
+            color: atom_theme::colors::ATOM_COLOR_ACCENT_GLOW, // DS: accent blue
+            svg_bitmap: Self::load_icon_bitmap("fileman", atom_theme::shell::DOCK_ITEM_SIZE),
         });
         icons.push(DesktopIcon {
             label: String::from("Rectangles"),
             executable: String::from("demo_rects"),
             x: 28,
             y: PANEL_HEIGHT as i32 + 120,
-            color: Color::new(86, 182, 245),
-            svg_bitmap: Self::load_icon_bitmap("demo_rects", 48),
+            color: atom_theme::colors::ATOM_COLOR_ACCENT, // DS: accent
+            svg_bitmap: Self::load_icon_bitmap("demo_rects", atom_theme::shell::DOCK_ITEM_SIZE),
         });
         icons.push(DesktopIcon {
             label: String::from("Text"),
             executable: String::from("demo_text"),
             x: 28,
             y: PANEL_HEIGHT as i32 + 212,
-            color: Color::new(72, 199, 142),
-            svg_bitmap: Self::load_icon_bitmap("demo_text", 48),
+            color: atom_theme::colors::ATOM_COLOR_SUCCESS, // DS: success green
+            svg_bitmap: Self::load_icon_bitmap("demo_text", atom_theme::shell::DOCK_ITEM_SIZE),
         });
 
         let dock_apps = Self::build_dock_apps();
@@ -1613,9 +1651,9 @@ impl Compositor {
 
         let width = self.fb.width();
         let height = self.fb.height();
-        let icon_size = 42i32;
-        let spacing = 20i32;
-        let side_padding = 28i32;
+        let icon_size   = atom_theme::shell::DOCK_ITEM_SIZE as i32;  // DS: 48 px
+        let spacing     = atom_theme::spacing::XL as i32;             // DS: 20 px
+        let side_padding = atom_theme::spacing::XXXL as i32;          // DS: 32 px
 
         let total_icons_width = count as i32 * icon_size + (count as i32 - 1) * spacing;
         let dock_width = (total_icons_width + side_padding * 2).max(140) as u32;
@@ -1629,7 +1667,7 @@ impl Compositor {
 
     /// Load the embedded SVG icon from an ATXF file for the given executable name,
     /// render it at `size`×`size` pixels, and return the bitmap (or None).
-    fn load_icon_bitmap(exec: &str, size: u32) -> Option<svg::SvgBitmap> {
+    fn load_icon_bitmap(exec: &str, size: u32) -> Option<SvgBitmap> {
         let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
         let user_path = alloc::format!("/apps/user/{}.atxf", exec);
         let path = if fs::stat(&sys_path).is_ok() { sys_path }
@@ -1637,16 +1675,16 @@ impl Compositor {
                    else { return None; };
         let atxf_bytes = fs::read_file(&path).ok()?;
         let icon_svg = Self::extract_embedded_icon_svg(&atxf_bytes)?;
-        svg::SvgBitmap::render(icon_svg, size, size)
+        SvgBitmap::render(icon_svg, size, size)
     }
 
     fn build_dock_apps() -> Vec<DockApp> {
         let candidates: [(&str, &str, Color); 5] = [
-            ("fileman", "Files", Color::new(99, 143, 255)),
-            ("display_settings", "Settings", Color::new(86, 182, 245)),
-            ("tinygl_demo", "TinyGL", Color::new(72, 199, 142)),
-            ("doom", "Doom", Color::new(200, 82, 82)),
-            ("terminal", "Terminal", Color::new(200, 160, 255)),
+            ("fileman",          "Files",    atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),   // DS: accent glow
+            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),        // DS: accent
+            ("tinygl_demo",      "TinyGL",   atom_theme::colors::ATOM_COLOR_SUCCESS),       // DS: success green
+            ("doom",             "Doom",     atom_theme::colors::ATOM_COLOR_ERROR),         // DS: error red
+            ("terminal",         "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),// DS: gradient violet
         ];
 
         let mut apps = Vec::new();
@@ -1665,14 +1703,14 @@ impl Compositor {
 
             if let Some(path) = atxf_path {
                 let mut color = *fallback_color;
-                let mut svg_bitmap: Option<svg::SvgBitmap> = None;
+                let mut svg_bitmap: Option<SvgBitmap> = None;
 
                 if let Ok(atxf_bytes) = fs::read_file(&path) {
                     if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
                         if let Some(icon_color) = Self::extract_first_hex_color(icon_svg) {
                             color = icon_color;
                         }
-                        svg_bitmap = svg::SvgBitmap::render(icon_svg, 42, 42);
+                        svg_bitmap = SvgBitmap::render(icon_svg, atom_theme::shell::DOCK_ITEM_SIZE, atom_theme::shell::DOCK_ITEM_SIZE);
                     }
                 }
 
@@ -1914,14 +1952,15 @@ impl Compositor {
         let ph = self.wallpaper_picker.height;
 
         // Shadow
-        self.backbuffer_fb.fill_rect_rounded_alpha(px + 2, py + 4, pw + 2, ph + 2, 10, theme::SHADOW, 100);
+        let picker_r = atom_theme::radius::MD as u32; // DS: 12 px
+        self.backbuffer_fb.fill_rect_rounded_alpha(px + 2, py + 4, pw + 2, ph + 2, picker_r, theme::SHADOW, 100);
         // Background
-        self.backbuffer_fb.fill_rect_rounded_aa(px, py, pw, ph, 10, theme::WINDOW_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(px, py, pw, ph, picker_r, theme::WINDOW_BG);
         // Border
-        self.backbuffer_fb.draw_rect_rounded_aa(px, py, pw, ph, 10, theme::WINDOW_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(px, py, pw, ph, picker_r, theme::WINDOW_BORDER);
 
-        // Header — top corners rounded to match outer border (radius 10 - border 1 = 9)
-        self.backbuffer_fb.fill_rect_top_rounded_aa(px + 1, py + 1, pw - 2, 40, 9, theme::WINDOW_HEADER_FOCUSED);
+        // Header — top corners rounded to match outer border (radius - border = inner)
+        self.backbuffer_fb.fill_rect_top_rounded_aa(px + 1, py + 1, pw - 2, 40, picker_r - 1, theme::WINDOW_HEADER_FOCUSED);
         let title_y = py + (40 - 8) / 2;
         self.backbuffer_fb.draw_string(px + 16, title_y, "Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
 
@@ -1931,40 +1970,42 @@ impl Compositor {
         self.backbuffer_fb.fill_rect_rounded_aa(close_x, close_y, 16, 16, 8, theme::BTN_CLOSE);
         self.backbuffer_fb.draw_string(close_x + 4, close_y + 4, "X", Color::WHITE, theme::BTN_CLOSE);
 
-        // Color tiles (rounded)
-        let start_x = px + 30;
-        let start_y = py + 60;
-        let tile_size = 48u32;
-        let spacing = 20u32;
+        // Color tiles (rounded) — DS tokens
+        let start_x   = px + atom_theme::spacing::XXXL as u32;                  // spacing::XXXL = 32
+        let start_y   = py + atom_theme::spacing::MD as u32 + 48;               // header (40) + gap
+        let tile_size = atom_theme::shell::DOCK_ITEM_SIZE as u32;               // 48 px
+        let tile_gap  = atom_theme::spacing::XL as u32;                         // 20 px
+        let tile_r    = atom_theme::radius::SM as u32;                           // DS: 8 px
 
         for (i, color) in self.wallpaper_picker.colors.iter().enumerate() {
-            let tx = start_x + (i as u32 % 4) * (tile_size + spacing);
-            let ty = start_y + (i as u32 / 4) * (tile_size + spacing);
+            let tx = start_x + (i as u32 % 4) * (tile_size + tile_gap);
+            let ty = start_y + (i as u32 / 4) * (tile_size + tile_gap);
 
-            self.backbuffer_fb.fill_rect_rounded_aa(tx, ty, tile_size, tile_size, 8, *color);
-            self.backbuffer_fb.draw_rect_rounded_aa(tx, ty, tile_size, tile_size, 8, theme::WINDOW_BORDER);
+            self.backbuffer_fb.fill_rect_rounded_aa(tx, ty, tile_size, tile_size, tile_r, *color);
+            self.backbuffer_fb.draw_rect_rounded_aa(tx, ty, tile_size, tile_size, tile_r, theme::WINDOW_BORDER);
         }
     }
 
     fn draw_context_menu(&self) {
-        let menu_w = 200u32;
-        let item_h = 32u32;
-        let padding_v = 6u32;
-        let menu_h = self.context_menu.items.len() as u32 * item_h + padding_v * 2;
+        let menu_w   = 200u32;
+        let item_h   = atom_theme::spacing::XXXL as u32;                         // DS: 32 px row height
+        let padding_v = atom_theme::spacing::SM as u32 - 2;                      // 6 px vertical padding
+        let menu_r    = atom_theme::radius::SM as u32;                            // DS: 8 px
+        let menu_h    = self.context_menu.items.len() as u32 * item_h + padding_v * 2;
         let mx = self.context_menu.x as u32;
         let my = self.context_menu.y as u32;
 
         // Shadow
-        self.backbuffer_fb.fill_rect_rounded_alpha(mx + 2, my + 3, menu_w, menu_h, 8, theme::SHADOW, 100);
+        self.backbuffer_fb.fill_rect_rounded_alpha(mx + 2, my + 3, menu_w, menu_h, menu_r, theme::SHADOW, 100);
         // Background
-        self.backbuffer_fb.fill_rect_rounded_aa(mx, my, menu_w, menu_h, 8, theme::MENU_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(mx, my, menu_w, menu_h, menu_r, theme::MENU_BG);
         // Border
-        self.backbuffer_fb.draw_rect_rounded_aa(mx, my, menu_w, menu_h, 8, theme::MENU_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(mx, my, menu_w, menu_h, menu_r, theme::MENU_BORDER);
 
         for (i, item) in self.context_menu.items.iter().enumerate() {
             let iy = my + padding_v + (i as u32 * item_h);
             let text_y = iy + (item_h - 8) / 2;
-            self.backbuffer_fb.draw_string(mx + 16, text_y, item, theme::MENU_TEXT, theme::MENU_BG);
+            self.backbuffer_fb.draw_string(mx + atom_theme::spacing::LG as u32, text_y, item, theme::MENU_TEXT, theme::MENU_BG);
         }
     }
 
@@ -2012,10 +2053,10 @@ impl Compositor {
 
         // Branding: Atom logo area
         let brand_y = (PANEL_HEIGHT - 8) / 2;
-        // Accent dot
-        self.backbuffer_fb.fill_rect_rounded_aa(14, brand_y - 1, 10, 10, 3, theme::ACCENT);
+        // Accent dot — DS: radius::XS, spacing::MD offset
+        self.backbuffer_fb.fill_rect_rounded_aa(atom_theme::spacing::MD as u32, brand_y - 1, 10, 10, atom_theme::radius::XS as u32, theme::ACCENT);
         // Brand text
-        self.backbuffer_fb.draw_string(28, brand_y, "Atom", theme::PANEL_TEXT, theme::PANEL_BG);
+        self.backbuffer_fb.draw_string(atom_theme::spacing::MD as u32 + 14, brand_y, "Atom", theme::PANEL_TEXT, theme::PANEL_BG);
 
         // Center: focused window title (if any)
         if let Some(focused_id) = self.wm.focused_id {
@@ -2028,8 +2069,8 @@ impl Compositor {
 
         // Right side: clock + status area
         let clock_x = width.saturating_sub(96);
-        // Status dot (indicates system running)
-        self.backbuffer_fb.fill_rect_rounded_aa(clock_x - 16, brand_y, 8, 8, 4, theme::BTN_MAXIMIZE);
+        // Status dot (indicates system running) — DS radius::XS
+        self.backbuffer_fb.fill_rect_rounded_aa(clock_x - atom_theme::spacing::LG as u32, brand_y, 8, 8, atom_theme::radius::XS as u32, theme::BTN_MAXIMIZE);
         self.backbuffer_fb.draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
@@ -2056,9 +2097,10 @@ impl Compositor {
         };
 
         // Window outer shell — full rounded rect (border color fills entire area first)
-        self.backbuffer_fb.fill_rect_rounded_aa(x, y, w, h, 6, border_color);
+        self.backbuffer_fb.fill_rect_rounded_aa(x, y, w, h, atom_theme::shell::WINDOW_RADIUS as u32, border_color);
 
-        // Window header — top corners rounded to match outer border (radius 6 - border 1 = 5)
+        // Window header — top corners rounded to match outer border (outer_r - border = inner_r)
+        let inner_r = atom_theme::shell::WINDOW_RADIUS as u32 - WINDOW_BORDER_WIDTH;
         let header_color = if window.focused {
             theme::WINDOW_HEADER_FOCUSED
         } else {
@@ -2067,7 +2109,7 @@ impl Compositor {
         self.backbuffer_fb.fill_rect_top_rounded_aa(
             x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
             w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
-            5, header_color,
+            inner_r, header_color,
         );
         // Header bottom separator
         self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_HEADER_HEIGHT - 1,
@@ -2101,7 +2143,7 @@ impl Compositor {
             self.backbuffer_fb.fill_rect_bottom_rounded_aa(
                 window.content_x(), window.content_y(),
                 window.content_width(), window.content_height(),
-                5, theme::WINDOW_BG,
+                inner_r, theme::WINDOW_BG,
             );
         }
 
@@ -2115,7 +2157,7 @@ impl Compositor {
                 let cy = window.content_y();
                 let cw = window.content_width();
                 let ch = window.content_height();
-                let r: u32 = 5;
+                let r: u32 = inner_r; // DS: WINDOW_RADIUS - border
                 for dy in 0..r {
                     let fy = r - dy;
                     let n = r * r - fy * fy;
@@ -2147,14 +2189,15 @@ impl Compositor {
         let spacing = spacing_i32 as u32;
 
         // Dock shadow
-        self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, 14, theme::SHADOW, 80);
+        let dock_r = atom_theme::radius::LG as u32; // DS: 16 px
+        self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, dock_r, theme::SHADOW, 80);
 
         // Dock background (pill shape)
-        self.backbuffer_fb.fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, 14, theme::DOCK_BG);
+        self.backbuffer_fb.fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BG);
         // Dock border
-        self.backbuffer_fb.draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, 14, theme::DOCK_BORDER);
+        self.backbuffer_fb.draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BORDER);
         // Top highlight line
-        self.backbuffer_fb.fill_rect(dock_x + 14, dock_y, dock_width - 28, 1, theme::DOCK_BORDER);
+        self.backbuffer_fb.fill_rect(dock_x + dock_r, dock_y, dock_width - dock_r * 2, 1, theme::DOCK_BORDER);
 
         for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));

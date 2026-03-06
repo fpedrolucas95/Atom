@@ -1,0 +1,13 @@
+[package]
+name = "libsvg"
+version = "0.1.0"
+edition = "2021"
+description = "Rust FFI wrapper for the freestanding C libsvg build used by Atom userspace"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
