@@ -6,10 +6,12 @@
 
 extern crate alloc;
 
-use libsvg::SvgBitmap;
-
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+mod svg;
+
+use svg::SvgBitmap;
 
 struct BumpAllocator {
     start: AtomicUsize,

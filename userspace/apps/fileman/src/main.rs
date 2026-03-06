@@ -24,8 +24,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod error;
 mod fs;
+mod svg;
 
-use libsvg::SvgBitmap;
+use crate::svg::SvgBitmap;
 use fs::{Dir, DirEntry, FsOps};
 
 use atom_syscall::graphics::{Color, SharedSurface};

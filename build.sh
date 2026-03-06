@@ -241,6 +241,40 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
 
     # -------------------------------------------------------------------------
+    # Build libxml2 (C XML library)
+    # Output → userspace/libs/libxml2/build/libxml2_atom.a
+    # -------------------------------------------------------------------------
+    step "Building libxml2 (C XML library)..."
+
+    if [ -f "userspace/libs/libxml2/Makefile" ]; then
+        if make -C userspace/libs/libxml2 2>build/libxml2.log; then
+            success "libxml2_atom.a built"
+        else
+            warning "libxml2 build failed (see build/libxml2.log)"
+            cat build/libxml2.log
+        fi
+    else
+        warning "userspace/libs/libxml2/Makefile not found, skipping libxml2 build"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Build libsvg (ravhed/libsvg)
+    # Output → userspace/libs/libsvg_c/build/libsvg_atom.a
+    # -------------------------------------------------------------------------
+    step "Building libsvg (ravhed/libsvg)..."
+
+    if [ -f "userspace/libs/libsvg_c/Makefile" ]; then
+        if make -C userspace/libs/libsvg_c 2>build/libsvg.log; then
+            success "libsvg_atom.a built"
+        else
+            warning "libsvg build failed (see build/libsvg.log)"
+            cat build/libsvg.log
+        fi
+    else
+        warning "userspace/libs/libsvg_c/Makefile not found, skipping libsvg build"
+    fi
+
+    # -------------------------------------------------------------------------
     # Build system apps (ui_shell, display, keyboard, mouse, terminal, …)
     # Output → efi/apps/system/
     # -------------------------------------------------------------------------
