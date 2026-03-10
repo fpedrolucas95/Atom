@@ -5360,7 +5360,7 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
             cur + offset
         }
         2 => {                        // SEEK_END
-            // Use cached file length if available to avoid a fat32::stat_path call
+            // Fast path: use the cached file length when already populated.
             let cached_len = table[idx].cache_len;
             if cached_len > 0 {
                 let result = cached_len as i64 + offset;
@@ -5370,35 +5370,78 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
                 table[idx].offset = result as usize;
                 return result as u64;
             }
+
+            // Slow path: cache is empty (first seek before any read).
+            // Read the full file via fat32::open — the same path used by
+            // sys_fs_read — so we get an authoritative length AND pre-warm
+            // the cache for the subsequent read call.
             let (path_buf, path_len) = (table[idx].path, table[idx].path_len);
             drop(table);
+
             let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
-            let trimmed = path.trim_start_matches('/');
-            let file_size = match crate::drivers::fat32::stat_path(trimmed) {
-                Some(st) => st.size as i64,
+            let file_data = match crate::drivers::fat32::open(path) {
+                Some(d) => d,
                 None => {
-                    // WAD diagnostic
-                    if path.contains("doom1") || path.contains("DOOM1") {
-                        log_warn!("fs_syscall", "[WAD-DIAG] SEEK_END stat_path('{}') FAILED → ENOENT", trimmed);
-                    }
-                    return ENOENT;
+                    log_warn!("fs_syscall",
+                        "sys_fs_seek SEEK_END: fat32::open('{}') failed", path);
+                    return EIO;
                 }
             };
-            let result = file_size + offset;
-            // WAD diagnostic
-            if path.contains("doom1") || path.contains("DOOM1") {
-                log_info!("fs_syscall", "[WAD-DIAG] SEEK_END fd={} path='{}' file_size={} offset={} result={}",
-                    fd, trimmed, file_size, offset, result);
-            }
-            // Re-acquire lock to update offset
+            let file_len = file_data.len();
+
+            // Allocate a kernel heap cache for the file data.
+            let cache_ptr: usize = if file_len > 0 {
+                let layout = unsafe {
+                    core::alloc::Layout::from_size_align_unchecked(file_len, 1)
+                };
+                let ptr = unsafe { alloc::alloc::alloc(layout) };
+                if ptr.is_null() {
+                    log_warn!("fs_syscall",
+                        "sys_fs_seek SEEK_END: alloc failed for {} bytes", file_len);
+                    return EIO;
+                }
+                unsafe { core::ptr::copy_nonoverlapping(file_data.as_ptr(), ptr, file_len); }
+                ptr as usize
+            } else {
+                0
+            };
+            drop(file_data);
+
+            let result = file_len as i64 + offset;
+
+            // Re-acquire lock to install the cache and update the offset.
             let mut table = KERNEL_FD_TABLE.lock();
 
             if !table[idx].in_use {
+                if cache_ptr != 0 {
+                    unsafe {
+                        let layout = core::alloc::Layout::from_size_align_unchecked(file_len, 1);
+                        alloc::alloc::dealloc(cache_ptr as *mut u8, layout);
+                    }
+                }
                 return EBADF;
             }
 
             if let Err(e) = validate_fd_ownership(idx, &table) {
+                if cache_ptr != 0 {
+                    unsafe {
+                        let layout = core::alloc::Layout::from_size_align_unchecked(file_len, 1);
+                        alloc::alloc::dealloc(cache_ptr as *mut u8, layout);
+                    }
+                }
                 return e;
+            }
+
+            // Install cache only if not already populated (guard against races).
+            if table[idx].cache_ptr == 0 && cache_ptr != 0 {
+                table[idx].cache_ptr = cache_ptr;
+                table[idx].cache_len = file_len;
+            } else if cache_ptr != 0 {
+                // Another call already populated the cache; free the duplicate.
+                unsafe {
+                    let layout = core::alloc::Layout::from_size_align_unchecked(file_len, 1);
+                    alloc::alloc::dealloc(cache_ptr as *mut u8, layout);
+                }
             }
 
             if result < 0 {

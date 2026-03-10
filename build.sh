@@ -200,6 +200,68 @@ mkdir -p efi/user/config
 mkdir -p efi/user/data
 
 # =========================================================================
+# RESTAURAR DEPENDÊNCIAS (submodules)
+# =========================================================================
+
+restore_submodule() {
+    local name="$1"
+    local path="$2"
+    local url="$3"
+    local sentinel="$4"
+    local pinned_commit="$5"
+
+    if [ -e "$sentinel" ]; then
+        return 0
+    fi
+
+    step "Restaurando $name..."
+
+    # Ensure .gitmodules registers this submodule so git knows the URL
+    if [ ! -f ".gitmodules" ] || ! grep -q "$path" .gitmodules 2>/dev/null; then
+        cat >> .gitmodules <<GITMOD
+
+[submodule "$path"]
+	path = $path
+	url = $url
+GITMOD
+        git submodule sync "$path" 2>/dev/null || true
+    fi
+
+    # Try git submodule update first (fast if .git/modules already exists)
+    if git submodule update --init "$path" 2>/dev/null && [ -e "$sentinel" ]; then
+        # Ensure we are at the pinned commit
+        git -C "$path" checkout "$pinned_commit" 2>/dev/null || true
+        success "$name restaurado via submodule update (commit $pinned_commit)"
+        return 0
+    fi
+
+    # Fall back: clone directly
+    rm -rf "$path"
+    if git clone "$url" "$path" 2>/dev/null; then
+        git -C "$path" checkout "$pinned_commit" 2>/dev/null || true
+        success "$name clonado de $url (commit $pinned_commit)"
+    else
+        warning "Falha ao restaurar $name — verifique sua conexão de rede"
+        warning "  Clone manual: git clone $url $path"
+        warning "  Depois: git -C $path checkout $pinned_commit"
+    fi
+}
+
+restore_submodule \
+    "tinygl_src" \
+    "userspace/libs/tinygl_src" \
+    "https://github.com/C-Chads/tinygl" \
+    "userspace/libs/tinygl_src/src/api.c" \
+    "e94a97bd"
+
+restore_submodule \
+    "doomgeneric_src" \
+    "userspace/libs/doomgeneric_src" \
+    "https://github.com/ozkl/doomgeneric" \
+    "userspace/libs/doomgeneric_src/doomgeneric" \
+    "1dcb7bd3"
+
+# =========================================================================
 # BUILD USERSPACE TOOLS AND DRIVERS
 # =========================================================================
 
