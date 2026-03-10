@@ -73,6 +73,7 @@ impl<'a> FsdIpcHandler<'a> {
             MessageType::FsWrite   => self.handle_fs_write(payload),
             MessageType::FsStat    => self.handle_fs_stat(payload),
             MessageType::FsReaddir => self.handle_fs_readdir(payload),
+            MessageType::FsSeek   => self.handle_fs_seek(payload),
             _ => {
                 atom_syscall::debug::log("fsd: unsupported msg_type, returning ENOTSUP");
                 Self::make_reply(ENOTSUP, 0)
@@ -208,51 +209,132 @@ impl<'a> FsdIpcHandler<'a> {
             return Self::make_reply(EINVAL, 0);
         }
 
-        let fd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        let fd    = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
         let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
 
-        if fd >= MAX_FDS {
+        if fd >= MAX_FDS || self.fds[fd].is_none() {
             return Self::make_reply(EBADF, 0);
         }
 
-        let file = match &self.fds[fd] {
-            Some(f) => f.clone(),
-            None => return Self::make_reply(EBADF, 0),
-        };
-
-        if file.is_dir {
+        if self.fds[fd].as_ref().unwrap().is_dir {
             return Self::make_reply(EISDIR, 0);
         }
 
-        // Read file data from kernel backend
-        let mut buf = alloc::vec![0u8; count.min(65536)];
-        let bytes_read = match atom_syscall::fs::kern_fs_read_file(&file.path, &mut buf) {
-            Ok(n) => n,
-            Err(_) => return Self::make_reply(EIO, 0),
-        };
+        // Ensure the full file is cached on first access.  This avoids reading
+        // from byte 0 on every call and makes offset-based reads correct.
+        if self.fds[fd].as_ref().unwrap().data.is_none() {
+            let path = self.fds[fd].as_ref().unwrap().path.clone();
 
-        // Apply offset
-        let offset = self.fds[fd].as_ref().unwrap().offset;
-        if offset >= bytes_read {
-            // EOF
-            return Self::make_reply(ESUCCESS, 0);
+            // Get file size via stat so we allocate an exact buffer.
+            let mut stat_buf = [0u8; 80];
+            if atom_syscall::fs::kern_fs_stat_path(&path, &mut stat_buf).is_err() {
+                return Self::make_reply(EIO, 0);
+            }
+            let file_size =
+                u64::from_le_bytes(stat_buf[0..8].try_into().unwrap()) as usize;
+
+            if file_size > 0 {
+                let mut data = alloc::vec![0u8; file_size];
+                let n = match atom_syscall::fs::kern_fs_read_file(&path, &mut data) {
+                    Ok(n) => n,
+                    Err(_) => return Self::make_reply(EIO, 0),
+                };
+                data.truncate(n);
+                self.fds[fd].as_mut().unwrap().data = Some(data);
+            }
+            // Empty file: data stays None; reads will hit the EOF path below.
         }
 
-        let available = bytes_read - offset;
+        // Serve from the in-memory cache.
+        let file_len = self.fds[fd].as_ref().unwrap()
+            .data.as_ref().map_or(0, |d| d.len());
+        let offset = self.fds[fd].as_ref().unwrap().offset;
+
+        if count == 0 || offset >= file_len {
+            // EOF — reply with 0 bytes read
+            let mut resp = Vec::with_capacity(16);
+            resp.extend_from_slice(&ESUCCESS.to_le_bytes());
+            resp.extend_from_slice(&0u64.to_le_bytes());
+            return resp;
+        }
+
+        let available = file_len - offset;
         let to_return = available.min(count);
 
         // Build response: [error(8) | bytes_read(8) | data]
         let mut resp = Vec::with_capacity(16 + to_return);
         resp.extend_from_slice(&ESUCCESS.to_le_bytes());
         resp.extend_from_slice(&(to_return as u64).to_le_bytes());
-        resp.extend_from_slice(&buf[offset..offset + to_return]);
-
-        // Update offset
-        if let Some(ref mut f) = self.fds[fd] {
-            f.offset += to_return;
+        {
+            let data = self.fds[fd].as_ref().unwrap().data.as_ref().unwrap();
+            resp.extend_from_slice(&data[offset..offset + to_return]);
         }
 
+        self.fds[fd].as_mut().unwrap().offset += to_return;
         resp
+    }
+
+    // ── Seek ──────────────────────────────────────────────────────────────
+    //
+    // Request: [fd(8) | offset(8, i64) | whence(4)]
+    // Reply:   [error(8) | new_offset(8)]
+
+    fn handle_fs_seek(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 20 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let fd     = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        let off    = i64::from_le_bytes(payload[8..16].try_into().unwrap());
+        let whence = u32::from_le_bytes(payload[16..20].try_into().unwrap());
+
+        if fd >= MAX_FDS || self.fds[fd].is_none() {
+            return Self::make_reply(EBADF, 0);
+        }
+
+        if self.fds[fd].as_ref().unwrap().is_dir {
+            return Self::make_reply(EISDIR, 0);
+        }
+
+        let new_offset: i64 = match whence {
+            0 => off,   // SEEK_SET
+            1 => {      // SEEK_CUR
+                let cur = self.fds[fd].as_ref().unwrap().offset as i64;
+                cur + off
+            }
+            2 => {      // SEEK_END — need to know file size
+                // Ensure file data is cached so we have an authoritative length.
+                if self.fds[fd].as_ref().unwrap().data.is_none() {
+                    let path = self.fds[fd].as_ref().unwrap().path.clone();
+                    let mut stat_buf = [0u8; 80];
+                    if atom_syscall::fs::kern_fs_stat_path(&path, &mut stat_buf).is_err() {
+                        return Self::make_reply(EIO, 0);
+                    }
+                    let file_size =
+                        u64::from_le_bytes(stat_buf[0..8].try_into().unwrap()) as usize;
+                    if file_size > 0 {
+                        let mut data = alloc::vec![0u8; file_size];
+                        let n = match atom_syscall::fs::kern_fs_read_file(&path, &mut data) {
+                            Ok(n) => n,
+                            Err(_) => return Self::make_reply(EIO, 0),
+                        };
+                        data.truncate(n);
+                        self.fds[fd].as_mut().unwrap().data = Some(data);
+                    }
+                }
+                let file_len = self.fds[fd].as_ref().unwrap()
+                    .data.as_ref().map_or(0, |d| d.len()) as i64;
+                file_len + off
+            }
+            _ => return Self::make_reply(EINVAL, 0),
+        };
+
+        if new_offset < 0 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        self.fds[fd].as_mut().unwrap().offset = new_offset as usize;
+        Self::make_reply(ESUCCESS, new_offset as u64)
     }
 
     // ── Write ─────────────────────────────────────────────────────────────
