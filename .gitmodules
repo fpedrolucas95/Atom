@@ -1,6 +1,3 @@
 [submodule "userspace/libs/tinygl_src"]
 	path = userspace/libs/tinygl_src
 	url = https://github.com/C-Chads/tinygl
-[submodule "userspace/libs/doomgeneric_src"]
-	path = userspace/libs/doomgeneric_src
-	url = https://github.com/ozkl/doomgeneric

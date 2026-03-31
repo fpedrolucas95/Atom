@@ -30,11 +30,9 @@
 
 - [x] libc freestanding — string, stdlib, stdio, ctype, errno, assert, math (FPU x87), unistd, time, crt0.S, malloc/free via mmap/munmap, vsnprintf completo
 - [x] Port do TinyGL 0.4.1 — biblioteca estática freestanding, bridge de blit RGB565→ARGB32, integrado com o compositor
-- [x] Port do Doom via doomgeneric — janela de 640×400 no compositor, mapeamento completo de teclado PS/2, valida toda a pipeline de gráficos/IPC/compositor
 - [x] Lançamento de aplicações em runtime — syscall `SYS_SPAWN_FROM_PATH`, loader ATXF, serviço privilegiado app_launcher, lançamento por duplo-clique no gerenciador de arquivos
 - [x] Driver Bochs Graphics Adapter — troca de resolução em runtime, tabela de 12 modos de vídeo, aplicação Display Settings
-- [x] Rasterizador SVG (no_std) — rect, circle, ellipse, polygon, polyline, line, path (M/L/H/V/Z/C/S/Q/A), fill/stroke, transformações de grupo, seletores CSS, cores nomeadas
-- [x] Ambiente desktop — compositor com superfícies compartilhadas, dock em formato de pílula, retângulos arredondados, alpha blending, sombras suaves, controles circulares de janela, ícones SVG, shutdown gracioso de janelas (estado PendingClose)
+- [x] Ambiente desktop — compositor com superfícies compartilhadas, dock em formato de pílula, retângulos arredondados, alpha blending, sombras suaves, controles circulares de janela, shutdown gracioso de janelas (estado PendingClose)
 - [x] Layout de filesystem reorganizado — `/system/services`, `/apps/system`, `/apps/user`, `/user/home`, `/user/config`, `/user/data`
 - [x] Crate atom_abi compartilhado como fonte única de verdade para tipos e constantes entre kernel e user space
 
@@ -367,7 +365,6 @@ O padrão atual — compositor, ui_shell, terminal, gerenciador de arquivos, app
 - [x] Latência IPC < 10μs (média)
 - [x] Suporte a aplicações C nativas (libc + crt0)
 - [x] Renderização OpenGL por software (TinyGL)
-- [x] Aplicação real rodando (Doom)
 - [x] Lançamento de aplicações em runtime a partir do filesystem
 - [x] Troca dinâmica de resolução de display
 

@@ -94,11 +94,7 @@ $(TARGET).elf: $(CRT0) $(OBJS) $(LIBC)
 
 $(TARGET).atxf: $(TARGET).elf
 	@if [ -x "$(ELF2ATXF)" ]; then \
-      if [ -f "ico.svg" ]; then \
-          $(ELF2ATXF) --icon ico.svg $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf (icon embedded)"; \
-      else \
-          $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
-      fi; \
+	    $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
 	else \
 	    echo "WARNING: elf2atxf not found at $(ELF2ATXF); skipping ATXF conversion"; \
 	fi

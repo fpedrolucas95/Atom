@@ -8,7 +8,7 @@
 // - .data section (initialized data, writable)
 // - .bss size (zero-initialized data, writable)
 //
-// Usage: elf2atxf [--icon <icon.svg>] <input.elf> <output.atxf>
+// Usage: elf2atxf <input.elf> <output.atxf>
 
 use std::env;
 use std::fs::{self, File};
@@ -16,7 +16,6 @@ use std::io::{self, Write};
 
 const ATXF_MAGIC: u32 = 0x4154_5846; // "ATXF" in ASCII, little-endian
 const ATXF_VERSION: u16 = 1;
-const ATXF_ICON_MAGIC: u32 = 0x4154_5849; // "ATXI" in ASCII, little-endian
 const PAGE_SIZE: usize = 4096;
 const USER_BASE: u64 = 0x800000; // Expected userspace load address (must be above kernel heap)
 
@@ -107,25 +106,10 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let mut icon_path: Option<String> = None;
-    let mut positional: Vec<String> = Vec::new();
-    let mut i = 1usize;
-    while i < args.len() {
-        if args[i] == "--icon" {
-            if i + 1 >= args.len() {
-                eprintln!("Error: --icon requires a file path");
-                std::process::exit(1);
-            }
-            icon_path = Some(args[i + 1].clone());
-            i += 2;
-        } else {
-            positional.push(args[i].clone());
-            i += 1;
-        }
-    }
+    let positional: Vec<String> = args[1..].to_vec();
 
     if positional.len() != 2 {
-        eprintln!("Usage: {} [--icon <icon.svg>] <input.elf> <output.atxf>", args[0]);
+        eprintln!("Usage: {} <input.elf> <output.atxf>", args[0]);
         eprintln!();
         eprintln!("Convert ELF binary to Atom ATXF executable format.");
         eprintln!();
@@ -357,24 +341,11 @@ fn main() -> io::Result<()> {
         output.write_all(&data_data)?;
     }
 
-    let mut total_size = if data_size > 0 {
+    let total_size = if data_size > 0 {
         data_offset + data_size
     } else {
         text_offset + text_size
     };
-
-    // Optional embedded icon payload trailer:
-    // [icon bytes][icon_len:le u32][magic:le u32="ATXI"]
-    if let Some(icon_path) = icon_path.as_deref() {
-        let icon = fs::read(icon_path)?;
-        if !icon.is_empty() {
-            output.write_all(&icon)?;
-            output.write_all(&(icon.len() as u32).to_le_bytes())?;
-            output.write_all(&ATXF_ICON_MAGIC.to_le_bytes())?;
-            total_size += icon.len() + 8;
-            println!("  Icon:         embedded={} bytes ({})", icon.len(), icon_path);
-        }
-    }
 
     println!();
     println!("ATXF created successfully:");

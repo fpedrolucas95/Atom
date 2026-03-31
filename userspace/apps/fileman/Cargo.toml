@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
-libsvg = { path = "../../libs/libsvg" }
 atom_abi = { path = "../../libs/syscall/../syscall/../../../shared/abi" }
 libipc = { path = "../../libs/libipc" }
 

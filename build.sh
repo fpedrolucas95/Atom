@@ -302,39 +302,6 @@ if [ "$KERNEL_ONLY" != true ]; then
         exit 1
     fi
 
-    # -------------------------------------------------------------------------
-    # Build libxml2 (C XML library)
-    # Output → userspace/libs/libxml2/build/libxml2_atom.a
-    # -------------------------------------------------------------------------
-    step "Building libxml2 (C XML library)..."
-
-    if [ -f "userspace/libs/libxml2/Makefile" ]; then
-        if make -C userspace/libs/libxml2 2>build/libxml2.log; then
-            success "libxml2_atom.a built"
-        else
-            warning "libxml2 build failed (see build/libxml2.log)"
-            cat build/libxml2.log
-        fi
-    else
-        warning "userspace/libs/libxml2/Makefile not found, skipping libxml2 build"
-    fi
-
-    # -------------------------------------------------------------------------
-    # Build libsvg (ravhed/libsvg)
-    # Output → userspace/libs/libsvg_c/build/libsvg_atom.a
-    # -------------------------------------------------------------------------
-    step "Building libsvg (ravhed/libsvg)..."
-
-    if [ -f "userspace/libs/libsvg_c/Makefile" ]; then
-        if make -C userspace/libs/libsvg_c 2>build/libsvg.log; then
-            success "libsvg_atom.a built"
-        else
-            warning "libsvg build failed (see build/libsvg.log)"
-            cat build/libsvg.log
-        fi
-    else
-        warning "userspace/libs/libsvg_c/Makefile not found, skipping libsvg build"
-    fi
 
     # -------------------------------------------------------------------------
     # Build system apps (ui_shell, display, keyboard, mouse, terminal, …)
@@ -363,18 +330,10 @@ if [ "$KERNEL_ONLY" != true ]; then
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
             atxf_path="efi/apps/system/${app}.atxf"
-            icon_path="$app_path/ico.svg"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
-                if [ -f "$icon_path" ]; then
-                    if "$ELF2ATXF" --icon "$icon_path" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
-                        success "$app.atxf → apps/system/ (icon embedded)"
-                    else
-                        warning "Failed to convert $app to ATXF"
-                        cat build/elf2atxf_$app.log
-                    fi
-                elif "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
                     success "$app.atxf → apps/system/"
                 else
                     warning "Failed to convert $app to ATXF"
@@ -520,44 +479,6 @@ if [ "$KERNEL_ONLY" != true ]; then
     fi
 
     # -------------------------------------------------------------------------
-    # Build doom (port do Doom clássico via doomgeneric + TinyGL)
-    # Depends on libc + libtinygl; requer doomgeneric_src clonado separadamente.
-    # Output → efi/apps/user/
-    # -------------------------------------------------------------------------
-    step "Building doom (Doom clássico via doomgeneric)..."
-
-    if [ -f "userspace/apps/doom/Makefile" ]; then
-        if [ -d "userspace/libs/doomgeneric_src/doomgeneric" ]; then
-            if make -C userspace/apps/doom ELF2ATXF="../../../$ELF2ATXF" 2>build/doom.log; then
-                if [ -f "userspace/apps/doom/doom.atxf" ]; then
-                    mkdir -p efi/apps/user
-                    cp userspace/apps/doom/doom.atxf efi/apps/user/doom.atxf
-                    success "doom.atxf → apps/user/"
-                    warning "Coloque doom1.wad ou doom.wad em efi/apps/user/ para jogar"
-                else
-                    warning "doom.atxf não gerado (elf2atxf pode estar ausente)"
-                fi
-            else
-                warning "Falha ao compilar doom (veja build/doom.log)"
-                cat build/doom.log
-            fi
-        else
-            warning "doomgeneric_src não encontrado — pulando build do Doom"
-            warning "  Clone com: git clone https://github.com/ozkl/doomgeneric userspace/libs/doomgeneric_src"
-        fi
-    else
-        warning "userspace/apps/doom/Makefile não encontrado, pulando"
-    fi
-
-    if [ ! -f "efi/apps/user/doom1.wad" ]; then
-        if [ -f "Doom1.WAD" ]; then
-            cp Doom1.WAD efi/apps/user/doom1.wad
-            success "doom1.wad restaurado de Doom1.WAD"
-        else
-            warning "doom1.wad não encontrado em efi/apps/user/ nem na raiz — coloque o WAD em efi/apps/user/doom1.wad"
-        fi
-    fi
-    # -------------------------------------------------------------------------
     # Build user applications and convert to ATXF
     # Output → efi/apps/user/
     # -------------------------------------------------------------------------
@@ -584,18 +505,10 @@ if [ "$KERNEL_ONLY" != true ]; then
 
             elf_path="$app_path/target/x86_64-unknown-none/release/$bin_name"
             atxf_path="efi/apps/user/${app}.atxf"
-            icon_path="$app_path/ico.svg"
 
             if [ -f "$elf_path" ]; then
                 step "  Converting $app to ATXF..."
-                if [ -f "$icon_path" ]; then
-                    if "$ELF2ATXF" --icon "$icon_path" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
-                        success "$app.atxf → apps/user/ (icon embedded)"
-                    else
-                        warning "Failed to convert $app to ATXF"
-                        cat build/elf2atxf_$app.log
-                    fi
-                elif "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
+                if "$ELF2ATXF" "$elf_path" "$atxf_path" 2>build/elf2atxf_$app.log; then
                     success "$app.atxf → apps/user/"
                 else
                     warning "Failed to convert $app to ATXF"
