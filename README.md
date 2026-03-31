@@ -55,14 +55,12 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 - **TinyGL** — software OpenGL 1.1 rendering (port of TinyGL 0.4.1) as a freestanding static library with a custom blit bridge converting RGB565 to compositor ARGB32 surfaces
 - **libgui** — Rust library for window creation, drawing primitives (rounded rectangles, alpha blending, soft shadows), and event handling via IPC
 - **libipc** — Rust IPC wrapper for user-space services
-- **SVG rasterizer** — minimal no_std SVG renderer supporting rect, circle, ellipse, polygon, polyline, line, path (M/L/H/V/Z/C/S/Q/A), fill/stroke, group transforms, CSS class selectors, and named color parsing
 - **atom_abi** — shared crate defining syscall numbers, constants, and types as a single source of truth between kernel and user space
 
 ### Desktop Environment
 
 - Compositor with shared-surface windowing, Z-order management, and graceful window shutdown (PendingClose state)
 - Pill-shaped dock, circular window controls, centered window titles, active application indicator dots
-- SVG icons throughout the interface
 
 ---
 

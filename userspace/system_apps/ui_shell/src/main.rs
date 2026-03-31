@@ -9,10 +9,6 @@ extern crate alloc;
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-mod svg;
-
-use svg::SvgBitmap;
-
 struct BumpAllocator {
     start: AtomicUsize,
     size: AtomicUsize,
@@ -550,7 +546,6 @@ struct DesktopIcon {
     x: i32,
     y: i32,
     color: Color,
-    svg_bitmap: Option<SvgBitmap>,
 }
 
 struct DockApp {
@@ -558,7 +553,6 @@ struct DockApp {
     executable: String,
     color: Color,
     monogram: String,
-    svg_bitmap: Option<SvgBitmap>,
 }
 
 struct ContextMenu {
@@ -643,24 +637,21 @@ impl Compositor {
             executable: String::from("fileman"),
             x: 28,
             y: PANEL_HEIGHT as i32 + 28,
-            color: atom_theme::colors::ATOM_COLOR_ACCENT_GLOW, // DS: accent blue
-            svg_bitmap: Self::load_icon_bitmap("fileman", atom_theme::shell::DOCK_ITEM_SIZE),
+            color: atom_theme::colors::ATOM_COLOR_ACCENT_GLOW,
         });
         icons.push(DesktopIcon {
             label: String::from("Rectangles"),
             executable: String::from("demo_rects"),
             x: 28,
             y: PANEL_HEIGHT as i32 + 120,
-            color: atom_theme::colors::ATOM_COLOR_ACCENT, // DS: accent
-            svg_bitmap: Self::load_icon_bitmap("demo_rects", atom_theme::shell::DOCK_ITEM_SIZE),
+            color: atom_theme::colors::ATOM_COLOR_ACCENT,
         });
         icons.push(DesktopIcon {
             label: String::from("Text"),
             executable: String::from("demo_text"),
             x: 28,
             y: PANEL_HEIGHT as i32 + 212,
-            color: atom_theme::colors::ATOM_COLOR_SUCCESS, // DS: success green
-            svg_bitmap: Self::load_icon_bitmap("demo_text", atom_theme::shell::DOCK_ITEM_SIZE),
+            color: atom_theme::colors::ATOM_COLOR_SUCCESS,
         });
 
         let dock_apps = Self::build_dock_apps();
@@ -1665,55 +1656,23 @@ impl Compositor {
         Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
     }
 
-    /// Load the embedded SVG icon from an ATXF file for the given executable name,
-    /// render it at `size`×`size` pixels, and return the bitmap (or None).
-    fn load_icon_bitmap(exec: &str, size: u32) -> Option<SvgBitmap> {
-        let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
-        let user_path = alloc::format!("/apps/user/{}.atxf", exec);
-        let path = if fs::stat(&sys_path).is_ok() { sys_path }
-                   else if fs::stat(&user_path).is_ok() { user_path }
-                   else { return None; };
-        let atxf_bytes = fs::read_file(&path).ok()?;
-        let icon_svg = Self::extract_embedded_icon_svg(&atxf_bytes)?;
-        SvgBitmap::render(icon_svg, size, size)
-    }
-
     fn build_dock_apps() -> Vec<DockApp> {
-        let candidates: [(&str, &str, Color); 5] = [
-            ("fileman",          "Files",    atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),   // DS: accent glow
-            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),        // DS: accent
-            ("tinygl_demo",      "TinyGL",   atom_theme::colors::ATOM_COLOR_SUCCESS),       // DS: success green
-            ("doom",             "Doom",     atom_theme::colors::ATOM_COLOR_ERROR),         // DS: error red
-            ("terminal",         "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),// DS: gradient violet
+        let candidates: [(&str, &str, Color); 4] = [
+            ("fileman",          "Files",    atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),
+            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
+            ("tinygl_demo",      "TinyGL",   atom_theme::colors::ATOM_COLOR_SUCCESS),
+            ("terminal",         "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),
         ];
 
         let mut apps = Vec::new();
 
-        for (exec, label, fallback_color) in candidates.iter() {
+        for (exec, label, color) in candidates.iter() {
             let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
             let user_path = alloc::format!("/apps/user/{}.atxf", exec);
 
-            let atxf_path = if fs::stat(&sys_path).is_ok() {
-                Some(sys_path)
-            } else if fs::stat(&user_path).is_ok() {
-                Some(user_path)
-            } else {
-                None
-            };
+            let exists = fs::stat(&sys_path).is_ok() || fs::stat(&user_path).is_ok();
 
-            if let Some(path) = atxf_path {
-                let mut color = *fallback_color;
-                let mut svg_bitmap: Option<SvgBitmap> = None;
-
-                if let Ok(atxf_bytes) = fs::read_file(&path) {
-                    if let Some(icon_svg) = Self::extract_embedded_icon_svg(&atxf_bytes) {
-                        if let Some(icon_color) = Self::extract_first_hex_color(icon_svg) {
-                            color = icon_color;
-                        }
-                        svg_bitmap = SvgBitmap::render(icon_svg, atom_theme::shell::DOCK_ITEM_SIZE, atom_theme::shell::DOCK_ITEM_SIZE);
-                    }
-                }
-
+            if exists {
                 let mono = if exec.len() >= 2 {
                     alloc::format!(
                         "{}{}",
@@ -1727,86 +1686,13 @@ impl Compositor {
                 apps.push(DockApp {
                     label: String::from(*label),
                     executable: String::from(*exec),
-                    color,
+                    color: *color,
                     monogram: mono,
-                    svg_bitmap,
                 });
             }
         }
 
         apps
-    }
-
-    fn extract_embedded_icon_svg(atxf: &[u8]) -> Option<&[u8]> {
-        if atxf.len() < 8 {
-            return None;
-        }
-
-        let trailer_start = atxf.len() - 8;
-        let icon_len = u32::from_le_bytes([
-            atxf[trailer_start],
-            atxf[trailer_start + 1],
-            atxf[trailer_start + 2],
-            atxf[trailer_start + 3],
-        ]) as usize;
-        let magic = u32::from_le_bytes([
-            atxf[trailer_start + 4],
-            atxf[trailer_start + 5],
-            atxf[trailer_start + 6],
-            atxf[trailer_start + 7],
-        ]);
-
-        const ATXF_ICON_MAGIC: u32 = 0x4154_5849; // "ATXI"
-        if magic != ATXF_ICON_MAGIC || icon_len > trailer_start {
-            return None;
-        }
-
-        let icon_start = trailer_start - icon_len;
-        Some(&atxf[icon_start..trailer_start])
-    }
-
-    fn extract_first_hex_color(svg: &[u8]) -> Option<Color> {
-        let mut best: Option<Color> = None;
-        let mut best_score: i32 = -1;
-        let mut i = 0usize;
-        while i + 7 <= svg.len() {
-            if svg[i] == b'#' {
-                if let (Some(h1), Some(h2), Some(h3), Some(h4), Some(h5), Some(h6)) = (
-                    Self::hex_nibble(svg[i + 1]),
-                    Self::hex_nibble(svg[i + 2]),
-                    Self::hex_nibble(svg[i + 3]),
-                    Self::hex_nibble(svg[i + 4]),
-                    Self::hex_nibble(svg[i + 5]),
-                    Self::hex_nibble(svg[i + 6]),
-                ) {
-                    let r = (h1 << 4) | h2;
-                    let g = (h3 << 4) | h4;
-                    let b = (h5 << 4) | h6;
-                    let maxc = r.max(g).max(b) as i32;
-                    let minc = r.min(g).min(b) as i32;
-                    let sat = maxc - minc;
-                    let lum = maxc + minc;
-                    if sat >= 18 {
-                        let score = sat * 4 + maxc - (lum - 255).abs() / 2;
-                        if score > best_score {
-                            best_score = score;
-                            best = Some(Color::new(r, g, b));
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-        best
-    }
-
-    fn hex_nibble(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(10 + b - b'a'),
-            b'A'..=b'F' => Some(10 + b - b'A'),
-            _ => None,
-        }
     }
 
     fn spawn_app(&mut self, name: &str) {
@@ -2027,11 +1913,7 @@ impl Compositor {
             let icon_x = ix + (size - icon_size) / 2;
             let icon_y = iy + (size - icon_size) / 2 - 2;
 
-            if let Some(ref bm) = icon.svg_bitmap {
-                bm.blit_fb(&self.backbuffer_fb, icon_x, icon_y);
-            } else {
-                self.backbuffer_fb.fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
-            }
+            self.backbuffer_fb.fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
 
             // Label below icon (centered)
             let label_len = icon.label.len() as u32 * 8;
@@ -2202,16 +2084,10 @@ impl Compositor {
         for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
 
-            if let Some(ref bm) = app.svg_bitmap {
-                // Render only the icon (no background box)
-                bm.blit_fb(&self.backbuffer_fb, ix, icon_y);
-            } else {
-                // Fallback: monogram text
-                let label_len = app.monogram.len() as u32 * 8;
-                let lx = ix + (icon_size - label_len) / 2;
-                let ly = icon_y + (icon_size - 8) / 2;
-                self.backbuffer_fb.draw_string(lx, ly, &app.monogram, app.color, theme::DOCK_BG);
-            }
+            let label_len = app.monogram.len() as u32 * 8;
+            let lx = ix + (icon_size - label_len) / 2;
+            let ly = icon_y + (icon_size - 8) / 2;
+            self.backbuffer_fb.draw_string(lx, ly, &app.monogram, app.color, theme::DOCK_BG);
 
             // Active indicator dot for running apps
             if self.wm.windows.iter().any(|w| w.title == app.label && w.visible) {
