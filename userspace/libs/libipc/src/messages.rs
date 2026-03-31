@@ -469,6 +469,16 @@ pub enum MessageType {
     AppLaunchRequest = 1200,
     /// Response from app_launcher back to the requesting process.
     AppLaunchReply = 1201,
+
+    // Display Settings Protocol (1300-1399)
+    /// Request to open Display Settings in a specific tab
+    OpenInTab = 1300,
+    /// Request to apply wallpaper configuration
+    ApplyWallpaper = 1301,
+    /// Notification that wallpaper was applied successfully
+    WallpaperApplied = 1302,
+    /// Notification that wallpaper application failed
+    WallpaperFailed = 1303,
 }
 
 impl MessageType {
@@ -591,6 +601,11 @@ impl MessageType {
             // App Launcher Protocol
             1200 => Some(Self::AppLaunchRequest),
             1201 => Some(Self::AppLaunchReply),
+            // Display Settings Protocol
+            1300 => Some(Self::OpenInTab),
+            1301 => Some(Self::ApplyWallpaper),
+            1302 => Some(Self::WallpaperApplied),
+            1303 => Some(Self::WallpaperFailed),
             _ => None,
         }
     }
@@ -1734,5 +1749,275 @@ impl AppLaunchReplyMsg {
         let mut err_msg = [0u8; APP_LAUNCH_ERR_MSG_MAX];
         err_msg.copy_from_slice(&bytes[16..16 + APP_LAUNCH_ERR_MSG_MAX]);
         Some(Self { status, pid, err_msg_len, err_msg })
+    }
+}
+// ============================================================================
+// Display Settings Protocol (1300-1399)
+// ============================================================================
+
+/// Wallpaper source type for Display Settings
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WallpaperSourceType {
+    Image = 0,
+    SolidColor = 1,
+}
+
+impl WallpaperSourceType {
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Image),
+            1 => Some(Self::SolidColor),
+            _ => None,
+        }
+    }
+
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::Image => "Image",
+            Self::SolidColor => "SolidColor",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "Image" => Some(Self::Image),
+            "SolidColor" => Some(Self::SolidColor),
+            _ => None,
+        }
+    }
+}
+
+/// Scaling mode for wallpaper images
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScalingMode {
+    Fill = 0,
+    Fit = 1,
+    Stretch = 2,
+    Center = 3,
+    Tile = 4,
+}
+
+impl ScalingMode {
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Fill),
+            1 => Some(Self::Fit),
+            2 => Some(Self::Stretch),
+            3 => Some(Self::Center),
+            4 => Some(Self::Tile),
+            _ => None,
+        }
+    }
+
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::Fill => "Fill",
+            Self::Fit => "Fit",
+            Self::Stretch => "Stretch",
+            Self::Center => "Center",
+            Self::Tile => "Tile",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "Fill" => Some(Self::Fill),
+            "Fit" => Some(Self::Fit),
+            "Stretch" => Some(Self::Stretch),
+            "Center" => Some(Self::Center),
+            "Tile" => Some(Self::Tile),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Display Settings Protocol Messages (1300-1399)
+// ============================================================================
+
+/// Request to open Display Settings in a specific tab
+#[derive(Debug, Clone)]
+pub struct OpenInTabMsg {
+    pub target_app: String,
+    pub tab_name: String,
+}
+
+impl OpenInTabMsg {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let target_bytes = self.target_app.as_bytes();
+        let tab_bytes = self.tab_name.as_bytes();
+        
+        bytes.extend_from_slice(&(target_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(target_bytes);
+        bytes.extend_from_slice(&(tab_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(tab_bytes);
+        bytes
+    }
+    
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 8 {
+            return None;
+        }
+        
+        let target_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        if bytes.len() < 4 + target_len + 4 {
+            return None;
+        }
+        
+        let target_app = core::str::from_utf8(&bytes[4..4 + target_len]).ok()?;
+        
+        let tab_len_offset = 4 + target_len;
+        let tab_len = u32::from_le_bytes([
+            bytes[tab_len_offset],
+            bytes[tab_len_offset + 1],
+            bytes[tab_len_offset + 2],
+            bytes[tab_len_offset + 3],
+        ]) as usize;
+        
+        if bytes.len() < tab_len_offset + 4 + tab_len {
+            return None;
+        }
+        
+        let tab_name = core::str::from_utf8(&bytes[tab_len_offset + 4..tab_len_offset + 4 + tab_len]).ok()?;
+        
+        Some(Self {
+            target_app: String::from(target_app),
+            tab_name: String::from(tab_name),
+        })
+    }
+}
+
+/// Request to apply wallpaper configuration
+#[derive(Debug, Clone)]
+pub struct ApplyWallpaperMsg {
+    pub source_type: WallpaperSourceType,
+    pub image_path: Option<String>,
+    pub color_rgb: Option<u32>,
+    pub scaling_mode: ScalingMode,
+}
+
+impl ApplyWallpaperMsg {
+    pub const MAX_PATH_LEN: usize = 256;
+    
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(self.source_type.to_u8());
+        bytes.push(self.scaling_mode.to_u8());
+        
+        match self.source_type {
+            WallpaperSourceType::Image => {
+                let path = self.image_path.as_ref().expect("Image source requires path");
+                let path_bytes = path.as_bytes();
+                bytes.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(path_bytes);
+            }
+            WallpaperSourceType::SolidColor => {
+                let rgb = self.color_rgb.expect("SolidColor source requires RGB");
+                bytes.extend_from_slice(&rgb.to_le_bytes());
+            }
+        }
+        bytes
+    }
+    
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 2 {
+            return None;
+        }
+        
+        let source_type = WallpaperSourceType::from_u8(bytes[0])?;
+        let scaling_mode = ScalingMode::from_u8(bytes[1])?;
+        
+        let (image_path, color_rgb) = match source_type {
+            WallpaperSourceType::Image => {
+                if bytes.len() < 6 {
+                    return None;
+                }
+                let path_len = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+                if path_len > Self::MAX_PATH_LEN {
+                    return None;
+                }
+                if bytes.len() < 6 + path_len {
+                    return None;
+                }
+                let path = core::str::from_utf8(&bytes[6..6 + path_len]).ok()?;
+                (Some(String::from(path)), None)
+            }
+            WallpaperSourceType::SolidColor => {
+                if bytes.len() < 6 {
+                    return None;
+                }
+                let rgb = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+                (None, Some(rgb))
+            }
+        };
+        
+        Some(Self {
+            source_type,
+            image_path,
+            color_rgb,
+            scaling_mode,
+        })
+    }
+}
+
+/// Notification that wallpaper was applied successfully
+#[derive(Debug, Clone, Copy)]
+pub struct WallpaperAppliedMsg {
+    // Empty payload - just acknowledgment
+}
+
+impl WallpaperAppliedMsg {
+    pub const SIZE: usize = 0;
+    
+    pub fn to_bytes(&self) -> [u8; 0] {
+        []
+    }
+    
+    pub fn from_bytes(_bytes: &[u8]) -> Option<Self> {
+        Some(Self {})
+    }
+}
+
+/// Notification that wallpaper application failed
+#[derive(Debug, Clone)]
+pub struct WallpaperFailedMsg {
+    pub error_message: String,
+}
+
+impl WallpaperFailedMsg {
+    pub const MAX_ERROR_LEN: usize = 128;
+    
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let msg_bytes = self.error_message.as_bytes();
+        let len = msg_bytes.len().min(Self::MAX_ERROR_LEN);
+        bytes.extend_from_slice(&(len as u32).to_le_bytes());
+        bytes.extend_from_slice(&msg_bytes[..len]);
+        bytes
+    }
+    
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        if bytes.len() < 4 + len {
+            return None;
+        }
+        let msg = core::str::from_utf8(&bytes[4..4 + len]).ok()?;
+        Some(Self {
+            error_message: String::from(msg),
+        })
     }
 }

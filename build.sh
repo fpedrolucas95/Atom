@@ -254,13 +254,6 @@ restore_submodule \
     "userspace/libs/tinygl_src/src/api.c" \
     "e94a97bd"
 
-restore_submodule \
-    "doomgeneric_src" \
-    "userspace/libs/doomgeneric_src" \
-    "https://github.com/ozkl/doomgeneric" \
-    "userspace/libs/doomgeneric_src/doomgeneric" \
-    "1dcb7bd3"
-
 # =========================================================================
 # BUILD USERSPACE TOOLS AND DRIVERS
 # =========================================================================
@@ -680,6 +673,7 @@ mmd -i $DISK_IMG ::/EFI/BOOT
 # ---- OS partition directories ----
 mmd -i $DISK_IMG ::/system
 mmd -i $DISK_IMG ::/system/services
+mmd -i $DISK_IMG ::/system/wallpapers
 mmd -i $DISK_IMG ::/apps
 mmd -i $DISK_IMG ::/apps/system
 mmd -i $DISK_IMG ::/apps/user
@@ -708,6 +702,21 @@ fi
 # ---- User apps → /apps/user/ ----
 if ls efi/apps/user/*.atxf 1>/dev/null 2>&1; then
     mcopy -i $DISK_IMG efi/apps/user/*.atxf ::/apps/user/
+fi
+
+# ---- Wallpaper images → /system/wallpapers/ ----
+if ls userspace/system_apps/ui_shell/img/*.jpg 1>/dev/null 2>&1; then
+    for img in userspace/system_apps/ui_shell/img/*.jpg; do
+        mcopy -i $DISK_IMG "$img" ::/system/wallpapers/
+        success "$(basename $img) → system/wallpapers/"
+    done
+fi
+
+if ls userspace/system_apps/ui_shell/img/*.jpeg 1>/dev/null 2>&1; then
+    for img in userspace/system_apps/ui_shell/img/*.jpeg; do
+        mcopy -i $DISK_IMG "$img" ::/system/wallpapers/
+        success "$(basename $img) → system/wallpapers/"
+    done
 fi
 
 # ---- User data files (WADs, etc.) → /apps/user/ ----

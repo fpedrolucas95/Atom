@@ -10,6 +10,7 @@ description = "Atom OS Display Settings - System configuration UI for screen res
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
+libimage = { path = "../../libs/libimage" }
 
 [[bin]]
 name = "display_settings"

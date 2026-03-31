@@ -564,20 +564,359 @@ struct ContextMenu {
     items: Vec<String>,
 }
 
-struct WallpaperInfo {
-    name: String,
-    path: String,
+// ============================================================================
+// Desktop Configuration Structures (Task 1.3)
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WallpaperSourceType {
+    Image,
+    SolidColor,
 }
 
-struct WallpaperPicker {
-    visible: bool,
-    x: i32,
-    y: i32,
+impl WallpaperSourceType {
+    fn to_str(self) -> &'static str {
+        match self {
+            Self::Image => "Image",
+            Self::SolidColor => "SolidColor",
+        }
+    }
+    
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "Image" => Some(Self::Image),
+            "SolidColor" => Some(Self::SolidColor),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScalingMode {
+    Fill,
+    Fit,
+    Stretch,
+    Center,
+    Tile,
+}
+
+impl ScalingMode {
+    fn to_str(self) -> &'static str {
+        match self {
+            Self::Fill => "Fill",
+            Self::Fit => "Fit",
+            Self::Stretch => "Stretch",
+            Self::Center => "Center",
+            Self::Tile => "Tile",
+        }
+    }
+    
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "Fill" => Some(Self::Fill),
+            "Fit" => Some(Self::Fit),
+            "Stretch" => Some(Self::Stretch),
+            "Center" => Some(Self::Center),
+            "Tile" => Some(Self::Tile),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WallpaperConfig {
+    source_type: WallpaperSourceType,
+    image_path: Option<String>,
+    color_rgb: Option<u32>,
+    scaling_mode: ScalingMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolutionConfig {
     width: u32,
     height: u32,
-    colors: Vec<Color>,
-    wallpapers: Vec<WallpaperInfo>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopConfig {
+    wallpaper: WallpaperConfig,
+    resolution: ResolutionConfig,
+}
+
+#[derive(Debug)]
+enum ParseError {
+    InvalidJson,
+    MissingField(&'static str),
+    InvalidFieldValue(&'static str),
+}
+
+#[derive(Debug)]
+enum ValidationError {
+    InvalidResolution,
+    MissingImagePath,
+    EmptyImagePath,
+    InvalidImageExtension,
+    MissingColorRgb,
+}
+
+impl DesktopConfig {
+    fn to_json(&self) -> Result<String, ()> {
+        let mut json = String::from("{\n");
+        
+        // Wallpaper section
+        json.push_str("  \"wallpaper\": {\n");
+        json.push_str("    \"source_type\": \"");
+        json.push_str(self.wallpaper.source_type.to_str());
+        json.push_str("\",\n");
+        
+        match self.wallpaper.source_type {
+            WallpaperSourceType::Image => {
+                if let Some(ref path) = self.wallpaper.image_path {
+                    json.push_str("    \"image_path\": \"");
+                    // Escape special characters
+                    for ch in path.chars() {
+                        match ch {
+                            '"' => json.push_str("\\\""),
+                            '\\' => json.push_str("\\\\"),
+                            '\n' => json.push_str("\\n"),
+                            '\r' => json.push_str("\\r"),
+                            '\t' => json.push_str("\\t"),
+                            _ => json.push(ch),
+                        }
+                    }
+                    json.push_str("\",\n");
+                }
+            }
+            WallpaperSourceType::SolidColor => {
+                if let Some(rgb) = self.wallpaper.color_rgb {
+                    json.push_str("    \"color_rgb\": ");
+                    json.push_str(&format_u32(rgb));
+                    json.push_str(",\n");
+                }
+            }
+        }
+        
+        json.push_str("    \"scaling_mode\": \"");
+        json.push_str(self.wallpaper.scaling_mode.to_str());
+        json.push_str("\"\n");
+        json.push_str("  },\n");
+        
+        // Resolution section
+        json.push_str("  \"resolution\": {\n");
+        json.push_str("    \"width\": ");
+        json.push_str(&format_u32(self.resolution.width));
+        json.push_str(",\n");
+        json.push_str("    \"height\": ");
+        json.push_str(&format_u32(self.resolution.height));
+        json.push_str("\n");
+        json.push_str("  }\n");
+        json.push_str("}");
+        
+        Ok(json)
+    }
+    
+    fn from_json(json: &str) -> Result<Self, ParseError> {
+        // Simple JSON parser for no_std environment
+        let json = json.trim();
+        
+        // Extract wallpaper section
+        let wallpaper_start = json.find("\"wallpaper\"")
+            .ok_or(ParseError::MissingField("wallpaper"))?;
+        let wallpaper_obj_start = json[wallpaper_start..].find('{')
+            .ok_or(ParseError::InvalidJson)?;
+        
+        // Extract source_type
+        let source_type_str = extract_string_field(json, "source_type")
+            .ok_or(ParseError::MissingField("source_type"))?;
+        let source_type = WallpaperSourceType::from_str(&source_type_str)
+            .ok_or(ParseError::InvalidFieldValue("source_type"))?;
+        
+        // Extract scaling_mode
+        let scaling_mode_str = extract_string_field(json, "scaling_mode")
+            .ok_or(ParseError::MissingField("scaling_mode"))?;
+        let scaling_mode = ScalingMode::from_str(&scaling_mode_str)
+            .ok_or(ParseError::InvalidFieldValue("scaling_mode"))?;
+        
+        // Extract conditional fields
+        let image_path = match source_type {
+            WallpaperSourceType::Image => {
+                let path = extract_string_field(json, "image_path")
+                    .ok_or(ParseError::MissingField("image_path"))?;
+                if path.is_empty() {
+                    return Err(ParseError::InvalidFieldValue("image_path"));
+                }
+                Some(path)
+            }
+            WallpaperSourceType::SolidColor => None,
+        };
+        
+        let color_rgb = match source_type {
+            WallpaperSourceType::SolidColor => {
+                let rgb = extract_number_field(json, "color_rgb")
+                    .ok_or(ParseError::MissingField("color_rgb"))?;
+                Some(rgb)
+            }
+            WallpaperSourceType::Image => None,
+        };
+        
+        // Extract resolution section
+        let width = extract_number_field(json, "width")
+            .ok_or(ParseError::MissingField("width"))?;
+        let height = extract_number_field(json, "height")
+            .ok_or(ParseError::MissingField("height"))?;
+        
+        let config = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type,
+                image_path,
+                color_rgb,
+                scaling_mode,
+            },
+            resolution: ResolutionConfig {
+                width,
+                height,
+            },
+        };
+        
+        // Validate
+        config.validate().map_err(|_| ParseError::InvalidFieldValue("validation"))?;
+        
+        Ok(config)
+    }
+    
+    fn validate(&self) -> Result<(), ValidationError> {
+        // Validate resolution bounds
+        if self.resolution.width < 640 || self.resolution.width > 1920 {
+            return Err(ValidationError::InvalidResolution);
+        }
+        if self.resolution.height < 480 || self.resolution.height > 1080 {
+            return Err(ValidationError::InvalidResolution);
+        }
+        
+        // Validate wallpaper config consistency
+        match self.wallpaper.source_type {
+            WallpaperSourceType::Image => {
+                if self.wallpaper.image_path.is_none() {
+                    return Err(ValidationError::MissingImagePath);
+                }
+                let path = self.wallpaper.image_path.as_ref().unwrap();
+                if path.is_empty() {
+                    return Err(ValidationError::EmptyImagePath);
+                }
+                let lower = path.to_lowercase();
+                if !lower.ends_with(".jpg") && !lower.ends_with(".jpeg") {
+                    return Err(ValidationError::InvalidImageExtension);
+                }
+            }
+            WallpaperSourceType::SolidColor => {
+                if self.wallpaper.color_rgb.is_none() {
+                    return Err(ValidationError::MissingColorRgb);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+// Helper functions for JSON parsing
+fn extract_string_field(json: &str, field_name: &str) -> Option<String> {
+    let pattern = alloc::format!("\"{}\"", field_name);
+    let field_start = json.find(&pattern)?;
+    let after_field = &json[field_start + pattern.len()..];
+    let colon_pos = after_field.find(':')?;
+    let after_colon = after_field[colon_pos + 1..].trim_start();
+    
+    if !after_colon.starts_with('"') {
+        return None;
+    }
+    
+    let value_start = 1;
+    let mut value_end = value_start;
+    let chars: Vec<char> = after_colon.chars().collect();
+    
+    while value_end < chars.len() {
+        if chars[value_end] == '\\' && value_end + 1 < chars.len() {
+            value_end += 2;
+            continue;
+        }
+        if chars[value_end] == '"' {
+            break;
+        }
+        value_end += 1;
+    }
+    
+    if value_end >= chars.len() {
+        return None;
+    }
+    
+    let value: String = chars[value_start..value_end].iter().collect();
+    Some(value)
+}
+
+fn extract_number_field(json: &str, field_name: &str) -> Option<u32> {
+    let pattern = alloc::format!("\"{}\"", field_name);
+    let field_start = json.find(&pattern)?;
+    let after_field = &json[field_start + pattern.len()..];
+    let colon_pos = after_field.find(':')?;
+    let after_colon = after_field[colon_pos + 1..].trim_start();
+    
+    let mut num_str = String::new();
+    for ch in after_colon.chars() {
+        if ch.is_ascii_digit() {
+            num_str.push(ch);
+        } else {
+            break;
+        }
+    }
+    
+    parse_u32(&num_str)
+}
+
+fn format_u32(n: u32) -> String {
+    if n == 0 {
+        return String::from("0");
+    }
+    
+    let mut result = String::new();
+    let mut num = n;
+    let mut digits = Vec::new();
+    
+    while num > 0 {
+        digits.push((num % 10) as u8 + b'0');
+        num /= 10;
+    }
+    
+    for &digit in digits.iter().rev() {
+        result.push(digit as char);
+    }
+    
+    result
+}
+
+fn parse_u32(s: &str) -> Option<u32> {
+    if s.is_empty() {
+        return None;
+    }
+    
+    let mut result: u32 = 0;
+    for ch in s.chars() {
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        let digit = (ch as u8 - b'0') as u32;
+        result = result.checked_mul(10)?;
+        result = result.checked_add(digit)?;
+    }
+    
+    Some(result)
+}
+
+// ============================================================================
+// End Desktop Configuration Structures
+// ============================================================================
+
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragOperation {
@@ -622,7 +961,6 @@ struct Compositor {
     last_click_tick: u32,
     last_click_icon: Option<usize>,
     context_menu: ContextMenu,
-    wallpaper_picker: WallpaperPicker,
     current_wallpaper: Option<Arc<libimage::DecodedImage>>,
     scaled_wallpaper: Option<libimage::DecodedImage>,
     image_cache: libimage::ImageCache,
@@ -712,26 +1050,6 @@ impl Compositor {
                     v.push(String::from("Change Wallpaper"));
                     v
                 },
-            },
-            wallpaper_picker: WallpaperPicker {
-                visible: false,
-                x: (width as i32 - 340) / 2,
-                y: (height as i32 - 240) / 2,
-                width: 340,
-                height: 240,
-                colors: {
-                    let mut v = Vec::new();
-                    v.push(Color::new(18, 20, 28));   // Deep dark
-                    v.push(Color::new(12, 14, 22));   // Darker
-                    v.push(Color::new(24, 28, 42));   // Navy dark
-                    v.push(Color::new(16, 24, 40));   // Deep blue
-                    v.push(Color::new(22, 36, 52));   // Dark teal
-                    v.push(Color::new(28, 18, 36));   // Dark purple
-                    v.push(Color::new(20, 30, 24));   // Dark green
-                    v.push(Color::new(34, 20, 20));   // Dark red
-                    v
-                },
-                wallpapers: Vec::new(),
             },
             current_wallpaper: None,
             scaled_wallpaper: None,
@@ -1107,21 +1425,6 @@ impl Compositor {
     }
 
     fn handle_click(&mut self, x: i32, y: i32) {
-        if self.wallpaper_picker.visible {
-            if self.handle_wallpaper_picker_click(x, y) {
-                self.wallpaper_picker.visible = false;
-                self.dirty = true;
-                return;
-            }
-            if x < self.wallpaper_picker.x || x >= self.wallpaper_picker.x + self.wallpaper_picker.width as i32 ||
-               y < self.wallpaper_picker.y || y >= self.wallpaper_picker.y + self.wallpaper_picker.height as i32 {
-                self.wallpaper_picker.visible = false;
-                self.dirty = true;
-                return;
-            }
-            return;
-        }
-
         if self.context_menu.visible {
             if self.handle_context_menu_click(x, y) {
                 self.context_menu.visible = false;
@@ -1327,84 +1630,11 @@ impl Compositor {
             if (item_idx as usize) < self.context_menu.items.len() {
                 let action = &self.context_menu.items[item_idx as usize];
                 if action == "Change Wallpaper" {
-                    self.show_wallpaper_picker();
+                    // TODO: Task 5.2 will add IPC call to open Display Settings
                 }
                 return true;
             }
         }
-        false
-    }
-
-    fn show_wallpaper_picker(&mut self) {
-        self.wallpaper_picker.wallpapers.clear();
-        if let Ok(fd) = fs::open("/system/wallpapers", fs::OpenFlags::DIRECTORY, 0) {
-            if let Ok(entries) = fs::readdir(fd) {
-                for entry in entries {
-                    if entry.name.ends_with(".jpg") {
-                        self.wallpaper_picker.wallpapers.push(WallpaperInfo {
-                            path: alloc::format!("/system/wallpapers/{}", entry.name),
-                            name: entry.name,
-                        });
-                    }
-                }
-            }
-            let _ = fs::close(fd);
-        }
-
-        // Adjust picker height based on number of wallpapers (min 240, max 600)
-        let list_height = self.wallpaper_picker.wallpapers.len() as u32 * 24;
-        let start_y = atom_theme::spacing::MD as u32 + 48 + 2 * (atom_theme::shell::DOCK_ITEM_SIZE as u32 + atom_theme::spacing::XL as u32);
-        self.wallpaper_picker.height = (start_y + list_height + 20).clamp(240, 600);
-        self.wallpaper_picker.y = (self.fb.height() as i32 - self.wallpaper_picker.height as i32) / 2;
-
-        self.wallpaper_picker.visible = true;
-        self.dirty = true;
-    }
-
-    fn handle_wallpaper_picker_click(&mut self, x: i32, y: i32) -> bool {
-        let px = self.wallpaper_picker.x;
-        let py = self.wallpaper_picker.y;
-
-        if x >= px + self.wallpaper_picker.width as i32 - 32 && x < px + self.wallpaper_picker.width as i32 - 12 &&
-           y >= py + 12 && y < py + 32 {
-            return true;
-        }
-
-        let start_x = px + 30;
-        let start_y = py + 60;
-        let tile_size = 48u32;
-        let spacing = 20u32;
-
-        for (i, color) in self.wallpaper_picker.colors.iter().enumerate() {
-            let tx = start_x + (i as i32 % 4) * (tile_size as i32 + spacing as i32);
-            let ty = start_y + (i as i32 / 4) * (tile_size as i32 + spacing as i32);
-
-            if x >= tx && x < tx + tile_size as i32 && y >= ty && y < ty + tile_size as i32 {
-                self.desktop_bg = *color;
-                self.current_wallpaper = None;
-                self.scaled_wallpaper = None;
-                self.dirty = true;
-                return true;
-            }
-        }
-
-        // JPEG Wallpapers list
-        let list_y = start_y + 2 * (tile_size as i32 + spacing as i32);
-        let mut selected_path = None;
-        for (i, wp) in self.wallpaper_picker.wallpapers.iter().enumerate() {
-            let wy = list_y + i as i32 * 24;
-            if x >= px + 20 && x < px + self.wallpaper_picker.width as i32 - 20 &&
-               y >= wy && y < wy + 20 {
-                selected_path = Some(wp.path.clone());
-                break;
-            }
-        }
-
-        if let Some(path) = selected_path {
-            self.apply_wallpaper(&path);
-            return true;
-        }
-
         false
     }
 
@@ -1975,65 +2205,8 @@ impl Compositor {
             self.draw_context_menu();
         }
 
-        if self.wallpaper_picker.visible {
-            self.draw_wallpaper_picker();
-        }
-
         self.draw_cursor();
         self.backbuffer_fb.blit(&self.fb);
-    }
-
-    fn draw_wallpaper_picker(&self) {
-        let px = self.wallpaper_picker.x as u32;
-        let py = self.wallpaper_picker.y as u32;
-        let pw = self.wallpaper_picker.width;
-        let ph = self.wallpaper_picker.height;
-
-        // Shadow
-        let picker_r = atom_theme::radius::MD as u32; // DS: 12 px
-        self.backbuffer_fb.fill_rect_rounded_alpha(px + 2, py + 4, pw + 2, ph + 2, picker_r, theme::SHADOW, 100);
-        // Background
-        self.backbuffer_fb.fill_rect_rounded_aa(px, py, pw, ph, picker_r, theme::WINDOW_BG);
-        // Border
-        self.backbuffer_fb.draw_rect_rounded_aa(px, py, pw, ph, picker_r, theme::WINDOW_BORDER);
-
-        // Header — top corners rounded to match outer border (radius - border = inner)
-        self.backbuffer_fb.fill_rect_top_rounded_aa(px + 1, py + 1, pw - 2, 40, picker_r - 1, theme::WINDOW_HEADER_FOCUSED);
-        let title_y = py + (40 - 8) / 2;
-        self.backbuffer_fb.draw_string(px + 16, title_y, "Wallpaper", theme::PANEL_TEXT, theme::WINDOW_HEADER_FOCUSED);
-
-        // Close button (rounded)
-        let close_x = px + pw - 30;
-        let close_y = py + 14;
-        self.backbuffer_fb.fill_rect_rounded_aa(close_x, close_y, 16, 16, 8, theme::BTN_CLOSE);
-        self.backbuffer_fb.draw_string(close_x + 4, close_y + 4, "X", Color::WHITE, theme::BTN_CLOSE);
-
-        // Color tiles (rounded) — DS tokens
-        let start_x   = px + atom_theme::spacing::XXXL as u32;                  // spacing::XXXL = 32
-        let start_y   = py + atom_theme::spacing::MD as u32 + 48;               // header (40) + gap
-        let tile_size = atom_theme::shell::DOCK_ITEM_SIZE as u32;               // 48 px
-        let tile_gap  = atom_theme::spacing::XL as u32;                         // 20 px
-        let tile_r    = atom_theme::radius::SM as u32;                           // DS: 8 px
-
-        for (i, color) in self.wallpaper_picker.colors.iter().enumerate() {
-            let tx = start_x + (i as u32 % 4) * (tile_size + tile_gap);
-            let ty = start_y + (i as u32 / 4) * (tile_size + tile_gap);
-
-            self.backbuffer_fb.fill_rect_rounded_aa(tx, ty, tile_size, tile_size, tile_r, *color);
-            self.backbuffer_fb.draw_rect_rounded_aa(tx, ty, tile_size, tile_size, tile_r, theme::WINDOW_BORDER);
-        }
-
-        // JPEG Wallpapers list
-        let list_y = start_y + 2 * (tile_size + tile_gap);
-        for (i, wp) in self.wallpaper_picker.wallpapers.iter().enumerate() {
-            let wy = list_y + i as u32 * 24;
-            let display_name = if wp.name.len() > 30 {
-                &wp.name[..27]
-            } else {
-                &wp.name
-            };
-            self.backbuffer_fb.draw_string(px + 20, wy, display_name, theme::PANEL_TEXT, theme::WINDOW_BG);
-        }
     }
 
     fn draw_context_menu(&self) {
@@ -2361,4 +2534,232 @@ fn main() -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     log("Desktop: PANIC!");
     exit(0xFF);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_desktop_config_to_json_solid_color() {
+        let config = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::SolidColor,
+                image_path: None,
+                color_rgb: Some(1184028),
+                scaling_mode: ScalingMode::Fill,
+            },
+            resolution: ResolutionConfig {
+                width: 1024,
+                height: 768,
+            },
+        };
+        
+        let json = config.to_json().unwrap();
+        assert!(json.contains("\"source_type\": \"SolidColor\""));
+        assert!(json.contains("\"color_rgb\": 1184028"));
+        assert!(json.contains("\"scaling_mode\": \"Fill\""));
+        assert!(json.contains("\"width\": 1024"));
+        assert!(json.contains("\"height\": 768"));
+    }
+    
+    #[test]
+    fn test_desktop_config_to_json_image() {
+        let config = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::Image,
+                image_path: Some(String::from("/system/wallpapers/01.jpg")),
+                color_rgb: None,
+                scaling_mode: ScalingMode::Fit,
+            },
+            resolution: ResolutionConfig {
+                width: 1920,
+                height: 1080,
+            },
+        };
+        
+        let json = config.to_json().unwrap();
+        assert!(json.contains("\"source_type\": \"Image\""));
+        assert!(json.contains("\"image_path\": \"/system/wallpapers/01.jpg\""));
+        assert!(json.contains("\"scaling_mode\": \"Fit\""));
+        assert!(json.contains("\"width\": 1920"));
+        assert!(json.contains("\"height\": 1080"));
+    }
+    
+    #[test]
+    fn test_desktop_config_from_json_solid_color() {
+        let json = r#"{
+  "wallpaper": {
+    "source_type": "SolidColor",
+    "color_rgb": 1184028,
+    "scaling_mode": "Fill"
+  },
+  "resolution": {
+    "width": 1024,
+    "height": 768
+  }
+}"#;
+        
+        let config = DesktopConfig::from_json(json).unwrap();
+        assert_eq!(config.wallpaper.source_type, WallpaperSourceType::SolidColor);
+        assert_eq!(config.wallpaper.color_rgb, Some(1184028));
+        assert_eq!(config.wallpaper.scaling_mode, ScalingMode::Fill);
+        assert_eq!(config.resolution.width, 1024);
+        assert_eq!(config.resolution.height, 768);
+    }
+    
+    #[test]
+    fn test_desktop_config_from_json_image() {
+        let json = r#"{
+  "wallpaper": {
+    "source_type": "Image",
+    "image_path": "/system/wallpapers/mountain.jpg",
+    "scaling_mode": "Stretch"
+  },
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  }
+}"#;
+        
+        let config = DesktopConfig::from_json(json).unwrap();
+        assert_eq!(config.wallpaper.source_type, WallpaperSourceType::Image);
+        assert_eq!(config.wallpaper.image_path, Some(String::from("/system/wallpapers/mountain.jpg")));
+        assert_eq!(config.wallpaper.scaling_mode, ScalingMode::Stretch);
+        assert_eq!(config.resolution.width, 1920);
+        assert_eq!(config.resolution.height, 1080);
+    }
+    
+    #[test]
+    fn test_desktop_config_roundtrip() {
+        let original = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::Image,
+                image_path: Some(String::from("/system/wallpapers/test.jpg")),
+                color_rgb: None,
+                scaling_mode: ScalingMode::Center,
+            },
+            resolution: ResolutionConfig {
+                width: 1280,
+                height: 720,
+            },
+        };
+        
+        let json1 = original.to_json().unwrap();
+        let parsed = DesktopConfig::from_json(&json1).unwrap();
+        let json2 = parsed.to_json().unwrap();
+        
+        assert_eq!(json1, json2);
+    }
+    
+    #[test]
+    fn test_validate_resolution_bounds() {
+        let mut config = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::SolidColor,
+                image_path: None,
+                color_rgb: Some(1184028),
+                scaling_mode: ScalingMode::Fill,
+            },
+            resolution: ResolutionConfig {
+                width: 1024,
+                height: 768,
+            },
+        };
+        
+        assert!(config.validate().is_ok());
+        
+        // Test invalid width
+        config.resolution.width = 500;
+        assert!(config.validate().is_err());
+        
+        config.resolution.width = 2000;
+        assert!(config.validate().is_err());
+        
+        // Test invalid height
+        config.resolution.width = 1024;
+        config.resolution.height = 400;
+        assert!(config.validate().is_err());
+        
+        config.resolution.height = 1200;
+        assert!(config.validate().is_err());
+    }
+    
+    #[test]
+    fn test_validate_image_path() {
+        let mut config = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::Image,
+                image_path: Some(String::from("/system/wallpapers/test.jpg")),
+                color_rgb: None,
+                scaling_mode: ScalingMode::Fill,
+            },
+            resolution: ResolutionConfig {
+                width: 1024,
+                height: 768,
+            },
+        };
+        
+        assert!(config.validate().is_ok());
+        
+        // Test missing path
+        config.wallpaper.image_path = None;
+        assert!(config.validate().is_err());
+        
+        // Test empty path
+        config.wallpaper.image_path = Some(String::from(""));
+        assert!(config.validate().is_err());
+        
+        // Test invalid extension
+        config.wallpaper.image_path = Some(String::from("/system/wallpapers/test.png"));
+        assert!(config.validate().is_err());
+    }
+    
+    #[test]
+    fn test_validate_color_rgb() {
+        let mut config = DesktopConfig {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::SolidColor,
+                image_path: None,
+                color_rgb: Some(1184028),
+                scaling_mode: ScalingMode::Fill,
+            },
+            resolution: ResolutionConfig {
+                width: 1024,
+                height: 768,
+            },
+        };
+        
+        assert!(config.validate().is_ok());
+        
+        // Test missing color
+        config.wallpaper.color_rgb = None;
+        assert!(config.validate().is_err());
+    }
+    
+    #[test]
+    fn test_scaling_mode_conversions() {
+        assert_eq!(ScalingMode::Fill.to_str(), "Fill");
+        assert_eq!(ScalingMode::Fit.to_str(), "Fit");
+        assert_eq!(ScalingMode::Stretch.to_str(), "Stretch");
+        assert_eq!(ScalingMode::Center.to_str(), "Center");
+        assert_eq!(ScalingMode::Tile.to_str(), "Tile");
+        
+        assert_eq!(ScalingMode::from_str("Fill"), Some(ScalingMode::Fill));
+        assert_eq!(ScalingMode::from_str("Fit"), Some(ScalingMode::Fit));
+        assert_eq!(ScalingMode::from_str("Stretch"), Some(ScalingMode::Stretch));
+        assert_eq!(ScalingMode::from_str("Center"), Some(ScalingMode::Center));
+        assert_eq!(ScalingMode::from_str("Tile"), Some(ScalingMode::Tile));
+        assert_eq!(ScalingMode::from_str("Invalid"), None);
+    }
+    
+    #[test]
+    fn test_wallpaper_source_type_conversions() {
+        assert_eq!(WallpaperSourceType::Image.to_str(), "Image");
+        assert_eq!(WallpaperSourceType::SolidColor.to_str(), "SolidColor");
+        
+        assert_eq!(WallpaperSourceType::from_str("Image"), Some(WallpaperSourceType::Image));
+        assert_eq!(WallpaperSourceType::from_str("SolidColor"), Some(WallpaperSourceType::SolidColor));
+        assert_eq!(WallpaperSourceType::from_str("Invalid"), None);
+    }
 }

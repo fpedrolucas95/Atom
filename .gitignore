@@ -60,3 +60,7 @@ disk.img
 debug.log
 userspace/apps/fileman/build.log
 userspace/apps/fs_test/build.log
+.kiro/specs/display-settings-wallpaper-evolution/tasks.md
+.kiro/specs/display-settings-wallpaper-evolution/requirements.md
+.kiro/specs/display-settings-wallpaper-evolution/design.md
+.kiro/specs/display-settings-wallpaper-evolution/.config.kiro

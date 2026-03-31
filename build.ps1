@@ -124,7 +124,7 @@ if ($Clean) {
 # Preparar diretórios
 # -------------------------------------------------------------------------
 
-New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\system\services","efi\apps\system","efi\apps\user","efi\user\home","efi\user\config","efi\user\data" -Force | Out-Null
+New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\system\services","efi\system\wallpapers","efi\apps\system","efi\apps\user","efi\user\home","efi\user\config","efi\user\data" -Force | Out-Null
 
 # =========================================================================
 # BUILD ELF2ATXF TOOL
@@ -408,6 +408,25 @@ if (-not $Kernel) {
         Write-Success "init.atxf instalado como payload EFI de boot (PID 1)"
     } else {
         Write-Warning "init.atxf não encontrado - o sistema não irá bootar corretamente!"
+    }
+
+    # -------------------------------------------------------------------------
+    # Copy wallpaper images to /system/wallpapers/
+    # -------------------------------------------------------------------------
+    Write-Step "Copiando imagens de wallpaper..."
+
+    if (Test-Path "userspace\system_apps\ui_shell\img") {
+        $wallpaperFiles = Get-ChildItem "userspace\system_apps\ui_shell\img\*.jpg","userspace\system_apps\ui_shell\img\*.jpeg" -ErrorAction SilentlyContinue
+        if ($wallpaperFiles) {
+            foreach ($img in $wallpaperFiles) {
+                Copy-Item $img.FullName "efi\system\wallpapers\$($img.Name)" -Force
+                Write-Success "$($img.Name) → system\wallpapers\"
+            }
+        } else {
+            Write-Warning "Nenhuma imagem de wallpaper encontrada em userspace\system_apps\ui_shell\img\"
+        }
+    } else {
+        Write-Warning "Diretório userspace\system_apps\ui_shell\img não encontrado"
     }
 
     Write-Success "Userspace concluído"
