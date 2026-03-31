@@ -62,6 +62,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
         }
     }
 
+
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // LIFO optimisation: reclaim the most-recently-allocated block so
         // transient Vec allocations (IPC buffers etc.) don't exhaust the heap.
@@ -99,6 +100,7 @@ use atom_syscall::SyscallError;
 
 use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
 use libipc::protocol::send_message_async;
+use alloc::sync::Arc;
 
 /// Shell visual theme — all values sourced from `atom_theme` (DS v1.0 Luminous Dark).
 ///
@@ -562,6 +564,11 @@ struct ContextMenu {
     items: Vec<String>,
 }
 
+struct WallpaperInfo {
+    name: String,
+    path: String,
+}
+
 struct WallpaperPicker {
     visible: bool,
     x: i32,
@@ -569,6 +576,7 @@ struct WallpaperPicker {
     width: u32,
     height: u32,
     colors: Vec<Color>,
+    wallpapers: Vec<WallpaperInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,6 +623,9 @@ struct Compositor {
     last_click_icon: Option<usize>,
     context_menu: ContextMenu,
     wallpaper_picker: WallpaperPicker,
+    current_wallpaper: Option<Arc<libimage::DecodedImage>>,
+    scaled_wallpaper: Option<libimage::DecodedImage>,
+    image_cache: libimage::ImageCache,
 }
 
 impl Compositor {
@@ -720,11 +731,16 @@ impl Compositor {
                     v.push(Color::new(34, 20, 20));   // Dark red
                     v
                 },
+                wallpapers: Vec::new(),
             },
+            current_wallpaper: None,
+            scaled_wallpaper: None,
+            image_cache: libimage::ImageCache::new(),
         }
     }
 
     fn run(&mut self) -> ! {
+        self.load_persisted_wallpaper();
         self.wm.create_window("Welcome to Atom OS", 120, 100, 480, 320);
         self.draw_all();
 
@@ -1320,6 +1336,27 @@ impl Compositor {
     }
 
     fn show_wallpaper_picker(&mut self) {
+        self.wallpaper_picker.wallpapers.clear();
+        if let Ok(fd) = fs::open("/system/wallpapers", fs::OpenFlags::DIRECTORY, 0) {
+            if let Ok(entries) = fs::readdir(fd) {
+                for entry in entries {
+                    if entry.name.ends_with(".jpg") {
+                        self.wallpaper_picker.wallpapers.push(WallpaperInfo {
+                            path: alloc::format!("/system/wallpapers/{}", entry.name),
+                            name: entry.name,
+                        });
+                    }
+                }
+            }
+            let _ = fs::close(fd);
+        }
+
+        // Adjust picker height based on number of wallpapers (min 240, max 600)
+        let list_height = self.wallpaper_picker.wallpapers.len() as u32 * 24;
+        let start_y = atom_theme::spacing::MD as u32 + 48 + 2 * (atom_theme::shell::DOCK_ITEM_SIZE as u32 + atom_theme::spacing::XL as u32);
+        self.wallpaper_picker.height = (start_y + list_height + 20).clamp(240, 600);
+        self.wallpaper_picker.y = (self.fb.height() as i32 - self.wallpaper_picker.height as i32) / 2;
+
         self.wallpaper_picker.visible = true;
         self.dirty = true;
     }
@@ -1344,11 +1381,116 @@ impl Compositor {
 
             if x >= tx && x < tx + tile_size as i32 && y >= ty && y < ty + tile_size as i32 {
                 self.desktop_bg = *color;
+                self.current_wallpaper = None;
+                self.scaled_wallpaper = None;
                 self.dirty = true;
                 return true;
             }
         }
+
+        // JPEG Wallpapers list
+        let list_y = start_y + 2 * (tile_size as i32 + spacing as i32);
+        let mut selected_path = None;
+        for (i, wp) in self.wallpaper_picker.wallpapers.iter().enumerate() {
+            let wy = list_y + i as i32 * 24;
+            if x >= px + 20 && x < px + self.wallpaper_picker.width as i32 - 20 &&
+               y >= wy && y < wy + 20 {
+                selected_path = Some(wp.path.clone());
+                break;
+            }
+        }
+
+        if let Some(path) = selected_path {
+            self.apply_wallpaper(&path);
+            return true;
+        }
+
         false
+    }
+
+    fn load_persisted_wallpaper(&mut self) {
+        if let Ok(path_bytes) = fs::read_file("/user/config/desktop.json") {
+            if let Ok(path) = core::str::from_utf8(&path_bytes) {
+                let path = path.trim();
+                if !path.is_empty() {
+                    self.apply_wallpaper(path);
+                }
+            }
+        }
+    }
+
+    fn apply_wallpaper(&mut self, path: &str) {
+        let cached = self.image_cache.get(path);
+        if let Some(shared_img) = cached {
+            log(alloc::format!("Applying cached wallpaper: {}", path).as_str());
+            self.current_wallpaper = Some(shared_img.clone());
+            self.scaled_wallpaper = Some(self.precompute_wallpaper_cover(&shared_img));
+            self.dirty = true;
+            let _ = fs::write_file("/user/config/desktop.json", path.as_bytes());
+        } else {
+            match fs::read_file(path) {
+                Ok(data) => {
+                    use libimage::{JpgDecoder, ImageDecoder};
+                    match JpgDecoder::decode(&data) {
+                        Ok(img) => {
+                            log(alloc::format!("Decoded wallpaper: {}", path).as_str());
+                            self.image_cache.insert(String::from(path), img);
+                            if let Some(shared_img) = self.image_cache.get(path) {
+                                self.current_wallpaper = Some(shared_img.clone());
+                                self.scaled_wallpaper = Some(self.precompute_wallpaper_cover(&shared_img));
+                                self.dirty = true;
+                                let _ = fs::write_file("/user/config/desktop.json", path.as_bytes());
+                            }
+                        }
+                        Err(e) => {
+                            log(alloc::format!("Failed to decode JPG {}: {:?}", path, e).as_str());
+                        }
+                    }
+                }
+                Err(e) => {
+                    log(alloc::format!("Failed to read wallpaper file {}: {:?}", path, e).as_str());
+                }
+            }
+        }
+    }
+
+    fn precompute_wallpaper_cover(&self, img: &libimage::DecodedImage) -> libimage::DecodedImage {
+        let sw = self.fb.width();
+        let sh = self.fb.height();
+        let iw = img.width;
+        let ih = img.height;
+
+        if iw == 0 || ih == 0 { return libimage::DecodedImage::blank(sw, sh); }
+
+        let scale_x = (sw as u64 * 1000) / iw as u64;
+        let scale_y = (sh as u64 * 1000) / ih as u64;
+        let scale = scale_x.max(scale_y);
+
+        let target_w = (iw as u64 * scale / 1000) as u32;
+        let target_h = (ih as u64 * scale / 1000) as u32;
+
+        let offset_x = (target_w as i32 - sw as i32) / 2;
+        let offset_y = (target_h as i32 - sh as i32) / 2;
+
+        let mut scaled_pixels = alloc::vec![0u8; (sw * sh * 4) as usize];
+
+        for y in 0..sh {
+            for x in 0..sw {
+                let src_x = ((x as i32 + offset_x) as u64 * 1000 / scale) as u32;
+                let src_y = ((y as i32 + offset_y) as u64 * 1000 / scale) as u32;
+
+                if src_x < iw && src_y < ih {
+                    if let Some((r, g, b, a)) = img.get_pixel(src_x, src_y) {
+                        let off = ((y * sw + x) * 4) as usize;
+                        scaled_pixels[off] = r;
+                        scaled_pixels[off+1] = g;
+                        scaled_pixels[off+2] = b;
+                        scaled_pixels[off+3] = a;
+                    }
+                }
+            }
+        }
+        libimage::DecodedImage::new(sw, sh, scaled_pixels)
     }
 
     fn get_work_area(&self) -> (i32, i32, u32, u32) {
@@ -1806,7 +1948,17 @@ impl Compositor {
     }
 
     fn draw_all(&mut self) {
-        self.backbuffer_fb.fill_rect(0, 0, self.backbuffer_fb.width(), self.backbuffer_fb.height(), self.desktop_bg);
+        if self.scaled_wallpaper.is_some() {
+            let stride = self.backbuffer_fb.stride();
+            if let Some(ref wp) = self.scaled_wallpaper {
+                let ptr = self._backbuffer.as_mut_ptr() as *mut u8;
+                let len = self._backbuffer.len() * 4;
+                let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+                wp.blit_to(buf, stride, 0, 0);
+            }
+        } else {
+            self.backbuffer_fb.fill_rect(0, 0, self.backbuffer_fb.width(), self.backbuffer_fb.height(), self.desktop_bg);
+        }
 
         self.draw_desktop_icons();
         self.draw_panel();
@@ -1869,6 +2021,18 @@ impl Compositor {
 
             self.backbuffer_fb.fill_rect_rounded_aa(tx, ty, tile_size, tile_size, tile_r, *color);
             self.backbuffer_fb.draw_rect_rounded_aa(tx, ty, tile_size, tile_size, tile_r, theme::WINDOW_BORDER);
+        }
+
+        // JPEG Wallpapers list
+        let list_y = start_y + 2 * (tile_size + tile_gap);
+        for (i, wp) in self.wallpaper_picker.wallpapers.iter().enumerate() {
+            let wy = list_y + i as u32 * 24;
+            let display_name = if wp.name.len() > 30 {
+                &wp.name[..27]
+            } else {
+                &wp.name
+            };
+            self.backbuffer_fb.draw_string(px + 20, wy, display_name, theme::PANEL_TEXT, theme::WINDOW_BG);
         }
     }
 
@@ -2096,6 +2260,12 @@ impl Compositor {
                 self.backbuffer_fb.fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
             }
         }
+    }
+
+    fn _backbuffer_as_u8_mut(&mut self) -> &mut [u8] {
+        let ptr = self._backbuffer.as_mut_ptr() as *mut u8;
+        let len = self._backbuffer.len() * 4;
+        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 
     fn draw_cursor(&self) {
