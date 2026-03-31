@@ -47,7 +47,7 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 
 - **Services:** init (PID 1), namesvc (service discovery), service_manager (declarative boot), fsd (filesystem daemon), app_launcher (privileged process creation)
 - **System applications:** display driver, keyboard driver, mouse driver, ui_shell (compositor + window manager), terminal emulator
-- **Applications:** file manager (with double-click launching of .atxf executables), Doom port (640×400 via doomgeneric + TinyGL), TinyGL gears demo, hello_c (C runtime demo), filesystem test suite, display settings
+- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), filesystem test suite, display settings
 
 ### Runtime and Libraries
 
@@ -76,10 +76,10 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 │                                                         │
 │  Services          System Apps         Applications     │
 │  ├ init            ├ display driver    ├ file manager   │
-│  ├ namesvc         ├ keyboard driver   ├ doom           │
-│  ├ service_manager ├ mouse driver      ├ terminal       │
-│  ├ fsd             └ ui_shell          ├ tinygl_demo    │
-│  └ app_launcher      (compositor)      └ hello_c        │
+│  ├ namesvc         ├ keyboard driver   ├ terminal       │
+│  ├ service_manager ├ mouse driver      ├ tinygl_demo    │
+│  ├ fsd             └ ui_shell          └ hello_c        │
+│  └ app_launcher      (compositor)                       │
 │                                                         │
 │  Libraries: libc, libtinygl, libgui, libipc, atom_abi   │
 ├─────────────────────────────────────────────────────────┤
