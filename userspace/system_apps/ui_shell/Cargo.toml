@@ -10,6 +10,7 @@ atom_syscall = { path = "../../libs/syscall" }
 atom_theme   = { path = "../../libs/atom_theme" }
 libipc       = { path = "../../libs/libipc" }
 libgui       = { path = "../../libs/libgui" }
+libimage     = { path = "../../libs/libimage" }
 
 [[bin]]
 name = "atom_desktop"
