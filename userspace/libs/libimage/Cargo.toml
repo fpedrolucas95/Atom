@@ -1,0 +1,13 @@
+[package]
+name = "libimage"
+version = "0.1.0"
+edition = "2021"
+description = "Image decoding library for Atom OS (PNG, JPG) — no_std"
+ 
+[lib]
+name = "libimage"
+path = "src/lib.rs"
+ 
+[dependencies]
+ 
+[dev-dependencies]

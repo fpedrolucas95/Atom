@@ -70,30 +70,28 @@ CFLAGS = \
 # TinyGL core sources — glx.c and nglx.c are excluded (X11/NanoX not available)
 # ---------------------------------------------------------------------------
 TGL_SRCS = \
-    $(TGL_SRC)/api.c        \
-    $(TGL_SRC)/arrays.c     \
-    $(TGL_SRC)/clear.c      \
-    $(TGL_SRC)/clip.c       \
-    $(TGL_SRC)/error.c      \
-    $(TGL_SRC)/get.c        \
-    $(TGL_SRC)/image_util.c \
-    $(TGL_SRC)/init.c       \
-    $(TGL_SRC)/light.c      \
-    $(TGL_SRC)/list.c       \
-    $(TGL_SRC)/matrix.c     \
-    $(TGL_SRC)/memory.c     \
-    $(TGL_SRC)/misc.c       \
-    $(TGL_SRC)/msghandling.c \
-    $(TGL_SRC)/oscontext.c  \
-    $(TGL_SRC)/select.c     \
-    $(TGL_SRC)/specbuf.c    \
-    $(TGL_SRC)/texture.c    \
-    $(TGL_SRC)/vertex.c     \
-    $(TGL_SRC)/zbuffer.c    \
-    $(TGL_SRC)/zdither.c    \
-    $(TGL_SRC)/zline.c      \
-    $(TGL_SRC)/zmath.c      \
-    $(TGL_SRC)/ztriangle.c
+  $(TGL_SRC)/api.c        \
+  $(TGL_SRC)/arrays.c     \
+  $(TGL_SRC)/clear.c      \
+  $(TGL_SRC)/clip.c       \
+  $(TGL_SRC)/get.c        \
+  $(TGL_SRC)/image_util.c \
+  $(TGL_SRC)/init.c       \
+  $(TGL_SRC)/light.c      \
+  $(TGL_SRC)/list.c       \
+  $(TGL_SRC)/matrix.c     \
+  $(TGL_SRC)/memory.c     \
+  $(TGL_SRC)/misc.c       \
+  $(TGL_SRC)/msghandling.c \
+  $(TGL_SRC)/select.c     \
+  $(TGL_SRC)/specbuf.c    \
+  $(TGL_SRC)/texture.c    \
+  $(TGL_SRC)/vertex.c     \
+  $(TGL_SRC)/zbuffer.c    \
+  $(TGL_SRC)/zdither.c    \
+  $(TGL_SRC)/zline.c      \
+  $(TGL_SRC)/zmath.c      \
+  $(TGL_SRC)/ztriangle.c
 
 # AtomOS add-on: RGB565→ARGB32 blit helper
 LOCAL_SRCS = atomos_zb_blit.c
