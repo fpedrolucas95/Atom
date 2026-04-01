@@ -60,14 +60,35 @@ impl FatVolume {
         partition_start: u64,
         read_only: bool,
     ) -> VfsResult<FatVolume> {
-        // Read boot sector
+        // Read primary boot sector (sector 0 of partition)
         let mut buf = vec![0u8; 512];
         block.read_bytes(partition_start * 512, &mut buf)
             .map_err(|_| VfsError::Io)?;
         let sector0: &[u8; 512] = buf.as_slice().try_into().map_err(|_| VfsError::Io)?;
 
-        // Parse + validate BPB
-        let params = parse_bpb(sector0, partition_start)?;
+        // Parse + validate BPB.  On failure, fall back to the backup boot
+        // sector (BPB_BkBootSec, typically sector 6 within the partition).
+        // The backup is tried only when the primary is unreadable or fails
+        // validation; we never write to the backup here.
+        let params = match parse_bpb(sector0, partition_start) {
+            Ok(p) => p,
+            Err(primary_err) => {
+                // Try backup boot sector.  We read it at the well-known
+                // offset of 6 sectors from the partition start because the
+                // primary BPB failed — we cannot trust BPB_BkBootSec from a
+                // corrupt primary.  Sector 6 is the spec-recommended location.
+                let backup_lba = partition_start + 6;
+                let mut backup_buf = vec![0u8; 512];
+                block.read_bytes(backup_lba * 512, &mut backup_buf)
+                    .map_err(|_| primary_err)?; // propagate original error if read fails
+                let backup_sec: &[u8; 512] = backup_buf
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| VfsError::Io)?;
+                // parse_bpb uses partition_start so LBA arithmetic is correct
+                parse_bpb(backup_sec, partition_start)?
+            }
+        };
 
         // Check CLN_SHUT bit in FAT[1] entry (bit 27 of cluster 1)
         // We load it directly from block (cache not warm yet)

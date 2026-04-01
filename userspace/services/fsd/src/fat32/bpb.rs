@@ -58,6 +58,9 @@ pub struct VolumeParams {
     // ── FSInfo ──────────────────────────────────────────────────────────
     /// Absolute LBA of the FSInfo sector
     pub fsinfo_lba:         u64,
+    /// Absolute LBA of the backup boot sector (BPB_BkBootSec; typically
+    /// partition_start + 6).  Set to 0 when BPB_BkBootSec == 0 (no backup).
+    pub backup_boot_lba:    u64,
 
     // ── Mirroring ───────────────────────────────────────────────────────
     /// true = FAT is mirrored to all copies (EXT_FLAGS bit 7 == 0)
@@ -94,6 +97,7 @@ pub fn parse_bpb(sector0: &[u8; 512], partition_start: u64) -> VfsResult<VolumeP
     let fs_ver       = u16::from_le_bytes([sector0[42], sector0[43]]);
     let root_clus    = u32::from_le_bytes([sector0[44], sector0[45], sector0[46], sector0[47]]);
     let fs_info_sec  = u16::from_le_bytes([sector0[48], sector0[49]]) as u32;
+    let bk_boot_sec  = u16::from_le_bytes([sector0[50], sector0[51]]) as u64;
     let vol_id       = u32::from_le_bytes([sector0[67], sector0[68], sector0[69], sector0[70]]);
     let mut vol_lab  = [0u8; 11];
     vol_lab.copy_from_slice(&sector0[71..82]);
@@ -161,6 +165,14 @@ pub fn parse_bpb(sector0: &[u8; 512], partition_start: u64) -> VfsResult<VolumeP
     let fsinfo_lba     = partition_start + fs_info_sec as u64;
     let max_valid_clus = 1 + count_of_clusters; // clusters 2..=(count+1) are valid
 
+    // BPB_BkBootSec: 0 and 1 are reserved/invalid; spec recommends 6.
+    // Store 0 to mean "no backup" when the field is clearly invalid.
+    let backup_boot_lba = if bk_boot_sec >= 2 {
+        partition_start + bk_boot_sec
+    } else {
+        0
+    };
+
     // ── Mirroring flags ───────────────────────────────────────────────────
     let fat_mirroring = ext_flags & 0x0080 == 0;   // bit7 = 0 → mirror
     let active_fat    = (ext_flags & 0x000F) as u32;
@@ -180,6 +192,7 @@ pub fn parse_bpb(sector0: &[u8; 512], partition_start: u64) -> VfsResult<VolumeP
         count_of_clusters,
         max_valid_cluster: max_valid_clus,
         fsinfo_lba,
+        backup_boot_lba,
         fat_mirroring,
         active_fat_idx:    active_fat,
     })
@@ -230,6 +243,10 @@ pub fn format_volume_summary(params: &VolumeParams, prefix: &str) -> Vec<String>
         format!("{}  Clusters      : {}  (~{} MiB usable)",
                 prefix, params.count_of_clusters, total_mb),
         format!("{}  FSInfo LBA    : {}", prefix, params.fsinfo_lba),
+        format!("{}  Backup BPB    : {}",
+                prefix,
+                if params.backup_boot_lba == 0 { format!("none") }
+                else { format!("LBA {}", params.backup_boot_lba) }),
         format!("{}  Mirroring     : {}",
                 prefix,
                 if params.fat_mirroring { "enabled (all FATs updated)" }
@@ -241,7 +258,9 @@ pub fn format_volume_summary(params: &VolumeParams, prefix: &str) -> Vec<String>
 mod tests {
     use super::*;
 
-    fn make_fat32_sector(
+    /// Build a minimal valid FAT32 boot sector for testing.
+    /// `bk_boot`: BPB_BkBootSec value (bytes 50-51); 0 means "no backup".
+    fn make_fat32_sector_full(
         byts_per_sec: u16,
         sec_per_clus: u8,
         rsvd: u16,
@@ -250,6 +269,7 @@ mod tests {
         fat_sz32: u32,
         root_clus: u32,
         fs_info: u16,
+        bk_boot: u16,
     ) -> [u8; 512] {
         let mut s = [0u8; 512];
         s[11..13].copy_from_slice(&byts_per_sec.to_le_bytes());
@@ -262,9 +282,27 @@ mod tests {
         s[36..40].copy_from_slice(&fat_sz32.to_le_bytes());
         s[44..48].copy_from_slice(&root_clus.to_le_bytes());
         s[48..50].copy_from_slice(&fs_info.to_le_bytes());
+        s[50..52].copy_from_slice(&bk_boot.to_le_bytes());
         s[510] = 0x55;
         s[511] = 0xAA;
         s
+    }
+
+    fn make_fat32_sector(
+        byts_per_sec: u16,
+        sec_per_clus: u8,
+        rsvd: u16,
+        num_fats: u8,
+        tot_sec32: u32,
+        fat_sz32: u32,
+        root_clus: u32,
+        fs_info: u16,
+    ) -> [u8; 512] {
+        make_fat32_sector_full(
+            byts_per_sec, sec_per_clus, rsvd, num_fats,
+            tot_sec32, fat_sz32, root_clus, fs_info,
+            6, // default BPB_BkBootSec = 6
+        )
     }
 
     #[test]
@@ -326,5 +364,47 @@ mod tests {
         assert_eq!(cluster_to_lba(&p, 2), p.data_start_lba);
         // cluster 3 = data_start + 8 sectors
         assert_eq!(cluster_to_lba(&p, 3), p.data_start_lba + 8);
+    }
+
+    // ── Phase 5: backup boot sector tests ────────────────────────────────────
+
+    #[test]
+    fn test_backup_boot_lba_stored_correctly() {
+        // BPB_BkBootSec = 6, partition_start = 0 → backup_boot_lba = 6
+        let sec = make_fat32_sector_full(512, 8, 32, 2, 2097152, 256, 2, 1, 6);
+        let p = parse_bpb(&sec, 0).unwrap();
+        assert_eq!(p.backup_boot_lba, 6, "backup LBA must be partition_start + bk_boot_sec");
+    }
+
+    #[test]
+    fn test_backup_boot_lba_with_nonzero_partition_start() {
+        // partition at LBA 2048; BPB_BkBootSec = 6 → absolute backup LBA = 2048+6 = 2054
+        let sec = make_fat32_sector_full(512, 8, 32, 2, 2097152, 256, 2, 1, 6);
+        let p = parse_bpb(&sec, 2048).unwrap();
+        assert_eq!(p.backup_boot_lba, 2048 + 6);
+    }
+
+    #[test]
+    fn test_backup_boot_lba_zero_when_invalid() {
+        // BPB_BkBootSec = 0 → no backup (spec: 0 means "not present")
+        let sec = make_fat32_sector_full(512, 8, 32, 2, 2097152, 256, 2, 1, 0);
+        let p = parse_bpb(&sec, 0).unwrap();
+        assert_eq!(p.backup_boot_lba, 0, "BPB_BkBootSec=0 must map to backup_boot_lba=0");
+    }
+
+    #[test]
+    fn test_backup_boot_lba_one_treated_as_invalid() {
+        // BPB_BkBootSec = 1 is reserved/invalid per spec → backup_boot_lba = 0
+        let sec = make_fat32_sector_full(512, 8, 32, 2, 2097152, 256, 2, 1, 1);
+        let p = parse_bpb(&sec, 0).unwrap();
+        assert_eq!(p.backup_boot_lba, 0, "BPB_BkBootSec=1 is reserved, must produce backup_boot_lba=0");
+    }
+
+    #[test]
+    fn test_backup_boot_lba_non_default_value() {
+        // BPB_BkBootSec = 12 (non-standard but valid ≥2)
+        let sec = make_fat32_sector_full(512, 8, 32, 2, 2097152, 256, 2, 1, 12);
+        let p = parse_bpb(&sec, 100).unwrap();
+        assert_eq!(p.backup_boot_lba, 100 + 12);
     }
 }
