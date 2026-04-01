@@ -3,14 +3,8 @@
 //! The filesystem daemon is responsible for:
 //! - Creating and managing the filesystem IPC port (PORT_FS_SERVICE = 3)
 //! - Registering with namesvc for service discovery
-//! - Receiving filesystem requests via IPC
-//! - Routing requests through the VFS subsystem
-//! - Returning replies with status and data
-//!
-//! ## Well-known port: 3 (PORT_FS_SERVICE)
-//!
-//! Handles requests from userspace applications and syscall handlers
-//! for file operations (open, read, write, close, stat, readdir, etc.)
+//! - Mounting the root FAT32 volume on startup
+//! - Receiving filesystem requests via IPC and routing through the VFS
 
 #![no_std]
 #![no_main]
@@ -26,7 +20,7 @@ mod allocator {
     use core::cell::UnsafeCell;
     use core::ptr::null_mut;
 
-    const HEAP_SIZE: usize = 256 * 1024; // 256 KB heap for fsd
+    const HEAP_SIZE: usize = 512 * 1024; // 512 KB heap for fsd
 
     #[repr(align(4096))]
     struct Heap {
@@ -49,7 +43,7 @@ mod allocator {
             let heap_start = HEAP.data.get() as *mut u8;
 
             let align = layout.align();
-            let size = layout.size();
+            let size  = layout.size();
 
             let current = *next;
             let aligned = (current + align - 1) & !(align - 1);
@@ -62,241 +56,186 @@ mod allocator {
             heap_start.add(aligned)
         }
 
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-            // Bump allocator doesn't free
-        }
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
     }
 
     #[global_allocator]
     static ALLOCATOR: BumpAllocator = BumpAllocator;
 }
 
-// ============================================================================
-// Global state for journaling
-// ============================================================================
+// ── Module declarations ───────────────────────────────────────────────────────
 
-static mut JOURNAL_MANAGER: Option<JournalManager> = None;
-static mut BLOCK_DEVICE: Option<BlockDevice> = None;
-
-pub fn get_journal_manager() -> Option<&'static mut JournalManager> {
-    unsafe { JOURNAL_MANAGER.as_mut() }
-}
-
-pub fn get_block_device() -> Option<&'static BlockDevice> {
-    unsafe { BLOCK_DEVICE.as_ref() }
-}
-
-// ============================================================================
-// Logging helper
-// ============================================================================
-
-fn log(msg: &str) {
-    atom_syscall::debug::log(msg);
-}
-
-// ============================================================================
-// Module declarations
-// ============================================================================
-
-mod ipc;
-mod vfs;
-mod mounts;
+mod block_client;
+mod block_device;      // kept for journal; not used by FatFs directly
+mod cache;
+mod capabilities;
+mod error;
 mod fat32;
-mod journal;
-mod block_device;
 mod fat32_ops;
+mod fd_table;
+mod ipc;
+mod journal;
+mod journal_tests;
+mod mounts;
+mod vfs;
 
-use ipc::FsdIpcHandler;
-use journal::JournalManager;
-use block_device::BlockDevice;
 use atom_abi::PORT_FS_SERVICE;
+use block_client::BlockClient;
+use capabilities::CapabilityEnforcer;
+use fat32::FatFs;
+use ipc::FsdIpcHandler;
+use vfs::{MountFlags, Vfs};
 
-// ============================================================================
-// Main entry point
-// ============================================================================
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+fn log(msg: &str) { atom_syscall::debug::log(msg); }
+
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
-    main()
-}
+pub extern "C" fn _start() -> ! { main() }
 
 fn main() -> ! {
     log("========================================");
     log("Filesystem Daemon (fsd) starting");
     log("========================================");
 
-    // Initialize block device and journal manager for crash-consistent operations
-    unsafe {
-        BLOCK_DEVICE = Some(BlockDevice::new(512, 1_000_000));
+    // ── Create FS service port ────────────────────────────────────────────
 
-        if let Some(ref bd) = BLOCK_DEVICE {
-            let mut jm = JournalManager::new(bd as *const BlockDevice);
-            if !jm.init() {
-                log("fsd: ERROR - failed to initialize journal, exiting");
-                loop {
-                    atom_syscall::thread::yield_now();
-                }
+    let fs_port = match atom_syscall::ipc::create_port_with_id(PORT_FS_SERVICE) {
+        Ok(p) => {
+            log(&format!("fsd: created FS port {}", p));
+            p
+        }
+        Err(_) => match atom_syscall::ipc::create_port() {
+            Ok(p) => {
+                log(&format!("fsd: allocated dynamic FS port {}", p));
+                p
             }
-
-            // Check if recovery is needed from previous crash
-            if jm.recovery_needed {
-                log("fsd: WARNING - running crash recovery...");
-                if !jm.recovery_replay() {
-                    log("fsd: ERROR - recovery failed");
-                    loop {
-                        atom_syscall::thread::yield_now();
-                    }
-                }
-                log("fsd: recovery completed successfully");
+            Err(_) => {
+                log("fsd: ERROR — cannot create FS port");
+                loop { atom_syscall::thread::yield_now(); }
             }
+        },
+    };
 
-            JOURNAL_MANAGER = Some(jm);
+    // Register with namesvc
+    if let Err(_) = libipc::protocol::register_service("fsd", fs_port) {
+        log("fsd: WARNING — failed to register with namesvc");
+    }
+
+    // ── Build Vfs + CapabilityEnforcer ────────────────────────────────────
+
+    let mut vfs  = Vfs::new();
+    let mut caps = CapabilityEnforcer::new();
+
+    // ── Mount root FAT32 volume ───────────────────────────────────────────
+    //
+    // Step 1: identify the block device to get sector geometry.
+    // Step 2: mount FAT32 at "/".  Partition starts at LBA 0 for an
+    //         unpartitioned image; adjust if booting from a partitioned disk.
+    // Step 3: log the parsed BPB parameters (Phase 1 checkpoint).
+
+    let mut block = BlockClient::new(0 /*device_id: first disk*/);
+
+    // Step 1 — Identify block device
+    match block.identify() {
+        Ok(info) => {
+            let model = core::str::from_utf8(&info.model)
+                .unwrap_or("Unknown")
+                .trim_end_matches(' ');
+            log(&format!(
+                "fsd: block device \"{}\" — {} sectors × {} B/sector ({} MiB){}",
+                model,
+                info.total_sectors,
+                info.sector_size,
+                info.total_sectors * info.sector_size as u64 / (1024 * 1024),
+                if info.read_only != 0 { " [READ-ONLY]" } else { "" },
+            ));
+        }
+        Err(e) => {
+            // Block service may not be ready yet; continue with default 512 B/sector.
+            // FatVolume::mount() will fail cleanly if the device is truly absent.
+            log(&format!("fsd: WARNING — block identify failed ({:?}), assuming 512 B/sector", e));
         }
     }
 
-    // Create the filesystem service port (well-known port 3, with automatic fallback to dynamic)
-    let fs_port = match atom_syscall::ipc::create_port_with_id(PORT_FS_SERVICE) {
-        Ok(port) => {
-            log(&format!("fsd: created FS port with reserved ID {} (dynamic port would have been accepted too)", port));
-            port
-        }
-        Err(_) => {
-            // Fallback: if reserved port is busy, use dynamic port assignment
-            log("fsd: WARNING - reserved port busy, attempting dynamic port allocation");
-            match atom_syscall::ipc::create_port() {
-                Ok(port) => {
-                    log(&format!("fsd: allocated dynamic FS port ID {}", port));
-                    port
-                }
-                Err(_) => {
-                    log("fsd: ERROR - failed to create FS port (both reserved and dynamic), exiting");
-                    loop {
-                        atom_syscall::thread::yield_now();
-                    }
-                }
+    // Step 2 — Mount FAT32
+    match FatFs::mount(block, 0 /*partition_start*/, false /*rw*/, 0 /*mount_id*/) {
+        Ok(fat_fs) => {
+            // Step 3 — Log volume params (Phase 1 checkpoint)
+            for line in fat32::bpb::format_volume_summary(fat_fs.volume_params(), "fsd: ") {
+                log(&line);
+            }
+            if fat_fs.volume_was_dirty() {
+                log("fsd: WARNING — volume was not cleanly unmounted (dirty bit set)");
+            }
+
+            let flags = MountFlags { read_only: false, no_exec: false, synchronous: false };
+            match vfs.mount("/", flags, "/dev/block0", alloc::boxed::Box::new(fat_fs)) {
+                Ok(mid) => log(&format!("fsd: FAT32 mounted at / (mount_id {})", mid)),
+                Err(e)  => log(&format!("fsd: WARNING — VFS mount failed: {:?}", e)),
             }
         }
-    };
-
-    // Register the port with namesvc for service discovery
-    log("fsd: registering with namesvc...");
-    if let Err(_) = libipc::protocol::register_service("fsd", fs_port) {
-        log("fsd: WARNING - failed to register with namesvc, continuing");
+        Err(e) => log(&format!("fsd: WARNING — FAT32 mount failed: {:?}", e)),
     }
 
     log("fsd: ready, entering main loop");
 
-    // Initialize VFS subsystem
-    match vfs::init_vfs() {
-        Ok(()) => log("fsd: VFS subsystem initialized"),
-        Err(_) => {
-            log("fsd: ERROR - failed to initialize VFS");
-            loop {
-                atom_syscall::thread::yield_now();
-            }
-        }
-    }
-
-    // Initialize mount table with root filesystem
-    let mut mounts_manager = mounts::MountsManager::new();
-    log(&format!(
-        "fsd: mounted {} mount points",
-        mounts_manager.active_mount_count()
-    ));
-
-    // Create IPC handler
-    let mut ipc_handler = FsdIpcHandler::new(&mut mounts_manager);
-
-    log("fsd: ready to serve filesystem requests with journal-based crash-consistency");
-
-    // Main service loop
-    main_loop(fs_port, &mut ipc_handler);
+    main_loop(fs_port, &mut vfs, &mut caps);
 }
 
-/// Main service loop: receive requests, dispatch to handlers, send replies.
-/// 
-/// Message wire format (from kernel):
-///   [MessageHeader(16) | reply_port(8) | request_payload]
-///
-/// After parsing the header, the payload begins at byte 16.
-///   payload[0..8]  = reply_port (LE u64) — where to send the reply
-///   payload[8..]   = request-specific data
-///
-/// The handler returns a serialised response which we send to reply_port.
-fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler) -> ! {
-    // Allocate receive buffer once for reuse
+// ── IPC service loop ───────────────────────────────────────────────────────────
+
+fn main_loop(
+    fs_port: atom_syscall::ipc::PortId,
+    vfs:     &mut Vfs,
+    caps:    &mut CapabilityEnforcer,
+) -> ! {
     let mut buffer = [0u8; libipc::MAX_MESSAGE_SIZE];
 
-    log("fsd: entering main loop");
-
     loop {
-        // Block until a message arrives
         match atom_syscall::ipc::recv(fs_port, &mut buffer) {
-            Ok(bytes_received) => {
-                if bytes_received < libipc::messages::MessageHeader::SIZE {
-                    log("fsd: received message too small, ignoring");
+            Ok(n) if n >= libipc::messages::MessageHeader::SIZE => {
+                let Some(header) = libipc::messages::MessageHeader::from_bytes(&buffer[..n]) else {
                     continue;
-                }
-
-                // Parse message header (first 16 bytes)
-                let header = match libipc::messages::MessageHeader::from_bytes(&buffer[..bytes_received]) {
-                    Some(h) => h,
-                    None => {
-                        log("fsd: failed to parse message header, ignoring");
-                        continue;
-                    }
                 };
 
-                // Payload starts after header
                 let payload_start = libipc::messages::MessageHeader::SIZE;
-                let payload = &buffer[payload_start..bytes_received];
+                let payload = &buffer[payload_start..n];
 
-                // Extract reply_port (first 8 bytes of payload)
-                if payload.len() < 8 {
-                    log("fsd: payload too small for reply_port, ignoring");
-                    continue;
-                }
-                let reply_port = u64::from_le_bytes([
-                    payload[0], payload[1], payload[2], payload[3],
-                    payload[4], payload[5], payload[6], payload[7],
-                ]);
-
-                // The actual request data is after the reply_port
+                if payload.len() < 8 { continue; }
+                let reply_port = u64::from_le_bytes(payload[..8].try_into().unwrap());
                 let request_data = &payload[8..];
 
-                // Dispatch to handler — returns response bytes (FsReply format)
-                let response = ipc_handler.handle_request(header.msg_type, request_data);
+                // Advance capability TTL tick for every request
+                caps.tick();
 
-                // Send raw response bytes back through the reply port.
-                // No MessageHeader wrapping — the kernel expects [error(8)|value(8)|data...]
+                let mut handler = FsdIpcHandler::new(vfs, caps);
+                let response = handler.handle_request(header.msg_type, request_data);
+
                 if let Err(_) = atom_syscall::ipc::send(reply_port, &response) {
                     log("fsd: failed to send reply");
                 }
             }
-            Err(atom_syscall::SyscallError::WouldBlock) => {
-                atom_syscall::thread::yield_now();
-            }
+            Ok(_) => {} // message too small; ignore
+            Err(atom_syscall::SyscallError::WouldBlock) |
             Err(atom_syscall::SyscallError::TimedOut) => {
                 atom_syscall::thread::yield_now();
             }
-            Err(_e) => {
-                log("fsd: FATAL recv error, terminating");
-                loop {
-                    atom_syscall::thread::yield_now();
-                }
+            Err(_) => {
+                log("fsd: FATAL recv error");
+                loop { atom_syscall::thread::yield_now(); }
             }
         }
     }
 }
 
-// ============================================================================
-// Panic handler
-// ============================================================================
+// ── Panic handler ─────────────────────────────────────────────────────────────
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    log("fsd: PANIC");
-    loop {
-        atom_syscall::thread::yield_now();
-    }
+    atom_syscall::debug::log("fsd: PANIC");
+    loop { atom_syscall::thread::yield_now(); }
 }
+

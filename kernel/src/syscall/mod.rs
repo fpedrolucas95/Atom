@@ -3418,14 +3418,21 @@ fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
     // First try to load from filesystem (dynamic loading)
     // Then fall back to boot-loaded driver registry
     if crate::drivers::fat32::is_available() {
-        // Try loading from filesystem
-        let path = alloc::format!("/drivers/{}.atxf", name);
-        log_info!(LOG_ORIGIN, "Trying to load from filesystem: {}", path);
+        // Try loading from filesystem - check multiple locations
+        let search_paths = [
+            alloc::format!("/system/services/{}.atxf", name),
+            alloc::format!("/apps/system/{}.atxf", name),
+            alloc::format!("/apps/user/{}.atxf", name),
+        ];
 
-        if let Some(data) = crate::drivers::fat32::open(&path) {
-            log_info!(LOG_ORIGIN, "Loaded {} bytes from filesystem", data.len());
-            return spawn_from_image(&data, name);
+        for path in &search_paths {
+            log_info!(LOG_ORIGIN, "Trying to load from filesystem: {}", path);
+            if let Some(data) = crate::drivers::fat32::open(path) {
+                log_info!(LOG_ORIGIN, "Loaded {} bytes from filesystem: {}", data.len(), path);
+                return spawn_from_image(&data, name);
+            }
         }
+        
         // Fall back to registry if not found in filesystem
         log_debug!(LOG_ORIGIN, "Not found in filesystem, trying registry");
     }

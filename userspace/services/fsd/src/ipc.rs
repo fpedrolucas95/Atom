@@ -1,478 +1,428 @@
-//! IPC Request Handler Module
+//! IPC Request Handler for fsd
 //!
-//! Routes incoming IPC messages to filesystem operation handlers.
-//! Parses request payloads, delegates to the kernel FAT32 backend via
-//! the `kern_fs_*` syscalls, and constructs response byte arrays that
-//! the kernel can forward to the requesting thread.
+//! Receives messages from userspace on PORT_FS_SERVICE (3), dispatches
+//! them to the VFS layer, and serialises the replies.
 //!
-//! ## Response wire formats (all little-endian)
+//! ## Wire formats (all little-endian, all responses have a leading u64 error)
 //!
-//! Most responses use the generic FsReply layout:
-//!   [error(8) | value(8)]            (16 bytes)
-//!
-//! stat   → [error(8) | stat_buf(80)] (88 bytes)
-//! read   → [error(8) | nbytes(8) | data(nbytes)]
-//! readdir→ [error(8) | size(8)   | dirent_data(size)]
+//!   open    req: [path_len(4) | path | flags(4) | cap(8) | pid(4)]
+//!           rep: [error(8) | fd(8)]
+//!   close   req: [fd(8) | pid(4)]
+//!           rep: [error(8) | 0(8)]
+//!   read    req: [fd(8) | count(8) | pid(4)]
+//!           rep: [error(8) | bytes_read(8) | data]
+//!   write   req: [fd(8) | count(8) | pid(4) | data]
+//!           rep: [error(8) | bytes_written(8)]
+//!   seek    req: [fd(8) | offset(8,i64) | whence(4) | pid(4)]
+//!           rep: [error(8) | new_offset(8)]
+//!   fstat   req: [fd(8) | pid(4)]
+//!           rep: [error(8) | stat_buf(80)]
+//!   stat    req: [path_len(4) | path]
+//!           rep: [error(8) | stat_buf(80)]
+//!   readdir req: [fd(8) | pid(4)]
+//!           rep: [error(8) | count(8) | [name_len(2) | name | stat(80)]*]
+//!   mkdir   req: [path_len(4) | path]
+//!           rep: [error(8) | 0(8)]
+//!   unlink  req: [path_len(4) | path]
+//!           rep: [error(8) | 0(8)]
+//!   rmdir   req: [path_len(4) | path]
+//!           rep: [error(8) | 0(8)]
+//!   rename  req: [old_len(4) | old | new_len(4) | new]
+//!           rep: [error(8) | 0(8)]
+//!   truncate req:[fd(8) | new_size(8) | pid(4)]
+//!           rep: [error(8) | 0(8)]
+//!   fsync   req: [fd(8) | pid(4)]
+//!           rep: [error(8) | 0(8)]
+//!   statvfs req: [path_len(4) | path]
+//!           rep: [error(8) | statvfs_buf(64)]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use alloc::string::String;
 use libipc::messages::MessageType;
-use crate::mounts::MountsManager;
+use crate::capabilities::CapabilityEnforcer;
+use crate::error::{VfsError, VfsResult};
+use crate::vfs::{OpenFlags, Vfs, Whence};
 
-// ── Error codes (must match atom_abi) ─────────────────────────────────────
-const ESUCCESS: u64 = 0;
-const ENOENT: u64   = u64::MAX - 11;
-const EBADF: u64    = u64::MAX - 8;
-const EINVAL: u64   = u64::MAX - 1;
-const EIO: u64      = u64::MAX - 4;
-const EISDIR: u64   = u64::MAX - 20;
-const ENOTSUP: u64  = u64::MAX - 34;
+// ── Error helpers ─────────────────────────────────────────────────────────
 
-// ── Simple file descriptor table ──────────────────────────────────────────
+fn vfs_err_to_abi(e: VfsError) -> u64 { e.to_abi() }
 
-const MAX_FDS: usize = 128;
+// ── FsdIpcHandler ─────────────────────────────────────────────────────────
 
-/// Tracks a single open "file" (file or directory).
-#[derive(Clone)]
-struct OpenFile {
-    path: String,
-    flags: u32,
-    is_dir: bool,
-    offset: usize,
-    /// Cached file data (read once on open if not a directory).
-    data: Option<Vec<u8>>,
-}
-
-/// The FSD IPC handler.  Owns the fd table and dispatches requests.
+/// Stateless IPC dispatcher: owns references to the VFS and capability enforcer.
 pub struct FsdIpcHandler<'a> {
-    mounts: &'a mut MountsManager,
-    fds: [Option<OpenFile>; MAX_FDS],
-    next_fd: u32,
+    vfs:  &'a mut Vfs,
+    caps: &'a mut CapabilityEnforcer,
 }
 
 impl<'a> FsdIpcHandler<'a> {
-    pub fn new(mounts: &'a mut MountsManager) -> Self {
-        Self {
-            mounts,
-            fds: core::array::from_fn(|_| None),
-            next_fd: 3, // 0/1/2 reserved for stdin/stdout/stderr
-        }
+    pub fn new(vfs: &'a mut Vfs, caps: &'a mut CapabilityEnforcer) -> Self {
+        FsdIpcHandler { vfs, caps }
     }
 
     // ── Dispatch ──────────────────────────────────────────────────────────
 
-    /// Dispatch incoming request to handler based on message type.
-    /// Returns a byte vector that will be sent verbatim to the reply port.
     pub fn handle_request(&mut self, msg_type: MessageType, payload: &[u8]) -> Vec<u8> {
         match msg_type {
-            MessageType::FsOpen    => self.handle_fs_open(payload),
-            MessageType::FsClose   => self.handle_fs_close(payload),
-            MessageType::FsRead    => self.handle_fs_read(payload),
-            MessageType::FsWrite   => self.handle_fs_write(payload),
-            MessageType::FsStat    => self.handle_fs_stat(payload),
-            MessageType::FsReaddir => self.handle_fs_readdir(payload),
-            MessageType::FsSeek   => self.handle_fs_seek(payload),
-            _ => {
-                atom_syscall::debug::log("fsd: unsupported msg_type, returning ENOTSUP");
-                Self::make_reply(ENOTSUP, 0)
-            }
+            MessageType::FsOpen        => self.handle_open(payload),
+            MessageType::FsClose       => self.handle_close(payload),
+            MessageType::FsRead        => self.handle_read(payload),
+            MessageType::FsWrite       => self.handle_write(payload),
+            MessageType::FsSeek        => self.handle_seek(payload),
+            MessageType::FsFstat       => self.handle_fstat(payload),
+            MessageType::FsStat        => self.handle_stat(payload),
+            MessageType::FsReaddir     => self.handle_readdir(payload),
+            MessageType::FsMkdir       => self.handle_mkdir(payload),
+            MessageType::FsUnlink      => self.handle_unlink(payload),
+            MessageType::FsRmdir       => self.handle_rmdir(payload),
+            MessageType::FsRename      => self.handle_rename(payload),
+            MessageType::FsTruncate    => self.handle_truncate(payload),
+            MessageType::FsFsync       => self.handle_fsync(payload),
+            MessageType::FsStatvfs     => self.handle_statvfs(payload),
+            _ => Self::err_reply(VfsError::NotSupported),
         }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    fn log(msg: &str) {
-        atom_syscall::debug::log(msg);
-    }
-
-    /// Build a generic 16-byte FsReply: [error(8) | value(8)]
-    fn make_reply(error: u64, value: u64) -> Vec<u8> {
+    fn ok_reply(value: u64) -> Vec<u8> {
         let mut v = Vec::with_capacity(16);
-        v.extend_from_slice(&error.to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes());  // error = 0
         v.extend_from_slice(&value.to_le_bytes());
         v
     }
 
-    fn alloc_fd(&mut self) -> Option<u32> {
-        for i in 3..MAX_FDS {
-            if self.fds[i].is_none() {
-                return Some(i as u32);
-            }
-        }
-        None
+    fn err_reply(e: VfsError) -> Vec<u8> {
+        let mut v = Vec::with_capacity(16);
+        v.extend_from_slice(&e.to_abi().to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes());
+        v
     }
 
-    // ── Open ──────────────────────────────────────────────────────────────
-    //
-    // Request: [path_len(4) | path_bytes | flags(4) | mode(4)]
-    // Reply:   [error(8) | fd(8)]
-
-    fn handle_fs_open(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 4 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-        if payload.len() < 4 + path_len + 8 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let path = match core::str::from_utf8(&payload[4..4 + path_len]) {
-            Ok(s) => s,
-            Err(_) => return Self::make_reply(EINVAL, 0),
-        };
-        let flags = u32::from_le_bytes([
-            payload[4 + path_len],
-            payload[5 + path_len],
-            payload[6 + path_len],
-            payload[7 + path_len],
-        ]);
-
-        Self::log(&alloc::format!("fsd: open path=\"{}\" flags={:#x}", path, flags));
-
-        let o_directory: u32 = 0x10000; // O_DIRECTORY from atom_abi
-        let o_creat: u32 = 0x0040;
-
-        // Check if this is a directory open
-        let is_dir = (flags & o_directory) != 0 || path == "/" || path.ends_with('/');
-
-        if is_dir {
-            // Validate that the directory exists via kernel backend
-            let mut tmp = [0u8; 2048];
-            match atom_syscall::fs::kern_fs_list_dir(path, &mut tmp) {
-                Ok(_) => {} // directory exists
-                Err(_) => {
-                    // Maybe it's like "/" that needs special handling
-                    if path != "/" {
-                        return Self::make_reply(ENOENT, 0);
-                    }
-                }
-            }
-        } else {
-            // Validate file exists by reading 0-byte check (stat)
-            let mut stat_buf = [0u8; 80];
-            match atom_syscall::fs::kern_fs_stat_path(path, &mut stat_buf) {
-                Ok(()) => {}
-                Err(_) => {
-                    if (flags & o_creat) == 0 || atom_syscall::fs::write_file(path, &[]).is_err() {
-                        return Self::make_reply(ENOENT, 0);
-                    }
-                }
-            }
-        }
-
-        let fd = match self.alloc_fd() {
-            Some(f) => f,
-            None => return Self::make_reply(EIO, 0),
-        };
-
-        self.fds[fd as usize] = Some(OpenFile {
-            path: String::from(path),
-            flags,
-            is_dir,
-            offset: 0,
-            data: None,
-        });
-
-        Self::log(&alloc::format!("fsd: opened fd={} for \"{}\"", fd, path));
-        Self::make_reply(ESUCCESS, fd as u64)
-    }
-
-    // ── Close ─────────────────────────────────────────────────────────────
-    //
-    // Request: [fd(8)]
-    // Reply:   [error(8) | 0(8)]
-
-    fn handle_fs_close(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 8 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let fd = u64::from_le_bytes([
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7],
+    fn read_path(payload: &[u8], offset: usize) -> Option<(&str, usize)> {
+        if payload.len() < offset + 4 { return None; }
+        let len = u32::from_le_bytes([
+            payload[offset], payload[offset+1], payload[offset+2], payload[offset+3],
         ]) as usize;
-
-        if fd >= MAX_FDS || self.fds[fd].is_none() {
-            return Self::make_reply(EBADF, 0);
-        }
-
-        self.fds[fd] = None;
-        Self::log(&alloc::format!("fsd: closed fd={}", fd));
-        Self::make_reply(ESUCCESS, 0)
+        let end = offset + 4 + len;
+        if payload.len() < end { return None; }
+        let s = core::str::from_utf8(&payload[offset+4..end]).ok()?;
+        Some((s, end))
     }
 
-    // ── Read ──────────────────────────────────────────────────────────────
-    //
-    // Request: [fd(8) | count(8)]
-    // Reply:   [error(8) | bytes_read(8) | data]
+    // ── open ──────────────────────────────────────────────────────────────
+    // req: [path_len(4) | path | flags(4) | cap(8) | pid(4)]
+    // rep: [error(8) | fd(8)]
 
-    fn handle_fs_read(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 16 {
-            return Self::make_reply(EINVAL, 0);
+    fn handle_open(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((path, after_path)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        if payload.len() < after_path + 16 {
+            return Self::err_reply(VfsError::InvalidArgument);
+        }
+        let flags_raw = u32::from_le_bytes(payload[after_path..after_path+4].try_into().unwrap());
+        let cap_handle = u64::from_le_bytes(payload[after_path+4..after_path+12].try_into().unwrap());
+        let pid = u32::from_le_bytes(payload[after_path+12..after_path+16].try_into().unwrap());
+
+        let flags = OpenFlags(flags_raw);
+
+        // Capability check (full revalidation on open)
+        use crate::capabilities::CapPermissions;
+        let required = if flags.writable() {
+            CapPermissions::READ | CapPermissions::WRITE
+        } else {
+            CapPermissions::READ
+        };
+        if let Err(e) = self.caps.check_full(cap_handle, pid, required) {
+            return Self::err_reply(e);
         }
 
-        let fd    = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        match self.vfs.open(path, flags, pid, cap_handle) {
+            Ok(fd)  => Self::ok_reply(fd as u64),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── close ─────────────────────────────────────────────────────────────
+    // req: [fd(8) | pid(4)]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_close(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 12 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd  = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+        let pid = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+        match self.vfs.close(fd, pid) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── read ──────────────────────────────────────────────────────────────
+    // req: [fd(8) | count(8) | pid(4)]
+    // rep: [error(8) | bytes_read(8) | data]
+
+    fn handle_read(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 20 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd    = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
         let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
+        let pid   = u32::from_le_bytes(payload[16..20].try_into().unwrap());
 
-        if fd >= MAX_FDS || self.fds[fd].is_none() {
-            return Self::make_reply(EBADF, 0);
-        }
+        // Clamp to 64 KiB per request
+        let count = count.min(65536);
+        let mut buf = alloc::vec![0u8; count];
 
-        if self.fds[fd].as_ref().unwrap().is_dir {
-            return Self::make_reply(EISDIR, 0);
-        }
-
-        // Ensure the full file is cached on first access.  This avoids reading
-        // from byte 0 on every call and makes offset-based reads correct.
-        if self.fds[fd].as_ref().unwrap().data.is_none() {
-            let path = self.fds[fd].as_ref().unwrap().path.clone();
-
-            // Get file size via stat so we allocate an exact buffer.
-            let mut stat_buf = [0u8; 80];
-            if atom_syscall::fs::kern_fs_stat_path(&path, &mut stat_buf).is_err() {
-                return Self::make_reply(EIO, 0);
-            }
-            let file_size =
-                u64::from_le_bytes(stat_buf[0..8].try_into().unwrap()) as usize;
-
-            if file_size > 0 {
-                let mut data = alloc::vec![0u8; file_size];
-                let n = match atom_syscall::fs::kern_fs_read_file(&path, &mut data) {
-                    Ok(n) => n,
-                    Err(_) => return Self::make_reply(EIO, 0),
-                };
-                data.truncate(n);
-                self.fds[fd].as_mut().unwrap().data = Some(data);
-            }
-            // Empty file: data stays None; reads will hit the EOF path below.
-        }
-
-        // Serve from the in-memory cache.
-        let file_len = self.fds[fd].as_ref().unwrap()
-            .data.as_ref().map_or(0, |d| d.len());
-        let offset = self.fds[fd].as_ref().unwrap().offset;
-
-        if count == 0 || offset >= file_len {
-            // EOF — reply with 0 bytes read
-            let mut resp = Vec::with_capacity(16);
-            resp.extend_from_slice(&ESUCCESS.to_le_bytes());
-            resp.extend_from_slice(&0u64.to_le_bytes());
-            return resp;
-        }
-
-        let available = file_len - offset;
-        let to_return = available.min(count);
-
-        // Build response: [error(8) | bytes_read(8) | data]
-        let mut resp = Vec::with_capacity(16 + to_return);
-        resp.extend_from_slice(&ESUCCESS.to_le_bytes());
-        resp.extend_from_slice(&(to_return as u64).to_le_bytes());
-        {
-            let data = self.fds[fd].as_ref().unwrap().data.as_ref().unwrap();
-            resp.extend_from_slice(&data[offset..offset + to_return]);
-        }
-
-        self.fds[fd].as_mut().unwrap().offset += to_return;
-        resp
-    }
-
-    // ── Seek ──────────────────────────────────────────────────────────────
-    //
-    // Request: [fd(8) | offset(8, i64) | whence(4)]
-    // Reply:   [error(8) | new_offset(8)]
-
-    fn handle_fs_seek(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 20 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let fd     = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
-        let off    = i64::from_le_bytes(payload[8..16].try_into().unwrap());
-        let whence = u32::from_le_bytes(payload[16..20].try_into().unwrap());
-
-        if fd >= MAX_FDS || self.fds[fd].is_none() {
-            return Self::make_reply(EBADF, 0);
-        }
-
-        if self.fds[fd].as_ref().unwrap().is_dir {
-            return Self::make_reply(EISDIR, 0);
-        }
-
-        let new_offset: i64 = match whence {
-            0 => off,   // SEEK_SET
-            1 => {      // SEEK_CUR
-                let cur = self.fds[fd].as_ref().unwrap().offset as i64;
-                cur + off
-            }
-            2 => {      // SEEK_END — need to know file size
-                // Ensure file data is cached so we have an authoritative length.
-                if self.fds[fd].as_ref().unwrap().data.is_none() {
-                    let path = self.fds[fd].as_ref().unwrap().path.clone();
-                    let mut stat_buf = [0u8; 80];
-                    if atom_syscall::fs::kern_fs_stat_path(&path, &mut stat_buf).is_err() {
-                        return Self::make_reply(EIO, 0);
-                    }
-                    let file_size =
-                        u64::from_le_bytes(stat_buf[0..8].try_into().unwrap()) as usize;
-                    if file_size > 0 {
-                        let mut data = alloc::vec![0u8; file_size];
-                        let n = match atom_syscall::fs::kern_fs_read_file(&path, &mut data) {
-                            Ok(n) => n,
-                            Err(_) => return Self::make_reply(EIO, 0),
-                        };
-                        data.truncate(n);
-                        self.fds[fd].as_mut().unwrap().data = Some(data);
-                    }
-                }
-                let file_len = self.fds[fd].as_ref().unwrap()
-                    .data.as_ref().map_or(0, |d| d.len()) as i64;
-                file_len + off
-            }
-            _ => return Self::make_reply(EINVAL, 0),
-        };
-
-        if new_offset < 0 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        self.fds[fd].as_mut().unwrap().offset = new_offset as usize;
-        Self::make_reply(ESUCCESS, new_offset as u64)
-    }
-
-    // ── Write ─────────────────────────────────────────────────────────────
-    //
-    // Request: [fd(8) | count(8) | data]
-    // Reply:   [error(8) | bytes_written(8)]
-
-    fn handle_fs_write(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 16 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let fd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
-        let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
-        if payload.len() < 16 + count {
-            return Self::make_reply(EINVAL, 0);
-        }
-        if fd >= MAX_FDS || self.fds[fd].is_none() {
-            return Self::make_reply(EBADF, 0);
-        }
-        if self.fds[fd].as_ref().unwrap().is_dir {
-            return Self::make_reply(EISDIR, 0);
-        }
-
-        let o_append: u32 = 0x0400;
-        let write_offset = {
-            let of = self.fds[fd].as_ref().unwrap();
-            if (of.flags & o_append) != 0 {
-                of.data.as_ref().map_or(0, |d| d.len())
-            } else {
-                of.offset
-            }
-        };
-
-        if self.fds[fd].as_ref().unwrap().data.is_none() {
-            let path = self.fds[fd].as_ref().unwrap().path.clone();
-            let existing = atom_syscall::fs::read_file(&path).unwrap_or_default();
-            self.fds[fd].as_mut().unwrap().data = Some(existing);
-        }
-
-        let path = self.fds[fd].as_ref().unwrap().path.clone();
-        let data_in = &payload[16..16 + count];
-        let file_data = self.fds[fd].as_mut().unwrap().data.as_mut().unwrap();
-        let new_len = write_offset.saturating_add(count);
-        if file_data.len() < new_len {
-            file_data.resize(new_len, 0);
-        }
-        file_data[write_offset..write_offset + count].copy_from_slice(data_in);
-
-        match atom_syscall::fs::write_file(&path, file_data) {
-            Ok(()) => {
-                self.fds[fd].as_mut().unwrap().offset = write_offset + count;
-                Self::make_reply(ESUCCESS, count as u64)
-            }
-            Err(_) => Self::make_reply(EIO, 0),
-        }
-    }
-
-    // ── Stat ──────────────────────────────────────────────────────────────
-    //
-    // Request: [path_len(4) | path_bytes]
-    // Reply:   [error(8) | stat_buf(80)]
-
-    fn handle_fs_stat(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 4 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-        if payload.len() < 4 + path_len {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let path = match core::str::from_utf8(&payload[4..4 + path_len]) {
-            Ok(s) => s,
-            Err(_) => return Self::make_reply(EINVAL, 0),
-        };
-
-        Self::log(&alloc::format!("fsd: stat path=\"{}\"", path));
-
-        let mut stat_buf = [0u8; 80];
-        match atom_syscall::fs::kern_fs_stat_path(path, &mut stat_buf) {
-            Ok(()) => {
-                // Reply: [error(8) | stat_buf(80)]
-                let mut resp = Vec::with_capacity(88);
-                resp.extend_from_slice(&ESUCCESS.to_le_bytes());
-                resp.extend_from_slice(&stat_buf);
+        match self.vfs.read(fd, pid, &mut buf) {
+            Ok(n) => {
+                let mut resp = Vec::with_capacity(16 + n);
+                resp.extend_from_slice(&0u64.to_le_bytes());
+                resp.extend_from_slice(&(n as u64).to_le_bytes());
+                resp.extend_from_slice(&buf[..n]);
                 resp
             }
-            Err(_) => Self::make_reply(ENOENT, 0),
+            Err(e) => Self::err_reply(e),
         }
     }
 
-    // ── Readdir ───────────────────────────────────────────────────────────
-    //
-    // Request: [dirfd(8) | count(8)]
-    // Reply:   [error(8) | size(8) | dirent_data(size)]
+    // ── write ─────────────────────────────────────────────────────────────
+    // req: [fd(8) | count(8) | pid(4) | data]
+    // rep: [error(8) | bytes_written(8)]
 
-    fn handle_fs_readdir(&mut self, payload: &[u8]) -> Vec<u8> {
-        if payload.len() < 16 {
-            return Self::make_reply(EINVAL, 0);
-        }
-
-        let dirfd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+    fn handle_write(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 20 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd    = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
         let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
+        let pid   = u32::from_le_bytes(payload[16..20].try_into().unwrap());
 
-        if dirfd >= MAX_FDS {
-            return Self::make_reply(EBADF, 0);
+        if payload.len() < 20 + count {
+            return Self::err_reply(VfsError::InvalidArgument);
         }
+        let data = &payload[20..20 + count];
 
-        let dir = match &self.fds[dirfd] {
-            Some(f) if f.is_dir => f.clone(),
-            Some(_) => return Self::make_reply(EINVAL, 0), // not a directory
-            None    => return Self::make_reply(EBADF, 0),
+        match self.vfs.write(fd, pid, data) {
+            Ok(n)  => Self::ok_reply(n as u64),
+            Err(e) => Self::err_reply(e),
+        }
+    }
+
+    // ── seek ──────────────────────────────────────────────────────────────
+    // req: [fd(8) | offset(8,i64) | whence(4) | pid(4)]
+    // rep: [error(8) | new_offset(8)]
+
+    fn handle_seek(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 24 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd     = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+        let offset = i64::from_le_bytes(payload[8..16].try_into().unwrap());
+        let whence_raw = u32::from_le_bytes(payload[16..20].try_into().unwrap());
+        let pid    = u32::from_le_bytes(payload[20..24].try_into().unwrap());
+
+        let Some(whence) = Whence::from_raw(whence_raw) else {
+            return Self::err_reply(VfsError::InvalidArgument);
         };
 
-        Self::log(&alloc::format!("fsd: readdir fd={} path=\"{}\"", dirfd, dir.path));
+        match self.vfs.seek(fd, pid, offset, whence) {
+            Ok(pos) => Self::ok_reply(pos),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
 
-        // Ask kernel backend for directory listing (packed dirent format)
-        let buf_size = count.min(4096);
-        let mut dirent_buf = alloc::vec![0u8; buf_size];
-        let bytes_used = match atom_syscall::fs::kern_fs_list_dir(&dir.path, &mut dirent_buf) {
-            Ok(n) => n,
-            Err(_) => return Self::make_reply(ENOENT, 0),
+    // ── fstat ─────────────────────────────────────────────────────────────
+    // req: [fd(8) | pid(4)]
+    // rep: [error(8) | stat_buf(80)]
+
+    fn handle_fstat(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 12 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd  = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+        let pid = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+
+        match self.vfs.fstat(fd, pid) {
+            Ok(s) => {
+                let mut resp = Vec::with_capacity(88);
+                resp.extend_from_slice(&0u64.to_le_bytes());
+                // Serialize InodeStat (80 bytes, #[repr(C)])
+                let bytes: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        &s as *const _ as *const u8,
+                        core::mem::size_of::<crate::vfs::InodeStat>(),
+                    )
+                };
+                resp.extend_from_slice(bytes);
+                resp
+            }
+            Err(e) => Self::err_reply(e),
+        }
+    }
+
+    // ── stat ──────────────────────────────────────────────────────────────
+    // req: [path_len(4) | path]
+    // rep: [error(8) | stat_buf(80)]
+
+    fn handle_stat(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((path, _)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
         };
+        match self.vfs.stat(path) {
+            Ok(s) => {
+                let mut resp = Vec::with_capacity(88);
+                resp.extend_from_slice(&0u64.to_le_bytes());
+                let bytes: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        &s as *const _ as *const u8,
+                        core::mem::size_of::<crate::vfs::InodeStat>(),
+                    )
+                };
+                resp.extend_from_slice(bytes);
+                resp
+            }
+            Err(e) => Self::err_reply(e),
+        }
+    }
 
-        // Reply: [error(8) | size(8) | dirent_data]
-        let mut resp = Vec::with_capacity(16 + bytes_used);
-        resp.extend_from_slice(&ESUCCESS.to_le_bytes());
-        resp.extend_from_slice(&(bytes_used as u64).to_le_bytes());
-        resp.extend_from_slice(&dirent_buf[..bytes_used]);
+    // ── readdir ───────────────────────────────────────────────────────────
+    // req: [fd(8) | pid(4)]
+    // rep: [error(8) | count(8) | [name_len(2) | name | stat(80)]*]
 
-        Self::log(&alloc::format!("fsd: readdir returned {} bytes", bytes_used));
-        resp
+    fn handle_readdir(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 12 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd  = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+        let pid = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+
+        match self.vfs.readdir_fd(fd, pid) {
+            Ok(entries) => {
+                let count = entries.len() as u64;
+                let mut resp = Vec::new();
+                resp.extend_from_slice(&0u64.to_le_bytes());     // error
+                resp.extend_from_slice(&count.to_le_bytes());    // count
+                for e in &entries {
+                    let name_bytes = e.name.as_bytes();
+                    let name_len = name_bytes.len().min(255) as u16;
+                    resp.extend_from_slice(&name_len.to_le_bytes());
+                    resp.extend_from_slice(&name_bytes[..name_len as usize]);
+                    let stat_bytes: &[u8] = unsafe {
+                        core::slice::from_raw_parts(
+                            &e.stat as *const _ as *const u8,
+                            core::mem::size_of::<crate::vfs::InodeStat>(),
+                        )
+                    };
+                    resp.extend_from_slice(stat_bytes);
+                }
+                resp
+            }
+            Err(e) => Self::err_reply(e),
+        }
+    }
+
+    // ── mkdir ─────────────────────────────────────────────────────────────
+    // req: [path_len(4) | path]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_mkdir(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((path, _)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        match self.vfs.mkdir(path) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── unlink ────────────────────────────────────────────────────────────
+    // req: [path_len(4) | path]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_unlink(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((path, _)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        match self.vfs.unlink(path) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── rmdir ─────────────────────────────────────────────────────────────
+    // req: [path_len(4) | path]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_rmdir(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((path, _)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        match self.vfs.rmdir(path) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── rename ────────────────────────────────────────────────────────────
+    // req: [old_len(4) | old | new_len(4) | new]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_rename(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((old_path, after_old)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        let Some((new_path, _)) = Self::read_path(payload, after_old) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        match self.vfs.rename(old_path, new_path) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── truncate ──────────────────────────────────────────────────────────
+    // req: [fd(8) | new_size(8) | pid(4)]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_truncate(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 20 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd       = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+        let new_size = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+        let pid      = u32::from_le_bytes(payload[16..20].try_into().unwrap());
+        match self.vfs.truncate(fd, pid, new_size) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── fsync ─────────────────────────────────────────────────────────────
+    // req: [fd(8) | pid(4)]
+    // rep: [error(8) | 0(8)]
+
+    fn handle_fsync(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 12 { return Self::err_reply(VfsError::InvalidArgument); }
+        let fd  = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+        let pid = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+        match self.vfs.fsync(fd, pid) {
+            Ok(())  => Self::ok_reply(0),
+            Err(e)  => Self::err_reply(e),
+        }
+    }
+
+    // ── statvfs ───────────────────────────────────────────────────────────
+    // req: [path_len(4) | path]
+    // rep: [error(8) | statvfs_buf(64)]
+
+    fn handle_statvfs(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((path, _)) = Self::read_path(payload, 0) else {
+            return Self::err_reply(VfsError::InvalidArgument);
+        };
+        match self.vfs.statvfs(path) {
+            Ok(s) => {
+                let mut resp = Vec::with_capacity(72);
+                resp.extend_from_slice(&0u64.to_le_bytes());
+                let bytes: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        &s as *const _ as *const u8,
+                        core::mem::size_of::<crate::vfs::StatVfs>(),
+                    )
+                };
+                resp.extend_from_slice(bytes);
+                resp
+            }
+            Err(e) => Self::err_reply(e),
+        }
     }
 }
