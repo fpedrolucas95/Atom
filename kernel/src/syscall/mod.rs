@@ -259,7 +259,7 @@ pub use atom_abi::{
     EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
     // Filesystem error codes
     ENOENT, EISDIR, ENOTDIR, EBADF, EROFS, ENAMETOOLONG, EIO,
-    EMFILE,
+    EMFILE, EEXIST, EACCES, EXDEV, ENOTEMPTY,
     ENOTSUP,
     ENODEV,
     // FS limits
@@ -4819,6 +4819,8 @@ struct KernelFd {
     cache_ptr: usize,
     /// Cached file data length in bytes.
     cache_len: usize,
+    /// Whether the cached contents must be flushed back to disk.
+    dirty: bool,
 }
 
 impl KernelFd {
@@ -4832,6 +4834,7 @@ impl KernelFd {
         offset: 0,
         cache_ptr: 0,
         cache_len: 0,
+        dirty: false,
     };
 
     fn path_str(&self) -> &str {
@@ -4850,6 +4853,7 @@ impl KernelFd {
         }
         self.cache_ptr = 0;
         self.cache_len = 0;
+        self.dirty = false;
     }
 }
 
@@ -4959,10 +4963,107 @@ fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
             table[i].is_dir = is_dir;
             table[i].flags = flags;
             table[i].offset = 0;
+            table[i].dirty = false;
             return Ok(i as u64);
         }
     }
     Err(EMFILE)
+}
+
+fn ensure_fd_cache(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize) -> Result<(), u64> {
+    if table[idx].cache_ptr != 0 || table[idx].cache_len != 0 {
+        return Ok(());
+    }
+
+    let path_buf = table[idx].path;
+    let path_len = table[idx].path_len;
+    let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+
+    let data = crate::drivers::fat32::open(path).ok_or(EIO)?;
+    let len = data.len();
+    if len == 0 {
+        table[idx].cache_ptr = 0;
+        table[idx].cache_len = 0;
+        return Ok(());
+    }
+
+    let layout = unsafe { core::alloc::Layout::from_size_align_unchecked(len, 1) };
+    let ptr = unsafe { alloc::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return Err(EIO);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
+    }
+    table[idx].cache_ptr = ptr as usize;
+    table[idx].cache_len = len;
+    Ok(())
+}
+
+fn resize_fd_cache(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize, new_len: usize) -> Result<(), u64> {
+    let old_ptr = table[idx].cache_ptr;
+    let old_len = table[idx].cache_len;
+
+    if new_len == old_len {
+        return Ok(());
+    }
+
+    if new_len == 0 {
+        if old_ptr != 0 && old_len > 0 {
+            unsafe {
+                let layout = core::alloc::Layout::from_size_align_unchecked(old_len, 1);
+                alloc::alloc::dealloc(old_ptr as *mut u8, layout);
+            }
+        }
+        table[idx].cache_ptr = 0;
+        table[idx].cache_len = 0;
+        return Ok(());
+    }
+
+    let layout = unsafe { core::alloc::Layout::from_size_align_unchecked(new_len, 1) };
+    let new_ptr = unsafe { alloc::alloc::alloc(layout) };
+    if new_ptr.is_null() {
+        return Err(EIO);
+    }
+
+    unsafe {
+        if old_ptr != 0 && old_len > 0 {
+            core::ptr::copy_nonoverlapping(old_ptr as *const u8, new_ptr, old_len.min(new_len));
+            let old_layout = core::alloc::Layout::from_size_align_unchecked(old_len, 1);
+            alloc::alloc::dealloc(old_ptr as *mut u8, old_layout);
+        }
+        if new_len > old_len {
+            core::ptr::write_bytes(new_ptr.add(old_len), 0, new_len - old_len);
+        }
+    }
+
+    table[idx].cache_ptr = new_ptr as usize;
+    table[idx].cache_len = new_len;
+    Ok(())
+}
+
+fn flush_fd_locked(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize) -> u64 {
+    if !table[idx].dirty || table[idx].is_dir {
+        return ESUCCESS;
+    }
+
+    let path_buf = table[idx].path;
+    let path_len = table[idx].path_len;
+    let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+    let data = if table[idx].cache_ptr == 0 || table[idx].cache_len == 0 {
+        &[][..]
+    } else {
+        unsafe {
+            core::slice::from_raw_parts(table[idx].cache_ptr as *const u8, table[idx].cache_len)
+        }
+    };
+
+    if crate::drivers::fat32::write_file(path, data) {
+        table[idx].dirty = false;
+        ESUCCESS
+    } else {
+        EIO
+    }
 }
 
 // ============================================================================
@@ -4981,11 +5082,14 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
 
     log_debug!(LOG_ORIGIN, "sys_fs_open(path=\"{}\", flags={:#x})", path, flags);
 
-    let o_directory: u32 = 0x10000; // atom_abi::O_DIRECTORY
+    let o_directory: u32 = 0x10000;
+    let o_creat: u32 = 0x0040;
+    let o_excl: u32 = 0x0080;
+    let o_trunc: u32 = 0x0200;
+    let o_append: u32 = 0x0400;
     let is_dir = (flags & o_directory) != 0 || path == "/" || path.ends_with('/');
 
     if is_dir {
-        // Verify directory exists via kernel FAT32
         let list_path = if path == "/" || path.is_empty() {
             ""
         } else {
@@ -4997,35 +5101,49 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
                 return ENOENT;
             }
         }
-    } else {
-        // Verify file exists (stat-like: try open for existence check,
-        // but we don't want to read the entire file here for large files)
-        let trimmed = path.trim_start_matches('/');
-        let parent_end = trimmed.rfind('/').unwrap_or(0);
-        let list_path = &trimmed[..parent_end];
-        let file_name = path.split('/').filter(|s| !s.is_empty()).last().unwrap_or("");
-
-        // Check parent directory for the entry
-        let found = match crate::drivers::fat32::list_directory(list_path) {
-            Some(entries) => entries.iter().any(|e| {
-                let name = if e.ends_with('/') { &e[..e.len()-1] } else { e.as_str() };
-                name.eq_ignore_ascii_case(file_name)
-            }),
-            None => false,
-        };
-
-        if !found {
+    } else if crate::drivers::fat32::stat_path(path).is_none() {
+        if (flags & o_creat) == 0 {
             log_debug!(LOG_ORIGIN, "file not found: \"{}\"", path);
             return ENOENT;
         }
+        if !crate::drivers::fat32::write_file(path, &[]) {
+            return EIO;
+        }
+    } else if (flags & o_creat) != 0 && (flags & o_excl) != 0 {
+        return EEXIST;
     }
 
-    // Store path without trailing slash
     let store_path = path.trim_end_matches('/');
     let fd = match alloc_kernel_fd(store_path, is_dir, flags) {
         Ok(fd) => fd,
         Err(e) => return e,
     };
+
+    if !is_dir && (flags & o_trunc) != 0 {
+        let idx = fd as usize;
+        let mut table = KERNEL_FD_TABLE.lock();
+        if let Err(e) = ensure_fd_cache(&mut table, idx) {
+            table[idx].free_cache();
+            table[idx] = KernelFd::EMPTY;
+            return e;
+        }
+        if let Err(e) = resize_fd_cache(&mut table, idx, 0) {
+            table[idx].free_cache();
+            table[idx] = KernelFd::EMPTY;
+            return e;
+        }
+        table[idx].dirty = true;
+        table[idx].offset = 0;
+    } else if !is_dir && (flags & o_append) != 0 {
+        let idx = fd as usize;
+        let mut table = KERNEL_FD_TABLE.lock();
+        if let Err(e) = ensure_fd_cache(&mut table, idx) {
+            table[idx].free_cache();
+            table[idx] = KernelFd::EMPTY;
+            return e;
+        }
+        table[idx].offset = table[idx].cache_len;
+    }
 
     log_debug!(LOG_ORIGIN, "sys_fs_open OK: fd={} dir={}", fd, is_dir);
 
@@ -5051,6 +5169,11 @@ fn sys_fs_close(fd: u64) -> u64 {
         Ok(v) => v,
         Err(e) => return e,
     };
+
+    let flush = flush_fd_locked(&mut table, idx);
+    if flush != ESUCCESS {
+        return flush;
+    }
 
     table[idx].free_cache();
     table[idx].owner_pml4 = 0;
@@ -5209,15 +5332,56 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     to_read as u64
 }
 
-/// Write to file descriptor (read-only FAT32 — not supported)
-fn sys_fs_write(fd: u64, _buf_ptr: u64, _count: usize) -> u64 {
+fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    if !validate_user_pointer(buf_ptr) {
+        return EINVAL;
+    }
+    let buf_end = buf_ptr.saturating_add(count as u64).saturating_sub(1);
+    if !validate_user_pointer(buf_end) {
+        return EINVAL;
+    }
+
     let idx = fd as usize;
-    let (_table, _idx) = match get_fd_entry(idx) {
+    let (mut table, idx) = match get_fd_entry(idx) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    EROFS
+    if table[idx].is_dir {
+        return EISDIR;
+    }
+    if (table[idx].flags & 0x0001) == 0 && (table[idx].flags & 0x0002) == 0 {
+        return EACCES;
+    }
+
+    if let Err(e) = ensure_fd_cache(&mut table, idx) {
+        return e;
+    }
+
+    let append = (table[idx].flags & 0x0400) != 0;
+    let write_offset = if append { table[idx].cache_len } else { table[idx].offset };
+    let new_len = write_offset.saturating_add(count);
+    if let Err(e) = resize_fd_cache(&mut table, idx, new_len) {
+        return e;
+    }
+
+    if count > 0 {
+        let src = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, count) };
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(
+                (table[idx].cache_ptr + write_offset) as *mut u8,
+                count,
+            )
+        };
+        dst.copy_from_slice(src);
+    }
+
+    table[idx].offset = write_offset + count;
+    table[idx].dirty = true;
+    count as u64
 }
 
 /// Get file status by path
@@ -5317,30 +5481,69 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     }
 }
 
-/// Create directory (read-only FAT32 — not supported)
-fn sys_fs_mkdir(_path_ptr: u64, _path_len: usize, _mode: u32) -> u64 {
-    EROFS
-}
-
-/// Unlink (delete) file (read-only FAT32 — not supported)
-fn sys_fs_unlink(_path_ptr: u64, _path_len: usize) -> u64 {
-    EROFS
-}
-
-/// Rename file (read-only FAT32 — not supported)
-fn sys_fs_rename(_old_path_ptr: u64, _old_path_len: usize, _new_path_ptr: u64, _new_path_len: usize) -> u64 {
-    EROFS
-}
-
-/// Synchronize file to disk (no-op for read-only)
-fn sys_fs_fsync(fd: u64) -> u64 {
-    let idx = fd as usize;
-    let (_table, _idx) = match get_fd_entry(idx) {
+fn sys_fs_mkdir(path_ptr: u64, path_len: usize, _mode: u32) -> u64 {
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
         Ok(v) => v,
         Err(e) => return e,
     };
+    let path = path_buf_as_str(&path_buf, path_blen);
+    if crate::drivers::fat32::stat_path(path).is_some() {
+        return EEXIST;
+    }
+    if crate::drivers::fat32::mkdir(path) {
+        ESUCCESS
+    } else {
+        EIO
+    }
+}
 
-    ESUCCESS
+fn sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+    match crate::drivers::fat32::stat_path(path) {
+        Some(st) if st.is_dir => EISDIR,
+        Some(_) => {
+            if crate::drivers::fat32::unlink(path) { ESUCCESS } else { EIO }
+        }
+        None => ENOENT,
+    }
+}
+
+fn sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+    let (old_buf, old_len) = match copy_path_from_user(old_path_ptr, old_path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (new_buf, new_len) = match copy_path_from_user(new_path_ptr, new_path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let old_path = path_buf_as_str(&old_buf, old_len);
+    let new_path = path_buf_as_str(&new_buf, new_len);
+
+    if crate::drivers::fat32::stat_path(old_path).is_none() {
+        return ENOENT;
+    }
+    if crate::drivers::fat32::stat_path(new_path).is_some() {
+        return EEXIST;
+    }
+    if crate::drivers::fat32::rename(old_path, new_path) {
+        ESUCCESS
+    } else {
+        EXDEV
+    }
+}
+
+fn sys_fs_fsync(fd: u64) -> u64 {
+    let idx = fd as usize;
+    let (mut table, idx) = match get_fd_entry(idx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    flush_fd_locked(&mut table, idx)
 }
 
 // Stub implementations for remaining syscalls (not in priority list)
@@ -5493,9 +5696,19 @@ fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
     fill_stat_to_user(stat_path, stat_ptr)
 }
 
-/// Remove directory
-fn sys_fs_rmdir(_path_ptr: u64, _path_len: usize) -> u64 {
-    ENOTSUP
+fn sys_fs_rmdir(path_ptr: u64, path_len: usize) -> u64 {
+    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+    match crate::drivers::fat32::stat_path(path) {
+        Some(st) if !st.is_dir => ENOTDIR,
+        Some(_) => {
+            if crate::drivers::fat32::rmdir(path) { ESUCCESS } else { ENOTEMPTY }
+        }
+        None => ENOENT,
+    }
 }
 
 /// Truncate file

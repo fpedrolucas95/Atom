@@ -37,8 +37,8 @@ struct Component {
     qt_id: u8,
     dc_table_id: u8,
     ac_table_id: u8,
-    dc_pred: i16,
-    blocks: Vec<[i16; 64]>,
+    dc_pred: i32,
+    blocks: Vec<[i32; 64]>,
 }
 
 #[derive(Clone)]
@@ -162,11 +162,12 @@ impl<'a> JpgInternalDecoder<'a> {
             if id >= 4 { return Err(ImageError::CorruptData("Invalid QT ID")); }
             let mut table = [0u16; 64];
             for i in 0..64 {
-                table[i] = if precision == 0 {
+                let value = if precision == 0 {
                     self.read_u8()? as u16
                 } else {
                     self.read_u16()?
                 };
+                table[ZIGZAG[i]] = value;
             }
             self.quantization_tables[id] = Some(table);
         }
@@ -281,7 +282,10 @@ impl<'a> JpgInternalDecoder<'a> {
             } else {
                 self.huffman_tables_dc[table_idx].as_ref()
             }.ok_or(ImageError::CorruptData("Missing Huffman table"))?;
-            if code <= table.max_codes[i] {
+            if table.max_codes[i] != 0xFFFFFFFF
+                && code >= table.min_codes[i]
+                && code <= table.max_codes[i]
+            {
                 let idx = (table.val_ptr[i] as u32 + (code - table.min_codes[i])) as usize;
                 if idx < table.values.len() {
                     return Ok(table.values[idx]);
@@ -291,10 +295,10 @@ impl<'a> JpgInternalDecoder<'a> {
         Err(ImageError::CorruptData("Invalid Huffman code"))
     }
 
-    fn receive_extend(&mut self, category: u8) -> Result<i16, ImageError> {
+    fn receive_extend(&mut self, category: u8) -> Result<i32, ImageError> {
         if category == 0 { return Ok(0); }
         let vt = self.get_bits(category)?;
-        let mut v = vt as i16;
+        let mut v = vt as i32;
         if v < (1 << (category - 1)) {
             v -= (1 << category) - 1;
         }
@@ -310,7 +314,7 @@ impl<'a> JpgInternalDecoder<'a> {
         for comp_idx in 0..self.components.len() {
              let c = &self.components[comp_idx];
              let blocks_count = (mcus_x * c.h_samp as usize) * (mcus_y * c.v_samp as usize);
-             self.components[comp_idx].blocks = vec![[0i16; 64]; blocks_count];
+             self.components[comp_idx].blocks = vec![[0i32; 64]; blocks_count];
         }
 
         for my in 0..mcus_y {
@@ -324,7 +328,7 @@ impl<'a> JpgInternalDecoder<'a> {
                             let block_y = my * v_samp + vy;
                             let block_idx = block_y * (mcus_x * h_samp) + block_x;
 
-                            let mut block = [0i16; 64];
+                            let mut block = [0i32; 64];
                             let s = self.decode_huffman(self.components[comp_idx].dc_table_id as usize, false)?;
                             let diff = self.receive_extend(s)?;
                             self.components[comp_idx].dc_pred += diff;
@@ -340,7 +344,7 @@ impl<'a> JpgInternalDecoder<'a> {
                             }
 
                             if let Some(qt) = self.quantization_tables[self.components[comp_idx].qt_id as usize] {
-                                for i in 0..64 { block[i] = block[i].wrapping_mul(qt[i] as i16); }
+                                for i in 0..64 { block[i] *= qt[i] as i32; }
                             }
                             self.components[comp_idx].blocks[block_idx] = block;
                         }
@@ -393,141 +397,34 @@ impl<'a> JpgInternalDecoder<'a> {
     }
 }
 
-fn idct_8x8(b: &[i16; 64]) -> [i16; 64] {
+fn idct_8x8(b: &[i32; 64]) -> [i16; 64] {
+    const BASIS: [[i32; 8]; 8] = [
+        [11585, 11585, 11585, 11585, 11585, 11585, 11585, 11585],
+        [16069, 13623, 9102, 3196, -3196, -9102, -13623, -16069],
+        [15137, 6270, -6270, -15137, -15137, -6270, 6270, 15137],
+        [13623, -3196, -16069, -9102, 9102, 16069, 3196, -13623],
+        [11585, -11585, -11585, 11585, 11585, -11585, -11585, 11585],
+        [9102, -16069, 3196, 13623, -13623, -3196, 16069, -9102],
+        [6270, -15137, 15137, -6270, -6270, 15137, -15137, 6270],
+        [3196, -9102, 13623, -16069, 16069, -13623, 9102, -3196],
+    ];
+
     let mut out = [0i16; 64];
-    let mut temp = [0i32; 64];
-
-    // Constants for fixed-point IDCT (scaled by 2^13)
-    const FIX_0_298631336: i32 = 2446;
-    const FIX_0_390180644: i32 = 3196;
-    const FIX_0_541196100: i32 = 4433;
-    const FIX_0_765366865: i32 = 6270;
-    const FIX_0_899976223: i32 = 7373;
-    const FIX_1_175875602: i32 = 9633;
-    const FIX_1_501321110: i32 = 12300;
-    const FIX_1_847759065: i32 = 15137;
-    const FIX_1_961570560: i32 = 16069;
-    const FIX_2_053119869: i32 = 16819;
-    const FIX_2_562915447: i32 = 20995;
-    const FIX_3_072711035: i32 = 25172;
-
-    // Horizontal pass
-    for i in 0..8 {
-        let row = &b[i * 8..(i + 1) * 8];
-        if row[1] == 0 && row[2] == 0 && row[3] == 0 && row[4] == 0 && row[5] == 0 && row[6] == 0 && row[7] == 0 {
-            let dc = (row[0] as i32) << 2;
-            for j in 0..8 { temp[i * 8 + j] = dc; }
-            continue;
+    for y in 0..8 {
+        for x in 0..8 {
+            let mut sum = 0i64;
+            for v in 0..8 {
+                for u in 0..8 {
+                    sum += b[v * 8 + u] as i64
+                        * BASIS[u][x] as i64
+                        * BASIS[v][y] as i64;
+                }
+            }
+            let value = ((sum + (1 << 29)) >> 30)
+                .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+            out[y * 8 + x] = value;
         }
-
-        let z2 = row[2] as i32;
-        let z3 = row[6] as i32;
-        let z1 = (z2 + z3) * FIX_0_541196100;
-        let tmp2 = z1 + z3 * (-FIX_1_847759065);
-        let tmp3 = z1 + z2 * FIX_0_765366865;
-
-        let z2 = row[0] as i32;
-        let z3 = row[4] as i32;
-        let tmp0 = (z2 + z3) << 13;
-        let tmp1 = (z2 - z3) << 13;
-
-        let tmp10 = tmp0 + tmp3;
-        let tmp13 = tmp0 - tmp3;
-        let tmp11 = tmp1 + tmp2;
-        let tmp12 = tmp1 - tmp2;
-
-        let tmp4 = row[1] as i32;
-        let tmp5 = row[3] as i32;
-        let tmp6 = row[5] as i32;
-        let tmp7 = row[7] as i32;
-
-        let z1 = tmp4 + tmp7;
-        let z2 = tmp5 + tmp6;
-        let z3 = tmp4 + tmp5;
-        let z4 = tmp6 + tmp7;
-        let z5 = (z3 + z4) * FIX_1_175875602;
-
-        let tmp4 = tmp4 * FIX_0_298631336;
-        let tmp5 = tmp5 * FIX_2_053119869;
-        let tmp6 = tmp6 * FIX_3_072711035;
-        let tmp7 = tmp7 * FIX_1_501321110;
-        let z3 = z3 * (-FIX_1_961570560);
-        let z4 = z4 * (-FIX_0_390180644);
-        let z3 = z3 + z5;
-        let z4 = z4 + z5;
-
-        let tmp4 = tmp4 + z1 * (-FIX_0_899976223) + z3;
-        let tmp5 = tmp5 + z2 * (-FIX_2_562915447) + z4;
-        let tmp6 = tmp6 + z2 * (-FIX_1_961570560) + z4;
-        let tmp7 = tmp7 + z1 * (-FIX_0_390180644) + z3;
-
-        temp[i * 8 + 0] = (tmp10 + tmp7 + (1 << 10)) >> 11;
-        temp[i * 8 + 7] = (tmp10 - tmp7 + (1 << 10)) >> 11;
-        temp[i * 8 + 1] = (tmp11 + tmp6 + (1 << 10)) >> 11;
-        temp[i * 8 + 6] = (tmp11 - tmp6 + (1 << 10)) >> 11;
-        temp[i * 8 + 2] = (tmp12 + tmp5 + (1 << 10)) >> 11;
-        temp[i * 8 + 5] = (tmp12 - tmp5 + (1 << 10)) >> 11;
-        temp[i * 8 + 3] = (tmp13 + tmp4 + (1 << 10)) >> 11;
-        temp[i * 8 + 4] = (tmp13 - tmp4 + (1 << 10)) >> 11;
     }
-
-    // Vertical pass
-    for i in 0..8 {
-        if temp[1*8+i] == 0 && temp[2*8+i] == 0 && temp[3*8+i] == 0 && temp[4*8+i] == 0 && temp[5*8+i] == 0 && temp[6*8+i] == 0 && temp[7*8+i] == 0 {
-            let dc = (temp[i] + 4) >> 3;
-            for j in 0..8 { out[j * 8 + i] = dc as i16; }
-            continue;
-        }
-
-        let z2 = temp[2 * 8 + i];
-        let z3 = temp[6 * 8 + i];
-        let z1 = (z2 + z3) * FIX_0_541196100;
-        let tmp2 = z1 + z3 * (-FIX_1_847759065);
-        let tmp3 = z1 + z2 * FIX_0_765366865;
-
-        let tmp0 = (temp[0 * 8 + i] + temp[4 * 8 + i]) << 13;
-        let tmp1 = (temp[0 * 8 + i] - temp[4 * 8 + i]) << 13;
-
-        let tmp10 = tmp0 + tmp3;
-        let tmp13 = tmp0 - tmp3;
-        let tmp11 = tmp1 + tmp2;
-        let tmp12 = tmp1 - tmp2;
-
-        let tmp4 = temp[1 * 8 + i];
-        let tmp5 = temp[3 * 8 + i];
-        let tmp6 = temp[5 * 8 + i];
-        let tmp7 = temp[7 * 8 + i];
-
-        let z1 = tmp4 + tmp7;
-        let z2 = tmp5 + tmp6;
-        let z3 = tmp4 + tmp5;
-        let z4 = tmp6 + tmp7;
-        let z5 = (z3 + z4) * FIX_1_175875602;
-
-        let tmp4 = tmp4 * FIX_0_298631336;
-        let tmp5 = tmp5 * FIX_2_053119869;
-        let tmp6 = tmp6 * FIX_3_072711035;
-        let tmp7 = tmp7 * FIX_1_501321110;
-        let z3 = z3 * (-FIX_1_961570560);
-        let z4 = z4 * (-FIX_0_390180644);
-        let z3 = z3 + z5;
-        let z4 = z4 + z5;
-
-        let tmp4 = tmp4 + z1 * (-FIX_0_899976223) + z3;
-        let tmp5 = tmp5 + z2 * (-FIX_2_562915447) + z4;
-        let tmp6 = tmp6 + z2 * (-FIX_1_961570560) + z4;
-        let tmp7 = tmp7 + z1 * (-FIX_0_390180644) + z3;
-
-        out[0 * 8 + i] = ((tmp10 + tmp7 + (1 << 17)) >> 18) as i16;
-        out[7 * 8 + i] = ((tmp10 - tmp7 + (1 << 17)) >> 18) as i16;
-        out[1 * 8 + i] = ((tmp11 + tmp6 + (1 << 17)) >> 18) as i16;
-        out[6 * 8 + i] = ((tmp11 - tmp6 + (1 << 17)) >> 18) as i16;
-        out[2 * 8 + i] = ((tmp12 + tmp5 + (1 << 17)) >> 18) as i16;
-        out[5 * 8 + i] = ((tmp12 - tmp5 + (1 << 17)) >> 18) as i16;
-        out[3 * 8 + i] = ((tmp13 + tmp4 + (1 << 17)) >> 18) as i16;
-        out[4 * 8 + i] = ((tmp13 - tmp4 + (1 << 17)) >> 18) as i16;
-    }
-
     out
 }
 

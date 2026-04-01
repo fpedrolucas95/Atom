@@ -112,7 +112,7 @@ all: $(TARGET).atxf
 # libtinygl must come before libc so that its malloc/free calls
 # are satisfied by libc rather than being multiply-defined.
 $(TARGET).elf: $(CRT0) $(OBJS) $(LIBTINYGL) $(LIBC)
-	$(LD) $(LDFLAGS) -o $@ $(CRT0) $(OBJS) $(LIBTINYGL) $(LIBC)
+	$(LD) $(LDFLAGS) -o $@ $(CRT0) $(OBJS) --start-group $(LIBTINYGL) $(LIBC) --end-group
 
 $(TARGET).atxf: $(TARGET).elf
 	@if [ -x "$(ELF2ATXF)" ]; then \

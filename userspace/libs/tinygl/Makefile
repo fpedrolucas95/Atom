@@ -88,9 +88,10 @@ TGL_SRCS = \
   $(TGL_SRC)/texture.c    \
   $(TGL_SRC)/vertex.c     \
   $(TGL_SRC)/zbuffer.c    \
-  $(TGL_SRC)/zdither.c    \
   $(TGL_SRC)/zline.c      \
   $(TGL_SRC)/zmath.c      \
+  $(TGL_SRC)/zraster.c    \
+  $(TGL_SRC)/ztext.c      \
   $(TGL_SRC)/ztriangle.c
 
 # AtomOS add-on: RGB565→ARGB32 blit helper

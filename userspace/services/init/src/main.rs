@@ -283,14 +283,7 @@ fn boot_sequence() {
     // Phase 4: Applications
     // -----------------------------------------------------------------------
     log("");
-    log("[Phase 4] Spawning applications...");
-
-    let _terminal_pid = spawn_service("terminal");
-    let _rects_pid = spawn_service("demo_rects");
-    let _text_pid = spawn_service("demo_text");
-    let _fileman_pid = spawn_service("fileman");
-
-    log("[Phase 4] Applications ready");
+    log("[Phase 4] No applications configured for auto-start");
 
     // -----------------------------------------------------------------------
     // Done

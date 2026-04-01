@@ -80,7 +80,9 @@ unsafe impl GlobalAlloc for BumpAllocator {
 static ALLOCATOR: BumpAllocator = BumpAllocator::new();
 
 #[alloc_error_handler]
-fn alloc_error(_layout: Layout) -> ! {
+fn alloc_error(layout: Layout) -> ! {
+    log("atom_desktop: allocation failure");
+    let _ = layout;
     loop {}
 }
 
@@ -91,16 +93,16 @@ use core::panic::PanicInfo;
 use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags, shared_region_create, shared_region_map, get_framebuffer};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
-use atom_syscall::thread::exit;
+use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
 use atom_syscall::process::{spawn_process, spawn_from_path};
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 use atom_syscall::fs;
 use atom_syscall::SyscallError;
 
-use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton};
+use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton, OpenInTabMsg, ApplyWallpaperMsg, WallpaperAppliedMsg, WallpaperFailedMsg};
 use libipc::protocol::send_message_async;
-use alloc::sync::Arc;
+use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
 
 /// Shell visual theme — all values sourced from `atom_theme` (DS v1.0 Luminous Dark).
 ///
@@ -564,6 +566,12 @@ struct ContextMenu {
     items: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CurrentWallpaperSource {
+    SolidColor { rgb: u32 },
+    Image { path: String },
+}
+
 // ============================================================================
 // Desktop Configuration Structures (Task 1.3)
 // ============================================================================
@@ -575,6 +583,13 @@ enum WallpaperSourceType {
 }
 
 impl WallpaperSourceType {
+    fn from_ipc(value: libipc::messages::WallpaperSourceType) -> Self {
+        match value {
+            libipc::messages::WallpaperSourceType::Image => Self::Image,
+            libipc::messages::WallpaperSourceType::SolidColor => Self::SolidColor,
+        }
+    }
+
     fn to_str(self) -> &'static str {
         match self {
             Self::Image => "Image",
@@ -601,6 +616,16 @@ enum ScalingMode {
 }
 
 impl ScalingMode {
+    fn from_ipc(value: libipc::messages::ScalingMode) -> Self {
+        match value {
+            libipc::messages::ScalingMode::Fill => Self::Fill,
+            libipc::messages::ScalingMode::Fit => Self::Fit,
+            libipc::messages::ScalingMode::Stretch => Self::Stretch,
+            libipc::messages::ScalingMode::Center => Self::Center,
+            libipc::messages::ScalingMode::Tile => Self::Tile,
+        }
+    }
+
     fn to_str(self) -> &'static str {
         match self {
             Self::Fill => "Fill",
@@ -656,10 +681,23 @@ enum ValidationError {
     MissingImagePath,
     EmptyImagePath,
     InvalidImageExtension,
+    InvalidImagePath,
     MissingColorRgb,
 }
 
 impl DesktopConfig {
+    fn default_config(width: u32, height: u32) -> Self {
+        Self {
+            wallpaper: WallpaperConfig {
+                source_type: WallpaperSourceType::SolidColor,
+                image_path: None,
+                color_rgb: Some(0x12141C),
+                scaling_mode: ScalingMode::Fill,
+            },
+            resolution: ResolutionConfig { width, height },
+        }
+    }
+
     fn to_json(&self) -> Result<String, ()> {
         let mut json = String::from("{\n");
         
@@ -803,9 +841,12 @@ impl DesktopConfig {
                 if path.is_empty() {
                     return Err(ValidationError::EmptyImagePath);
                 }
-                let lower = path.to_lowercase();
-                if !lower.ends_with(".jpg") && !lower.ends_with(".jpeg") {
-                    return Err(ValidationError::InvalidImageExtension);
+                if !validate_wallpaper_path(path) {
+                    let lower = path.to_lowercase();
+                    if !lower.ends_with(".jpg") && !lower.ends_with(".jpeg") {
+                        return Err(ValidationError::InvalidImageExtension);
+                    }
+                    return Err(ValidationError::InvalidImagePath);
                 }
             }
             WallpaperSourceType::SolidColor => {
@@ -894,6 +935,33 @@ fn format_u32(n: u32) -> String {
     result
 }
 
+fn validate_wallpaper_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > ApplyWallpaperMsg::MAX_PATH_LEN {
+        return false;
+    }
+    if !path.starts_with("/system/wallpapers/") || path.contains("..") {
+        return false;
+    }
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+}
+
+fn wallpaper_png_sidecar_path(path: &str) -> Option<String> {
+    let lower = path.as_bytes();
+    if lower.len() < 5 {
+        return None;
+    }
+    let ext_start = path.rfind('.')?;
+    let ext = &path[ext_start..];
+    if ext.eq_ignore_ascii_case(".jpg") || ext.eq_ignore_ascii_case(".jpeg") {
+        let mut png = String::from(&path[..ext_start]);
+        png.push_str(".png");
+        Some(png)
+    } else {
+        None
+    }
+}
+
 fn parse_u32(s: &str) -> Option<u32> {
     if s.is_empty() {
         return None;
@@ -961,8 +1029,12 @@ struct Compositor {
     last_click_tick: u32,
     last_click_icon: Option<usize>,
     context_menu: ContextMenu,
-    current_wallpaper: Option<Arc<libimage::DecodedImage>>,
+    desktop_config: DesktopConfig,
+    current_wallpaper_source: CurrentWallpaperSource,
+    current_scaling_mode: ScalingMode,
     scaled_wallpaper: Option<libimage::DecodedImage>,
+    wallpaper_recompute_pending: bool,
+    config_save_pending: bool,
     image_cache: libimage::ImageCache,
 }
 
@@ -1051,15 +1123,19 @@ impl Compositor {
                     v
                 },
             },
-            current_wallpaper: None,
+            desktop_config: DesktopConfig::default_config(width, height),
+            current_wallpaper_source: CurrentWallpaperSource::SolidColor { rgb: 0x12141C },
+            current_scaling_mode: ScalingMode::Fill,
             scaled_wallpaper: None,
-            image_cache: libimage::ImageCache::new(),
+            wallpaper_recompute_pending: false,
+            config_save_pending: false,
+            image_cache: libimage::ImageCache::with_capacity(1),
         }
     }
 
     fn run(&mut self) -> ! {
-        self.load_persisted_wallpaper();
-        self.wm.create_window("Welcome to Atom OS", 120, 100, 480, 320);
+        self.load_persisted_config();
+        self.flush_deferred_desktop_work();
         self.draw_all();
 
         let mut reg_buffer = [0u8; 64];
@@ -1079,6 +1155,7 @@ impl Compositor {
             self.poll_input();
 
             self.reap_pending_closes();
+            self.flush_deferred_desktop_work();
 
             if self.dirty {
                 self.draw_all();
@@ -1386,6 +1463,13 @@ impl Compositor {
             MessageType::VideoModeChanged => {
                 self.handle_video_mode_changed();
             }
+            MessageType::ApplyWallpaper => {
+                if let Some(msg) = ApplyWallpaperMsg::from_bytes(&data[MessageHeader::SIZE..]) {
+                    self.handle_apply_wallpaper_msg(&msg);
+                } else {
+                    self.send_wallpaper_failed("Invalid wallpaper request");
+                }
+            }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
@@ -1576,6 +1660,12 @@ impl Compositor {
         let h = self.fb.height() as i32;
         if self.cursor.x >= w { self.cursor.x = w - 1; }
         if self.cursor.y >= h { self.cursor.y = h - 1; }
+        self.desktop_config.resolution = ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
+        if matches!(self.current_wallpaper_source, CurrentWallpaperSource::Image { .. }) {
+            self.scaled_wallpaper = None;
+            self.wallpaper_recompute_pending = true;
+        }
+        self.config_save_pending = true;
         self.dirty = true;
     }
 
@@ -1630,7 +1720,7 @@ impl Compositor {
             if (item_idx as usize) < self.context_menu.items.len() {
                 let action = &self.context_menu.items[item_idx as usize];
                 if action == "Change Wallpaper" {
-                    // TODO: Task 5.2 will add IPC call to open Display Settings
+                    self.open_display_settings_wallpaper_tab();
                 }
                 return true;
             }
@@ -1638,89 +1728,392 @@ impl Compositor {
         false
     }
 
-    fn load_persisted_wallpaper(&mut self) {
-        if let Ok(path_bytes) = fs::read_file("/user/config/desktop.json") {
-            if let Ok(path) = core::str::from_utf8(&path_bytes) {
-                let path = path.trim();
-                if !path.is_empty() {
-                    self.apply_wallpaper(path);
+    fn open_display_settings_wallpaper_tab(&mut self) {
+        let port = match libipc::protocol::lookup_service("display_settings") {
+            Ok(port) => port,
+            Err(_) => {
+                self.spawn_display_settings();
+                let mut found = None;
+                for _ in 0..80 {
+                    if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+                        found = Some(port);
+                        break;
+                    }
+                    yield_now();
                 }
+                match found {
+                    Some(port) => port,
+                    None => return,
+                }
+            }
+        };
+
+        if let Some(id) = self.wm.windows.iter().find(|w| w.title == "Display Settings").map(|w| w.id) {
+            self.wm.focus_window(id);
+        }
+
+        let msg = OpenInTabMsg {
+            target_app: String::from("display_settings"),
+            tab_name: String::from("Wallpaper"),
+        };
+        let payload = msg.to_bytes();
+        let header = MessageHeader::new(MessageType::OpenInTab, payload.len() as u32);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&header.to_bytes());
+        buf.extend_from_slice(&payload);
+        let _ = send(port, &buf);
+        self.dirty = true;
+    }
+
+    fn send_wallpaper_applied(&mut self) {
+        if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+            let msg = WallpaperAppliedMsg {};
+            let header = MessageHeader::new(MessageType::WallpaperApplied, WallpaperAppliedMsg::SIZE as u32);
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&header.to_bytes());
+            buf.extend_from_slice(&msg.to_bytes());
+            let _ = send(port, &buf);
+        }
+    }
+
+    fn send_wallpaper_failed(&mut self, error: &str) {
+        if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+            let msg = WallpaperFailedMsg { error_message: String::from(error) };
+            let payload = msg.to_bytes();
+            let header = MessageHeader::new(MessageType::WallpaperFailed, payload.len() as u32);
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&header.to_bytes());
+            buf.extend_from_slice(&payload);
+            let _ = send(port, &buf);
+        }
+    }
+
+    fn handle_apply_wallpaper_msg(&mut self, msg: &ApplyWallpaperMsg) {
+        let source_type = WallpaperSourceType::from_ipc(msg.source_type);
+        let scaling_mode = ScalingMode::from_ipc(msg.scaling_mode);
+        let config = match source_type {
+            WallpaperSourceType::SolidColor => DesktopConfig {
+                wallpaper: WallpaperConfig {
+                    source_type: WallpaperSourceType::SolidColor,
+                    image_path: None,
+                    color_rgb: msg.color_rgb,
+                    scaling_mode,
+                },
+                resolution: ResolutionConfig { width: self.fb.width(), height: self.fb.height() },
+            },
+            WallpaperSourceType::Image => DesktopConfig {
+                wallpaper: WallpaperConfig {
+                    source_type: WallpaperSourceType::Image,
+                    image_path: msg.image_path.clone(),
+                    color_rgb: None,
+                    scaling_mode,
+                },
+                resolution: ResolutionConfig { width: self.fb.width(), height: self.fb.height() },
+            },
+        };
+
+        match self.apply_config(config, true) {
+            Ok(()) => self.send_wallpaper_applied(),
+            Err(error) => {
+                self.revert_to_fallback_wallpaper();
+                self.send_wallpaper_failed(error);
             }
         }
     }
 
-    fn apply_wallpaper(&mut self, path: &str) {
-        let cached = self.image_cache.get(path);
-        if let Some(shared_img) = cached {
-            log(alloc::format!("Applying cached wallpaper: {}", path).as_str());
-            self.current_wallpaper = Some(shared_img.clone());
-            self.scaled_wallpaper = Some(self.precompute_wallpaper_cover(&shared_img));
-            self.dirty = true;
-            let _ = fs::write_file("/user/config/desktop.json", path.as_bytes());
-        } else {
-            match fs::read_file(path) {
-                Ok(data) => {
-                    use libimage::{JpgDecoder, ImageDecoder};
-                    match JpgDecoder::decode(&data) {
-                        Ok(img) => {
-                            log(alloc::format!("Decoded wallpaper: {}", path).as_str());
-                            self.image_cache.insert(String::from(path), img);
-                            if let Some(shared_img) = self.image_cache.get(path) {
-                                self.current_wallpaper = Some(shared_img.clone());
-                                self.scaled_wallpaper = Some(self.precompute_wallpaper_cover(&shared_img));
-                                self.dirty = true;
-                                let _ = fs::write_file("/user/config/desktop.json", path.as_bytes());
-                            }
-                        }
-                        Err(e) => {
-                            log(alloc::format!("Failed to decode JPG {}: {:?}", path, e).as_str());
-                        }
+    fn load_persisted_config(&mut self) {
+        let mut config = DesktopConfig::default_config(self.fb.width(), self.fb.height());
+        if let Ok(bytes) = fs::read_file("/user/config/desktop.cfg") {
+            if let Ok(text) = core::str::from_utf8(&bytes) {
+                let trimmed = text.trim();
+                if let Ok(parsed) = DesktopConfig::from_json(trimmed) {
+                    config = parsed;
+                } else if validate_wallpaper_path(trimmed) {
+                    config.wallpaper.source_type = WallpaperSourceType::Image;
+                    config.wallpaper.image_path = Some(String::from(trimmed));
+                    config.wallpaper.color_rgb = None;
+                    config.wallpaper.scaling_mode = ScalingMode::Fill;
+                }
+            }
+        }
+        if matches!(config.wallpaper.source_type, WallpaperSourceType::SolidColor) {
+            if let Ok(bytes) = fs::read_file("/user/config/desktop.json") {
+                if let Ok(text) = core::str::from_utf8(&bytes) {
+                    let trimmed = text.trim();
+                    if let Ok(parsed) = DesktopConfig::from_json(trimmed) {
+                        config = parsed;
                     }
                 }
-                Err(e) => {
-                    log(alloc::format!("Failed to read wallpaper file {}: {:?}", path, e).as_str());
+            }
+        }
+        let _ = self.apply_config(config, false);
+    }
+
+    fn load_and_decode_image(&mut self, path: &str) -> Result<DecodedImage, &'static str> {
+        if !validate_wallpaper_path(path) {
+            return Err("Invalid wallpaper path");
+        }
+        let data = fs::read_file(path).map_err(|_| "Image file not found")?;
+        if data.len() > 16 * 1024 * 1024 {
+            return Err("Image file too large");
+        }
+        let img = if let Some(sidecar_path) = wallpaper_png_sidecar_path(path) {
+            if let Ok(sidecar_data) = fs::read_file(&sidecar_path) {
+                PngDecoder::decode(&sidecar_data).or_else(|_| JpgDecoder::decode(&data))
+            } else {
+                JpgDecoder::decode(&data)
+            }
+        } else {
+            JpgDecoder::decode(&data)
+        }.map_err(|_| "Failed to decode image")?;
+        if img.width == 0 || img.height == 0 || img.width > 4096 || img.height > 4096 {
+            return Err("Image dimensions unsupported");
+        }
+        Ok(img)
+    }
+
+    fn apply_config(&mut self, config: DesktopConfig, persist: bool) -> Result<(), &'static str> {
+        config.validate().map_err(|_| "Invalid desktop configuration")?;
+
+        self.desktop_config = config.clone();
+        self.current_scaling_mode = config.wallpaper.scaling_mode;
+        match config.wallpaper.source_type {
+            WallpaperSourceType::SolidColor => {
+                let rgb = config.wallpaper.color_rgb.unwrap_or(0x12141C);
+                self.current_wallpaper_source = CurrentWallpaperSource::SolidColor { rgb };
+                self.scaled_wallpaper = None;
+                self.wallpaper_recompute_pending = false;
+                self.desktop_bg = Color::new(((rgb >> 16) & 0xFF) as u8, ((rgb >> 8) & 0xFF) as u8, (rgb & 0xFF) as u8);
+            }
+            WallpaperSourceType::Image => {
+                let path = config.wallpaper.image_path.as_ref().ok_or("Missing image path")?.clone();
+                self.current_wallpaper_source = CurrentWallpaperSource::Image { path };
+                self.scaled_wallpaper = None;
+                self.wallpaper_recompute_pending = true;
+            }
+        }
+
+        if persist {
+            self.config_save_pending = true;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn save_desktop_config(&mut self) -> Result<(), &'static str> {
+        self.desktop_config.validate().map_err(|_| "Invalid config")?;
+        let json = self.desktop_config.to_json().map_err(|_| "Serialize failed")?;
+        let tmp_path = "/user/config/desktop.tmp";
+        let final_path = "/user/config/desktop.cfg";
+
+        if fs::write_file(tmp_path, json.as_bytes()).is_ok() {
+            match fs::rename(tmp_path, final_path) {
+                Ok(()) => return Ok(()),
+                Err(_) => {
+                    // FAT32 rename is not implemented yet; fall back to direct overwrite.
+                }
+            }
+        }
+
+        fs::write_file(final_path, json.as_bytes()).map_err(|_| "Failed to write config")
+    }
+
+    fn revert_to_fallback_wallpaper(&mut self) {
+        let fallback_rgb = match self.current_wallpaper_source {
+            CurrentWallpaperSource::SolidColor { rgb } => rgb,
+            CurrentWallpaperSource::Image { .. } => 0x12141C,
+        };
+        self.desktop_bg = Color::new(((fallback_rgb >> 16) & 0xFF) as u8, ((fallback_rgb >> 8) & 0xFF) as u8, (fallback_rgb & 0xFF) as u8);
+        self.current_wallpaper_source = CurrentWallpaperSource::SolidColor { rgb: fallback_rgb };
+        self.current_scaling_mode = ScalingMode::Fill;
+        self.scaled_wallpaper = None;
+        self.wallpaper_recompute_pending = false;
+        self.desktop_config.wallpaper = WallpaperConfig {
+            source_type: WallpaperSourceType::SolidColor,
+            image_path: None,
+            color_rgb: Some(fallback_rgb),
+            scaling_mode: ScalingMode::Fill,
+        };
+        self.config_save_pending = true;
+        self.dirty = true;
+    }
+
+    fn flush_deferred_desktop_work(&mut self) {
+        if self.wallpaper_recompute_pending {
+            let image_path = match &self.current_wallpaper_source {
+                CurrentWallpaperSource::Image { path } => Some(path.clone()),
+                CurrentWallpaperSource::SolidColor { .. } => None,
+            };
+
+            if let Some(path) = image_path {
+                match self.load_and_decode_image(&path) {
+                    Ok(wallpaper) => {
+                        self.scaled_wallpaper = Some(self.scale_wallpaper(&wallpaper, self.current_scaling_mode));
+                    }
+                    Err(_) => {
+                        self.revert_to_fallback_wallpaper();
+                    }
+                }
+            } else {
+                self.scaled_wallpaper = None;
+            }
+            self.wallpaper_recompute_pending = false;
+            self.dirty = true;
+        }
+
+        if self.config_save_pending {
+            let _ = self.save_desktop_config();
+            self.config_save_pending = false;
+        }
+    }
+
+    fn fill_image(width: u32, height: u32, color: Color) -> DecodedImage {
+        let mut pixels = alloc::vec![0u8; (width * height * 4) as usize];
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk[0] = color.r;
+            chunk[1] = color.g;
+            chunk[2] = color.b;
+            chunk[3] = 255;
+        }
+        DecodedImage::new(width, height, pixels)
+    }
+
+    fn sample_bilinear(img: &DecodedImage, src_x_fp: i32, src_y_fp: i32) -> Option<(u8, u8, u8, u8)> {
+        if img.width == 0 || img.height == 0 {
+            return None;
+        }
+
+        let max_x_fp = ((img.width - 1) as i32) << 16;
+        let max_y_fp = ((img.height - 1) as i32) << 16;
+        let x_fp = src_x_fp.clamp(0, max_x_fp);
+        let y_fp = src_y_fp.clamp(0, max_y_fp);
+
+        let x0 = (x_fp >> 16) as u32;
+        let y0 = (y_fp >> 16) as u32;
+        let x1 = (x0 + 1).min(img.width - 1);
+        let y1 = (y0 + 1).min(img.height - 1);
+
+        let tx = (x_fp & 0xFFFF) as u32;
+        let ty = (y_fp & 0xFFFF) as u32;
+
+        let (r00, g00, b00, a00) = img.get_pixel(x0, y0)?;
+        let (r10, g10, b10, a10) = img.get_pixel(x1, y0)?;
+        let (r01, g01, b01, a01) = img.get_pixel(x0, y1)?;
+        let (r11, g11, b11, a11) = img.get_pixel(x1, y1)?;
+
+        let lerp = |a: u32, b: u32, t: u32| -> u32 {
+            (((a * (65536 - t)) + (b * t)) + 32768) >> 16
+        };
+
+        let top_r = lerp(r00 as u32, r10 as u32, tx);
+        let top_g = lerp(g00 as u32, g10 as u32, tx);
+        let top_b = lerp(b00 as u32, b10 as u32, tx);
+        let top_a = lerp(a00 as u32, a10 as u32, tx);
+        let bot_r = lerp(r01 as u32, r11 as u32, tx);
+        let bot_g = lerp(g01 as u32, g11 as u32, tx);
+        let bot_b = lerp(b01 as u32, b11 as u32, tx);
+        let bot_a = lerp(a01 as u32, a11 as u32, tx);
+
+        let r = lerp(top_r, bot_r, ty).min(255) as u8;
+        let g = lerp(top_g, bot_g, ty).min(255) as u8;
+        let b = lerp(top_b, bot_b, ty).min(255) as u8;
+        let a = lerp(top_a, bot_a, ty).min(255) as u8;
+
+        Some((r, g, b, a))
+    }
+
+    fn blit_scaled(dest: &mut DecodedImage, img: &DecodedImage, dst_x: i32, dst_y: i32, dst_w: u32, dst_h: u32) {
+        if dst_w == 0 || dst_h == 0 || img.width == 0 || img.height == 0 {
+            return;
+        }
+        for y in 0..dst_h {
+            for x in 0..dst_w {
+                let src_x = ((((x as u64) * 2 + 1) * img.width as u64) << 15) / dst_w as u64;
+                let src_y = ((((y as u64) * 2 + 1) * img.height as u64) << 15) / dst_h as u64;
+                let src_x_fp = src_x as i64 - (1 << 15);
+                let src_y_fp = src_y as i64 - (1 << 15);
+                let dx = dst_x + x as i32;
+                let dy = dst_y + y as i32;
+                if dx < 0 || dy < 0 || dx >= dest.width as i32 || dy >= dest.height as i32 {
+                    continue;
+                }
+                if let Some((r, g, b, a)) = Self::sample_bilinear(img, src_x_fp as i32, src_y_fp as i32) {
+                    let off = (((dy as u32) * dest.width + dx as u32) * 4) as usize;
+                    dest.pixels[off] = r;
+                    dest.pixels[off + 1] = g;
+                    dest.pixels[off + 2] = b;
+                    dest.pixels[off + 3] = a;
                 }
             }
         }
     }
 
-    fn precompute_wallpaper_cover(&self, img: &libimage::DecodedImage) -> libimage::DecodedImage {
-        let sw = self.fb.width();
-        let sh = self.fb.height();
-        let iw = img.width;
-        let ih = img.height;
+    fn scale_fill(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
+        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+        let scale_w = (sw as u64 * 1024) / img.width as u64;
+        let scale_h = (sh as u64 * 1024) / img.height as u64;
+        let scale = scale_w.max(scale_h).max(1);
+        let target_w = ((img.width as u64 * scale) / 1024) as u32;
+        let target_h = ((img.height as u64 * scale) / 1024) as u32;
+        let dx = (sw as i32 - target_w as i32) / 2;
+        let dy = (sh as i32 - target_h as i32) / 2;
+        Self::blit_scaled(&mut out, img, dx, dy, target_w.max(1), target_h.max(1));
+        out
+    }
 
-        if iw == 0 || ih == 0 { return libimage::DecodedImage::blank(sw, sh); }
+    fn scale_fit(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
+        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+        let scale_w = (sw as u64 * 1024) / img.width as u64;
+        let scale_h = (sh as u64 * 1024) / img.height as u64;
+        let scale = scale_w.min(scale_h).max(1);
+        let target_w = ((img.width as u64 * scale) / 1024) as u32;
+        let target_h = ((img.height as u64 * scale) / 1024) as u32;
+        let dx = (sw as i32 - target_w as i32) / 2;
+        let dy = (sh as i32 - target_h as i32) / 2;
+        Self::blit_scaled(&mut out, img, dx, dy, target_w.max(1), target_h.max(1));
+        out
+    }
 
-        let scale_x = (sw as u64 * 1000) / iw as u64;
-        let scale_y = (sh as u64 * 1000) / ih as u64;
-        let scale = scale_x.max(scale_y);
+    fn scale_stretch(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
+        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+        Self::blit_scaled(&mut out, img, 0, 0, sw, sh);
+        out
+    }
 
-        let target_w = (iw as u64 * scale / 1000) as u32;
-        let target_h = (ih as u64 * scale / 1000) as u32;
+    fn scale_center(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
+        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+        let dx = (sw as i32 - img.width as i32) / 2;
+        let dy = (sh as i32 - img.height as i32) / 2;
+        Self::blit_scaled(&mut out, img, dx, dy, img.width, img.height);
+        out
+    }
 
-        let offset_x = (target_w as i32 - sw as i32) / 2;
-        let offset_y = (target_h as i32 - sh as i32) / 2;
-
-        let mut scaled_pixels = alloc::vec![0u8; (sw * sh * 4) as usize];
-
+    fn scale_tile(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
+        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
         for y in 0..sh {
             for x in 0..sw {
-                let src_x = ((x as i32 + offset_x) as u64 * 1000 / scale) as u32;
-                let src_y = ((y as i32 + offset_y) as u64 * 1000 / scale) as u32;
-
-                if src_x < iw && src_y < ih {
-                    if let Some((r, g, b, a)) = img.get_pixel(src_x, src_y) {
-                        let off = ((y * sw + x) * 4) as usize;
-                        scaled_pixels[off] = r;
-                        scaled_pixels[off+1] = g;
-                        scaled_pixels[off+2] = b;
-                        scaled_pixels[off+3] = a;
-                    }
+                if let Some((r, g, b, a)) = img.get_pixel(x % img.width, y % img.height) {
+                    let off = ((y * sw + x) * 4) as usize;
+                    out.pixels[off] = r;
+                    out.pixels[off + 1] = g;
+                    out.pixels[off + 2] = b;
+                    out.pixels[off + 3] = a;
                 }
             }
         }
-        libimage::DecodedImage::new(sw, sh, scaled_pixels)
+        out
+    }
+
+    fn scale_wallpaper(&self, img: &DecodedImage, mode: ScalingMode) -> DecodedImage {
+        let sw = self.fb.width();
+        let sh = self.fb.height();
+        match mode {
+            ScalingMode::Fill => self.scale_fill(img, sw, sh),
+            ScalingMode::Fit => self.scale_fit(img, sw, sh),
+            ScalingMode::Stretch => self.scale_stretch(img, sw, sh),
+            ScalingMode::Center => self.scale_center(img, sw, sh),
+            ScalingMode::Tile => self.scale_tile(img, sw, sh),
+        }
     }
 
     fn get_work_area(&self) -> (i32, i32, u32, u32) {
@@ -2078,6 +2471,18 @@ impl Compositor {
         }
         if name == "display_settings" {
             self.spawn_display_settings();
+            return;
+        }
+
+        let user_path = alloc::format!("/apps/user/{}.atxf", name);
+        if fs::stat(&user_path).is_ok() {
+            let _ = spawn_from_path(&user_path);
+            return;
+        }
+
+        let system_path = alloc::format!("/apps/system/{}.atxf", name);
+        if fs::stat(&system_path).is_ok() {
+            let _ = spawn_from_path(&system_path);
             return;
         }
 
@@ -2498,11 +2903,18 @@ fn main() -> ! {
         None => exit(1),
     };
 
-    // Reserve enough heap for a backbuffer at the largest supported mode (1920×1080×32bpp)
-    // so that on-the-fly mode changes never require a reallocation.
+    // Reserve enough heap for:
+    // - a backbuffer at the largest supported mode (1920×1080×32bpp)
+    // - decoded wallpaper source images / PNG scratch buffers
+    // - one fully scaled wallpaper plus UI transient allocations
+    //
+    // The previous 8 MiB headroom was too small for image wallpapers and would
+    // hit `alloc_error`, which traps in an infinite loop and looked like a
+    // compositor freeze immediately after pressing Apply.
     const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
+    const EXTRA_HEAP_HEADROOM: usize = 32 * 1024 * 1024;
     let fb_size = fb_info.stride as usize * fb_info.height as usize * fb_info.bytes_per_pixel as usize;
-    let heap_size = (MAX_BACKBUFFER_PIXELS * 4).max(fb_size) + 8 * 1024 * 1024;
+    let heap_size = (MAX_BACKBUFFER_PIXELS * 4).max(fb_size) + EXTRA_HEAP_HEADROOM;
 
     let region_id = match shared_region_create(heap_size) {
         Ok(id) => id,
@@ -2735,6 +3147,41 @@ mod tests {
         // Test missing color
         config.wallpaper.color_rgb = None;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_wallpaper_path_constraints() {
+        assert!(validate_wallpaper_path("/system/wallpapers/test.jpg"));
+        assert!(validate_wallpaper_path("/system/wallpapers/test.JPEG"));
+        assert!(!validate_wallpaper_path("relative/test.jpg"));
+        assert!(!validate_wallpaper_path("/system/wallpapers/../test.jpg"));
+        assert!(!validate_wallpaper_path("/tmp/test.jpg"));
+        assert!(!validate_wallpaper_path("/system/wallpapers/test.png"));
+    }
+
+    #[test]
+    fn test_parse_invalid_json_missing_fields() {
+        let json = r#"{
+  "wallpaper": {
+    "source_type": "Image"
+  }
+}"#;
+        assert!(matches!(DesktopConfig::from_json(json), Err(ParseError::MissingField(_))));
+    }
+
+    #[test]
+    fn test_parse_invalid_json_conditional_field() {
+        let json = r#"{
+  "wallpaper": {
+    "source_type": "Image",
+    "scaling_mode": "Fill"
+  },
+  "resolution": {
+    "width": 1024,
+    "height": 768
+  }
+}"#;
+        assert!(matches!(DesktopConfig::from_json(json), Err(ParseError::MissingField("image_path"))));
     }
     
     #[test]

@@ -421,6 +421,17 @@ if (-not $Kernel) {
             foreach ($img in $wallpaperFiles) {
                 Copy-Item $img.FullName "efi\system\wallpapers\$($img.Name)" -Force
                 Write-Success "$($img.Name) → system\wallpapers\"
+                try {
+                    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+                    $bitmap = [System.Drawing.Image]::FromFile($img.FullName)
+                    $pngName = [System.IO.Path]::GetFileNameWithoutExtension($img.Name) + ".png"
+                    $pngPath = Join-Path "efi\system\wallpapers" $pngName
+                    $bitmap.Save($pngPath, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $bitmap.Dispose()
+                    Write-Success "$pngName → system\wallpapers\"
+                } catch {
+                    Write-Warning "Falha ao gerar sidecar PNG para $($img.Name); usando JPEG original"
+                }
             }
         } else {
             Write-Warning "Nenhuma imagem de wallpaper encontrada em userspace\system_apps\ui_shell\img\"

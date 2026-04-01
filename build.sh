@@ -709,6 +709,13 @@ if ls userspace/system_apps/ui_shell/img/*.jpg 1>/dev/null 2>&1; then
     for img in userspace/system_apps/ui_shell/img/*.jpg; do
         mcopy -i $DISK_IMG "$img" ::/system/wallpapers/
         success "$(basename $img) → system/wallpapers/"
+        if command -v sips >/dev/null 2>&1; then
+            png_tmp="build/$(basename "${img%.*}").png"
+            if sips -s format png "$img" --out "$png_tmp" >/dev/null 2>&1; then
+                mcopy -i $DISK_IMG "$png_tmp" ::/system/wallpapers/
+                success "$(basename "$png_tmp") → system/wallpapers/"
+            fi
+        fi
     done
 fi
 
@@ -716,6 +723,13 @@ if ls userspace/system_apps/ui_shell/img/*.jpeg 1>/dev/null 2>&1; then
     for img in userspace/system_apps/ui_shell/img/*.jpeg; do
         mcopy -i $DISK_IMG "$img" ::/system/wallpapers/
         success "$(basename $img) → system/wallpapers/"
+        if command -v sips >/dev/null 2>&1; then
+            png_tmp="build/$(basename "${img%.*}").png"
+            if sips -s format png "$img" --out "$png_tmp" >/dev/null 2>&1; then
+                mcopy -i $DISK_IMG "$png_tmp" ::/system/wallpapers/
+                success "$(basename "$png_tmp") → system/wallpapers/"
+            fi
+        fi
     done
 fi
 

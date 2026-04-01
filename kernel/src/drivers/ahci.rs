@@ -51,6 +51,7 @@ const FIS_TYPE_REG_H2D: u8 = 0x27;
 
 // ATA commands
 const ATA_CMD_READ_DMA_EX: u8 = 0x25;
+const ATA_CMD_WRITE_DMA_EX: u8 = 0x35;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
 // PCI configuration for AHCI
@@ -399,6 +400,73 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
 
         crate::log_error!("ahci", "Read timeout on port {}", port);
         None
+    }
+}
+
+/// Write sectors to the disk.
+/// `data.len()` must be a non-zero multiple of 512 bytes.
+pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
+    unsafe {
+        let port = match ACTIVE_PORT {
+            Some(port) => port,
+            None => return false,
+        };
+
+        if data.is_empty() || data.len() % 512 != 0 {
+            return false;
+        }
+
+        let sector_count = (data.len() / 512).min(128);
+        let byte_count = sector_count * 512;
+
+        core::ptr::copy_nonoverlapping(data.as_ptr(), DATA_BUFFER as *mut u8, byte_count);
+
+        let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
+        (*cmd_header).flags = 5 | (1 << 6);
+        (*cmd_header).prdtl = 1;
+        (*cmd_header).prdbc = 0;
+
+        let cmd_table = CMD_TABLE_BASE as *mut CommandTable;
+        ptr::write_bytes(cmd_table, 0, 1);
+
+        (*cmd_table).prdt[0].dba = DATA_BUFFER as u32;
+        (*cmd_table).prdt[0].dbau = 0;
+        (*cmd_table).prdt[0].dbc = ((byte_count as u32) - 1) | (1 << 31);
+
+        let fis = &mut (*cmd_table).cfis as *mut [u8; 64] as *mut FisRegH2D;
+        (*fis).fis_type = FIS_TYPE_REG_H2D;
+        (*fis).flags = 0x80;
+        (*fis).command = ATA_CMD_WRITE_DMA_EX;
+        (*fis).device = 0x40;
+
+        (*fis).lba0 = (lba & 0xFF) as u8;
+        (*fis).lba1 = ((lba >> 8) & 0xFF) as u8;
+        (*fis).lba2 = ((lba >> 16) & 0xFF) as u8;
+        (*fis).lba3 = ((lba >> 24) & 0xFF) as u8;
+        (*fis).lba4 = ((lba >> 32) & 0xFF) as u8;
+        (*fis).lba5 = ((lba >> 40) & 0xFF) as u8;
+
+        (*fis).count_lo = (sector_count as u16 & 0xFF) as u8;
+        (*fis).count_hi = (((sector_count as u16) >> 8) & 0xFF) as u8;
+
+        write_port_reg(port, PORT_CI, 1);
+
+        for _ in 0..10000000 {
+            let ci = read_port_reg(port, PORT_CI);
+            if ci == 0 {
+                let is = read_port_reg(port, PORT_IS);
+                if is & 0x40000000 != 0 {
+                    crate::log_error!("ahci", "Write error on port {}", port);
+                    write_port_reg(port, PORT_IS, is);
+                    return false;
+                }
+                write_port_reg(port, PORT_IS, is);
+                return true;
+            }
+        }
+
+        crate::log_error!("ahci", "Write timeout on port {}", port);
+        false
     }
 }
 

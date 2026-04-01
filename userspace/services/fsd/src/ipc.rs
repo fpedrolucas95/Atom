@@ -133,6 +133,7 @@ impl<'a> FsdIpcHandler<'a> {
         Self::log(&alloc::format!("fsd: open path=\"{}\" flags={:#x}", path, flags));
 
         let o_directory: u32 = 0x10000; // O_DIRECTORY from atom_abi
+        let o_creat: u32 = 0x0040;
 
         // Check if this is a directory open
         let is_dir = (flags & o_directory) != 0 || path == "/" || path.ends_with('/');
@@ -154,7 +155,11 @@ impl<'a> FsdIpcHandler<'a> {
             let mut stat_buf = [0u8; 80];
             match atom_syscall::fs::kern_fs_stat_path(path, &mut stat_buf) {
                 Ok(()) => {}
-                Err(_) => return Self::make_reply(ENOENT, 0),
+                Err(_) => {
+                    if (flags & o_creat) == 0 || atom_syscall::fs::write_file(path, &[]).is_err() {
+                        return Self::make_reply(ENOENT, 0);
+                    }
+                }
             }
         }
 
@@ -342,9 +347,55 @@ impl<'a> FsdIpcHandler<'a> {
     // Request: [fd(8) | count(8) | data]
     // Reply:   [error(8) | bytes_written(8)]
 
-    fn handle_fs_write(&mut self, _payload: &[u8]) -> Vec<u8> {
-        // FAT32 backend is read-only for now
-        Self::make_reply(ENOTSUP, 0)
+    fn handle_fs_write(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 16 {
+            return Self::make_reply(EINVAL, 0);
+        }
+
+        let fd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
+        if payload.len() < 16 + count {
+            return Self::make_reply(EINVAL, 0);
+        }
+        if fd >= MAX_FDS || self.fds[fd].is_none() {
+            return Self::make_reply(EBADF, 0);
+        }
+        if self.fds[fd].as_ref().unwrap().is_dir {
+            return Self::make_reply(EISDIR, 0);
+        }
+
+        let o_append: u32 = 0x0400;
+        let write_offset = {
+            let of = self.fds[fd].as_ref().unwrap();
+            if (of.flags & o_append) != 0 {
+                of.data.as_ref().map_or(0, |d| d.len())
+            } else {
+                of.offset
+            }
+        };
+
+        if self.fds[fd].as_ref().unwrap().data.is_none() {
+            let path = self.fds[fd].as_ref().unwrap().path.clone();
+            let existing = atom_syscall::fs::read_file(&path).unwrap_or_default();
+            self.fds[fd].as_mut().unwrap().data = Some(existing);
+        }
+
+        let path = self.fds[fd].as_ref().unwrap().path.clone();
+        let data_in = &payload[16..16 + count];
+        let file_data = self.fds[fd].as_mut().unwrap().data.as_mut().unwrap();
+        let new_len = write_offset.saturating_add(count);
+        if file_data.len() < new_len {
+            file_data.resize(new_len, 0);
+        }
+        file_data[write_offset..write_offset + count].copy_from_slice(data_in);
+
+        match atom_syscall::fs::write_file(&path, file_data) {
+            Ok(()) => {
+                self.fds[fd].as_mut().unwrap().offset = write_offset + count;
+                Self::make_reply(ESUCCESS, count as u64)
+            }
+            Err(_) => Self::make_reply(EIO, 0),
+        }
     }
 
     // ── Stat ──────────────────────────────────────────────────────────────

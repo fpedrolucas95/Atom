@@ -39,12 +39,13 @@ use libipc::messages::{
     KeyEvent as IpcKeyEvent,
     MouseButtonEvent,
     MouseScrollEvent,
+    OpenInTabMsg,
+    WallpaperAppliedMsg,
+    WallpaperFailedMsg,
     ScalingMode,
     ApplyWallpaperMsg,
     WallpaperSourceType,
 };
-
-use libimage::image::DecodedImage;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -202,11 +203,17 @@ enum WallpaperSource {
     Image { path: String },
 }
 
-/// Information about a discovered wallpaper image
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThumbnailState {
+    Unloaded,
+    Loaded { width: u16, height: u16 },
+    Failed,
+}
+
 struct WallpaperInfo {
     name: String,
     path: String,
-    thumbnail: Option<DecodedImage>,
+    thumbnail: ThumbnailState,
 }
 
 /// State for the wallpaper tab
@@ -215,9 +222,12 @@ struct WallpaperState {
     discovered_images: Vec<WallpaperInfo>,
     selected_source: Option<WallpaperSource>,
     selected_scaling: ScalingMode,
+    discovery_in_progress: bool,
 }
 
 impl WallpaperState {
+    const MAX_WALLPAPER_COUNT: usize = 100;
+
     fn new() -> Self {
         Self {
             solid_colors: [
@@ -233,7 +243,31 @@ impl WallpaperState {
             discovered_images: Vec::new(),
             selected_source: None,
             selected_scaling: ScalingMode::Fill,
+            discovery_in_progress: false,
         }
+    }
+
+    fn selected_is_image(&self) -> bool {
+        matches!(self.selected_source, Some(WallpaperSource::Image { .. }))
+    }
+
+    fn select_color(&mut self, index: usize) {
+        if index >= self.solid_colors.len() {
+            return;
+        }
+        let color = self.solid_colors[index];
+        let rgb = ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32);
+        self.selected_source = Some(WallpaperSource::SolidColor { rgb });
+    }
+
+    fn select_image(&mut self, index: usize) {
+        if let Some(info) = self.discovered_images.get(index) {
+            self.selected_source = Some(WallpaperSource::Image { path: info.path.clone() });
+        }
+    }
+
+    fn set_scaling_mode(&mut self, mode: ScalingMode) {
+        self.selected_scaling = mode;
     }
 
     /// Discover wallpaper images from /system/wallpapers/ directory.
@@ -243,13 +277,16 @@ impl WallpaperState {
     /// Requirements: 3.1, 3.2, 3.3, 3.6, 3.7
     fn discover_images(&mut self) -> Result<(), &'static str> {
         use atom_syscall::fs::{open, readdir, close, OpenFlags, FileType};
-        
+        self.discovery_in_progress = true;
+        self.discovered_images.clear();
+
         // Try to open /system/wallpapers/ directory
         let fd = match open("/system/wallpapers/", OpenFlags::DIRECTORY, 0) {
             Ok(fd) => fd,
             Err(_) => {
                 // Directory doesn't exist - graceful degradation (show only colors)
                 log("WallpaperState: /system/wallpapers/ not found, showing only colors");
+                self.discovery_in_progress = false;
                 return Err("Directory not found");
             }
         };
@@ -260,6 +297,7 @@ impl WallpaperState {
             Err(_) => {
                 let _ = close(fd);
                 log("WallpaperState: Failed to read directory");
+                self.discovery_in_progress = false;
                 return Err("Failed to read directory");
             }
         };
@@ -283,8 +321,11 @@ impl WallpaperState {
                 self.discovered_images.push(WallpaperInfo {
                     name: entry.name,
                     path,
-                    thumbnail: None, // Lazy loading
+                    thumbnail: ThumbnailState::Unloaded,
                 });
+                if self.discovered_images.len() >= Self::MAX_WALLPAPER_COUNT {
+                    break;
+                }
             }
         }
 
@@ -292,7 +333,47 @@ impl WallpaperState {
         self.discovered_images.sort_by(|a, b| a.name.cmp(&b.name));
 
         log("WallpaperState: Image discovery complete");
+        self.discovery_in_progress = false;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabState {
+    Wallpaper,
+    Resolution,
+}
+
+#[derive(Clone, Copy)]
+struct Tab {
+    label: &'static str,
+    state: TabState,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl Tab {
+    fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x as i32
+            && py >= self.y as i32
+            && px < (self.x + self.width) as i32
+            && py < (self.y + self.height) as i32
+    }
+
+    fn render(&self, surface: &SharedSurface, active: bool) {
+        let bg = if active { theme::SEL_BG } else { theme::HEADER_BG };
+        let fg = if active { theme::SEL_TEXT } else { theme::TEXT_DIM };
+        surface.fill_rect_rounded_aa(self.x, self.y, self.width, self.height, 4, bg);
+        surface.draw_rect_rounded_aa(self.x, self.y, self.width, self.height, 4, theme::BORDER);
+        surface.draw_string(
+            self.x + (self.width - self.label.len() as u32 * CHAR_W) / 2,
+            self.y + (self.height - CHAR_H) / 2,
+            self.label,
+            fg,
+            bg,
+        );
     }
 }
 
@@ -314,6 +395,16 @@ const PAD:          u32 = 12;   // horizontal padding
 // Wallpaper tab layout constants
 const COLOR_TILE_SIZE:    u32 = 48;  // size of each color tile
 const COLOR_TILE_SPACING: u32 = 12;  // spacing between color tiles
+const TAB_HEIGHT:         u32 = 28;
+const TAB_WIDTH:          u32 = 110;
+const TAB_SPACING:        u32 = 8;
+const IMAGE_TILE_W:       u32 = 116;
+const IMAGE_TILE_H:       u32 = 112;
+const IMAGE_TILE_SPACING: u32 = 10;
+const IMAGE_LIST_ROWS:    usize = 2;
+const SCALING_BTN_W:      u32 = 64;
+const SCALING_BTN_H:      u32 = 24;
+const SCALING_BTN_SPACING:u32 = 8;
 
 // ============================================================================
 // App state
@@ -333,8 +424,10 @@ struct DisplaySettings {
     dirty:           bool,
     status:          Status,
     running:         bool,
+    active_tab:      TabState,
+    tabs:            [Tab; 2],
     wallpaper_state: WallpaperState,
-    show_wallpaper_tab: bool,  // Simple toggle for wallpaper vs resolution view
+    wallpaper_scroll: usize,
 }
 
 impl DisplaySettings {
@@ -355,10 +448,30 @@ impl DisplaySettings {
             dirty: true,
             status: Status::new(),
             running: true,
+            active_tab: TabState::Resolution,
+            tabs: [
+                Tab {
+                    label: "Wallpaper",
+                    state: TabState::Wallpaper,
+                    x: PAD,
+                    y: HDR_H + 6,
+                    width: TAB_WIDTH,
+                    height: TAB_HEIGHT,
+                },
+                Tab {
+                    label: "Resolution",
+                    state: TabState::Resolution,
+                    x: PAD + TAB_WIDTH + TAB_SPACING,
+                    y: HDR_H + 6,
+                    width: TAB_WIDTH,
+                    height: TAB_HEIGHT,
+                },
+            ],
             wallpaper_state: WallpaperState::new(),
-            show_wallpaper_tab: false,  // Start with resolution tab
+            wallpaper_scroll: 0,
         };
         s.clamp_scroll();
+        let _ = s.wallpaper_state.discover_images();
         s
     }
 
@@ -371,13 +484,71 @@ impl DisplaySettings {
         let row = (index / 4) as u32;
         
         // Position color tiles below the tab bar with some padding
-        let color_grid_x = PAD + 20;
-        let color_grid_y = HDR_H + 40;  // Below header with padding
+        let color_grid_x = PAD + 8;
+        let color_grid_y = HDR_H + TAB_HEIGHT + 40;
         
         let x = color_grid_x + col * (COLOR_TILE_SIZE + COLOR_TILE_SPACING);
         let y = color_grid_y + row * (COLOR_TILE_SIZE + COLOR_TILE_SPACING);
         
         (x, y, COLOR_TILE_SIZE, COLOR_TILE_SIZE)
+    }
+
+    fn image_list_origin(&self) -> (u32, u32) {
+        (PAD + 272, HDR_H + TAB_HEIGHT + 40)
+    }
+
+    fn image_tile_bounds(&self, index: usize) -> (u32, u32, u32, u32) {
+        let visible_index = index.saturating_sub(self.wallpaper_scroll);
+        let col = (visible_index % 2) as u32;
+        let row = (visible_index / 2) as u32;
+        let (x0, y0) = self.image_list_origin();
+        (
+            x0 + col * (IMAGE_TILE_W + IMAGE_TILE_SPACING),
+            y0 + row * (IMAGE_TILE_H + IMAGE_TILE_SPACING),
+            IMAGE_TILE_W,
+            IMAGE_TILE_H,
+        )
+    }
+
+    fn scaling_button_bounds(&self, index: usize) -> (u32, u32, u32, u32) {
+        let row = (index / 3) as u32;
+        let col = (index % 3) as u32;
+        let x = PAD + col * (SCALING_BTN_W + SCALING_BTN_SPACING);
+        let y = HDR_H + TAB_HEIGHT + 190 + row * (SCALING_BTN_H + SCALING_BTN_SPACING);
+        (x, y, SCALING_BTN_W, SCALING_BTN_H)
+    }
+
+    fn switch_tab(&mut self, tab: TabState) {
+        let changed = self.active_tab != tab;
+        if changed {
+            self.active_tab = tab;
+            if tab == TabState::Wallpaper && self.wallpaper_state.discovered_images.is_empty() {
+                let _ = self.wallpaper_state.discover_images();
+            }
+            let msg = match tab {
+                TabState::Wallpaper => b"Wallpaper tab selected".as_slice(),
+                TabState::Resolution => b"Resolution tab selected".as_slice(),
+            };
+            self.status.set(StatusKind::Ok, msg);
+        }
+        self.dirty = true;
+    }
+
+    fn handle_tab_click(&mut self, x: i32, y: i32) -> bool {
+        for tab in &self.tabs {
+            if tab.contains(x, y) {
+                self.switch_tab(tab.state);
+                log("DisplaySettings: tab clicked");
+                return true;
+            }
+        }
+        false
+    }
+
+    fn render_tabs(&self, surface: &SharedSurface) {
+        for tab in &self.tabs {
+            tab.render(surface, self.active_tab == tab.state);
+        }
     }
 
     fn notify_mode_changed(&self) {
@@ -422,17 +593,18 @@ impl DisplaySettings {
     fn render_wallpaper_tab(&self, surface: &SharedSurface) {
         let w = self.surface_w;
         let h = self.surface_h;
-        
+
         // Section label for color tiles
-        let sec_y = HDR_H + 4;
+        let sec_y = HDR_H + TAB_HEIGHT + 14;
         surface.draw_string(PAD, sec_y + 3, "Solid Colors", theme::TEXT_DIM, theme::BG);
+        surface.draw_string(PAD + 272, sec_y + 3, "Wallpapers", theme::TEXT_DIM, theme::BG);
         surface.fill_rect(0, sec_y + SEC_H - 1, w, 1, theme::BORDER);
-        
+
         // Render 8 color tiles in 4x2 grid
         for i in 0..8 {
             let (tx, ty, tw, th) = self.calculate_color_tile_bounds(i);
             let color = self.wallpaper_state.solid_colors[i];
-            
+
             // Check if this tile is selected
             let is_selected = if let Some(ref source) = self.wallpaper_state.selected_source {
                 match source {
@@ -446,27 +618,94 @@ impl DisplaySettings {
             } else {
                 false
             };
-            
+
             // Render tile with rounded corners
             surface.fill_rect_rounded_aa(tx, ty, tw, th, 4, color);
-            
+
             // If selected, draw a highlight border
             if is_selected {
                 surface.draw_rect_rounded_aa(tx, ty, tw, th, 4, theme::ACCENT);
-                // Draw a thicker border by drawing multiple rectangles
                 surface.draw_rect_rounded_aa(tx + 1, ty + 1, tw - 2, th - 2, 4, theme::ACCENT);
             } else {
-                // Draw subtle border for unselected tiles
                 surface.draw_rect_rounded_aa(tx, ty, tw, th, 4, theme::BORDER);
             }
         }
-        
+
+        let visible_start = self.wallpaper_scroll;
+        let visible_end = (visible_start + IMAGE_LIST_ROWS * 2).min(self.wallpaper_state.discovered_images.len());
+        for i in visible_start..visible_end {
+            let (ix, iy, iw, ih) = self.image_tile_bounds(i);
+            let info = &self.wallpaper_state.discovered_images[i];
+            let selected = matches!(
+                self.wallpaper_state.selected_source,
+                Some(WallpaperSource::Image { ref path }) if path == &info.path
+            );
+            let tile_bg = if selected { theme::SEL_BG } else { theme::HEADER_BG };
+            surface.fill_rect_rounded_aa(ix, iy, iw, ih, 4, tile_bg);
+            surface.draw_rect_rounded_aa(ix, iy, iw, ih, 4, if selected { theme::ACCENT } else { theme::BORDER });
+
+            let preview_x = ix + 14;
+            let preview_y = iy + 12;
+            let preview_w = iw - 28;
+            let preview_h = 64;
+            surface.fill_rect_rounded_aa(preview_x, preview_y, preview_w, preview_h, 4, Color::new(60, 66, 80));
+
+            match info.thumbnail {
+                ThumbnailState::Loaded { width, height } => {
+                    let dims = fit_within(width as u32, height as u32, preview_w - 6, preview_h - 6);
+                    let px = preview_x + (preview_w - dims.0) / 2;
+                    let py = preview_y + (preview_h - dims.1) / 2;
+                    surface.fill_rect_rounded_aa(px, py, dims.0, dims.1, 3, theme::ACCENT_DIM);
+                    surface.draw_rect_rounded_aa(px, py, dims.0, dims.1, 3, theme::ACCENT);
+                }
+                ThumbnailState::Failed => {
+                    surface.draw_rect_rounded_aa(preview_x + 10, preview_y + 10, preview_w - 20, preview_h - 20, 3, theme::WARNING);
+                }
+                ThumbnailState::Unloaded => {
+                    surface.fill_rect_rounded_aa(preview_x + 18, preview_y + 18, preview_w - 36, preview_h - 36, 3, theme::THUMB);
+                }
+            }
+
+            surface.draw_string(ix + 8, iy + 84, &info.name, theme::TEXT, tile_bg);
+        }
+
+        if self.wallpaper_state.discovery_in_progress {
+            surface.draw_string(PAD + 272, sec_y + SEC_H + IMAGE_TILE_H * 2 + 12, "Loading wallpapers...", theme::TEXT_DIM, theme::BG);
+        } else if self.wallpaper_state.discovered_images.is_empty() {
+            surface.draw_string(PAD + 272, sec_y + SEC_H + 16, "No JPG wallpapers found", theme::TEXT_DIM, theme::BG);
+        }
+
+        surface.draw_string(PAD, HDR_H + TAB_HEIGHT + 168, "Scaling", theme::TEXT_DIM, theme::BG);
+        let modes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch, ScalingMode::Center, ScalingMode::Tile];
+        for (i, mode) in modes.iter().enumerate() {
+            let (bx, by, bw, bh) = self.scaling_button_bounds(i);
+            let enabled = self.wallpaper_state.selected_is_image();
+            let active = self.wallpaper_state.selected_scaling == *mode;
+            let bg = if !enabled {
+                theme::HEADER_BG
+            } else if active {
+                theme::SEL_BG
+            } else {
+                theme::BTN_RESTORE
+            };
+            let fg = if !enabled { theme::TEXT_DIM } else { theme::BTN_TEXT };
+            surface.fill_rect_rounded_aa(bx, by, bw, bh, 4, bg);
+            surface.draw_rect_rounded_aa(bx, by, bw, bh, 4, if active { theme::ACCENT } else { theme::BORDER });
+            surface.draw_string(
+                bx + (bw - mode.to_str().len() as u32 * CHAR_W) / 2,
+                by + (bh - CHAR_H) / 2,
+                mode.to_str(),
+                fg,
+                bg,
+            );
+        }
+
         // ── Apply button for wallpaper tab ──────────────────────────────────
         let div_y = h - BTN_BAR_H - STATUS_H;
         let btn_area_y = div_y + 1;
         let btn_h = 26u32;
         let btn_vy = btn_area_y + (BTN_BAR_H - btn_h) / 2;
-        
+
         // Apply button (right-aligned)
         let aw = 80u32;
         let ax = w - PAD - aw;
@@ -504,9 +743,10 @@ impl DisplaySettings {
 
         let title_y = (HDR_H - CHAR_H) / 2;
         surface.draw_string(PAD + 24, title_y, "Display Settings", theme::TEXT, theme::HEADER_BG);
+        self.render_tabs(surface);
 
         // Render appropriate tab content
-        if self.show_wallpaper_tab {
+        if self.active_tab == TabState::Wallpaper {
             self.render_wallpaper_tab(surface);
         } else {
             self.render_resolution_tab(surface);
@@ -522,10 +762,10 @@ impl DisplaySettings {
             surface.draw_string(PAD, st_y + (STATUS_H - CHAR_H) / 2,
                                  self.status.text_str(), col, theme::HEADER_BG);
         } else {
-            let hint = if self.show_wallpaper_tab {
-                "Click color tile to select   W Toggle view"
+            let hint = if self.active_tab == TabState::Wallpaper {
+                "Select color or wallpaper   Click Apply to save"
             } else {
-                "\x18\x19 Navigate   Enter Apply   R Restore   W Toggle view"
+                "\x18\x19 Navigate   Enter Apply   R Restore Default"
             };
             surface.draw_string(PAD, st_y + (STATUS_H - CHAR_H) / 2,
                                  hint, theme::TEXT_DIM, theme::HEADER_BG);
@@ -540,12 +780,12 @@ impl DisplaySettings {
         let h = self.surface_h;
 
         // ── Section label ────────────────────────────────────────────────────
-        let sec_y = HDR_H + 4;
+        let sec_y = HDR_H + TAB_HEIGHT + 14;
         surface.draw_string(PAD, sec_y + 3, "Available Resolutions", theme::TEXT_DIM, theme::BG);
         surface.fill_rect(0, sec_y + SEC_H - 1, w, 1, theme::BORDER);
 
         // ── Mode list ─────────────────────────────────────────────────────────
-        let list_top = HDR_H + SEC_H + 4;
+        let list_top = sec_y + SEC_H + 4;
         let list_w   = w - PAD * 2 - SB_W - 4;
 
         for i in 0..VISIBLE_ROWS {
@@ -674,6 +914,28 @@ impl DisplaySettings {
         self.dirty = true;
     }
 
+    fn handle_open_in_tab(&mut self, tab_name: &str) {
+        match tab_name {
+            "Wallpaper" => self.switch_tab(TabState::Wallpaper),
+            "Resolution" => self.switch_tab(TabState::Resolution),
+            _ => return,
+        }
+        self.status.set(StatusKind::Ok, b"Display Settings focused");
+        self.dirty = true;
+    }
+
+    fn handle_wallpaper_applied(&mut self) {
+        self.status.set(StatusKind::Ok, b"Wallpaper applied successfully.");
+        self.dirty = true;
+    }
+
+    fn handle_wallpaper_failed(&mut self, error: &str) {
+        let mut msg = String::from("Wallpaper failed: ");
+        msg.push_str(error);
+        self.status.set(StatusKind::Warn, msg.as_bytes());
+        self.dirty = true;
+    }
+
     /// Apply the selected wallpaper by sending ApplyWallpaper IPC message to the compositor.
     /// 
     /// Constructs the message with:
@@ -767,26 +1029,28 @@ impl DisplaySettings {
         }
         match ev.character {
             b'\n' | b'\r' => {
-                if self.show_wallpaper_tab {
+                if self.active_tab == TabState::Wallpaper {
                     self.apply_wallpaper();
                 } else {
                     self.apply_selected();
                 }
             }
-            b'r' | b'R'   => self.restore_default(),
-            b'w' | b'W'   => {
-                // Toggle between wallpaper and resolution tabs
-                self.show_wallpaper_tab = !self.show_wallpaper_tab;
-                self.dirty = true;
-                log("DisplaySettings: Toggled tab view");
-            }
+            b'r' | b'R' if self.active_tab == TabState::Resolution => self.restore_default(),
+            b'w' | b'W'   => self.switch_tab(TabState::Wallpaper),
+            b't' | b'T'   => self.switch_tab(TabState::Resolution),
             _ => {}
         }
     }
 
     fn handle_scroll(&mut self, dz: i32) {
-        // dz > 0 = wheel up → scroll list up; dz < 0 = wheel down → scroll list down
-        if dz > 0 {
+        if self.active_tab == TabState::Wallpaper {
+            if dz > 0 {
+                self.wallpaper_scroll = self.wallpaper_scroll.saturating_sub(2);
+            } else if dz < 0 {
+                let max = self.wallpaper_state.discovered_images.len().saturating_sub(IMAGE_LIST_ROWS * 2);
+                self.wallpaper_scroll = (self.wallpaper_scroll + 2).min(max);
+            }
+        } else if dz > 0 {
             if self.scroll > 0 { self.scroll -= 1; }
         } else if dz < 0 {
             let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS);
@@ -795,9 +1059,47 @@ impl DisplaySettings {
         self.dirty = true;
     }
 
+    fn handle_wallpaper_click(&mut self, x: i32, y: i32) -> bool {
+        for i in 0..8 {
+            let (tx, ty, tw, th) = self.calculate_color_tile_bounds(i);
+            if x >= tx as i32 && x < (tx + tw) as i32 && y >= ty as i32 && y < (ty + th) as i32 {
+                self.wallpaper_state.select_color(i);
+                self.dirty = true;
+                return true;
+            }
+        }
+
+        let visible_end = (self.wallpaper_scroll + IMAGE_LIST_ROWS * 2).min(self.wallpaper_state.discovered_images.len());
+        for i in self.wallpaper_scroll..visible_end {
+            let (ix, iy, iw, ih) = self.image_tile_bounds(i);
+            if x >= ix as i32 && x < (ix + iw) as i32 && y >= iy as i32 && y < (iy + ih) as i32 {
+                self.wallpaper_state.select_image(i);
+                self.dirty = true;
+                return true;
+            }
+        }
+
+        for i in 0..5 {
+            let (bx, by, bw, bh) = self.scaling_button_bounds(i);
+            if x >= bx as i32 && x < (bx + bw) as i32 && y >= by as i32 && y < (by + bh) as i32 {
+                if self.wallpaper_state.selected_is_image() {
+                    let mode = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch, ScalingMode::Center, ScalingMode::Tile][i];
+                    self.wallpaper_state.set_scaling_mode(mode);
+                    self.dirty = true;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     fn handle_mouse_down(&mut self, x: i32, y: i32) {
         let w = self.surface_w as i32;
         let h = self.surface_h as i32;
+
+        if self.handle_tab_click(x, y) {
+            return;
+        }
 
         // Button bar hit test
         let div_y    = h - BTN_BAR_H as i32 - STATUS_H as i32;
@@ -808,7 +1110,7 @@ impl DisplaySettings {
         // Check for Apply button click
         if y >= btn_vy && y < btn_vy + 26 {
             if x >= ax && x < ax + 80 {
-                if self.show_wallpaper_tab {
+                if self.active_tab == TabState::Wallpaper {
                     self.apply_wallpaper();
                 } else {
                     self.apply_selected();
@@ -816,38 +1118,21 @@ impl DisplaySettings {
                 return;
             }
             // Restore button (only for resolution tab)
-            if !self.show_wallpaper_tab && x >= rx && x < rx + 120 { 
+            if self.active_tab == TabState::Resolution && x >= rx && x < rx + 120 {
                 self.restore_default(); 
                 return; 
             }
         }
 
         // Wallpaper tab interactions
-        if self.show_wallpaper_tab {
-            // Color tile hit test
-            for i in 0..8 {
-                let (tx, ty, tw, th) = self.calculate_color_tile_bounds(i);
-                let tx = tx as i32;
-                let ty = ty as i32;
-                let tw = tw as i32;
-                let th = th as i32;
-                
-                if x >= tx && x < tx + tw && y >= ty && y < ty + th {
-                    // Color tile clicked - select this color
-                    let color = self.wallpaper_state.solid_colors[i];
-                    let rgb = ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32);
-                    self.wallpaper_state.selected_source = Some(WallpaperSource::SolidColor { rgb });
-                    self.dirty = true;
-                    log("DisplaySettings: Color tile selected");
-                    return;
-                }
-            }
+        if self.active_tab == TabState::Wallpaper {
+            self.handle_wallpaper_click(x, y);
             return;
         }
 
         // Resolution tab interactions
         // Mode list hit test
-        let list_top = (HDR_H + SEC_H + 4) as i32;
+        let list_top = (HDR_H + TAB_HEIGHT + 14 + SEC_H + 4) as i32;
         let list_h   = (VISIBLE_ROWS as u32 * ROW_H) as i32;
         let list_w   = w - PAD as i32 * 2 - SB_W as i32 - 4;
 
@@ -899,6 +1184,21 @@ impl DisplaySettings {
             MessageType::MouseScroll => {
                 if let Some(ev) = MouseScrollEvent::from_bytes(payload) {
                     self.handle_scroll(ev.dz);
+                }
+            }
+            MessageType::OpenInTab => {
+                if let Some(msg) = OpenInTabMsg::from_bytes(payload) {
+                    self.handle_open_in_tab(&msg.tab_name);
+                }
+            }
+            MessageType::WallpaperApplied => {
+                if WallpaperAppliedMsg::from_bytes(payload).is_some() {
+                    self.handle_wallpaper_applied();
+                }
+            }
+            MessageType::WallpaperFailed => {
+                if let Some(msg) = WallpaperFailedMsg::from_bytes(payload) {
+                    self.handle_wallpaper_failed(&msg.error_message);
                 }
             }
             _ => {}
@@ -954,6 +1254,19 @@ fn validate_filename_extension(filename: &str) -> bool {
     lower.ends_with(".jpg") || lower.ends_with(".jpeg")
 }
 
+fn fit_within(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 || max_w == 0 || max_h == 0 {
+        return (0, 0);
+    }
+    let scale_w = (max_w as u64 * 1024) / src_w as u64;
+    let scale_h = (max_h as u64 * 1024) / src_h as u64;
+    let scale = scale_w.min(scale_h).max(1);
+    (
+        ((src_w as u64 * scale) / 1024).max(1) as u32,
+        ((src_h as u64 * scale) / 1024).max(1) as u32,
+    )
+}
+
 // ============================================================================
 // Number-formatting helpers (no_std, no format!)
 // ============================================================================
@@ -985,6 +1298,93 @@ fn fmt_info<'a>(buf: &'a mut [u8; 44], w: u16, h: u16) -> &'a str {
     let suf = b" @ 32bpp  60Hz";
     buf[p..p + suf.len()].copy_from_slice(suf); p += suf.len();
     core::str::from_utf8(&buf[..p]).unwrap_or("?")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_settings() -> DisplaySettings {
+        let modes = [Mode { width: 1024, height: 768 }; VIDEO_MAX_MODES];
+        DisplaySettings {
+            window_id: 1,
+            compositor_port: 1,
+            local_port: 2,
+            surface: None,
+            surface_w: 640,
+            surface_h: 480,
+            modes,
+            mode_count: 1,
+            selected: 0,
+            scroll: 0,
+            dirty: false,
+            status: Status::new(),
+            running: true,
+            active_tab: TabState::Resolution,
+            tabs: [
+                Tab { label: "Wallpaper", state: TabState::Wallpaper, x: PAD, y: HDR_H + 6, width: TAB_WIDTH, height: TAB_HEIGHT },
+                Tab { label: "Resolution", state: TabState::Resolution, x: PAD + TAB_WIDTH + TAB_SPACING, y: HDR_H + 6, width: TAB_WIDTH, height: TAB_HEIGHT },
+            ],
+            wallpaper_state: WallpaperState::new(),
+            wallpaper_scroll: 0,
+        }
+    }
+
+    #[test]
+    fn initial_ui_has_two_tabs() {
+        let settings = make_settings();
+        assert_eq!(settings.tabs.len(), 2);
+        assert_eq!(settings.tabs[0].label, "Wallpaper");
+        assert_eq!(settings.tabs[1].label, "Resolution");
+    }
+
+    #[test]
+    fn switch_tab_updates_active_state() {
+        let mut settings = make_settings();
+        settings.switch_tab(TabState::Wallpaper);
+        assert_eq!(settings.active_tab, TabState::Wallpaper);
+    }
+
+    #[test]
+    fn clicking_wallpaper_tab_changes_active_tab() {
+        let mut settings = make_settings();
+        let wallpaper_tab = settings.tabs[0];
+        assert!(settings.handle_tab_click(
+            wallpaper_tab.x as i32 + 4,
+            wallpaper_tab.y as i32 + 4,
+        ));
+        assert_eq!(settings.active_tab, TabState::Wallpaper);
+    }
+
+    #[test]
+    fn color_selection_is_mutually_exclusive_with_image_selection() {
+        let mut state = WallpaperState::new();
+        state.discovered_images.push(WallpaperInfo {
+            name: String::from("a.jpg"),
+            path: String::from("/system/wallpapers/a.jpg"),
+            thumbnail: ThumbnailState::Unloaded,
+        });
+        state.select_image(0);
+        assert!(matches!(state.selected_source, Some(WallpaperSource::Image { .. })));
+        state.select_color(2);
+        assert!(matches!(state.selected_source, Some(WallpaperSource::SolidColor { .. })));
+    }
+
+    #[test]
+    fn file_extension_validation_is_case_insensitive() {
+        assert!(validate_filename_extension("test.JPG"));
+        assert!(validate_filename_extension("test.jpeg"));
+        assert!(!validate_filename_extension("test.png"));
+    }
+
+    #[test]
+    fn fit_within_preserves_bounds() {
+        let (w, h) = fit_within(1920, 1080, 64, 64);
+        assert!(w <= 64);
+        assert!(h <= 64);
+        assert!(w > 0);
+        assert!(h > 0);
+    }
 }
 
 // ============================================================================

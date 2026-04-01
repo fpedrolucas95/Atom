@@ -7,9 +7,8 @@
  *
  * Rendering pipeline
  * ──────────────────
- *   TinyGL (software GL) → 16-bit RGB565 scratch buffer
- *     → tgl_blit_to_argb32()
- *       → compositor 32-bit ARGB shared surface
+ *   TinyGL (software GL) → 32-bit RGB scratch buffer
+ *     → compositor 32-bit ARGB shared surface
  *         → wm_commit() → visible window
  *
  * Protocol stack (pure C, no Rust libraries):
@@ -31,10 +30,7 @@
 
 /* TinyGL public headers */
 #include <GL/gl.h>
-#include <GL/oscontext.h>
-
-/* AtomOS compositor blit helper */
-#include "atomos_tgl.h"
+#include <zbuffer.h>
 
 /* ==========================================================================
  * §1  Kernel syscall wrappers
@@ -255,6 +251,16 @@ static void wm_commit(uint64_t wm_port, uint32_t window_id)
     hdr_init(h, MSG_WM_COMMIT, 4);
     memcpy(msg + HDR_SIZE, &window_id, 4);
     ipc_send(wm_port, msg, (uint32_t)sizeof(msg));
+}
+
+static void blit_rgb32_to_surface(const uint32_t *src, uint32_t src_w, uint32_t src_h,
+                                  uint32_t src_stride_px, uint32_t *dst, uint32_t dst_stride_px)
+{
+    for (uint32_t y = 0; y < src_h; y++) {
+        const uint32_t *srow = src + (size_t)y * src_stride_px;
+        uint32_t *drow = dst + (size_t)y * dst_stride_px;
+        memcpy(drow, srow, (size_t)src_w * sizeof(uint32_t));
+    }
 }
 
 /* ==========================================================================
@@ -493,8 +499,8 @@ static bool handle_key(const uint8_t *payload, int plen)
  * §7  Entry point
  * ======================================================================== */
 
-#define WIN_W 640u
-#define WIN_H 480u
+#define WIN_W 320u
+#define WIN_H 240u
 /* Target ~30 frames per second */
 #define FRAME_INTERVAL_MS 33u
 /* Angle increment per frame (2°/frame ≈ 60 rpm at 30 fps) */
@@ -514,13 +520,13 @@ int main(void)
         /* Headless mode: allocate a scratch buffer, render a few frames,
          * then exit so CI / boot testing still exercises the code path.  */
         const uint32_t hw = WIN_W, hh = WIN_H;
-        uint16_t *scratch = (uint16_t *)malloc((size_t)hw * hh * 2u);
+        uint32_t *scratch = (uint32_t *)malloc((size_t)hw * hh * 4u);
         if (!scratch) { printf("[tinygl_demo] malloc failed\n"); return 1; }
-        memset(scratch, 0, (size_t)hw * hh * 2u);
+        memset(scratch, 0, (size_t)hw * hh * 4u);
 
-        void     *fbs[1] = { scratch };
-        ostgl_context *ctx = ostgl_create_context((int)hw, (int)hh, 16, fbs, 1);
-        if (!ctx) { printf("[tinygl_demo] ostgl_create_context failed\n"); return 1; }
+        ZBuffer *zb = ZB_open((int)hw, (int)hh, ZB_MODE_RGBA, scratch);
+        if (!zb) { printf("[tinygl_demo] ZB_open failed\n"); return 1; }
+        glInit(zb);
 
         gears_reshape((int)hw, (int)hh);
         gears_init();
@@ -531,7 +537,8 @@ int main(void)
         }
         printf("[tinygl_demo] headless: rendered 60 frames OK\n");
 
-        ostgl_delete_context(ctx);
+        glClose();
+        ZB_close(zb);
         free(scratch);
         return 0;
     }
@@ -573,7 +580,7 @@ int main(void)
     /* ------------------------------------------------------------------ */
     uint32_t tw = win.width  & ~3u;   /* TinyGL requires multiple of 4  */
     uint32_t th = win.height;
-    uint16_t *scratch = (uint16_t *)malloc((size_t)tw * th * 2u);
+    uint32_t *scratch = (uint32_t *)malloc((size_t)tw * th * 4u);
     if (!scratch) {
         printf("[tinygl_demo] malloc scratch failed\n");
         ipc_close_port(event_port);
@@ -583,19 +590,19 @@ int main(void)
      * versions read from pbuf during ZBuffer initialisation; an
      * uninitialised buffer can leave internal state in an undefined
      * condition. */
-    memset(scratch, 0, (size_t)tw * th * 2u);
+    memset(scratch, 0, (size_t)tw * th * 4u);
 
     /* ------------------------------------------------------------------ */
     /* 5. Initialise TinyGL context                                        */
     /* ------------------------------------------------------------------ */
-    void *fbs[1] = { scratch };
-    ostgl_context *ctx = ostgl_create_context((int)tw, (int)th, 16, fbs, 1);
-    if (!ctx) {
-        printf("[tinygl_demo] ostgl_create_context failed\n");
+    ZBuffer *zb = ZB_open((int)tw, (int)th, ZB_MODE_RGBA, scratch);
+    if (!zb) {
+        printf("[tinygl_demo] ZB_open failed\n");
         free(scratch);
         ipc_close_port(event_port);
         return 1;
     }
+    glInit(zb);
 
     gears_reshape((int)tw, (int)th);
     gears_init();
@@ -616,8 +623,8 @@ int main(void)
         /* Render the scene into TinyGL's internal 16-bit buffer */
         gears_draw();
 
-        /* Blit RGB565 → ARGB32 into the compositor shared surface */
-        tgl_blit_to_argb32(scratch, tw, th, tw, surface, win.stride);
+        /* Blit TinyGL's 32-bit RGB surface directly into the compositor surface */
+        blit_rgb32_to_surface(scratch, tw, th, tw, surface, win.stride);
 
         /* Tell compositor to composite and display the frame */
         wm_commit(wm_port, win.window_id);
@@ -679,7 +686,8 @@ int main(void)
     /* ------------------------------------------------------------------ */
     /* 7. Cleanup                                                          */
     /* ------------------------------------------------------------------ */
-    ostgl_delete_context(ctx);
+    glClose();
+    ZB_close(zb);
     free(scratch);
     ipc_close_port(event_port);
     return 0;

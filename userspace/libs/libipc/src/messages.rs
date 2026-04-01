@@ -1853,6 +1853,9 @@ pub struct OpenInTabMsg {
 }
 
 impl OpenInTabMsg {
+    pub const MAX_TARGET_APP_LEN: usize = 64;
+    pub const MAX_TAB_NAME_LEN: usize = 32;
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         let target_bytes = self.target_app.as_bytes();
@@ -1869,14 +1872,20 @@ impl OpenInTabMsg {
         if bytes.len() < 8 {
             return None;
         }
-        
+
         let target_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        if target_len == 0 || target_len > Self::MAX_TARGET_APP_LEN {
+            return None;
+        }
         if bytes.len() < 4 + target_len + 4 {
             return None;
         }
-        
-        let target_app = core::str::from_utf8(&bytes[4..4 + target_len]).ok()?;
-        
+
+        let target_app = core::str::from_utf8(&bytes[4..4 + target_len]).ok()?.trim();
+        if target_app.is_empty() {
+            return None;
+        }
+
         let tab_len_offset = 4 + target_len;
         let tab_len = u32::from_le_bytes([
             bytes[tab_len_offset],
@@ -1884,13 +1893,24 @@ impl OpenInTabMsg {
             bytes[tab_len_offset + 2],
             bytes[tab_len_offset + 3],
         ]) as usize;
-        
+        if tab_len == 0 || tab_len > Self::MAX_TAB_NAME_LEN {
+            return None;
+        }
         if bytes.len() < tab_len_offset + 4 + tab_len {
             return None;
         }
-        
-        let tab_name = core::str::from_utf8(&bytes[tab_len_offset + 4..tab_len_offset + 4 + tab_len]).ok()?;
-        
+
+        if bytes.len() != tab_len_offset + 4 + tab_len {
+            return None;
+        }
+
+        let tab_name = core::str::from_utf8(
+            &bytes[tab_len_offset + 4..tab_len_offset + 4 + tab_len]
+        ).ok()?.trim();
+        if tab_name != "Wallpaper" && tab_name != "Resolution" {
+            return None;
+        }
+
         Some(Self {
             target_app: String::from(target_app),
             tab_name: String::from(tab_name),
@@ -1909,6 +1929,17 @@ pub struct ApplyWallpaperMsg {
 
 impl ApplyWallpaperMsg {
     pub const MAX_PATH_LEN: usize = 256;
+
+    fn validate_image_path(path: &str) -> bool {
+        if path.is_empty() || path.len() > Self::MAX_PATH_LEN {
+            return false;
+        }
+        if !path.starts_with("/system/wallpapers/") || path.contains("..") {
+            return false;
+        }
+        let lower = path.to_ascii_lowercase();
+        lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+    }
     
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1951,13 +1982,25 @@ impl ApplyWallpaperMsg {
                     return None;
                 }
                 let path = core::str::from_utf8(&bytes[6..6 + path_len]).ok()?;
+                if !Self::validate_image_path(path) {
+                    return None;
+                }
+                if bytes.len() != 6 + path_len {
+                    return None;
+                }
                 (Some(String::from(path)), None)
             }
             WallpaperSourceType::SolidColor => {
                 if bytes.len() < 6 {
                     return None;
                 }
+                if bytes.len() != 6 {
+                    return None;
+                }
                 let rgb = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+                if rgb > 0x00FF_FFFF {
+                    return None;
+                }
                 (None, Some(rgb))
             }
         };
@@ -2012,12 +2055,86 @@ impl WallpaperFailedMsg {
             return None;
         }
         let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        if len == 0 || len > Self::MAX_ERROR_LEN {
+            return None;
+        }
         if bytes.len() < 4 + len {
+            return None;
+        }
+        if bytes.len() != 4 + len {
             return None;
         }
         let msg = core::str::from_utf8(&bytes[4..4 + len]).ok()?;
         Some(Self {
             error_message: String::from(msg),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_in_tab_roundtrip() {
+        let msg = OpenInTabMsg {
+            target_app: String::from("display_settings"),
+            tab_name: String::from("Wallpaper"),
+        };
+
+        let decoded = OpenInTabMsg::from_bytes(&msg.to_bytes()).unwrap();
+        assert_eq!(decoded.target_app, "display_settings");
+        assert_eq!(decoded.tab_name, "Wallpaper");
+    }
+
+    #[test]
+    fn open_in_tab_rejects_invalid_tab_name() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(16u32).to_le_bytes());
+        bytes.extend_from_slice(b"display_settings");
+        bytes.extend_from_slice(&(7u32).to_le_bytes());
+        bytes.extend_from_slice(b"Invalid");
+        assert!(OpenInTabMsg::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn apply_wallpaper_roundtrip_image() {
+        let msg = ApplyWallpaperMsg {
+            source_type: WallpaperSourceType::Image,
+            image_path: Some(String::from("/system/wallpapers/mountain.jpg")),
+            color_rgb: None,
+            scaling_mode: ScalingMode::Fit,
+        };
+
+        let decoded = ApplyWallpaperMsg::from_bytes(&msg.to_bytes()).unwrap();
+        assert_eq!(decoded.source_type, WallpaperSourceType::Image);
+        assert_eq!(decoded.image_path.as_deref(), Some("/system/wallpapers/mountain.jpg"));
+        assert_eq!(decoded.scaling_mode, ScalingMode::Fit);
+    }
+
+    #[test]
+    fn apply_wallpaper_rejects_path_traversal() {
+        let mut bytes = Vec::new();
+        bytes.push(WallpaperSourceType::Image.to_u8());
+        bytes.push(ScalingMode::Fill.to_u8());
+        let path = "/system/wallpapers/../secret.jpg";
+        bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(path.as_bytes());
+        assert!(ApplyWallpaperMsg::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn apply_wallpaper_rejects_out_of_range_rgb() {
+        let mut bytes = Vec::new();
+        bytes.push(WallpaperSourceType::SolidColor.to_u8());
+        bytes.push(ScalingMode::Fill.to_u8());
+        bytes.extend_from_slice(&0x01FF_FFFFu32.to_le_bytes());
+        assert!(ApplyWallpaperMsg::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn wallpaper_failed_rejects_empty_message() {
+        let bytes = 0u32.to_le_bytes();
+        assert!(WallpaperFailedMsg::from_bytes(&bytes).is_none());
     }
 }
