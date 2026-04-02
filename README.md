@@ -1,9 +1,8 @@
 # Atom Operating System
 
-<img width="912" height="744" alt="Atom Desktop Environment with Terminal" src="https://github.com/user-attachments/assets/2e9248ef-fae0-4720-a3bd-035e511b5c5d" />
-<img width="912" height="744" alt="Atom Desktop Environment with File Manager" src="https://github.com/user-attachments/assets/44b7a931-3c27-4073-83f8-1f4ce8b8b013" />
+<img width="1392" height="864" alt="Captura de Tela 2026-04-02 às 19 30 55" src="https://github.com/user-attachments/assets/8770ac88-dc36-47ce-bf2c-362aaba8ac5d" />
 
-**Atom** is an experimental **capability-based microkernel operating system** written in **Rust** and **x86-64 assembly**, with a complete user-space stack including a freestanding C library, software OpenGL rendering, a windowed desktop environment, and native application support.
+**Atom** is an experimental (mostly vibe-coded) **capability-based microkernel operating system** written in **Rust** and **x86-64 assembly**, with a complete user-space stack including a freestanding C library, software OpenGL rendering, a windowed desktop environment, and native application support.
 
 > ⚠️ **Experimental software.** Expect breaking changes, missing features, and sharp edges. The project is primarily for learning, research, and incremental validation of OS design ideas.
 
