@@ -29,7 +29,8 @@
 // - Mapping size is capped (`MAX_REGION_SIZE`) to limit abuse and fragmentation
 // - Rollback logic ensures no silent partial mappings on failure
 // - `mapping_count` prevents destroying address spaces still in active use
-// - PML4 pages are freed automatically via `Drop` when an address space is removed
+// - PML4 pages are freed via `Drop` unless ownership is explicitly handed off
+//   to thread teardown for a thread's primary address space
 //
 // Error handling:
 // - Rich `AddressSpaceError` enum distinguishes permission, validity,
@@ -40,7 +41,7 @@
 // - Thin wrapper functions expose the manager without leaking internal locks
 // - Intended to be used by syscalls and higher-level process management code
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
@@ -49,6 +50,20 @@ use crate::mm::pmm;
 use crate::mm::vm::{self, PageFlags, VmError};
 use crate::thread::ThreadId;
 use crate::{log_info, log_warn, log_error};
+
+static CLEANED_THREAD_ADDRESS_SPACES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
+
+fn note_thread_address_space_activity(thread_id: ThreadId) {
+    CLEANED_THREAD_ADDRESS_SPACES.lock().remove(&thread_id);
+}
+
+pub(crate) fn forget_thread_address_space_cleanup(thread_id: ThreadId) {
+    CLEANED_THREAD_ADDRESS_SPACES.lock().remove(&thread_id);
+}
+
+fn begin_thread_address_space_cleanup(thread_id: ThreadId) -> bool {
+    CLEANED_THREAD_ADDRESS_SPACES.lock().insert(thread_id)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AddressSpaceId(u64);
@@ -94,6 +109,7 @@ pub struct AddressSpace {
     pml4_phys: usize,
     owner: ThreadId,
     mapping_count: usize,
+    release_pml4_on_drop: bool,
 }
 
 impl AddressSpace {
@@ -125,6 +141,7 @@ impl AddressSpace {
             pml4_phys,
             owner,
             mapping_count: 0,
+            release_pml4_on_drop: true,
         })
     }
 
@@ -151,10 +168,24 @@ impl AddressSpace {
     fn dec_mappings(&mut self, count: usize) {
         self.mapping_count = self.mapping_count.saturating_sub(count);
     }
+
+    fn defer_pml4_release_to_thread_teardown(&mut self) {
+        self.release_pml4_on_drop = false;
+    }
 }
 
 impl Drop for AddressSpace {
     fn drop(&mut self) {
+        if !self.release_pml4_on_drop {
+            log_info!(
+                LOG_ORIGIN,
+                "Dropping address space {} metadata without freeing PML4 0x{:X} (thread teardown owns final release)",
+                self.id,
+                self.pml4_phys
+            );
+            return;
+        }
+
         log_info!(
             LOG_ORIGIN,
             "Destroying address space {} (PML4=0x{:X})",
@@ -194,6 +225,7 @@ impl AddressSpaceManager {
         let addrspace = AddressSpace::new(owner)?;
         let id = addrspace.id();
 
+        note_thread_address_space_activity(owner);
         let mut spaces = self.spaces.lock();
         spaces.insert(id, addrspace);
 
@@ -662,7 +694,16 @@ pub fn pml4_of(id: AddressSpaceId) -> Option<usize> {
 
 /// Cleanup all address spaces owned by a thread
 /// This should be called when a thread terminates to free all memory resources
-pub fn cleanup_thread_address_spaces(thread_id: ThreadId) {
+pub fn cleanup_thread_address_spaces(thread_id: ThreadId, thread_primary_pml4: u64) {
+    if !begin_thread_address_space_cleanup(thread_id) {
+        log_info!(
+            LOG_ORIGIN,
+            "Address-space manager cleanup already ran for thread {} - skipping duplicate cleanup_thread_address_spaces",
+            thread_id
+        );
+        return;
+    }
+
     let mut spaces = ADDRESS_SPACE_MANAGER.spaces.lock();
 
     // Collect all address space IDs owned by this thread
@@ -679,20 +720,25 @@ pub fn cleanup_thread_address_spaces(thread_id: ThreadId) {
         thread_id
     );
 
-    // Remove each address space
-    // Note: When AddressSpace is dropped, its Drop impl frees the PML4 page
-    // However, it does NOT free the mapped pages - those should be freed by
-    // the physical memory manager when the process's physical pages are reclaimed
+    // Remove each address space.
+    // The thread's primary PML4 is handed off to thread teardown so only one
+    // path can release it. Standalone address spaces still free their PML4 on Drop.
     for id in owned_spaces {
-        if let Some(space) = spaces.remove(&id) {
+        if let Some(mut space) = spaces.remove(&id) {
+            let pml4_phys = space.pml4_phys();
+            if thread_primary_pml4 != 0 && pml4_phys as u64 == thread_primary_pml4 {
+                space.defer_pml4_release_to_thread_teardown();
+            }
+
             log_info!(
                 LOG_ORIGIN,
                 "Removed address space {} (PML4=0x{:X}, {} mappings)",
                 id,
-                space.pml4_phys(),
+                pml4_phys,
                 space.mapping_count()
             );
-            // space is dropped here, which frees the PML4
+            // `space` is dropped here. Whether the PML4 is freed now or later is
+            // determined by `release_pml4_on_drop`.
         }
     }
 }

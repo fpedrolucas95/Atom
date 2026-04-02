@@ -260,6 +260,7 @@ fn create_init_process(
     // Init gets High priority as it orchestrates the entire boot
     let thread = Thread {
         id: pid,
+        process_id: Some(crate::process::ProcessId::from(pid)),
         state: ThreadState::Ready,
         context,
         kernel_stack: kernel_stack_top,

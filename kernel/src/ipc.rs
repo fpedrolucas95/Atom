@@ -51,11 +51,12 @@
 
 #![allow(dead_code)]
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+use crate::process::ProcessId;
 use crate::shared_mem;
 use crate::shared_mem::RegionId;
 use crate::thread::{ThreadId, ThreadPriority};
@@ -73,6 +74,20 @@ const LOG_ORIGIN: &str = "ipc";
 const CONFIG_DEADLOCK_DETECT: bool = true;
 const CONFIG_IPC_TRACE: bool = true;
 const IPC_TRACE_RING_SIZE: usize = 1000;
+
+static CLEANED_THREAD_PORTS: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
+
+fn mark_thread_ports_dirty(thread_id: ThreadId) {
+    CLEANED_THREAD_PORTS.lock().remove(&thread_id);
+}
+
+fn begin_thread_port_cleanup(thread_id: ThreadId) -> bool {
+    CLEANED_THREAD_PORTS.lock().insert(thread_id)
+}
+
+pub(crate) fn forget_thread_port_cleanup(thread_id: ThreadId) {
+    CLEANED_THREAD_PORTS.lock().remove(&thread_id);
+}
 
 #[inline(always)]
 fn current_time_ms() -> u64 {
@@ -411,6 +426,7 @@ pub struct IpcPortStats {
 struct PortState {
     id: PortId,
     owner: ThreadId,
+    owner_process: Option<ProcessId>,
     messages: VecDeque<Message>,
     receiver_blocked: Option<ThreadId>,
     /// Threads waiting for a message on this port
@@ -423,9 +439,12 @@ struct PortState {
 
 impl PortState {
     fn new(id: PortId, owner: ThreadId) -> Self {
+        let owner_process = crate::thread::get_thread_process_id(owner);
+
         Self {
             id,
             owner,
+            owner_process,
             messages: VecDeque::new(),
             receiver_blocked: None,
             wait_queue: VecDeque::new(),
@@ -461,6 +480,7 @@ impl IpcManager {
         let port_id = PortId::new();
         let port = PortState::new(port_id, owner);
 
+        mark_thread_ports_dirty(owner);
         self.ports.lock().insert(port_id, port);
         port_id
     }
@@ -476,6 +496,7 @@ impl IpcManager {
         }
 
         let port = PortState::new(port_id, owner);
+        mark_thread_ports_dirty(owner);
         ports.insert(port_id, port);
         Ok(port_id)
     }
@@ -1123,6 +1144,16 @@ pub fn has_message(port_id: PortId) -> Result<bool, IpcError> {
 /// Close all ports owned by a thread and wake up any threads waiting on those ports
 /// This should be called when a thread terminates to clean up IPC resources
 pub fn close_all_thread_ports(thread_id: ThreadId) {
+    if !begin_thread_port_cleanup(thread_id) {
+        log_debug!(
+            LOG_ORIGIN,
+            "IPC port cleanup already ran for thread {} - skipping duplicate close_all_thread_ports",
+            thread_id
+        );
+        IPC_MANAGER.waiting_threads.lock().remove(&thread_id);
+        return;
+    }
+
     let mut ports = IPC_MANAGER.ports.lock();
 
     // Collect all port IDs owned by this thread

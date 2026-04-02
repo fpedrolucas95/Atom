@@ -1242,6 +1242,18 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         caller_addr_space,
     );
 
+    let caller_process_id = match crate::thread::get_thread_process_id(caller) {
+        Some(process_id) => process_id,
+        None => {
+            log_error!(
+                LOG_ORIGIN,
+                "thread_create rejected: caller {} has no registered process_id",
+                caller
+            );
+            return EINVAL;
+        }
+    };
+
     let tid = crate::thread::ThreadId::new();
     let cap_table = crate::cap::create_capability_table(tid);
 
@@ -1255,6 +1267,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
 
     let thread = crate::thread::Thread {
         id: tid,
+        process_id: Some(caller_process_id),
         state: crate::thread::ThreadState::Ready,
         context,
         kernel_stack: kernel_stack_top,
@@ -3394,10 +3407,11 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
 // ============================================================================
 
 use spin::Mutex;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 /// Registered IRQ handlers - maps IRQ number to (ThreadId, port for notification)
 static IRQ_HANDLERS: Mutex<BTreeMap<u8, (crate::thread::ThreadId, u64)>> = Mutex::new(BTreeMap::new());
+static CLEANED_FD_OWNERS: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
 /// Allowed IRQs for userspace drivers
 const ALLOWED_IRQS: [u8; 2] = [1, 12]; // Keyboard (IRQ1), Mouse (IRQ12)
@@ -4169,6 +4183,7 @@ fn spawn_process_internal(
     // Create the thread with its own address space
     let thread = Thread {
         id: pid,
+        process_id: Some(crate::process::ProcessId::from(pid)),
         state: ThreadState::Ready,
         context,
         kernel_stack: kernel_stack_top,
@@ -5183,6 +5198,12 @@ fn fill_stat_to_user(path: &str, stat_ptr: u64) -> u64 {
 const MAX_KERNEL_FDS: usize = 128;
 const MAX_PATH_BUF: usize = 256;
 
+#[derive(Clone, Copy)]
+struct FdOwnerContext {
+    owner_pml4: u64,
+    owner_process: Option<crate::process::ProcessId>,
+}
+
 fn current_owner_pml4() -> Option<u64> {
     let tid = crate::sched::current_thread()?;
     let pml4 = crate::thread::get_thread_address_space(tid)?;
@@ -5194,11 +5215,51 @@ fn current_owner_pml4() -> Option<u64> {
     }
 }
 
+fn current_fd_owner_context() -> Option<FdOwnerContext> {
+    let tid = crate::sched::current_thread()?;
+    let owner_pml4 = current_owner_pml4()?;
+    let owner_process = crate::thread::get_thread_process_id(tid);
+
+    if let Some(process_id) = owner_process {
+        let process = crate::process::get_process(process_id)
+            .expect("userspace FD owner must resolve to a registered process");
+        assert_eq!(
+            process.pml4_phys,
+            owner_pml4,
+            "FD caller process {} PML4 0x{:X} must match caller owner_pml4 0x{:X}",
+            process_id,
+            process.pml4_phys,
+            owner_pml4
+        );
+    }
+
+    Some(FdOwnerContext {
+        owner_pml4,
+        owner_process,
+    })
+}
+
+fn assert_fd_process_alignment(fd: &KernelFd) {
+    if let Some(process_id) = fd.owner_process {
+        let process = crate::process::get_process(process_id)
+            .expect("FD owner_process must resolve to a registered process");
+        assert_eq!(
+            process.pml4_phys,
+            fd.owner_pml4,
+            "FD owner process {} PML4 0x{:X} must match owner_pml4 0x{:X}",
+            process_id,
+            process.pml4_phys,
+            fd.owner_pml4
+        );
+    }
+}
+
 /// A kernel-side open file/directory (zero-heap, stored in .bss).
 #[derive(Clone)]
 struct KernelFd {
     in_use: bool,
     owner_pml4: u64,
+    owner_process: Option<crate::process::ProcessId>,
     path: [u8; MAX_PATH_BUF],
     path_len: usize,
     is_dir: bool,
@@ -5216,6 +5277,7 @@ impl KernelFd {
     const EMPTY: Self = Self {
         in_use: false,
         owner_pml4: 0,
+        owner_process: None,
         path: [0u8; MAX_PATH_BUF],
         path_len: 0,
         is_dir: false,
@@ -5277,12 +5339,22 @@ fn path_buf_as_str(buf: &[u8; MAX_PATH_BUF], len: usize) -> &str {
 }
 
 fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Result<(), u64> {
-    let caller = match current_owner_pml4() {
-        Some(p) => p,
+    let caller = match current_fd_owner_context() {
+        Some(owner) => owner,
         None => return Err(EBADF),
     };
 
-    if table[idx].owner_pml4 != caller {
+    assert_fd_process_alignment(&table[idx]);
+
+    if let Some(caller_process) = caller.owner_process {
+        if let Some(entry_process) = table[idx].owner_process {
+            if entry_process != caller_process {
+                return Err(EBADF);
+            }
+        }
+    }
+
+    if table[idx].owner_pml4 != caller.owner_pml4 {
         return Err(EBADF);
     }
 
@@ -5292,13 +5364,33 @@ fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Resu
 fn validate_fd_ownership_with_owner(
     idx: usize,
     table: &[KernelFd; MAX_KERNEL_FDS],
-    caller_pml4: u64,
+    caller: FdOwnerContext,
 ) -> u64 {
-    if table[idx].owner_pml4 != caller_pml4 {
+    assert_fd_process_alignment(&table[idx]);
+
+    if let Some(caller_process) = caller.owner_process {
+        if let Some(entry_process) = table[idx].owner_process {
+            if entry_process != caller_process {
+                return EBADF;
+            }
+        }
+    }
+
+    if table[idx].owner_pml4 != caller.owner_pml4 {
         return EBADF;
     }
 
     ESUCCESS
+}
+
+fn note_fd_owner_activity(owner_pml4: u64) {
+    if owner_pml4 != 0 {
+        CLEANED_FD_OWNERS.lock().remove(&owner_pml4);
+    }
+}
+
+fn begin_fd_owner_cleanup(owner_pml4: u64) -> bool {
+    CLEANED_FD_OWNERS.lock().insert(owner_pml4)
 }
 
 fn get_fd_entry(
@@ -5324,6 +5416,15 @@ pub(crate) fn close_fds_for_owner(owner_pml4: u64) {
         return;
     }
 
+    if !begin_fd_owner_cleanup(owner_pml4) {
+        log_debug!(
+            "syscall",
+            "FD cleanup already ran for owner PML4 0x{:X} - skipping duplicate close_fds_for_owner",
+            owner_pml4
+        );
+        return;
+    }
+
     let mut table = KERNEL_FD_TABLE.lock();
     for fd in table.iter_mut() {
         if fd.in_use && fd.owner_pml4 == owner_pml4 {
@@ -5333,19 +5434,56 @@ pub(crate) fn close_fds_for_owner(owner_pml4: u64) {
     }
 }
 
+pub(crate) fn close_fds_for_process(process_id: crate::process::ProcessId) {
+    let Some(process) = crate::process::get_process(process_id) else {
+        log_debug!(
+            "syscall",
+            "FD cleanup requested for unknown process {} - skipping close_fds_for_process",
+            process_id
+        );
+        return;
+    };
+
+    debug_assert_eq!(
+        process.id,
+        process_id,
+        "Process registry returned mismatched process {} while closing FDs for {}",
+        process.id,
+        process_id
+    );
+    debug_assert_ne!(
+        process.pml4_phys,
+        0,
+        "close_fds_for_process requires a non-zero PML4 for process {}",
+        process_id
+    );
+    debug_assert_eq!(
+        crate::process::process_id_for_pml4(process.pml4_phys),
+        Some(process_id),
+        "Process {} must remain mapped from PML4 0x{:X} before FD cleanup",
+        process_id,
+        process.pml4_phys
+    );
+
+    close_fds_for_owner(process.pml4_phys);
+}
+
 /// Allocate an fd slot (returns 3..MAX_KERNEL_FDS-1, or EMFILE on full).
 fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
-    let owner = match current_owner_pml4() {
-        Some(p) => p,
+    let owner = match current_fd_owner_context() {
+        Some(owner) => owner,
         None => return Err(EBADF),
     };
 
+    note_fd_owner_activity(owner.owner_pml4);
     let mut table = KERNEL_FD_TABLE.lock();
     // fd 0/1/2 reserved for stdin/out/err
     for i in 3..MAX_KERNEL_FDS {
         if !table[i].in_use {
             table[i].in_use = true;
-            table[i].owner_pml4 = owner;
+            table[i].owner_pml4 = owner.owner_pml4;
+            table[i].owner_process = owner.owner_process;
+            assert_fd_process_alignment(&table[i]);
             let plen = path.len().min(MAX_PATH_BUF);
             table[i].path[..plen].copy_from_slice(&path.as_bytes()[..plen]);
             table[i].path_len = plen;
@@ -5566,6 +5704,7 @@ fn sys_fs_close(fd: u64) -> u64 {
 
     table[idx].free_cache();
     table[idx].owner_pml4 = 0;
+    table[idx].owner_process = None;
     table[idx].in_use = false;
     ESUCCESS
 }
@@ -5603,8 +5742,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return EBADF;
     }
 
-    let caller_pml4 = match current_owner_pml4() {
-        Some(p) => p,
+    let caller = match current_fd_owner_context() {
+        Some(owner) => owner,
         None => return EBADF,
     };
 
@@ -5616,7 +5755,7 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return EBADF;
     }
 
-    let err = validate_fd_ownership_with_owner(idx, &table, caller_pml4);
+    let err = validate_fd_ownership_with_owner(idx, &table, caller);
     if err != ESUCCESS {
         return err;
     }
@@ -5703,7 +5842,7 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         let mut page = start_page;
         while page <= end_page {
             crate::mm::vma::handle_page_fault(
-                caller_pml4 as usize, page, 0x6 /* write|user|not-present */);
+                caller.owner_pml4 as usize, page, 0x6 /* write|user|not-present */);
             page += page_size;
         }
     }

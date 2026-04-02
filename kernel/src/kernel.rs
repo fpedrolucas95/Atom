@@ -59,6 +59,7 @@ mod interrupts;
 mod input;  // Minimal input buffer for userspace drivers
 mod log;
 mod graphics;
+mod process;
 mod thread;
 mod sched;
 mod syscall;

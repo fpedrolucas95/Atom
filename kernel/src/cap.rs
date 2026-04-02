@@ -45,9 +45,8 @@
 
 use crate::log_info;
 use crate::log_debug;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
-use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -308,7 +307,7 @@ pub enum CapError {
     NotOwner,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CapabilityTable {
     capabilities: BTreeMap<CapHandle, Capability>,
     owner: ThreadId,
@@ -418,6 +417,8 @@ impl CapabilityManager {
 
         caps.insert(handle, cap);
         drop(caps);
+
+        note_thread_capability_activity(owner);
 
         self.log_audit(AuditLogEntry::new(
             AuditEventType::Create,
@@ -545,6 +546,19 @@ pub struct CapabilityStats {
 }
 
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();
+static CLEANED_THREAD_CAPABILITIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
+
+pub(crate) fn note_thread_capability_activity(thread_id: ThreadId) {
+    CLEANED_THREAD_CAPABILITIES.lock().remove(&thread_id);
+}
+
+pub(crate) fn forget_thread_capability_cleanup(thread_id: ThreadId) {
+    CLEANED_THREAD_CAPABILITIES.lock().remove(&thread_id);
+}
+
+fn begin_thread_capability_cleanup(thread_id: ThreadId) -> bool {
+    CLEANED_THREAD_CAPABILITIES.lock().insert(thread_id)
+}
 
 pub fn init() {
     log_info!(
@@ -684,9 +698,60 @@ pub fn lookup_capability(handle: CapHandle) -> Option<Capability> {
     CAPABILITY_MANAGER.lookup(handle)
 }
 
+pub fn revoke_all_process_capabilities(process_id: crate::process::ProcessId) {
+    let Some(process) = crate::process::get_process(process_id) else {
+        log_debug!(
+            LOG_ORIGIN,
+            "Capability cleanup requested for unknown process {} - skipping revoke_all_process_capabilities",
+            process_id
+        );
+        return;
+    };
+
+    let owned_caps = process.capability_table.list();
+
+    log_info!(
+        LOG_ORIGIN,
+        "Revoking {} capabilities for process {}",
+        owned_caps.len(),
+        process_id
+    );
+
+    let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+
+    for handle in owned_caps {
+        if let Some(_cap) = caps.remove(&handle) {
+            log_debug!(
+                LOG_ORIGIN,
+                "Revoked capability {} from process {}",
+                handle,
+                process_id
+            );
+        }
+
+        drop(caps);
+        let _ = crate::process::remove_process_capability(process_id, handle);
+        CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
+            AuditEventType::Revoke,
+            process.primary_thread,
+            handle,
+        ));
+        caps = CAPABILITY_MANAGER.global_caps.lock();
+    }
+}
+
 /// Revoke all capabilities owned by a thread
 /// This should be called when a thread terminates to clean up all its capabilities
 pub fn revoke_all_thread_capabilities(thread_id: ThreadId) {
+    if !begin_thread_capability_cleanup(thread_id) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Capability cleanup already ran for thread {} - skipping duplicate revoke_all_thread_capabilities",
+            thread_id
+        );
+        return;
+    }
+
     let mut caps = CAPABILITY_MANAGER.global_caps.lock();
 
     // Collect all capability handles owned by this thread
@@ -719,6 +784,7 @@ pub fn revoke_all_thread_capabilities(thread_id: ThreadId) {
 
             // Log audit entry for revocation
             drop(caps);
+            let _ = crate::thread::remove_thread_capability(thread_id, handle);
             CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
                 AuditEventType::Revoke,
                 thread_id,

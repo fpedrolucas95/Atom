@@ -55,7 +55,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::mm::{pmm, vm};
-use crate::thread::ThreadId;
+use crate::thread::{ThreadId, ThreadState};
 use crate::log_info;
 use crate::log_debug;
 
@@ -924,33 +924,54 @@ fn resolve_thread_pml4(thread_id: ThreadId) -> Option<usize> {
     }
 }
 
-/// Check whether any other live threads share the same address space (PML4)
-/// as the given thread.
+/// Check whether any other live threads belong to the same process as the
+/// given thread.
+///
+/// Shared memory mappings are still tracked by PML4, so this relies on the
+/// invariant that every userspace thread in a process caches the same
+/// `thread.address_space == process.pml4_phys` relationship.
 fn other_threads_share_address_space(thread_id: ThreadId, addr_space: u64) -> bool {
-    let mut buf = [crate::thread::ProcessInfo {
-        pid: 0,
-        state: 0,
-        name: [0u8; 32],
-    }; 64];
-    let count = crate::thread::list_processes(&mut buf);
-
-    for i in 0..count {
-        let tid = crate::thread::ThreadId::from_raw(buf[i].pid);
-        if tid == thread_id {
-            continue;
-        }
-        // Skip exited threads — they don't hold mappings.
-        if buf[i].state == 3 {
-            continue;
-        }
-        if let Some(other_as) = crate::thread::get_thread_address_space(tid) {
-            if other_as == addr_space {
-                return true;
-            }
-        }
+    if addr_space == 0 {
+        return false;
     }
 
-    false
+    let Some(process_id) = crate::thread::get_thread_process_id(thread_id) else {
+        debug_assert!(
+            false,
+            "shared_mem cleanup: userspace thread {} with PML4 0x{:X} is missing process_id",
+            thread_id,
+            addr_space
+        );
+        return crate::thread::has_live_sibling_in_address_space(thread_id, addr_space);
+    };
+
+    let Some(process) = crate::process::get_process(process_id) else {
+        debug_assert!(
+            false,
+            "shared_mem cleanup: missing process {} for thread {}",
+            process_id,
+            thread_id
+        );
+        return crate::thread::has_live_sibling_in_address_space(thread_id, addr_space);
+    };
+
+    debug_assert_eq!(
+        process.pml4_phys,
+        addr_space,
+        "shared_mem cleanup: thread {} cache PML4 0x{:X} does not match process {} PML4 0x{:X}",
+        thread_id,
+        addr_space,
+        process_id,
+        process.pml4_phys
+    );
+
+    process.threads.iter().copied().any(|other_thread_id| {
+        other_thread_id != thread_id
+            && matches!(
+                crate::thread::get_thread_state(other_thread_id),
+                Some(state) if state != ThreadState::Exited
+            )
+    })
 }
 
 /// Cleanup all shared memory regions owned by or mapped by a thread.

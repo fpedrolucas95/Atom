@@ -65,6 +65,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use crate::arch::gdt;
+use crate::process::{self, ProcessId};
 use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 
 use crate::cap::CapabilityTable;
@@ -306,10 +307,13 @@ impl CpuContext {
 #[derive(Debug)]
 pub struct Thread {
     pub id: ThreadId,
+    pub process_id: Option<ProcessId>,
     pub state: ThreadState,
     pub context: CpuContext,
     pub kernel_stack: u64,
     pub kernel_stack_size: usize,
+    /// Compatibility cache of the owning process PML4.
+    /// Kernel threads keep their current kernel CR3 here and never register a Process.
     pub address_space: u64,
     pub priority: ThreadPriority,
     pub name: &'static str,
@@ -359,6 +363,7 @@ impl Thread {
 
         Self {
             id,
+            process_id: None,
             state: ThreadState::Ready,
             context,
             kernel_stack,
@@ -464,11 +469,26 @@ impl ThreadList {
 
     pub fn remove(&self, id: ThreadId) -> Option<Thread> {
         let mut threads = self.threads.lock();
-        if let Some(pos) = threads.iter().position(|t| t.id == id) {
+        let removed = if let Some(pos) = threads.iter().position(|t| t.id == id) {
             Some(threads.remove(pos))
         } else {
             None
+        };
+        drop(threads);
+
+        if let Some(thread) = &removed {
+            if let Some(process_id) = thread.process_id {
+                process::detach_thread_from_process(process_id, thread.id);
+            }
         }
+
+        if removed.is_some() {
+            crate::ipc::forget_thread_port_cleanup(id);
+            crate::cap::forget_thread_capability_cleanup(id);
+            crate::mm::addrspace::forget_thread_address_space_cleanup(id);
+        }
+
+        removed
     }
 
     pub fn find(&self, id: ThreadId) -> Option<ThreadId> {
@@ -548,6 +568,7 @@ impl ThreadList {
         let threads = self.threads.lock();
         threads.iter().find(|t| t.id == id).map(|t| Thread {
             id: t.id,
+            process_id: t.process_id,
             state: t.state,
             context: t.context,
             kernel_stack: t.kernel_stack,
@@ -661,7 +682,64 @@ pub fn init() {
     );
 }
 
+fn track_thread_process(thread: &Thread) {
+    if let Some(process_id) = thread.process_id {
+        debug_assert!(
+            thread.is_userspace,
+            "Thread {} has process_id {} but is not marked as userspace",
+            thread.id,
+            process_id
+        );
+        debug_assert_ne!(
+            thread.address_space,
+            0,
+            "Userspace thread {} must have a non-zero address space",
+            thread.id
+        );
+
+        if process_id.raw() == thread.id.raw() {
+            process::register_process(process_id, thread.address_space, thread.id);
+        } else {
+            process::attach_thread_to_process(process_id, thread.id, thread.address_space);
+        }
+
+        debug_assert_eq!(
+            process::process_id_for_pml4(thread.address_space),
+            Some(process_id),
+            "PML4 0x{:X} should resolve to process {} for thread {}",
+            thread.address_space,
+            process_id,
+            thread.id
+        );
+
+        process::debug_assert_thread_process_alignment(
+            process_id,
+            thread.id,
+            thread.address_space,
+        );
+    } else {
+        debug_assert!(
+            !thread.is_userspace,
+            "Userspace thread {} is missing a process_id",
+            thread.id
+        );
+
+        if thread.address_space != 0 {
+            let mapped_process = process::process_id_for_pml4(thread.address_space);
+            debug_assert_eq!(
+                mapped_process,
+                None,
+                "Kernel thread {} unexpectedly resolves to process {:?} via PML4 0x{:X}",
+                thread.id,
+                mapped_process,
+                thread.address_space
+            );
+        }
+    }
+}
+
 pub fn add_thread(thread: Thread) {
+    track_thread_process(&thread);
     THREAD_LIST.add(thread);
 }
 
@@ -714,11 +792,49 @@ pub fn get_thread_address_space(thread_id: ThreadId) -> Option<u64> {
     threads.iter().find(|t| t.id == thread_id).map(|t| t.address_space)
 }
 
+pub fn get_thread_process_id(thread_id: ThreadId) -> Option<ProcessId> {
+    let threads = THREAD_LIST.threads.lock();
+    threads.iter().find(|t| t.id == thread_id).and_then(|t| t.process_id)
+}
+
 pub fn validate_thread_capability(
     thread_id: ThreadId,
     cap_handle: crate::cap::CapHandle,
     required_permission: crate::cap::CapPermissions,
 ) -> Result<(), crate::cap::CapError> {
+    let (has_local_caps, process_id) = {
+        let threads = THREAD_LIST.threads.lock();
+        let thread = threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .ok_or(crate::cap::CapError::NotFound)?;
+        (thread.capability_table.count() > 0, thread.process_id)
+    };
+
+    if has_local_caps {
+        log_debug!(
+            LOG_ORIGIN,
+            "validate_thread_capability: thread {} using thread-local capability table",
+            thread_id
+        );
+        return THREAD_LIST.validate_capability(thread_id, cap_handle, required_permission);
+    }
+
+    if let Some(process_id) = process_id {
+        log_debug!(
+            LOG_ORIGIN,
+            "validate_thread_capability: thread {} using process {} capability table fallback",
+            thread_id,
+            process_id
+        );
+        return process::validate_process_capability(process_id, cap_handle, required_permission);
+    }
+
+    log_debug!(
+        LOG_ORIGIN,
+        "validate_thread_capability: thread {} has no local or process capability store",
+        thread_id
+    );
     THREAD_LIST.validate_capability(thread_id, cap_handle, required_permission)
 }
 
@@ -726,14 +842,43 @@ pub fn add_thread_capability(
     thread_id: ThreadId,
     capability: crate::cap::Capability,
 ) -> Result<crate::cap::CapHandle, crate::cap::CapError> {
-    THREAD_LIST.add_capability(thread_id, capability)
+    crate::cap::note_thread_capability_activity(thread_id);
+
+    let process_id = get_thread_process_id(thread_id);
+    let capability_for_process = capability.clone();
+    let handle = THREAD_LIST.add_capability(thread_id, capability)?;
+
+    if let Some(process_id) = process_id {
+        if let Err(err) = process::add_process_capability(process_id, capability_for_process) {
+            let _ = THREAD_LIST.remove_capability(thread_id, handle);
+            return Err(err);
+        }
+    }
+
+    Ok(handle)
 }
 
 pub fn remove_thread_capability(
     thread_id: ThreadId,
     cap_handle: crate::cap::CapHandle,
 ) -> Option<crate::cap::Capability> {
-    THREAD_LIST.remove_capability(thread_id, cap_handle)
+    let process_id = get_thread_process_id(thread_id);
+    let removed = THREAD_LIST.remove_capability(thread_id, cap_handle);
+
+    if removed.is_some() {
+        if let Some(process_id) = process_id {
+            let removed_from_process = process::remove_process_capability(process_id, cap_handle);
+            debug_assert!(
+                removed_from_process.is_some(),
+                "Capability {} missing from process {} mirror while removing from thread {}",
+                cap_handle,
+                process_id,
+                thread_id
+            );
+        }
+    }
+
+    removed
 }
 
 pub fn thread_has_capability(
@@ -751,6 +896,46 @@ pub fn validate_thread_capability_by_type<F>(
 where
     F: Fn(&crate::cap::ResourceType) -> bool,
 {
+    let (has_local_caps, process_id) = {
+        let threads = THREAD_LIST.threads.lock();
+        let Some(thread) = threads.iter().find(|t| t.id == thread_id) else {
+            return false;
+        };
+        (thread.capability_table.count() > 0, thread.process_id)
+    };
+
+    if has_local_caps {
+        log_debug!(
+            LOG_ORIGIN,
+            "validate_thread_capability_by_type: thread {} using thread-local capability table",
+            thread_id
+        );
+        return THREAD_LIST.validate_capability_by_type(
+            thread_id,
+            required_permission,
+            resource_filter,
+        );
+    }
+
+    if let Some(process_id) = process_id {
+        log_debug!(
+            LOG_ORIGIN,
+            "validate_thread_capability_by_type: thread {} using process {} capability table fallback",
+            thread_id,
+            process_id
+        );
+        return process::validate_process_capability_by_type(
+            process_id,
+            required_permission,
+            resource_filter,
+        );
+    }
+
+    log_debug!(
+        LOG_ORIGIN,
+        "validate_thread_capability_by_type: thread {} has no local or process capability store",
+        thread_id
+    );
     THREAD_LIST.validate_capability_by_type(thread_id, required_permission, resource_filter)
 }
 
@@ -1277,6 +1462,7 @@ fn get_pt_entry(pt_phys: usize, index: usize) -> Result<u64, ()> {
 /// All memory is reclaimed, all handles are invalid, and all waiters are unblocked.
 struct ZombieInfo {
     id: ThreadId,
+    process_id: Option<ProcessId>,
     pml4: u64,
     stack: u64,
     stack_size: usize,
@@ -1308,10 +1494,15 @@ fn other_threads_share_address_space(current_tid: ThreadId, address_space_cr3: u
     other_threads_share_address_space_locked(current_tid, address_space_cr3, &threads)
 }
 
+pub(crate) fn has_live_sibling_in_address_space(current_tid: ThreadId, address_space_cr3: u64) -> bool {
+    other_threads_share_address_space(current_tid, address_space_cr3)
+}
+
 /// Performs the final, dangerous cleanup operations (freeing stack and PML4)
 /// that cannot be done while the thread is still running.
 fn perform_final_cleanup(
     thread_id: ThreadId,
+    process_id: Option<ProcessId>,
     address_space_cr3: u64,
     kernel_stack: u64,
     kernel_stack_size: usize,
@@ -1338,6 +1529,30 @@ fn perform_final_cleanup(
                 address_space_cr3
             );
             false
+        } else if let Some(process_id) = process_id {
+            if !process::is_process_cleaned(process_id) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Skipping address-space teardown for TID {} (process {} / PML4 0x{:X}) until final process cleanup is claimed",
+                    thread_id,
+                    process_id,
+                    address_space_cr3
+                );
+                false
+            } else {
+                let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
+                if cleaned.contains(&address_space_cr3) {
+                    log_debug!(
+                        LOG_ORIGIN,
+                        "Address-space teardown already completed for PML4 0x{:X} - skipping duplicate cleanup",
+                        address_space_cr3
+                    );
+                    false
+                } else {
+                    cleaned.insert(address_space_cr3);
+                    true
+                }
+            }
         } else {
             let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
             if cleaned.contains(&address_space_cr3) {
@@ -1367,8 +1582,14 @@ fn perform_final_cleanup(
             CLEANED_ADDRESS_SPACES.lock().remove(&address_space_cr3);
             0
         } else {
-            // Close and release all FDs owned by this address space before reusing PML4.
-            crate::syscall::close_fds_for_owner(address_space_cr3);
+            if let Some(process_id) = process_id {
+                debug_assert!(
+                    process::is_process_cleaned(process_id),
+                    "Process {} must be marked cleaned before freeing PML4 0x{:X}",
+                    process_id,
+                    address_space_cr3
+                );
+            }
 
             // Destroy VMA map for this address space (must happen before freeing pages)
             crate::mm::vma::destroy_vma_map(address_space_cr3 as usize);
@@ -1419,7 +1640,13 @@ pub fn reap_zombies() {
     for zombie in zombies {
         log_info!(LOG_ORIGIN, "Reaping zombie thread {} ('{}')", zombie.id, zombie.name);
 
-        perform_final_cleanup(zombie.id, zombie.pml4, zombie.stack, zombie.stack_size);
+        perform_final_cleanup(
+            zombie.id,
+            zombie.process_id,
+            zombie.pml4,
+            zombie.stack,
+            zombie.stack_size,
+        );
 
         // Only now remove from the global thread list
         if let Some(_removed) = THREAD_LIST.remove(zombie.id) {
@@ -1448,14 +1675,20 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         let mut threads = THREAD_LIST.threads.lock();
         if let Some(t) = threads.iter_mut().find(|t| t.id == thread_id) {
             t.set_state(ThreadState::Exited);
-            Some((t.kernel_stack, t.kernel_stack_size, t.address_space, t.name))
+            Some((
+                t.kernel_stack,
+                t.kernel_stack_size,
+                t.address_space,
+                t.process_id,
+                t.name,
+            ))
         } else {
             None
         }
     };
 
-    let (kernel_stack, kernel_stack_size, address_space_cr3, thread_name) = match thread_info {
-        Some((ks, kss, as_cr3, name)) => (ks, kss, as_cr3, name),
+    let (kernel_stack, kernel_stack_size, address_space_cr3, thread_process_id, thread_name) = match thread_info {
+        Some((ks, kss, as_cr3, process_id, name)) => (ks, kss, as_cr3, process_id, name),
         None => {
             log_warn!(LOG_ORIGIN, "Thread {} not found in thread list during termination", thread_id);
             return;
@@ -1473,13 +1706,46 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     log_debug!(LOG_ORIGIN, "Step 3/10: Cleaning up shared memory");
     crate::shared_mem::cleanup_thread_shared_memory(thread_id);
 
-    // Step 4: Revoke all capabilities
-    log_debug!(LOG_ORIGIN, "Step 4/10: Revoking capabilities");
-    crate::cap::revoke_all_thread_capabilities(thread_id);
+    // Step 4: Claim process-owned final cleanup if this is the last live thread.
+    let process_cleanup_claimed = if let Some(process_id) = thread_process_id {
+        let claimed = process::claim_process_cleanup(process_id, thread_id, address_space_cr3);
+        log_debug!(
+            LOG_ORIGIN,
+            "Step 4/10: Process cleanup claim for process {} by thread {} => {}",
+            process_id,
+            thread_id,
+            claimed
+        );
+        claimed
+    } else {
+        log_debug!(LOG_ORIGIN, "Step 4/10: Kernel thread - no process cleanup claim");
+        false
+    };
+
+    // Step 5: Process-owned resources are cleaned exactly once, when the last
+    // userspace thread exits. Kernel threads keep the original thread-local path.
+    if let Some(process_id) = thread_process_id {
+        if process_cleanup_claimed {
+            log_debug!(LOG_ORIGIN, "Step 5/10: Closing process-owned FDs for {}", process_id);
+            crate::syscall::close_fds_for_process(process_id);
+
+            log_debug!(LOG_ORIGIN, "Step 5/10: Revoking process-owned capabilities for {}", process_id);
+            crate::cap::revoke_all_process_capabilities(process_id);
+        } else {
+            log_debug!(
+                LOG_ORIGIN,
+                "Step 5/10: Skipping process-owned FD/cap cleanup for thread {} because sibling threads still exist or cleanup was already claimed",
+                thread_id
+            );
+        }
+    } else {
+        log_debug!(LOG_ORIGIN, "Step 5/10: Revoking kernel-thread capabilities");
+        crate::cap::revoke_all_thread_capabilities(thread_id);
+    }
 
     // Step 6: Clean up address spaces from manager
     log_debug!(LOG_ORIGIN, "Step 6/10: Removing address spaces from manager");
-    crate::mm::addrspace::cleanup_thread_address_spaces(thread_id);
+    crate::mm::addrspace::cleanup_thread_address_spaces(thread_id, address_space_cr3);
 
     // Step 8: Remove from scheduler (handled automatically when thread is removed or state is Exited)
     log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will skip this thread from now on");
@@ -1490,13 +1756,20 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         log_info!(LOG_ORIGIN, "Current thread {} exiting - deferring final cleanup to reaper", thread_id);
         ZOMBIE_THREADS.lock().push(ZombieInfo {
             id: thread_id,
+            process_id: thread_process_id,
             pml4: address_space_cr3,
             stack: kernel_stack,
             stack_size: kernel_stack_size,
             name: thread_name,
         });
     } else {
-        perform_final_cleanup(thread_id, address_space_cr3, kernel_stack, kernel_stack_size);
+        perform_final_cleanup(
+            thread_id,
+            thread_process_id,
+            address_space_cr3,
+            kernel_stack,
+            kernel_stack_size,
+        );
 
         // Step 9: Remove from global thread list
         log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
