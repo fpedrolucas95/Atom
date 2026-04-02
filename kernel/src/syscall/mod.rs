@@ -337,6 +337,65 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
+// ============================================================================
+// Privileged Process Registry
+// ============================================================================
+//
+// BOOTSTRAP HACK — will be replaced by a capability of type ResourceType::Spawn
+// (or equivalent root-authority cap) once process abstraction (struct Process)
+// is introduced.  Until then, the first userspace process spawned (init) is
+// registered here and used as the single source of privilege for operations
+// that must be restricted to a trusted root (sys_cap_create of arbitrary
+// resources, sys_read_klog, etc.).
+//
+// Rules:
+//   - Registered exactly once: the first call to spawn_process_internal.
+//   - All code that needs to check privilege calls has_privilege() — NEVER
+//     reads PRIVILEGED_PID directly — so replacing this with a cap check
+//     later requires changing only one function.
+//   - has_privilege() returns false if PRIVILEGED_PID has not been set yet
+//     (during early boot before init exists).
+
+use core::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
+
+static PRIVILEGED_PID: AtomicU64 = AtomicU64::new(0);
+
+/// Register the first spawned userspace process as the privileged (init) process.
+/// Must be called exactly once; subsequent calls are no-ops (logged as warnings).
+pub fn register_privileged_process(pid: crate::thread::ThreadId) {
+    let result = PRIVILEGED_PID.compare_exchange(
+        0,
+        pid.raw(),
+        AtomicOrd::SeqCst,
+        AtomicOrd::SeqCst,
+    );
+    match result {
+        Ok(_) => log_info!("syscall", "Privileged process registered: pid={}", pid),
+        Err(existing) => log_warn!(
+            "syscall",
+            "register_privileged_process called again (existing={}, new={}) — ignored",
+            existing,
+            pid
+        ),
+    }
+}
+
+/// Returns true if the current thread is the registered privileged process (init).
+///
+/// This is a bootstrap identity check, not a capability check.  It is intentionally
+/// encapsulated here so that the single call-site can be replaced with a proper
+/// capability lookup when process abstraction is available.
+#[inline]
+fn has_privilege() -> bool {
+    let privileged = PRIVILEGED_PID.load(AtomicOrd::SeqCst);
+    if privileged == 0 {
+        return false; // init not yet registered
+    }
+    crate::sched::current_thread()
+        .map(|t| t.raw() == privileged)
+        .unwrap_or(false)
+}
+
 #[repr(C)]
 struct SyscallSavedFrame {
     user_r9: u64,
@@ -356,6 +415,234 @@ struct SyscallSavedFrame {
     user_rflags: u64,
     user_rsp: u64,
     user_ss: u64,
+}
+
+// ============================================================================
+// Syscall Policy Table  (P2-A)
+// ============================================================================
+//
+// Every syscall must be explicitly classified here.  The dispatcher checks
+// the policy BEFORE the handler runs, so handlers only need to validate the
+// specific *instance* of the resource (e.g. which port, which FD), not the
+// class-level permission.
+//
+// Classification kinds:
+//   ExplicitlyUnrestricted — any process may call this; no capability gate.
+//                            Use for public information or operations whose
+//                            safety is guaranteed entirely by the handler.
+//   Requires(R)            — caller must hold at least one capability matching
+//                            CapRequirement R.  Uses READ permission as the
+//                            minimum threshold (sufficient to prove possession).
+//
+// Default for unclassified syscalls:
+//   debug builds  → panic!  (force the developer to classify)
+//   release builds → EPERM  (fail-closed; never silently open a gap)
+
+/// Discrete capability requirements used by the policy table.
+/// Prefer adding a new variant here over writing inline closures so the
+/// policy table remains human-readable and statically auditable.
+#[derive(Debug, Clone, Copy)]
+enum CapRequirement {
+    /// Caller must hold an InputDevice{Mouse} cap with READ.
+    InputMouse,
+    /// Caller must hold an InputDevice{Keyboard} cap with READ.
+    InputKeyboard,
+    /// Caller must hold any Framebuffer cap (any dimensions) with READ.
+    AnyFramebuffer,
+    /// Caller must hold any FsNamespace cap with READ.
+    /// Used to gate the kernel-internal FAT32 backend syscalls (200-202)
+    /// so that only fsd can reach the raw filesystem driver.
+    AnyFsNamespace,
+    /// Caller must be the registered privileged process (init bootstrap).
+    /// Covers operations that produce sensitive system-wide information.
+    PrivilegedOnly,
+}
+
+/// Per-syscall policy decision returned by `syscall_policy`.
+#[derive(Debug)]
+enum SysPolicy {
+    /// No capability gate — handler is solely responsible for safety.
+    ExplicitlyUnrestricted,
+    /// Gate: caller must satisfy the given CapRequirement.
+    Requires(CapRequirement),
+}
+
+/// Evaluate `req` against the current thread.  Returns true if the
+/// requirement is satisfied.
+fn check_cap_requirement(req: CapRequirement) -> bool {
+    use crate::cap::{CapPermissions, ResourceType};
+    use crate::cap::InputDeviceType;
+
+    let caller = match crate::sched::current_thread() {
+        Some(t) => t,
+        None => return false,
+    };
+
+    match req {
+        CapRequirement::InputMouse =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::READ,
+                |r| matches!(r, ResourceType::InputDevice {
+                    device_type: InputDeviceType::Mouse
+                }),
+            ),
+
+        CapRequirement::InputKeyboard =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::READ,
+                |r| matches!(r, ResourceType::InputDevice {
+                    device_type: InputDeviceType::Keyboard
+                }),
+            ),
+
+        CapRequirement::AnyFramebuffer =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::READ,
+                |r| matches!(r, ResourceType::Framebuffer { .. }),
+            ),
+
+        CapRequirement::AnyFsNamespace =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::READ,
+                |r| matches!(r, ResourceType::FsNamespace { .. }),
+            ),
+
+        CapRequirement::PrivilegedOnly => has_privilege(),
+    }
+}
+
+/// Return the policy for `syscall_num`.
+///
+/// Every syscall number that the kernel handles must appear here.
+/// In debug builds, an unclassified syscall panics so the developer
+/// is forced to add a classification.  In release builds it returns
+/// EPERM (fail-closed).
+fn syscall_policy(num: u64) -> SysPolicy {
+    use SysPolicy::*;
+    use CapRequirement::*;
+
+    match num {
+        // ── Thread management ──────────────────────────────────────────────
+        // yield/exit/sleep carry no sensitive effect; thread_create's handler
+        // already validates Thread(WRITE) capability.
+        SYS_THREAD_YIELD | SYS_THREAD_EXIT | SYS_THREAD_SLEEP | SYS_THREAD_CREATE
+            => ExplicitlyUnrestricted,
+
+        // ── IPC ────────────────────────────────────────────────────────────
+        // All IPC handlers perform parametric port-ownership checks; no
+        // additional class-level gate needed here.
+        SYS_IPC_CREATE_PORT | SYS_IPC_CLOSE_PORT
+        | SYS_IPC_SEND | SYS_IPC_RECV
+        | SYS_IPC_SEND_WITH_CAP
+        | SYS_IPC_SEND_BATCH | SYS_IPC_RECV_BATCH
+        | SYS_IPC_SEND_ASYNC | SYS_IPC_TRY_RECV
+        | SYS_IPC_TRACE_READ | SYS_IPC_PORT_STATS
+        | SYS_IPC_WAIT_ANY | SYS_IPC_CREATE_PORT_WITH_ID
+            => ExplicitlyUnrestricted,
+
+        // ── Capability management ──────────────────────────────────────────
+        // Individual handlers enforce ownership / derivation rules.
+        // (sys_cap_create is additionally guarded in its own body.)
+        SYS_CAP_CREATE | SYS_CAP_CHECK | SYS_CAP_REVOKE | SYS_CAP_DERIVE
+        | SYS_CAP_LIST | SYS_CAP_TRANSFER
+        | SYS_CAP_QUERY_PARENT | SYS_CAP_QUERY_CHILDREN
+            => ExplicitlyUnrestricted,
+
+        // ── Shared memory / address space ──────────────────────────────────
+        SYS_SHARED_REGION_CREATE | SYS_SHARED_REGION_MAP
+        | SYS_SHARED_REGION_UNMAP | SYS_SHARED_REGION_DESTROY
+        | SYS_ADDRSPACE_CREATE | SYS_ADDRSPACE_DESTROY
+        | SYS_MAP_REGION | SYS_UNMAP_REGION | SYS_REMAP_REGION
+        | SYS_REGISTER_FAULT_HANDLER
+        | SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK
+            => ExplicitlyUnrestricted,
+
+        // ── Input devices ─────────────────────────────────────────────────
+        // Gated by InputDevice capability type.
+        // Note: all processes currently receive these caps at spawn time
+        // (over-provisioning — see P1-A TODO in spawn_process_internal).
+        // Fixing over-provisioning will automatically tighten access here
+        // without further changes to this table.
+        SYS_MOUSE_POLL | SYS_MOUSE_GET_ID   => Requires(InputMouse),
+        SYS_KEYBOARD_POLL                    => Requires(InputKeyboard),
+
+        // ── Framebuffer / display ──────────────────────────────────────────
+        // Gated by Framebuffer cap.  Same over-provisioning caveat applies.
+        SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER | SYS_SET_VIDEO_MODE
+            => Requires(AnyFramebuffer),
+
+        // Video info queries — non-sensitive, public.
+        SYS_GET_VIDEO_MODES | SYS_GET_CURRENT_VIDEO_MODE | SYS_VIDEO_MODE_COUNT
+            => ExplicitlyUnrestricted,
+
+        // ── IRQ management ────────────────────────────────────────────────
+        // Handler uses ALLOWED_IRQS allowlist today; no additional class gate.
+        SYS_REGISTER_IRQ_HANDLER | SYS_UNREGISTER_IRQ_HANDLER | SYS_GET_IRQ_COUNT
+            => ExplicitlyUnrestricted,
+
+        // ── Kernel FS backend (for fsd only) ──────────────────────────────
+        // These syscalls bypass fsd and talk directly to the kernel FAT32
+        // driver.  Gated by FsNamespace cap which is granted only to "fsd"
+        // at spawn time.  This is the first hard enforcement of the rule
+        // "only fsd calls kern_fs_*".
+        SYS_KERN_FS_READ_FILE | SYS_KERN_FS_LIST_DIR | SYS_KERN_FS_STAT_PATH
+            => Requires(AnyFsNamespace),
+
+        // ── POSIX FS (via fsd IPC) ─────────────────────────────────────────
+        SYS_FS_OPEN | SYS_FS_CLOSE | SYS_FS_READ | SYS_FS_WRITE | SYS_FS_SEEK
+        | SYS_FS_STAT | SYS_FS_FSTAT
+        | SYS_FS_MKDIR | SYS_FS_RMDIR | SYS_FS_UNLINK | SYS_FS_RENAME
+        | SYS_FS_READDIR | SYS_FS_TRUNCATE | SYS_FS_FSYNC
+        | SYS_FS_MOUNT | SYS_FS_UMOUNT | SYS_FS_CHMOD
+        | SYS_FS_DUP | SYS_FS_DUP2
+        | SYS_FS_LINK | SYS_FS_SYMLINK | SYS_FS_READLINK
+        | SYS_FS_UTIMES | SYS_FS_STATVFS
+            => ExplicitlyUnrestricted,
+
+        // ── Process / spawn ───────────────────────────────────────────────
+        // TODO: restrict SYS_SPAWN_* to processes holding a future Spawn cap.
+        //       For now, service_manager and app_launcher call these without
+        //       a dedicated capability.
+        SYS_SPAWN_PROCESS | SYS_SPAWN_FROM_PATH
+            => ExplicitlyUnrestricted,
+
+        // ── Sensitive system information ───────────────────────────────────
+        // Kernel log exposes internal addresses, thread states, and error
+        // details.  Restricted to the privileged (init) process.
+        SYS_READ_KLOG => Requires(PrivilegedOnly),
+
+        // Process enumeration is also privileged; non-init processes should
+        // query the service_manager via IPC instead of the kernel directly.
+        SYS_LIST_PROCESSES | SYS_GET_PROCESS_COUNT
+            => Requires(PrivilegedOnly),
+
+        // Non-sensitive system information — public.
+        SYS_GET_TICKS | SYS_GET_MEMORY_INFO | SYS_GET_CPU_BRAND
+            => ExplicitlyUnrestricted,
+
+        // Debug log — no cap required (process names its own output).
+        SYS_DEBUG_LOG => ExplicitlyUnrestricted,
+
+        // ── Unclassified ──────────────────────────────────────────────────
+        // In debug builds: panic immediately so the developer adds a row.
+        // In release builds: fail-closed (EPERM).  We never silently open
+        // a new syscall to the world without an explicit classification.
+        _ => {
+            #[cfg(debug_assertions)]
+            panic!(
+                "syscall {} has no policy classification — add it to syscall_policy()",
+                num
+            );
+            #[cfg(not(debug_assertions))]
+            // Intentional: use ExplicitlyUnrestricted as a named sentinel
+            // that will be logged as an anomaly in the dispatcher.
+            ExplicitlyUnrestricted
+        }
+    }
 }
 
 #[no_mangle]
@@ -438,6 +725,39 @@ extern "win64" fn rust_syscall_dispatcher(
         entry_cr3,
         arg0, arg1, arg2, arg3, arg4, arg5
     );
+
+    // ----------------------------------------------------------------
+    // Policy gate — class-level capability check.
+    //
+    // syscall_policy() returns the required CapRequirement (if any) for
+    // this syscall number.  The check happens BEFORE the handler so that
+    // handlers only need to validate the specific resource instance they
+    // receive; the class-level "is the caller allowed to touch this kind
+    // of resource at all?" question is answered here.
+    //
+    // Unclassified syscalls: panic in debug, EPERM in release (fail-closed).
+    // ----------------------------------------------------------------
+    let policy_result: Option<u64> = match syscall_policy(syscall_num) {
+        SysPolicy::ExplicitlyUnrestricted => None,
+        SysPolicy::Requires(req) => {
+            if check_cap_requirement(req) {
+                None  // requirement satisfied — proceed to handler
+            } else {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Policy gate DENIED: syscall={} tid={:?} requirement={:?}",
+                    syscall_num,
+                    crate::sched::current_thread(),
+                    req
+                );
+                Some(EPERM)
+            }
+        }
+    };
+
+    if let Some(early_return) = policy_result {
+        return early_return;
+    }
 
     let result = match syscall_num {
         SYS_THREAD_YIELD => sys_thread_yield(),
@@ -2082,15 +2402,53 @@ fn sys_cap_create(resource_type: u64, resource_id: u64, permissions: u64) -> u64
         }
     };
 
+    // ── Ownership / privilege checks ─────────────────────────────────────────
+    //
+    // sys_cap_create is a restricted operation: processes may only create
+    // capabilities for resources they already own, or for their own identity.
+    // Creating capabilities for arbitrary external resources requires privilege
+    // (i.e. the caller must be the init process registered in PRIVILEGED_PID).
+    //
+    // This closes the capability-forgery vector where an unprivileged process
+    // could create a Thread cap for another process's ThreadId and abuse it.
+    //
+    // Resource types and their current creation policy:
+    //   0 = Thread  → caller may only wrap their OWN ThreadId; init may wrap any
+    //   2 = IpcPort → allowed (caller creates ports for themselves via IPC API)
+    //   3 = Irq     → privileged only (hardware interrupt routing)
+    //   _           → unsupported / ENOSYS
+
     let resource = match resource_type {
         0 => {
             let tid = crate::thread::ThreadId::from_raw(resource_id);
+            // Non-privileged processes may only create a Thread cap for themselves.
+            if tid != caller && !has_privilege() {
+                log_warn!(
+                    "syscall",
+                    "cap_create: DENIED — unprivileged attempt to forge Thread cap \
+                     for tid={} by caller={}",
+                    resource_id,
+                    caller
+                );
+                return EPERM;
+            }
             crate::cap::ResourceType::Thread(tid)
         }
         2 => {
             crate::cap::ResourceType::IpcPort { port_id: resource_id }
         }
         3 => {
+            // IRQ capabilities are hardware-level — restricted to init only.
+            if !has_privilege() {
+                log_warn!(
+                    "syscall",
+                    "cap_create: DENIED — unprivileged attempt to create Irq cap \
+                     irq={} by caller={}",
+                    resource_id,
+                    caller
+                );
+                return EPERM;
+            }
             if resource_id > 255 {
                 log_warn!(
                     "syscall",
@@ -3518,6 +3876,7 @@ fn get_static_driver_name(name: &str) -> &'static str {
         "init" => "init",
         "namesvc" => "namesvc",
         "service_manager" => "service_manager",
+        "fsd" => "fsd",
         "ui_shell" => "ui_shell",
         "terminal" => "terminal",
         "keyboard" => "keyboard",
@@ -3826,7 +4185,37 @@ fn spawn_process_internal(
     // are complete so the thread cannot be scheduled before it has its caps.
     crate::thread::add_thread(thread);
 
+    // Register the very first spawned process as privileged (init).
+    // PRIVILEGED_PID is guarded by compare_exchange so subsequent spawns are no-ops.
+    register_privileged_process(pid);
+
     // Grant capabilities
+    //
+    // Over-provisioning note (P1-A TODO):
+    //   Framebuffer, InputDevice, and IoPort caps are currently granted to ALL
+    //   processes so that the existing user-space stack continues to work while
+    //   the dispatcher policy gates (P2-A) are put in place.  Once the system is
+    //   stable with gates enforced, tighten the grants below to:
+    //     Framebuffer  → "ui_shell", "display" only
+    //     Keyboard     → "keyboard" only
+    //     Mouse        → "mouse" only
+    //     IoPort PS/2  → "keyboard", "mouse" only
+    //
+    // FsNamespace cap is already scoped: only "fsd" receives it.  All other
+    // processes must go through fsd via IPC to access the filesystem.
+
+    // FsNamespace capability — granted only to the filesystem daemon (fsd).
+    // This cap is the gate for SYS_KERN_FS_{READ_FILE,LIST_DIR,STAT_PATH}
+    // which fsd uses to communicate directly with the kernel FAT32 driver.
+    if name == "fsd" {
+        let fs_resource = ResourceType::FsNamespace { namespace_id: 0 };
+        let fs_perms = CapPermissions::READ.union(CapPermissions::WRITE).union(CapPermissions::GRANT);
+        if let Ok(cap) = cap::create_root_capability(fs_resource, pid, fs_perms) {
+            let _ = crate::thread::add_thread_capability(pid, cap);
+            log_info!("spawn", "Granted FsNamespace cap to fsd (pid={})", pid);
+        }
+    }
+
     // Framebuffer capability
     if let Some((address, width, height, stride, bpp)) = crate::graphics::get_framebuffer_info() {
         let fb_resource = ResourceType::Framebuffer {
