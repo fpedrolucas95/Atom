@@ -1004,6 +1004,21 @@ fn isqrt_helper(n: u32) -> u32 {
     x
 }
 
+fn frac_sqrt_256_helper(n: u32, sq_int: u32) -> u32 {
+    if sq_int == 0 { return 0; }
+    let step = 2 * sq_int + 1;
+    let remainder = n - sq_int * sq_int;
+    (remainder * 256) / step
+}
+
+fn rgb32_to_color(pixel: u32) -> Color {
+    Color::new(
+        ((pixel >> 16) & 0xFF) as u8,
+        ((pixel >> 8) & 0xFF) as u8,
+        (pixel & 0xFF) as u8,
+    )
+}
+
 struct Compositor {
     fb: Framebuffer,
     backbuffer_fb: Framebuffer,
@@ -2698,6 +2713,94 @@ impl Compositor {
         self.backbuffer_fb.draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
+    fn blit_surface_bottom_rounded(&self, surface: &SharedSurface, dest_x: u32, dest_y: u32, radius: u32) {
+        let Some(src_addr) = surface.address() else {
+            return;
+        };
+
+        let fb_bpp = self.backbuffer_fb.bytes_per_pixel();
+        if fb_bpp != surface.bytes_per_pixel() {
+            surface.blit_to_framebuffer(&self.backbuffer_fb, dest_x, dest_y);
+            return;
+        }
+
+        let copy_width = surface.width().min(self.backbuffer_fb.width().saturating_sub(dest_x));
+        let copy_height = surface.height().min(self.backbuffer_fb.height().saturating_sub(dest_y));
+        if copy_width == 0 || copy_height == 0 {
+            return;
+        }
+
+        let r = radius.min(copy_width / 2).min(copy_height);
+        if r == 0 {
+            surface.blit_to_framebuffer(&self.backbuffer_fb, dest_x, dest_y);
+            return;
+        }
+
+        let fb_addr = self.backbuffer_fb.address();
+        let fb_stride = self.backbuffer_fb.stride();
+        let src_stride = surface.stride();
+        let straight_height = copy_height.saturating_sub(r);
+
+        for sy in 0..straight_height {
+            let src_offset = (sy * src_stride) as usize * fb_bpp;
+            let dst_offset = ((dest_y + sy) * fb_stride + dest_x) as usize * fb_bpp;
+            let src_ptr = (src_addr + src_offset) as *const u8;
+            let dst_ptr = (fb_addr + dst_offset) as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize * fb_bpp);
+            }
+        }
+
+        for sy in straight_height..copy_height {
+            let dy = copy_height - 1 - sy;
+            let fy = r - dy;
+            let n = r * r - fy * fy;
+            let sq = isqrt_helper(n);
+            let frac = frac_sqrt_256_helper(n, sq);
+            let int_offset = r - sq;
+            let row_y = dest_y + sy;
+            let row_width = copy_width.saturating_sub(int_offset * 2);
+
+            if row_width > 0 {
+                let src_offset = (sy * src_stride + int_offset) as usize * fb_bpp;
+                let dst_offset = (row_y * fb_stride + dest_x + int_offset) as usize * fb_bpp;
+                let src_ptr = (src_addr + src_offset) as *const u8;
+                let dst_ptr = (fb_addr + dst_offset) as *mut u8;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_width as usize * fb_bpp);
+                }
+            }
+
+            if frac > 0 && int_offset > 0 {
+                let alpha = frac as u8;
+
+                let left_src_x = int_offset - 1;
+                let left_src_offset = (sy * src_stride + left_src_x) as usize * fb_bpp;
+                let left_pixel = unsafe { ((src_addr + left_src_offset) as *const u32).read_volatile() };
+                self.backbuffer_fb.fill_rect_alpha(
+                    dest_x + left_src_x,
+                    row_y,
+                    1,
+                    1,
+                    rgb32_to_color(left_pixel),
+                    alpha,
+                );
+
+                let right_src_x = copy_width - int_offset;
+                let right_src_offset = (sy * src_stride + right_src_x) as usize * fb_bpp;
+                let right_pixel = unsafe { ((src_addr + right_src_offset) as *const u32).read_volatile() };
+                self.backbuffer_fb.fill_rect_alpha(
+                    dest_x + right_src_x,
+                    row_y,
+                    1,
+                    1,
+                    rgb32_to_color(right_pixel),
+                    alpha,
+                );
+            }
+        }
+    }
+
     fn draw_window(&self, window: &Window) {
         if !window.visible || window.state == WindowState::Minimized {
             return;
@@ -2762,39 +2865,18 @@ impl Compositor {
             self.backbuffer_fb.fill_rect_rounded_aa(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
         }
 
-        // Content area background — bottom corners rounded to match outer border
-        if window.surface.is_none() || !window.surface_ready {
-            self.backbuffer_fb.fill_rect_bottom_rounded_aa(
-                window.content_x(), window.content_y(),
-                window.content_width(), window.content_height(),
-                inner_r, theme::WINDOW_BG,
-            );
-        }
+        // Content area background — always paint the rounded body first so the
+        // surface AA edge blends against the same shape as the window shell.
+        self.backbuffer_fb.fill_rect_bottom_rounded_aa(
+            window.content_x(), window.content_y(),
+            window.content_width(), window.content_height(),
+            inner_r, theme::WINDOW_BG,
+        );
 
         // Blit application surface
         if window.surface_ready {
             if let Some(ref surface) = window.surface {
-                surface.blit_to_framebuffer(&self.backbuffer_fb, window.content_x(), window.content_y());
-
-                // Mask bottom corners of blitted surface to match window rounding
-                let cx = window.content_x();
-                let cy = window.content_y();
-                let cw = window.content_width();
-                let ch = window.content_height();
-                let r: u32 = inner_r; // DS: WINDOW_RADIUS - border
-                for dy in 0..r {
-                    let fy = r - dy;
-                    let n = r * r - fy * fy;
-                    let sq = isqrt_helper(n);
-                    let int_offset = r - sq;
-                    let row_y = cy + ch - 1 - dy;
-                    for cx_off in 0..int_offset {
-                        // Left bottom corner
-                        self.backbuffer_fb.fill_rect_alpha(cx + cx_off, row_y, 1, 1, border_color, 255);
-                        // Right bottom corner
-                        self.backbuffer_fb.fill_rect_alpha(cx + cw - 1 - cx_off, row_y, 1, 1, border_color, 255);
-                    }
-                }
+                self.blit_surface_bottom_rounded(surface, window.content_x(), window.content_y(), inner_r);
             }
         }
     }
