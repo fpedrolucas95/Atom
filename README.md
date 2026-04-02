@@ -1,6 +1,6 @@
 # Atom Operating System
 
-<img width="1392" height="864" alt="Captura de Tela 2026-04-02 às 19 30 55" src="https://github.com/user-attachments/assets/8770ac88-dc36-47ce-bf2c-362aaba8ac5d" />
+<img width="1392" height="864" alt="Captura de Tela 2026-04-02 às 19 34 34" src="https://github.com/user-attachments/assets/2ad2ebbd-8316-4bbd-9d98-00b28863ad73" />
 
 **Atom** is an experimental (mostly vibe-coded) **capability-based microkernel operating system** written in **Rust** and **x86-64 assembly**, with a complete user-space stack including a freestanding C library, software OpenGL rendering, a windowed desktop environment, and native application support.
 
