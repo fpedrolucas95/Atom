@@ -431,8 +431,19 @@ impl CapabilityManager {
     pub fn revoke(&self, handle: CapHandle, revoker: ThreadId) -> Result<Vec<CapHandle>, CapError> {
         let mut caps = self.global_caps.lock();
         let mut revoked = Vec::new();
+
+        // All of: lookup, ownership check, children collection, and remove happen
+        // under the same lock to prevent TOCTOU between concurrent revoke calls.
         let cap = caps.get(&handle).ok_or(CapError::NotFound)?;
         let owner = cap.owner;
+
+        // Only the capability owner may revoke it.
+        // Transitive revocation of children (lines below) is authorised because
+        // the owner of the root initiated the operation.
+        if owner != revoker {
+            return Err(CapError::NotOwner);
+        }
+
         let children = cap.children.clone();
 
         caps.remove(&handle);
