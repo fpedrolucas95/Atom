@@ -1,4 +1,5 @@
 # Atom Operating System
+[Ler em Português do Brasil](README-PTBR.md)
 
 <img width="1392" height="864" alt="Captura de Tela 2026-04-02 às 19 34 34" src="https://github.com/user-attachments/assets/2ad2ebbd-8316-4bbd-9d98-00b28863ad73" />
 
