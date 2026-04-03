@@ -14,8 +14,8 @@
 //   unrecoverable faults but surfaces enough context for external decisions.
 // - Payloads are compact, fixed-width fields (address, error code, RIP, TID)
 //   to keep IPC parsing simple for user-space services.
-// - Ownership validation relies on IPC port metadata to prevent hijacking of
-//   fault streams by other threads.
+// - Registration validates IPC control authority without changing the legacy
+//   creator-thread-only behavior relied on by the current boot path.
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -61,16 +61,19 @@ impl MemoryPolicyManager {
         port_id: PortId,
         caller: ThreadId,
     ) -> Result<(), MemoryPolicyError> {
-        let owner = ipc::get_port_owner(port_id).ok_or(MemoryPolicyError::InvalidPort)?;
-
-        if owner != caller {
-            log_warn!(
-                LOG_ORIGIN,
-                "Page fault handler registration rejected: port {:?} not owned by {}",
-                port_id,
-                caller
-            );
-            return Err(MemoryPolicyError::PermissionDenied);
+        match ipc::validate_port_authority_exercise(port_id, caller) {
+            Ok(()) => {}
+            Err(ipc::IpcError::InvalidPort) => return Err(MemoryPolicyError::InvalidPort),
+            Err(ipc::IpcError::PermissionDenied) => {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Page fault handler registration rejected: port {:?} not controlled by {}",
+                    port_id,
+                    caller
+                );
+                return Err(MemoryPolicyError::PermissionDenied);
+            }
+            Err(_) => return Err(MemoryPolicyError::PermissionDenied),
         }
 
         let mut state = self.state.lock();

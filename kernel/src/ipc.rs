@@ -425,7 +425,14 @@ pub struct IpcPortStats {
 #[derive(Debug)]
 struct PortState {
     id: PortId,
-    owner: ThreadId,
+    /// Creator-thread metadata retained for compatibility-restricted operations.
+    authority_thread: ThreadId,
+    /// Thread identity used for wait/wake and deadlock routing.
+    routing_thread: ThreadId,
+    /// Thread identity whose exit currently triggers lifecycle cleanup.
+    lifecycle_thread: ThreadId,
+    /// Authoritative ownership identity for userspace ports.
+    /// Kernel-thread-owned ports intentionally keep this as None.
     owner_process: Option<ProcessId>,
     messages: VecDeque<Message>,
     receiver_blocked: Option<ThreadId>,
@@ -443,7 +450,9 @@ impl PortState {
 
         Self {
             id,
-            owner,
+            authority_thread: owner,
+            routing_thread: owner,
+            lifecycle_thread: owner,
             owner_process,
             messages: VecDeque::new(),
             receiver_blocked: None,
@@ -453,6 +462,60 @@ impl PortState {
             metrics: IpcPortMetrics::default(),
         }
     }
+}
+
+fn debug_assert_port_authority_metadata(port: &PortState) {
+    let authority_process = crate::thread::get_thread_process_id(port.authority_thread);
+
+    if let Some(owner_process) = port.owner_process {
+        debug_assert_eq!(
+            authority_process,
+            Some(owner_process),
+            "userspace IPC authority metadata diverged from authority_thread process"
+        );
+
+        if let Some(routing_process) = crate::thread::get_thread_process_id(port.routing_thread) {
+            debug_assert_eq!(
+                routing_process,
+                owner_process,
+                "routing_thread must stay within the port authority process for userspace ports"
+            );
+        }
+
+        if let Some(lifecycle_process) = crate::thread::get_thread_process_id(port.lifecycle_thread) {
+            debug_assert_eq!(
+                lifecycle_process,
+                owner_process,
+                "lifecycle_thread must stay within the port authority process for userspace ports"
+            );
+        }
+    } else {
+        debug_assert!(
+            authority_process.is_none(),
+            "userspace IPC ports must carry owner_process authority"
+        );
+    }
+}
+
+fn is_port_authority_process(caller: ThreadId, port: &PortState) -> bool {
+    debug_assert_port_authority_metadata(port);
+
+    match port.owner_process {
+        Some(owner_process) => crate::thread::get_thread_process_id(caller) == Some(owner_process),
+        None => caller == port.authority_thread,
+    }
+}
+
+fn can_thread_exercise_port_authority(caller: ThreadId, port: &PortState) -> bool {
+    let has_process_authority = is_port_authority_process(caller, port);
+    let allowed = has_process_authority && caller == port.authority_thread;
+
+    debug_assert!(
+        !(allowed && caller == port.routing_thread && caller != port.authority_thread),
+        "routing_thread must not grant IPC authority"
+    );
+
+    allowed
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -501,15 +564,40 @@ impl IpcManager {
         Ok(port_id)
     }
 
-    fn port_owner(&self, port_id: PortId) -> Option<ThreadId> {
-        self.ports.lock().get(&port_id).map(|port| port.owner)
+    fn port_authority_thread(&self, port_id: PortId) -> Option<ThreadId> {
+        self.ports
+            .lock()
+            .get(&port_id)
+            .map(|port| port.authority_thread)
+    }
+
+    fn port_authority_process(&self, port_id: PortId) -> Option<ProcessId> {
+        self.ports
+            .lock()
+            .get(&port_id)
+            .and_then(|port| port.owner_process)
+    }
+
+    fn validate_port_authority_exercise(
+        &self,
+        port_id: PortId,
+        caller: ThreadId,
+    ) -> Result<(), IpcError> {
+        let ports = self.ports.lock();
+        let port = ports.get(&port_id).ok_or(IpcError::InvalidPort)?;
+
+        if !can_thread_exercise_port_authority(caller, port) {
+            return Err(IpcError::PermissionDenied);
+        }
+
+        Ok(())
     }
 
     fn close_port(&self, port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
         let mut ports = self.ports.lock();
 
         if let Some(port) = ports.get(&port_id) {
-            if port.owner != caller {
+            if !can_thread_exercise_port_authority(caller, port) {
                 return Err(IpcError::PermissionDenied);
             }
 
@@ -812,9 +900,9 @@ impl IpcManager {
         let ports = self.ports.lock();
         let waiting = self.waiting_threads.lock();
 
-        // Get the owner of the target port
+        // Deadlock routing still follows the thread responsible for serving the port.
         let owner = match ports.get(&target_port) {
-            Some(port) => port.owner,
+            Some(port) => port.routing_thread,
             None => return false,
         };
 
@@ -837,7 +925,7 @@ impl IpcManager {
             }
 
             let next_owner = match ports.get(&info.port) {
-                Some(port) => port.owner,
+                Some(port) => port.routing_thread,
                 None => break,
             };
 
@@ -1066,8 +1154,23 @@ pub fn create_port_with_id(owner: ThreadId, id: u64) -> Result<PortId, IpcError>
     IPC_MANAGER.create_port_with_id(owner, id)
 }
 
+pub fn get_port_authority_thread(port_id: PortId) -> Option<ThreadId> {
+    IPC_MANAGER.port_authority_thread(port_id)
+}
+
+pub fn get_port_authority_process(port_id: PortId) -> Option<ProcessId> {
+    IPC_MANAGER.port_authority_process(port_id)
+}
+
 pub fn get_port_owner(port_id: PortId) -> Option<ThreadId> {
-    IPC_MANAGER.port_owner(port_id)
+    get_port_authority_thread(port_id)
+}
+
+pub fn validate_port_authority_exercise(
+    port_id: PortId,
+    caller: ThreadId,
+) -> Result<(), IpcError> {
+    IPC_MANAGER.validate_port_authority_exercise(port_id, caller)
 }
 
 pub fn close_port(port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
@@ -1143,11 +1246,11 @@ pub fn has_message(port_id: PortId) -> Result<bool, IpcError> {
 
 /// Close all ports owned by a thread and wake up any threads waiting on those ports
 /// This should be called when a thread terminates to clean up IPC resources
-pub fn close_all_thread_ports(thread_id: ThreadId) {
+pub fn close_ports_for_thread_lifecycle(thread_id: ThreadId) {
     if !begin_thread_port_cleanup(thread_id) {
         log_debug!(
             LOG_ORIGIN,
-            "IPC port cleanup already ran for thread {} - skipping duplicate close_all_thread_ports",
+            "IPC port cleanup already ran for thread {} - skipping duplicate close_ports_for_thread_lifecycle",
             thread_id
         );
         IPC_MANAGER.waiting_threads.lock().remove(&thread_id);
@@ -1156,10 +1259,10 @@ pub fn close_all_thread_ports(thread_id: ThreadId) {
 
     let mut ports = IPC_MANAGER.ports.lock();
 
-    // Collect all port IDs owned by this thread
+    // Collect all port IDs whose lifecycle is currently bound to this thread.
     let owned_ports: Vec<PortId> = ports
         .iter()
-        .filter(|(_, port)| port.owner == thread_id)
+        .filter(|(_, port)| port.lifecycle_thread == thread_id)
         .map(|(id, _)| *id)
         .collect();
 
@@ -1211,4 +1314,8 @@ pub fn close_all_thread_ports(thread_id: ThreadId) {
 
     // Remove thread from waiting_threads if it was waiting
     IPC_MANAGER.waiting_threads.lock().remove(&thread_id);
+}
+
+pub fn close_all_thread_ports(thread_id: ThreadId) {
+    close_ports_for_thread_lifecycle(thread_id)
 }

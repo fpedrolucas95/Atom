@@ -103,11 +103,17 @@ pub const USER_CANONICAL_MAX: usize = atom_abi::USER_CANONICAL_MAX as usize;
 const MAX_REGION_SIZE: usize = 256 * 1024 * 1024;
 const LOG_ORIGIN: &str = "addrspace";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedAddressSpaceKind {
+    Auxiliary,
+}
+
 #[derive(Debug)]
 pub struct AddressSpace {
     id: AddressSpaceId,
     pml4_phys: usize,
     owner: ThreadId,
+    kind: ManagedAddressSpaceKind,
     mapping_count: usize,
     release_pml4_on_drop: bool,
 }
@@ -131,7 +137,7 @@ impl AddressSpace {
 
         log_info!(
             LOG_ORIGIN,
-            "Created new address space with PML4 at 0x{:X} for thread {}",
+            "Created new auxiliary address space with PML4 at 0x{:X} for thread {}",
             pml4_phys,
             owner
         );
@@ -140,6 +146,7 @@ impl AddressSpace {
             id: AddressSpaceId::new(),
             pml4_phys,
             owner,
+            kind: ManagedAddressSpaceKind::Auxiliary,
             mapping_count: 0,
             release_pml4_on_drop: true,
         })
@@ -159,6 +166,10 @@ impl AddressSpace {
 
     pub fn mapping_count(&self) -> usize {
         self.mapping_count
+    }
+
+    pub fn kind(&self) -> ManagedAddressSpaceKind {
+        self.kind
     }
 
     fn inc_mappings(&mut self, count: usize) {
@@ -725,6 +736,10 @@ pub fn cleanup_thread_address_spaces(thread_id: ThreadId, thread_primary_pml4: u
     // path can release it. Standalone address spaces still free their PML4 on Drop.
     for id in owned_spaces {
         if let Some(mut space) = spaces.remove(&id) {
+            debug_assert!(
+                matches!(space.kind(), ManagedAddressSpaceKind::Auxiliary),
+                "AddressSpaceManager must only manage auxiliary address spaces"
+            );
             let pml4_phys = space.pml4_phys();
             if thread_primary_pml4 != 0 && pml4_phys as u64 == thread_primary_pml4 {
                 space.defer_pml4_release_to_thread_teardown();

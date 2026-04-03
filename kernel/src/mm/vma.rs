@@ -23,6 +23,7 @@ use alloc::collections::BTreeMap;
 use spin::Mutex;
 
 use crate::mm::pmm::PAGE_SIZE;
+use crate::process::ProcessId;
 use crate::{log_info, log_debug, log_warn};
 
 const LOG_ORIGIN: &str = "vma";
@@ -440,6 +441,111 @@ pub enum VmaError {
 
 /// Global registry: maps PML4 physical address -> VmaMap
 static VMA_REGISTRY: Mutex<BTreeMap<usize, VmaMap>> = Mutex::new(BTreeMap::new());
+
+fn registered_process_pml4(process_id: ProcessId) -> Result<usize, VmaError> {
+    let pml4_phys = crate::process::get_process_pml4(process_id).ok_or(VmaError::NotFound)?;
+    debug_assert_ne!(
+        pml4_phys,
+        0,
+        "process {} must resolve to a non-zero primary PML4 for VMA access",
+        process_id
+    );
+    Ok(pml4_phys as usize)
+}
+
+fn debug_assert_process_primary_pml4(process_id: ProcessId, pml4_phys: usize) {
+    if let Some(registered_pml4) = crate::process::get_process_pml4(process_id) {
+        debug_assert_eq!(
+            registered_pml4,
+            pml4_phys as u64,
+            "process {} VMA selection must resolve through the registered primary PML4 0x{:X}, not 0x{:X}",
+            process_id,
+            registered_pml4,
+            pml4_phys
+        );
+    }
+}
+
+pub fn create_bootstrap_process_vma_map(process_id: ProcessId, pml4_phys: usize) {
+    debug_assert_process_primary_pml4(process_id, pml4_phys);
+    create_vma_map(pml4_phys);
+}
+
+pub fn create_process_vma_map(process_id: ProcessId) -> Result<(), VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    create_vma_map(pml4_phys);
+    Ok(())
+}
+
+pub fn destroy_process_vma_map(process_id: ProcessId) -> Result<(), VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    destroy_vma_map(pml4_phys);
+    Ok(())
+}
+
+pub fn insert_bootstrap_process_vma(
+    process_id: ProcessId,
+    pml4_phys: usize,
+    vma: Vma,
+) -> Result<(), VmaError> {
+    debug_assert_process_primary_pml4(process_id, pml4_phys);
+    insert_vma(pml4_phys, vma)
+}
+
+pub fn insert_process_vma(process_id: ProcessId, vma: Vma) -> Result<(), VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    insert_vma(pml4_phys, vma)
+}
+
+pub fn remove_process_vma(process_id: ProcessId, start: usize) -> Result<Option<Vma>, VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    Ok(remove_vma(pml4_phys, start))
+}
+
+pub fn remove_process_vma_range(
+    process_id: ProcessId,
+    start: usize,
+    end: usize,
+) -> Result<alloc::vec::Vec<Vma>, VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    Ok(remove_vma_range(pml4_phys, start, end))
+}
+
+pub fn find_process_vma(process_id: ProcessId, addr: usize) -> Option<Vma> {
+    let pml4_phys = registered_process_pml4(process_id).ok()?;
+    find_vma(pml4_phys, addr)
+}
+
+pub fn find_process_free_region(
+    process_id: ProcessId,
+    low: usize,
+    high: usize,
+    size: usize,
+) -> Result<Option<usize>, VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    Ok(find_free_region(pml4_phys, low, high, size))
+}
+
+pub fn set_process_permissions(
+    process_id: ProcessId,
+    start: usize,
+    end: usize,
+    perms: VmaPermissions,
+) -> Result<(), VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    set_permissions(pml4_phys, start, end, perms)
+}
+
+pub fn account_process_unmap(process_id: ProcessId) -> Result<(), VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    account_unmap(pml4_phys);
+    Ok(())
+}
+
+pub fn get_process_stats(process_id: ProcessId) -> Option<VmaStats> {
+    let pml4_phys = registered_process_pml4(process_id).ok()?;
+    get_stats(pml4_phys)
+}
 
 /// Create a new VmaMap for the given address space (PML4 phys addr)
 pub fn create_vma_map(pml4_phys: usize) {

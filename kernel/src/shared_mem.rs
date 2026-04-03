@@ -25,15 +25,11 @@
 // - `SharedMemManager`: global authority managing all regions
 //
 // Bookkeeping model:
-// - Mappings are tracked **per address space** (identified by PML4 physical
-//   address), not per thread.  Threads sharing the same PML4 (sibling
-//   threads in the same process) see the same mapping.
-// - `Option<usize>` is used for the PML4 identity: `None` represents kernel
-//   space, `Some(addr)` a specific user-space address space.
-// - Unmap uses `unmap_page_in_pml4()` to target the correct page tables,
-//   regardless of which address space is currently active.
-// - Cleanup on thread termination checks whether sibling threads still
-//   share the address space before unmapping page-table entries.
+// - Shared region ownership is tracked by ProcessId.
+// - Each mapping carries both a logical membership key (`process_id`) and the
+//   material page-table identity (`pml4_phys`).
+// - PML4 is used only for low-level page-table operations.
+// - Cleanup is process-scoped and keyed by ProcessId.
 //
 // VA window:
 // - The shared memory VA window spans from above the identity-map ceiling
@@ -49,13 +45,13 @@
 
 #![allow(dead_code)]
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::mm::{pmm, vm};
-use crate::thread::{ThreadId, ThreadState};
+use crate::process::{self, ProcessId};
 use crate::log_info;
 use crate::log_debug;
 
@@ -79,6 +75,8 @@ static SHARED_MEM_VA_BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// Dynamic VA limit, also set at init time.
 static SHARED_MEM_VA_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+static CLEANED_SHARED_MEMORY_PROCESSES: Mutex<BTreeSet<ProcessId>> = Mutex::new(BTreeSet::new());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(u64);
@@ -211,18 +209,12 @@ impl RegionFlags {
     }
 }
 
-/// A single mapping of a shared region into an address space.
-///
-/// Keyed by **address space** (`pml4_phys`), not by thread.  Sibling threads
-/// that share the same PML4 share the mapping and should not duplicate it.
+/// A single mapping of a shared region into a process-owned address space.
 #[derive(Debug, Clone)]
 struct RegionMapping {
-    /// Physical address of the PML4 that owns this mapping.
-    ///
-    /// `None` means the mapping lives in the kernel's active address space
-    /// (rare — only for kernel-internal shared regions).
-    /// `Some(addr)` identifies a specific user-space address space.
-    pml4_phys: Option<usize>,
+    process_id: ProcessId,
+    /// Physical address of the process PML4 that materializes this mapping.
+    pml4_phys: usize,
     virt_addr: usize,
     flags: RegionFlags,
 }
@@ -230,15 +222,16 @@ struct RegionMapping {
 #[derive(Debug)]
 struct SharedRegion {
     id: RegionId,
-    owner: ThreadId,
+    owner_process: ProcessId,
     size: usize,
     physical_pages: Vec<usize>,
     mappings: Vec<RegionMapping>,
     ref_count: usize,
+    is_destroying: bool,
 }
 
 impl SharedRegion {
-    fn new(id: RegionId, owner: ThreadId, size: usize) -> Result<Self, SharedMemError> {
+    fn new(id: RegionId, owner_process: ProcessId, size: usize) -> Result<Self, SharedMemError> {
         let aligned_size = pmm::align_up(size);
         let num_pages = aligned_size / pmm::PAGE_SIZE;
 
@@ -269,28 +262,28 @@ impl SharedRegion {
 
         Ok(Self {
             id,
-            owner,
+            owner_process,
             size: aligned_size,
             physical_pages,
             mappings: Vec::new(),
             ref_count: 0,
+            is_destroying: false,
         })
     }
 
-    /// Map this region into an address space at `virt_addr`.
-    ///
-    /// `pml4_phys` identifies the address space.  Two threads that share the
-    /// same PML4 (i.e. belong to the same process) are considered as occupying
-    /// the **same** address space.  Duplicate-mapping detection uses
-    /// `pml4_phys` so that sibling threads cannot accidentally double-map.
-    ///
-    /// Returns the virtual address where the mapping was placed.
     fn map(
         &mut self,
+        process_id: ProcessId,
         virt_addr: usize,
         flags: RegionFlags,
-        pml4_phys: Option<usize>,
+        pml4_phys: usize,
     ) -> Result<usize, SharedMemError> {
+        if self.is_destroying {
+            return Err(SharedMemError::RegionInUse);
+        }
+
+        debug_assert_process_pml4_alignment(process_id, pml4_phys);
+
         if !pmm::is_page_aligned(virt_addr) {
             return Err(SharedMemError::Unaligned);
         }
@@ -305,8 +298,8 @@ impl SharedRegion {
             SharedMemError::MappingFailed
         })?;
 
-        // Duplicate check: same region already mapped in the same address space.
-        let already_mapped = self.mappings.iter().any(|m| m.pml4_phys == pml4_phys);
+        // Duplicate check: a process may map a region only once.
+        let already_mapped = self.mappings.iter().any(|m| m.process_id == process_id);
         if already_mapped {
             return Err(SharedMemError::AlreadyMapped);
         }
@@ -315,21 +308,13 @@ impl SharedRegion {
         for (i, &phys_page) in self.physical_pages.iter().enumerate() {
             let virt = virt_addr + (i * pmm::PAGE_SIZE);
 
-            let map_result = if let Some(pml4) = pml4_phys {
-                vm::map_page_in_pml4(pml4, virt, phys_page, page_flags)
-            } else {
-                vm::map_page(virt, phys_page, page_flags)
-            };
+            let map_result = vm::map_page_in_pml4(pml4_phys, virt, phys_page, page_flags);
 
             if let Err(e) = map_result {
                 // Rollback on error
                 for j in 0..i {
                     let virt_to_unmap = virt_addr + (j * pmm::PAGE_SIZE);
-                    if let Some(pml4) = pml4_phys {
-                        let _ = vm::unmap_page_in_pml4(pml4, virt_to_unmap);
-                    } else {
-                        let _ = vm::unmap_page(virt_to_unmap);
-                    }
+                    let _ = vm::unmap_page_in_pml4(pml4_phys, virt_to_unmap);
                 }
 
                 return match e {
@@ -341,16 +326,23 @@ impl SharedRegion {
         }
 
         self.mappings.push(RegionMapping {
+            process_id,
             pml4_phys,
             virt_addr,
             flags,
         });
         self.ref_count += 1;
+        debug_assert_eq!(self.ref_count, self.mappings.len());
+
+        if let Some(mapping) = self.mappings.last() {
+            debug_assert_mapping_process_alignment(mapping);
+        }
 
         log_debug!(
             LOG_ORIGIN,
-            "Mapped region {} at 0x{:X} ({} pages) pml4={:?}",
+            "Mapped region {} into process {} at 0x{:X} ({} pages, pml4=0x{:X})",
             self.id,
+            process_id,
             virt_addr,
             self.physical_pages.len(),
             pml4_phys
@@ -359,45 +351,76 @@ impl SharedRegion {
         Ok(virt_addr)
     }
 
-    /// Unmap this region from the given address space.
-    ///
-    /// Uses `unmap_page_in_pml4()` to target the correct page tables,
-    /// regardless of which address space is currently active in CR3.
-    fn unmap(&mut self, pml4_phys: Option<usize>) -> Result<(), SharedMemError> {
+    fn take_process_mapping(&mut self, process_id: ProcessId) -> Result<RegionMapping, SharedMemError> {
         let mapping_idx = self.mappings
             .iter()
-            .position(|m| m.pml4_phys == pml4_phys)
+            .position(|m| m.process_id == process_id)
             .ok_or(SharedMemError::NotMapped)?;
 
         let mapping = self.mappings.remove(mapping_idx);
-
-        for i in 0..self.physical_pages.len() {
-            let virt = mapping.virt_addr + (i * pmm::PAGE_SIZE);
-            if let Some(pml4) = mapping.pml4_phys {
-                let _ = vm::unmap_page_in_pml4(pml4, virt);
-            } else {
-                let _ = vm::unmap_page(virt);
-            }
-        }
+        debug_assert_eq!(mapping.process_id, process_id);
+        debug_assert_mapping_process_alignment(&mapping);
+        debug_assert!(
+            self.ref_count > 0,
+            "shared_mem region {} ref_count underflow while removing process {} mapping",
+            self.id,
+            process_id
+        );
 
         self.ref_count -= 1;
+        debug_assert_eq!(self.ref_count, self.mappings.len());
+        Ok(mapping)
+    }
+
+    fn mark_destroying(&mut self) -> bool {
+        self.is_destroying = true;
+        self.mappings.is_empty()
+    }
+
+    fn unmap_process_mapping(
+        &mut self,
+        process_id: ProcessId,
+        expected_pml4_phys: Option<usize>,
+    ) -> Result<(), SharedMemError> {
+        let mapping = self.take_process_mapping(process_id)?;
+
+        if let Some(current_pml4_phys) = expected_pml4_phys {
+            debug_assert_eq!(
+                mapping.pml4_phys,
+                current_pml4_phys,
+                "shared_mem mapping for process {} must use the current process PML4 0x{:X}, got 0x{:X}",
+                process_id,
+                current_pml4_phys,
+                mapping.pml4_phys
+            );
+        }
+
+        unmap_region_mapping_pages(&self.physical_pages, &mapping);
 
         log_debug!(
             LOG_ORIGIN,
-            "Unmapped region {} from pml4={:?} (ref_count={})",
+            "Unmapped region {} from process {} (pml4=0x{:X}, ref_count={})",
             self.id,
-            pml4_phys,
+            process_id,
+            mapping.pml4_phys,
             self.ref_count
         );
 
         Ok(())
     }
 
-    fn can_destroy(&self) -> bool {
-        self.ref_count == 0
+    fn unmap(&mut self, process_id: ProcessId, current_pml4_phys: usize) -> Result<(), SharedMemError> {
+        self.unmap_process_mapping(process_id, Some(current_pml4_phys))
     }
 
     fn destroy(&mut self) {
+        debug_assert!(
+            self.mappings.is_empty(),
+            "shared_mem region {} cannot be physically destroyed while mappings remain",
+            self.id
+        );
+        debug_assert_eq!(self.ref_count, 0);
+
         for &phys_page in &self.physical_pages {
             pmm::free_page(phys_page);
         }
@@ -407,8 +430,65 @@ impl SharedRegion {
     }
 }
 
+fn unmap_region_mapping_pages(physical_pages: &[usize], mapping: &RegionMapping) {
+    for i in 0..physical_pages.len() {
+        let virt = mapping.virt_addr + (i * pmm::PAGE_SIZE);
+        let _ = vm::unmap_page_in_pml4(mapping.pml4_phys, virt);
+    }
+}
+
 struct SharedMemManager {
     regions: Mutex<BTreeMap<RegionId, SharedRegion>>,
+}
+
+fn debug_assert_process_exists(process_id: ProcessId) {
+    debug_assert!(
+        process::get_process(process_id).is_some(),
+        "shared_mem requires registered owner process {}",
+        process_id
+    );
+}
+
+fn debug_assert_process_pml4_alignment(process_id: ProcessId, pml4_phys: usize) {
+    let process = process::get_process(process_id)
+        .expect("shared_mem process references must resolve to a registered process");
+    debug_assert_eq!(
+        process.pml4_phys as usize,
+        pml4_phys,
+        "shared_mem process {} must map through its registered PML4 0x{:X}, got 0x{:X}",
+        process_id,
+        process.pml4_phys,
+        pml4_phys
+    );
+}
+
+fn debug_assert_mapping_process_alignment(mapping: &RegionMapping) {
+    debug_assert_process_pml4_alignment(mapping.process_id, mapping.pml4_phys);
+}
+
+fn debug_assert_no_zombie_regions(regions: &BTreeMap<RegionId, SharedRegion>) {
+    let zombie_region = regions
+        .iter()
+        .find(|(_, region)| region.is_destroying && region.mappings.is_empty())
+        .map(|(region_id, _)| *region_id);
+
+    debug_assert!(
+        zombie_region.is_none(),
+        "shared_mem region {} remained in destroying state with zero mappings",
+        zombie_region.unwrap_or_default()
+    );
+}
+
+fn process_pml4(process_id: ProcessId) -> Result<usize, SharedMemError> {
+    let process = process::get_process(process_id).ok_or(SharedMemError::PermissionDenied)?;
+    let pml4_phys = process.pml4_phys as usize;
+    debug_assert_ne!(
+        pml4_phys,
+        0,
+        "userspace shared_mem process {} must have a non-zero PML4",
+        process_id
+    );
+    Ok(pml4_phys)
 }
 
 impl SharedMemManager {
@@ -418,21 +498,78 @@ impl SharedMemManager {
         }
     }
 
-    fn create_region(&self, owner: ThreadId, size: usize) -> Result<RegionId, SharedMemError> {
+    fn create_region(&self, owner_process: ProcessId, size: usize) -> Result<RegionId, SharedMemError> {
+        debug_assert_process_exists(owner_process);
+
         let region_id = RegionId::new();
-        let region = SharedRegion::new(region_id, owner, size)?;
+        let region = SharedRegion::new(region_id, owner_process, size)?;
 
         self.regions.lock().insert(region_id, region);
 
         log_info!(
             LOG_ORIGIN,
-            "Created region {} with size {} bytes (owner: {})",
+            "Created region {} with size {} bytes (owner_process: {})",
             region_id,
             size,
-            owner
+            owner_process
         );
 
         Ok(region_id)
+    }
+
+    fn destroy_region_internal(
+        regions: &mut BTreeMap<RegionId, SharedRegion>,
+        region_id: RegionId,
+    ) {
+        let mut region = regions
+            .remove(&region_id)
+            .expect("shared_mem destroy_region_internal requires a live region");
+
+        debug_assert!(
+            region.is_destroying,
+            "shared_mem internal destruction requires region {} to be marked destroying",
+            region_id
+        );
+        debug_assert!(
+            region.mappings.is_empty(),
+            "shared_mem internal destruction requires region {} to have no mappings",
+            region_id
+        );
+        debug_assert_eq!(
+            region.ref_count,
+            0,
+            "shared_mem internal destruction requires region {} ref_count to be zero",
+            region_id
+        );
+
+        region.destroy();
+
+        debug_assert!(
+            !regions.contains_key(&region_id),
+            "shared_mem region {} must be removed from registry after destruction",
+            region_id
+        );
+    }
+
+    fn finalize_deferred_destruction_if_ready(
+        regions: &mut BTreeMap<RegionId, SharedRegion>,
+        region_id: RegionId,
+    ) -> bool {
+        let should_destroy = matches!(
+            regions.get(&region_id),
+            Some(region) if region.is_destroying && region.mappings.is_empty()
+        );
+
+        if should_destroy {
+            log_info!(
+                LOG_ORIGIN,
+                "Finalizing deferred destruction of region {}",
+                region_id
+            );
+            Self::destroy_region_internal(regions, region_id);
+        }
+
+        should_destroy
     }
 
     /// Find a free virtual address range for `size` bytes within the shared
@@ -444,9 +581,7 @@ impl SharedMemManager {
     ///
     /// Key design decisions:
     ///
-    /// 1. **Address-space identity**: used ranges are collected by matching
-    ///    `pml4_phys` (an `Option<usize>`).  Sibling threads within the same
-    ///    process share the same PML4 and VA space.
+    /// 1. **Process identity**: used ranges are collected by `process_id`.
     ///
     /// 2. **Window restriction**: only mappings within `[va_base, va_limit)`
     ///    are considered.
@@ -458,7 +593,8 @@ impl SharedMemManager {
     fn find_free_va(
         regions: &BTreeMap<RegionId, SharedRegion>,
         size: usize,
-        pml4_phys: Option<usize>,
+        process_id: ProcessId,
+        pml4_phys: usize,
     ) -> Result<usize, SharedMemError> {
         let aligned_size = pmm::align_up(size);
         if aligned_size == 0 {
@@ -478,14 +614,18 @@ impl SharedMemManager {
             return Err(SharedMemError::NoFreeVirtualAddress);
         }
 
-        // ---- 1. Collect used VA ranges for this *address space* (PML4),
-        //         restricted to the shared-memory window.
+        debug_assert_process_pml4_alignment(process_id, pml4_phys);
+
+        // ---- 1. Collect used VA ranges for this process, restricted to the
+        //         shared-memory window.
         let mut used_ranges: Vec<(usize, usize)> = Vec::new();
         for region in regions.values() {
             for mapping in &region.mappings {
-                if mapping.pml4_phys != pml4_phys {
+                if mapping.process_id != process_id {
                     continue;
                 }
+
+                debug_assert_mapping_process_alignment(mapping);
 
                 let mapping_end = mapping.virt_addr.saturating_add(region.size);
 
@@ -531,34 +671,32 @@ impl SharedMemManager {
             //     this loop typically finds zero collisions and runs quickly.
             //     In the rare case that a stray mapping (framebuffer, MMIO,
             //     user stack) falls within the window, we skip past it.
-            if let Some(pml4) = pml4_phys {
-                let mut page_collision = false;
-                let mut collision_end = candidate;
+            let mut page_collision = false;
+            let mut collision_end = candidate;
 
-                for page_idx in 0..num_pages {
-                    let probe_va = candidate + page_idx * pmm::PAGE_SIZE;
-                    if vm::query_mapping_in_pml4(pml4, probe_va).is_ok() {
-                        page_collision = true;
-                        collision_end = probe_va + pmm::PAGE_SIZE;
-                        // Scan ahead to find the end of this mapped region
-                        // so we can skip past it entirely.
-                        for lookahead in (page_idx + 1)..num_pages {
-                            let la_va = candidate + lookahead * pmm::PAGE_SIZE;
-                            if vm::query_mapping_in_pml4(pml4, la_va).is_ok() {
-                                collision_end = la_va + pmm::PAGE_SIZE;
-                            } else {
-                                break;
-                            }
+            for page_idx in 0..num_pages {
+                let probe_va = candidate + page_idx * pmm::PAGE_SIZE;
+                if vm::query_mapping_in_pml4(pml4_phys, probe_va).is_ok() {
+                    page_collision = true;
+                    collision_end = probe_va + pmm::PAGE_SIZE;
+                    // Scan ahead to find the end of this mapped region
+                    // so we can skip past it entirely.
+                    for lookahead in (page_idx + 1)..num_pages {
+                        let la_va = candidate + lookahead * pmm::PAGE_SIZE;
+                        if vm::query_mapping_in_pml4(pml4_phys, la_va).is_ok() {
+                            collision_end = la_va + pmm::PAGE_SIZE;
+                        } else {
+                            break;
                         }
-                        break;
                     }
+                    break;
                 }
+            }
 
-                if page_collision {
-                    // Skip past the mapped region, aligned to 4 KiB.
-                    candidate = pmm::align_up(collision_end);
-                    continue;
-                }
+            if page_collision {
+                // Skip past the mapped region, aligned to 4 KiB.
+                candidate = pmm::align_up(collision_end);
+                continue;
             }
 
             // Candidate range is free in both metadata and page tables.
@@ -571,16 +709,18 @@ impl SharedMemManager {
     fn map_region(
         &self,
         region_id: RegionId,
+        process_id: ProcessId,
         virt_addr: usize,
         flags: RegionFlags,
     ) -> Result<usize, SharedMemError> {
+        let pml4_phys = process_pml4(process_id)?;
         let mut regions = self.regions.lock();
 
         let effective_va = if virt_addr == 0 {
             let size = regions.get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?
                 .size;
-            Self::find_free_va(&regions, size, None)?
+            Self::find_free_va(&regions, size, process_id, pml4_phys)?
         } else {
             Self::validate_explicit_va(virt_addr, regions.get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?.size)?;
@@ -588,23 +728,25 @@ impl SharedMemManager {
         };
 
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
-        region.map(effective_va, flags, None)
+        region.map(process_id, effective_va, flags, pml4_phys)
     }
 
     fn map_region_in_pml4(
         &self,
         region_id: RegionId,
+        process_id: ProcessId,
         pml4_phys: usize,
         virt_addr: usize,
         flags: RegionFlags,
     ) -> Result<usize, SharedMemError> {
+        debug_assert_process_pml4_alignment(process_id, pml4_phys);
         let mut regions = self.regions.lock();
 
         let effective_va = if virt_addr == 0 {
             let size = regions.get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?
                 .size;
-            Self::find_free_va(&regions, size, Some(pml4_phys))?
+            Self::find_free_va(&regions, size, process_id, pml4_phys)?
         } else {
             Self::validate_explicit_va(virt_addr, regions.get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?.size)?;
@@ -612,7 +754,7 @@ impl SharedMemManager {
         };
 
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
-        region.map(effective_va, flags, Some(pml4_phys))
+        region.map(process_id, effective_va, flags, pml4_phys)
     }
 
     /// Validate that an explicit (user-provided) virtual address is sane:
@@ -664,51 +806,59 @@ impl SharedMemManager {
         }
     }
 
-    /// Unmap a region from the given address space.
-    fn unmap_region(&self, region_id: RegionId, pml4_phys: Option<usize>) -> Result<(), SharedMemError> {
+    /// Unmap a region from the given process.
+    fn unmap_region(&self, region_id: RegionId, process_id: ProcessId, pml4_phys: usize) -> Result<(), SharedMemError> {
         let mut regions = self.regions.lock();
-        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        {
+            let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+            region.unmap(process_id, pml4_phys)?;
+        }
 
-        region.unmap(pml4_phys)
+        Self::finalize_deferred_destruction_if_ready(&mut regions, region_id);
+        debug_assert_no_zombie_regions(&regions);
+
+        Ok(())
     }
 
-    fn destroy_region(&self, region_id: RegionId, caller: ThreadId) -> Result<(), SharedMemError> {
+    fn destroy_region(&self, region_id: RegionId, caller_process: ProcessId) -> Result<(), SharedMemError> {
+        debug_assert_process_exists(caller_process);
         let mut regions = self.regions.lock();
 
-        let region = regions.get(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        let should_destroy = {
+            let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
 
-        if region.owner != caller {
-            return Err(SharedMemError::PermissionDenied);
-        }
+            if region.owner_process != caller_process {
+                return Err(SharedMemError::PermissionDenied);
+            }
 
-        // Force-destroy: unmap from ALL remaining address spaces first,
-        // then free the physical pages.  This is the correct behavior when
-        // the owner (e.g. compositor) tears down a shared surface — client
-        // processes that still have mappings will see the pages vanish, which
-        // is acceptable (they are being terminated anyway).
-        if let Some(mut region) = regions.remove(&region_id) {
-            // Force-unmap all remaining mappings
-            for mapping in region.mappings.drain(..) {
-                for (i, &phys_page) in region.physical_pages.iter().enumerate() {
-                    let virt = mapping.virt_addr + (i * pmm::PAGE_SIZE);
-                    if let Some(pml4) = mapping.pml4_phys {
-                        let _ = vm::unmap_page_in_pml4(pml4, virt);
-                    } else {
-                        let _ = vm::unmap_page(virt);
-                    }
-                    let _ = phys_page; // suppress unused warning
-                }
-                log_debug!(
+            let destroy_now = region.mark_destroying();
+            debug_assert_eq!(region.ref_count, region.mappings.len());
+
+            if destroy_now {
+                log_info!(
                     LOG_ORIGIN,
-                    "Force-unmapped region {} from pml4={:?}",
-                    region_id, mapping.pml4_phys
+                    "Destroying unmapped region {} immediately for owner process {}",
+                    region_id,
+                    caller_process
+                );
+            } else {
+                log_info!(
+                    LOG_ORIGIN,
+                    "Deferring destruction of region {} for owner process {} until {} mappings are removed",
+                    region_id,
+                    caller_process,
+                    region.mappings.len()
                 );
             }
-            region.ref_count = 0;
-            region.destroy();
+
+            destroy_now
+        };
+
+        if should_destroy {
+            Self::destroy_region_internal(&mut regions, region_id);
         }
 
-        log_info!(LOG_ORIGIN, "Destroyed region {} by owner thread {}", region_id, caller);
+        debug_assert_no_zombie_regions(&regions);
 
         Ok(())
     }
@@ -719,7 +869,7 @@ impl SharedMemManager {
 
         Ok(RegionInfo {
             id: region.id,
-            owner: region.owner,
+            owner_process: region.owner_process,
             size: region.size,
             ref_count: region.ref_count,
         })
@@ -741,7 +891,7 @@ impl SharedMemManager {
 #[derive(Debug, Clone, Copy)]
 pub struct RegionInfo {
     pub id: RegionId,
-    pub owner: ThreadId,
+    pub owner_process: ProcessId,
     pub size: usize,
     pub ref_count: usize,
 }
@@ -837,8 +987,8 @@ pub fn init() {
     log_info!(LOG_ORIGIN, "Zero-copy IPC via shared regions enabled");
 }
 
-pub fn create_region(owner: ThreadId, size: usize) -> Result<RegionId, SharedMemError> {
-    SHARED_MEM_MANAGER.create_region(owner, size)
+pub fn create_region(owner_process: ProcessId, size: usize) -> Result<RegionId, SharedMemError> {
+    SHARED_MEM_MANAGER.create_region(owner_process, size)
 }
 
 /// Map a shared region into a thread's address space.
@@ -846,11 +996,11 @@ pub fn create_region(owner: ThreadId, size: usize) -> Result<RegionId, SharedMem
 /// Returns the virtual address where the region was mapped.
 pub fn map_region(
     region_id: RegionId,
-    _thread_id: ThreadId,
+    process_id: ProcessId,
     virt_addr: usize,
     flags: RegionFlags,
 ) -> Result<usize, SharedMemError> {
-    SHARED_MEM_MANAGER.map_region(region_id, virt_addr, flags)
+    SHARED_MEM_MANAGER.map_region(region_id, process_id, virt_addr, flags)
 }
 
 /// Map a shared region into a specific PML4 (address space).
@@ -858,26 +1008,20 @@ pub fn map_region(
 /// Returns the virtual address where the region was mapped.
 pub fn map_region_in_pml4(
     region_id: RegionId,
-    _thread_id: ThreadId,
+    process_id: ProcessId,
     pml4_phys: u64,
     virt_addr: usize,
     flags: RegionFlags,
 ) -> Result<usize, SharedMemError> {
-    SHARED_MEM_MANAGER.map_region_in_pml4(region_id, pml4_phys as usize, virt_addr, flags)
+    SHARED_MEM_MANAGER.map_region_in_pml4(region_id, process_id, pml4_phys as usize, virt_addr, flags)
 }
 
-/// Unmap a shared region from a thread's address space.
-///
-/// The caller's PML4 is resolved from the thread's `address_space` field.
-/// If the thread shares an address space with siblings, they all lose the
-/// mapping (because they share the same page tables).
-pub fn unmap_region(region_id: RegionId, thread_id: ThreadId) -> Result<(), SharedMemError> {
-    let pml4_phys = resolve_thread_pml4(thread_id);
-    SHARED_MEM_MANAGER.unmap_region(region_id, pml4_phys)
+pub fn unmap_region(region_id: RegionId, process_id: ProcessId, pml4_phys: u64) -> Result<(), SharedMemError> {
+    SHARED_MEM_MANAGER.unmap_region(region_id, process_id, pml4_phys as usize)
 }
 
-pub fn destroy_region(region_id: RegionId, caller: ThreadId) -> Result<(), SharedMemError> {
-    SHARED_MEM_MANAGER.destroy_region(region_id, caller)
+pub fn destroy_region(region_id: RegionId, caller_process: ProcessId) -> Result<(), SharedMemError> {
+    SHARED_MEM_MANAGER.destroy_region(region_id, caller_process)
 }
 
 pub fn get_region_info(region_id: RegionId) -> Result<RegionInfo, SharedMemError> {
@@ -905,175 +1049,139 @@ pub fn region_size(region_id: RegionId) -> Option<usize> {
     mgr.get(&region_id).map(|r| r.size)
 }
 
-/// Resolve a thread's PML4 physical address into an `Option<usize>`.
+/// Cleanup all shared-memory state owned by or mapped into a process.
 ///
-/// Returns `None` if the thread uses the kernel's own PML4 (address_space == 0).
-/// Returns `Some(pml4_phys)` for user-space threads that have their own
-/// address space.
-///
-/// NOTE: We intentionally do NOT compare against CR3 here.  During a syscall
-/// the active CR3 holds the calling thread's PML4, so comparing would
-/// incorrectly resolve every user-space caller to `None` (kernel space),
-/// causing unmap/cleanup to fail with `NotMapped`.
-fn resolve_thread_pml4(thread_id: ThreadId) -> Option<usize> {
-    let addr_space = crate::thread::get_thread_address_space(thread_id).unwrap_or(0);
-    if addr_space == 0 {
-        None
-    } else {
-        Some(addr_space as usize)
-    }
-}
-
-/// Check whether any other live threads belong to the same process as the
-/// given thread.
-///
-/// Shared memory mappings are still tracked by PML4, so this relies on the
-/// invariant that every userspace thread in a process caches the same
-/// `thread.address_space == process.pml4_phys` relationship.
-fn other_threads_share_address_space(thread_id: ThreadId, addr_space: u64) -> bool {
-    if addr_space == 0 {
-        return false;
-    }
-
-    let Some(process_id) = crate::thread::get_thread_process_id(thread_id) else {
-        debug_assert!(
-            false,
-            "shared_mem cleanup: userspace thread {} with PML4 0x{:X} is missing process_id",
-            thread_id,
-            addr_space
-        );
-        return crate::thread::has_live_sibling_in_address_space(thread_id, addr_space);
-    };
-
-    let Some(process) = crate::process::get_process(process_id) else {
-        debug_assert!(
-            false,
-            "shared_mem cleanup: missing process {} for thread {}",
-            process_id,
-            thread_id
-        );
-        return crate::thread::has_live_sibling_in_address_space(thread_id, addr_space);
-    };
-
-    debug_assert_eq!(
-        process.pml4_phys,
-        addr_space,
-        "shared_mem cleanup: thread {} cache PML4 0x{:X} does not match process {} PML4 0x{:X}",
-        thread_id,
-        addr_space,
-        process_id,
-        process.pml4_phys
+/// This is the single authoritative cleanup path for shared memory. The
+/// caller must invoke it only after final process cleanup has been claimed.
+pub fn cleanup_process_shared_memory(process_id: ProcessId) {
+    debug_assert!(
+        process::is_process_cleaned(process_id),
+        "shared_mem cleanup for process {} must run only after final cleanup is claimed",
+        process_id
     );
+    debug_assert_process_exists(process_id);
 
-    process.threads.iter().copied().any(|other_thread_id| {
-        other_thread_id != thread_id
-            && matches!(
-                crate::thread::get_thread_state(other_thread_id),
-                Some(state) if state != ThreadState::Exited
-            )
-    })
-}
-
-/// Cleanup all shared memory regions owned by or mapped by a thread.
-///
-/// Called when a thread terminates.  Address-space aware: page-table entries
-/// are only unmapped when no sibling threads still share the PML4.
-///
-/// Cleanup policy:
-/// 1. If other threads share this address space, skip page-table unmapping
-///    (the mappings are still reachable by siblings).
-/// 2. If this is the last thread in the address space, unmap all regions.
-/// 3. Destroy all owned regions whose ref_count has reached 0.
-pub fn cleanup_thread_shared_memory(thread_id: ThreadId) {
-    let addr_space = crate::thread::get_thread_address_space(thread_id).unwrap_or(0);
-    let pml4_opt = if addr_space == 0 {
-        None
-    } else {
-        Some(addr_space as usize)
-    };
-
-    // Check if sibling threads share this address space.
-    let siblings_alive = if addr_space != 0 {
-        other_threads_share_address_space(thread_id, addr_space)
-    } else {
-        false
-    };
+    {
+        let mut cleaned = CLEANED_SHARED_MEMORY_PROCESSES.lock();
+        let inserted = cleaned.insert(process_id);
+        debug_assert!(
+            inserted,
+            "shared_mem cleanup for process {} must run exactly once",
+            process_id
+        );
+        if !inserted {
+            return;
+        }
+    }
 
     let mut regions = SHARED_MEM_MANAGER.regions.lock();
 
-    // Collect regions that have a mapping in this address space.
-    let mut regions_to_unmap = Vec::new();
-    let mut regions_to_destroy = Vec::new();
+    let regions_to_destroy: Vec<RegionId> = regions
+        .iter()
+        .filter_map(|(region_id, region)| {
+            if region.owner_process == process_id {
+                Some(*region_id)
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    for (region_id, region) in regions.iter() {
-        if region.mappings.iter().any(|m| m.pml4_phys == pml4_opt) {
-            regions_to_unmap.push(*region_id);
-        }
-        if region.owner == thread_id {
-            // Owner is terminating — force-destroy all owned regions regardless
-            // of remaining mappings.  Client processes that still have mappings
-            // will see the pages vanish, which is safe (the pages go back to
-            // the PMM and will fault on access, triggering process termination).
-            regions_to_destroy.push(*region_id);
-        }
-    }
+    let regions_to_unmap: Vec<RegionId> = regions
+        .iter()
+        .filter_map(|(region_id, region)| {
+            if region
+                .mappings
+                .iter()
+                .any(|mapping| mapping.process_id == process_id)
+            {
+                Some(*region_id)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     log_info!(
         LOG_ORIGIN,
-        "Cleaning up shared memory for thread {}: {} mappings (siblings_alive={}), {} regions to destroy",
-        thread_id,
-        regions_to_unmap.len(),
-        siblings_alive,
-        regions_to_destroy.len()
+        "Cleaning up shared memory for process {}: {} owned regions, {} total mappings to remove",
+        process_id,
+        regions_to_destroy.len(),
+        regions_to_unmap.len()
     );
 
-    // Only unmap page-table entries if no sibling threads share the address space.
-    if !siblings_alive {
-        for region_id in regions_to_unmap {
-            if let Some(region) = regions.get_mut(&region_id) {
-                if let Err(e) = region.unmap(pml4_opt) {
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "Failed to unmap region {} from pml4={:?}: {:?}",
-                        region_id,
-                        pml4_opt,
-                        e
-                    );
-                }
-            }
+    for region_id in &regions_to_destroy {
+        if let Some(region) = regions.get_mut(region_id) {
+            debug_assert_eq!(
+                region.owner_process,
+                process_id,
+                "shared_mem marked wrong owner for region {} during process {} cleanup",
+                region_id,
+                process_id
+            );
+            region.mark_destroying();
         }
     }
 
-    // Destroy all regions owned by this thread, force-unmapping any remaining
-    // mappings (from other address spaces) before freeing physical pages.
-    for region_id in regions_to_destroy {
-        if let Some(mut region) = regions.remove(&region_id) {
-            // Force-unmap from ALL remaining address spaces
-            for mapping in region.mappings.drain(..) {
-                for (i, _) in region.physical_pages.iter().enumerate() {
-                    let virt = mapping.virt_addr + (i * pmm::PAGE_SIZE);
-                    if let Some(pml4) = mapping.pml4_phys {
-                        let _ = vm::unmap_page_in_pml4(pml4, virt);
-                    } else {
-                        let _ = vm::unmap_page(virt);
-                    }
-                }
+    for region_id in regions_to_unmap {
+        if let Some(region) = regions.get_mut(&region_id) {
+            if let Err(e) = region.unmap_process_mapping(process_id, None) {
                 log_debug!(
                     LOG_ORIGIN,
-                    "Force-unmapped region {} from pml4={:?} during owner cleanup",
-                    region_id, mapping.pml4_phys
+                    "Failed to unmap region {} from process {} during process cleanup: {:?}",
+                    region_id,
+                    process_id,
+                    e
                 );
             }
-            region.ref_count = 0;
+        }
 
-            log_debug!(
-                LOG_ORIGIN,
-                "Destroying region {} owned by thread {} ({} physical pages)",
+        SharedMemManager::finalize_deferred_destruction_if_ready(&mut regions, region_id);
+    }
+
+    for region_id in regions_to_destroy {
+        let region_belongs_to_process = if let Some(region) = regions.get(&region_id) {
+            debug_assert_eq!(
+                region.owner_process,
+                process_id,
+                "shared_mem cleanup observed wrong owner for region {} during process {} cleanup",
                 region_id,
-                thread_id,
-                region.physical_pages.len()
+                process_id
             );
-            region.destroy();
+            debug_assert!(
+                region.is_destroying,
+                "shared_mem owned region {} must be marked destroying during process {} cleanup",
+                region_id,
+                process_id
+            );
+            true
+        } else {
+            false
+        };
+
+        if region_belongs_to_process {
+            SharedMemManager::finalize_deferred_destruction_if_ready(&mut regions, region_id);
         }
     }
+
+    debug_assert_no_zombie_regions(&regions);
+
+    debug_assert!(
+        !regions
+            .values()
+            .any(|region| region.mappings.iter().any(|mapping| mapping.process_id == process_id)),
+        "shared_mem cleanup left mappings behind for process {}",
+        process_id
+    );
+    debug_assert!(
+        !regions.values().any(|region| {
+            region.owner_process == process_id && (!region.is_destroying || region.mappings.is_empty())
+        }),
+        "shared_mem cleanup left owner process {} with regions that were not either destroyed or waiting on foreign mappings",
+        process_id
+    );
+}
+
+pub fn forget_process_shared_memory_cleanup(process_id: ProcessId) {
+    CLEANED_SHARED_MEMORY_PROCESSES.lock().remove(&process_id);
 }

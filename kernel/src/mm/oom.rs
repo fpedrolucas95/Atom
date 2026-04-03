@@ -84,13 +84,13 @@ pub fn oom_kill() -> OomResult {
     let threads = crate::thread::get_all_thread_info();
     let mut best_victim: Option<(ThreadId, &'static str, usize)> = None;
 
-    for (tid, name, addr_space, is_userspace) in &threads {
+    for (tid, name, process_id, is_userspace) in &threads {
         if !is_userspace {
             continue;
         }
 
-        // Get resident page count from VMA system
-        let resident = vma::get_stats(*addr_space as usize)
+        let resident = process_id
+            .and_then(|process_id| vma::get_process_stats(process_id))
             .map(|s| s.resident_pages)
             .unwrap_or(0);
 

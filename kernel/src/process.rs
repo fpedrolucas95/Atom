@@ -5,7 +5,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::cap::{CapError, CapHandle, CapPermissions, Capability, CapabilityTable, ResourceType};
+use crate::cap::{
+    CapError,
+    CapHandle,
+    CapPermissions,
+    Capability,
+    CapabilityTable,
+    ResourceType,
+};
 use crate::log_warn;
 use crate::thread::ThreadId;
 
@@ -53,6 +60,15 @@ pub struct Process {
 pub static PROCESS_REGISTRY: Mutex<BTreeMap<ProcessId, Process>> = Mutex::new(BTreeMap::new());
 pub static PML4_TO_PROCESS: Mutex<BTreeMap<u64, ProcessId>> = Mutex::new(BTreeMap::new());
 
+fn debug_assert_capability_store_owner(process: &Process) {
+    debug_assert_eq!(
+        process.capability_table.owner(),
+        Some(process.id),
+        "Process {} capability table must be owned by the same process",
+        process.id
+    );
+}
+
 fn ensure_pml4_mapping(process_id: ProcessId, pml4_phys: u64) {
     let mut pml4_map = PML4_TO_PROCESS.lock();
     if let Some(existing) = pml4_map.get(&pml4_phys).copied() {
@@ -98,7 +114,7 @@ pub fn register_process(process_id: ProcessId, pml4_phys: u64, primary_thread: T
             pml4_phys,
             primary_thread,
             threads: vec![primary_thread],
-            capability_table: crate::cap::create_capability_table(primary_thread),
+            capability_table: crate::cap::create_process_capability_table(process_id),
             cleaned: false,
         },
     );
@@ -125,7 +141,7 @@ pub fn attach_thread_to_process(process_id: ProcessId, thread_id: ThreadId, pml4
             pml4_phys,
             primary_thread: ThreadId::from_raw(process_id.raw()),
             threads: vec![thread_id],
-            capability_table: crate::cap::create_capability_table(ThreadId::from_raw(process_id.raw())),
+            capability_table: crate::cap::create_process_capability_table(process_id),
             cleaned: false,
         })
     };
@@ -223,6 +239,8 @@ pub fn detach_thread_from_process(process_id: ProcessId, thread_id: ThreadId) {
         if pml4_map.get(&pml4_phys).copied() == Some(process_id) {
             pml4_map.remove(&pml4_phys);
         }
+
+        crate::shared_mem::forget_process_shared_memory_cleanup(process_id);
     }
 }
 
@@ -232,6 +250,12 @@ pub fn process_id_for_pml4(pml4_phys: u64) -> Option<ProcessId> {
 
 pub fn get_process(process_id: ProcessId) -> Option<Process> {
     PROCESS_REGISTRY.lock().get(&process_id).cloned()
+}
+
+pub fn get_process_pml4(process_id: ProcessId) -> Option<u64> {
+    let registry = PROCESS_REGISTRY.lock();
+    let process = registry.get(&process_id)?;
+    Some(process.pml4_phys)
 }
 
 pub fn claim_process_cleanup(
@@ -303,6 +327,15 @@ pub fn add_process_capability(
 ) -> Result<CapHandle, CapError> {
     let mut registry = PROCESS_REGISTRY.lock();
     let process = registry.get_mut(&process_id).ok_or(CapError::NotFound)?;
+    debug_assert_capability_store_owner(process);
+    debug_assert_eq!(
+        capability.owner,
+        process_id,
+        "Capability {} owner {} does not match target process {}",
+        capability.handle,
+        capability.owner,
+        process_id
+    );
     process.capability_table.insert(capability)
 }
 
@@ -312,7 +345,66 @@ pub fn remove_process_capability(
 ) -> Option<Capability> {
     let mut registry = PROCESS_REGISTRY.lock();
     let process = registry.get_mut(&process_id)?;
+    debug_assert_capability_store_owner(process);
     process.capability_table.remove(cap_handle)
+}
+
+pub fn get_process_capability(
+    process_id: ProcessId,
+    cap_handle: CapHandle,
+) -> Option<Capability> {
+    let registry = PROCESS_REGISTRY.lock();
+    let process = registry.get(&process_id)?;
+    debug_assert_capability_store_owner(process);
+    process.capability_table.get(cap_handle).cloned()
+}
+
+pub fn process_has_capability(process_id: ProcessId, cap_handle: CapHandle) -> bool {
+    let registry = PROCESS_REGISTRY.lock();
+    let Some(process) = registry.get(&process_id) else {
+        return false;
+    };
+
+    debug_assert_capability_store_owner(process);
+
+    process.capability_table.contains(cap_handle)
+}
+
+pub fn append_process_capability_child(
+    process_id: ProcessId,
+    parent_handle: CapHandle,
+    child_handle: CapHandle,
+) -> Result<(), CapError> {
+    let mut registry = PROCESS_REGISTRY.lock();
+    let process = registry.get_mut(&process_id).ok_or(CapError::NotFound)?;
+    debug_assert_capability_store_owner(process);
+    let parent = process
+        .capability_table
+        .get_mut(parent_handle)
+        .ok_or(CapError::NotFound)?;
+
+    if !parent.children.contains(&child_handle) {
+        parent.children.push(child_handle);
+    }
+
+    Ok(())
+}
+
+pub fn remove_process_capability_child(
+    process_id: ProcessId,
+    parent_handle: CapHandle,
+    child_handle: CapHandle,
+) -> Result<(), CapError> {
+    let mut registry = PROCESS_REGISTRY.lock();
+    let process = registry.get_mut(&process_id).ok_or(CapError::NotFound)?;
+    debug_assert_capability_store_owner(process);
+    let parent = process
+        .capability_table
+        .get_mut(parent_handle)
+        .ok_or(CapError::NotFound)?;
+
+    parent.children.retain(|existing| *existing != child_handle);
+    Ok(())
 }
 
 pub fn validate_process_capability(
@@ -322,6 +414,7 @@ pub fn validate_process_capability(
 ) -> Result<(), CapError> {
     let registry = PROCESS_REGISTRY.lock();
     let process = registry.get(&process_id).ok_or(CapError::NotFound)?;
+    debug_assert_capability_store_owner(process);
     process
         .capability_table
         .validate(cap_handle, required_permission)
@@ -340,6 +433,8 @@ where
     let Some(process) = registry.get(&process_id) else {
         return false;
     };
+
+    debug_assert_capability_store_owner(process);
 
     for handle in process.capability_table.list() {
         if let Some(cap) = process.capability_table.get(handle) {

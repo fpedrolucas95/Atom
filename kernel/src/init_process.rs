@@ -193,9 +193,12 @@ fn create_init_process(
     pid: ThreadId,
     sections: &executable::ExecutableSections,
 ) -> Result<InitProcess, InitError> {
+    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
+
     // Create a new address space for init (no longer shares kernel_cr3)
     let init_pml4_phys = pmm::alloc_pages_zeroed(1)
         .ok_or(InitError::MemoryAllocationFailed)?;
+    let process_id = crate::process::ProcessId::from(pid);
 
     log_info!(
         LOG_ORIGIN,
@@ -212,10 +215,73 @@ fn create_init_process(
         "Cloned kernel mappings to init's PML4"
     );
 
+    vma::create_bootstrap_process_vma_map(process_id, init_pml4_phys);
+
     // Load executable into memory (using init's own PML4)
     let executable = load_executable(init_pml4_phys, sections)?;
     let user_stack_top = allocate_user_stack(init_pml4_phys)?;
     let kernel_stack_top = allocate_kernel_stack()?;
+
+    let text_size = align_up(sections.text.len().max(1));
+    let data_size = align_up(sections.data.len().max(1));
+    let bss_size = align_up(sections.bss_size.max(1));
+    let user_stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    let heap_start = atom_abi::USER_HEAP_START as usize;
+    let bss_end = executable.bss_base + bss_size;
+
+    vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
+        start: executable.text_base,
+        end: executable.text_base + text_size,
+        perms: VmaPermissions::read_exec(),
+        backing: VmaBacking::Anonymous,
+        label: "text",
+    }).map_err(|_| InitError::MemoryAllocationFailed)?;
+
+    if !sections.data.is_empty() {
+        vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
+            start: executable.data_base,
+            end: executable.data_base + data_size,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "data",
+        }).map_err(|_| InitError::MemoryAllocationFailed)?;
+    }
+
+    vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
+        start: executable.bss_base,
+        end: executable.bss_base + bss_size,
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Anonymous,
+        label: "bss",
+    }).map_err(|_| InitError::MemoryAllocationFailed)?;
+
+    vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
+        start: user_stack_base,
+        end: USER_STACK_TOP,
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Stack {
+            max_size: USER_STACK_SIZE,
+        },
+        label: "stack",
+    }).map_err(|_| InitError::MemoryAllocationFailed)?;
+
+    if bss_end > heap_start {
+        log_error!(
+            LOG_ORIGIN,
+            "Init image too large: BSS end 0x{:X} exceeds USER_HEAP_START 0x{:X}",
+            bss_end,
+            heap_start
+        );
+        return Err(InitError::MemoryAllocationFailed);
+    }
+
+    vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
+        start: heap_start,
+        end: heap_start + PAGE_SIZE,
+        perms: VmaPermissions::read_write(),
+        backing: VmaBacking::Anonymous,
+        label: "heap",
+    }).map_err(|_| InitError::MemoryAllocationFailed)?;
 
     // Create CPU context for Ring 3 execution with init's own PML4
     let context = CpuContext::new_user(
@@ -260,7 +326,7 @@ fn create_init_process(
     // Init gets High priority as it orchestrates the entire boot
     let thread = Thread {
         id: pid,
-        process_id: Some(crate::process::ProcessId::from(pid)),
+        process_id: Some(process_id),
         state: ThreadState::Ready,
         context,
         kernel_stack: kernel_stack_top,
