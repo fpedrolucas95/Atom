@@ -50,6 +50,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+use crate::process::ProcessId;
 use crate::thread::ThreadId;
 
 const LOG_ORIGIN: &str = "cap";
@@ -248,13 +249,13 @@ pub struct Capability {
     pub handle: CapHandle,
     pub resource: ResourceType,
     pub permissions: CapPermissions,
-    pub owner: ThreadId,
+    pub owner: ProcessId,
     pub parent: Option<CapHandle>,
     pub children: Vec<CapHandle>,
 }
 
 impl Capability {
-    pub fn new_root(resource: ResourceType, owner: ThreadId, permissions: CapPermissions) -> Self {
+    pub fn new_root(resource: ResourceType, owner: ProcessId, permissions: CapPermissions) -> Self {
         Self {
             handle: CapHandle::new(),
             resource,
@@ -267,7 +268,7 @@ impl Capability {
 
     pub fn derive(
         &mut self,
-        new_owner: ThreadId,
+        new_owner: ProcessId,
         reduced_permissions: CapPermissions,
     ) -> Result<Self, CapError> {
         if !reduced_permissions.is_subset_of(self.permissions) {
@@ -292,8 +293,8 @@ impl Capability {
         self.permissions.contains(perm)
     }
 
-    pub fn is_owned_by(&self, thread_id: ThreadId) -> bool {
-        self.owner == thread_id
+    pub fn is_owned_by(&self, process_id: ProcessId) -> bool {
+        self.owner == process_id
     }
 }
 
@@ -310,11 +311,11 @@ pub enum CapError {
 #[derive(Debug, Clone)]
 pub struct CapabilityTable {
     capabilities: BTreeMap<CapHandle, Capability>,
-    owner: ThreadId,
+    owner: Option<ProcessId>,
 }
 
 impl CapabilityTable {
-    pub fn new(owner: ThreadId) -> Self {
+    pub fn new(owner: Option<ProcessId>) -> Self {
         Self {
             capabilities: BTreeMap::new(),
             owner,
@@ -370,8 +371,12 @@ impl CapabilityTable {
         self.capabilities.len()
     }
 
-    pub fn owner(&self) -> ThreadId {
+    pub fn owner(&self) -> Option<ProcessId> {
         self.owner
+    }
+
+    pub fn set_owner_process(&mut self, owner: Option<ProcessId>) {
+        self.owner = owner;
     }
 }
 
@@ -406,10 +411,9 @@ impl CapabilityManager {
         log.iter().rev().take(count).cloned().collect()
     }
 
-    pub fn register(&self, cap: Capability) -> Result<CapHandle, CapError> {
+    pub fn register(&self, cap: Capability, actor_thread: ThreadId) -> Result<CapHandle, CapError> {
         let mut caps = self.global_caps.lock();
         let handle = cap.handle;
-        let owner = cap.owner;
 
         if caps.contains_key(&handle) {
             return Err(CapError::AlreadyExists);
@@ -418,18 +422,23 @@ impl CapabilityManager {
         caps.insert(handle, cap);
         drop(caps);
 
-        note_thread_capability_activity(owner);
+        note_thread_capability_activity(actor_thread);
 
         self.log_audit(AuditLogEntry::new(
             AuditEventType::Create,
-            owner,
+            actor_thread,
             handle,
         ));
 
         Ok(handle)
     }
     
-    pub fn revoke(&self, handle: CapHandle, revoker: ThreadId) -> Result<Vec<CapHandle>, CapError> {
+    pub fn revoke(
+        &self,
+        handle: CapHandle,
+        revoker: ProcessId,
+        revoker_thread: ThreadId,
+    ) -> Result<Vec<CapHandle>, CapError> {
         let mut caps = self.global_caps.lock();
         let mut revoked = Vec::new();
 
@@ -451,16 +460,23 @@ impl CapabilityManager {
         revoked.push(handle);
         drop(caps);
 
-        crate::thread::remove_thread_capability(owner, handle);
+        let removed_from_process = crate::process::remove_process_capability(owner, handle);
+        debug_assert!(
+            removed_from_process.is_some(),
+            "Capability {} missing from authoritative process {} table during revoke",
+            handle,
+            owner
+        );
+        let _ = crate::thread::remove_process_capability_mirror(owner, handle);
 
         self.log_audit(AuditLogEntry::new(
             AuditEventType::Revoke,
-            revoker,
+            revoker_thread,
             handle,
         ));
 
         for child_handle in children {
-            if let Ok(mut child_revoked) = self.revoke(child_handle, revoker) {
+            if let Ok(mut child_revoked) = self.revoke(child_handle, revoker, revoker_thread) {
                 revoked.append(&mut child_revoked);
             }
         }
@@ -548,6 +564,10 @@ pub struct CapabilityStats {
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();
 static CLEANED_THREAD_CAPABILITIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
 
+fn required_process_id(thread_id: ThreadId) -> Result<ProcessId, CapError> {
+    crate::thread::get_thread_process_id(thread_id).ok_or(CapError::NotFound)
+}
+
 pub(crate) fn note_thread_capability_activity(thread_id: ThreadId) {
     CLEANED_THREAD_CAPABILITIES.lock().remove(&thread_id);
 }
@@ -583,8 +603,12 @@ pub fn init() {
     );
 }
 
-pub fn create_capability_table(owner: ThreadId) -> CapabilityTable {
-    CapabilityTable::new(owner)
+pub fn create_capability_table(_owner: ThreadId) -> CapabilityTable {
+    CapabilityTable::new(None)
+}
+
+pub fn create_process_capability_table(owner: ProcessId) -> CapabilityTable {
+    CapabilityTable::new(Some(owner))
 }
 
 pub fn create_root_capability(
@@ -592,13 +616,14 @@ pub fn create_root_capability(
     owner: ThreadId,
     permissions: CapPermissions,
 ) -> Result<Capability, CapError> {
-    let cap = Capability::new_root(resource, owner, permissions);
-    CAPABILITY_MANAGER.register(cap.clone())?;
+    let owner_process = required_process_id(owner)?;
+    let cap = Capability::new_root(resource, owner_process, permissions);
+    CAPABILITY_MANAGER.register(cap.clone(), owner)?;
     Ok(cap)
 }
 
 pub fn revoke_capability(handle: CapHandle, revoker: ThreadId) -> Result<Vec<CapHandle>, CapError> {
-    CAPABILITY_MANAGER.revoke(handle, revoker)
+    CAPABILITY_MANAGER.revoke(handle, required_process_id(revoker)?, revoker)
 }
 
 pub fn query_parent(handle: CapHandle) -> Result<Option<CapHandle>, CapError> {
@@ -622,28 +647,52 @@ pub fn transfer_capability(
     source_thread: ThreadId,
     target_thread: ThreadId,
 ) -> Result<(), CapError> {
-    let cap = crate::thread::remove_thread_capability(source_thread, cap_handle)
+    let source_process = required_process_id(source_thread)?;
+    let target_process = required_process_id(target_thread)?;
+    let cap = crate::process::get_process_capability(source_process, cap_handle)
         .ok_or(CapError::NotFound)?;
 
-    if !cap.is_owned_by(source_thread) {
-        let _ = crate::thread::add_thread_capability(source_thread, cap);
+    if !cap.is_owned_by(source_process) {
         return Err(CapError::NotOwner);
     }
 
     if !cap.has_permission(CapPermissions::GRANT) {
-        let _ = crate::thread::add_thread_capability(source_thread, cap);
         return Err(CapError::PermissionDenied);
     }
 
-    let mut transferred_cap = cap;
-    transferred_cap.owner = target_thread;
+    if source_process == target_process {
+        CAPABILITY_MANAGER.log_audit(AuditLogEntry::new_transfer(
+            source_thread,
+            cap_handle,
+            target_thread,
+        ));
+        return Ok(());
+    }
 
-    crate::thread::add_thread_capability(target_thread, transferred_cap)
-        .map_err(|_| CapError::AlreadyExists)?;
+    let removed_cap = crate::process::remove_process_capability(source_process, cap_handle)
+        .ok_or(CapError::NotFound)?;
+    let _ = crate::thread::remove_process_capability_mirror(source_process, cap_handle);
+
+    let rollback_cap = removed_cap.clone();
+    let mut transferred_cap = removed_cap;
+    transferred_cap.owner = target_process;
+
+    if let Err(err) = crate::process::add_process_capability(target_process, transferred_cap.clone()) {
+        let _ = crate::process::add_process_capability(source_process, rollback_cap.clone());
+        let _ = crate::thread::mirror_process_capability_to_threads(source_process, rollback_cap);
+        return Err(err);
+    }
+
+    if let Err(err) = crate::thread::mirror_process_capability_to_threads(target_process, transferred_cap.clone()) {
+        let _ = crate::process::remove_process_capability(target_process, cap_handle);
+        let _ = crate::process::add_process_capability(source_process, rollback_cap.clone());
+        let _ = crate::thread::mirror_process_capability_to_threads(source_process, rollback_cap);
+        return Err(err);
+    }
 
     let mut caps = CAPABILITY_MANAGER.global_caps.lock();
     if let Some(global_cap) = caps.get_mut(&cap_handle) {
-        global_cap.owner = target_thread;
+        global_cap.owner = target_process;
     }
     drop(caps);
 
@@ -662,14 +711,17 @@ pub fn derive_capability(
     new_owner: ThreadId,
     reduced_perms: CapPermissions,
 ) -> Result<CapHandle, CapError> {
-    if !crate::thread::thread_has_capability(owner_thread, parent_handle) {
+    let owner_process = required_process_id(owner_thread)?;
+    let new_owner_process = required_process_id(new_owner)?;
+
+    if !crate::process::process_has_capability(owner_process, parent_handle) {
         return Err(CapError::NotFound);
     }
 
     let mut caps = CAPABILITY_MANAGER.global_caps.lock();
     let parent = caps.get_mut(&parent_handle).ok_or(CapError::NotFound)?;
 
-    if !parent.is_owned_by(owner_thread) {
+    if !parent.is_owned_by(owner_process) {
         return Err(CapError::NotOwner);
     }
 
@@ -677,13 +729,56 @@ pub fn derive_capability(
         return Err(CapError::PermissionDenied);
     }
 
-    let child = parent.derive(new_owner, reduced_perms)?;
+    let child = parent.derive(new_owner_process, reduced_perms)?;
     let child_handle = child.handle;
 
     caps.insert(child_handle, child.clone());
     drop(caps);
 
-    crate::thread::add_thread_capability(new_owner, child)?;
+    if let Err(err) = crate::process::append_process_capability_child(owner_process, parent_handle, child_handle) {
+        let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+        caps.remove(&child_handle);
+        if let Some(parent) = caps.get_mut(&parent_handle) {
+            parent.children.retain(|existing| *existing != child_handle);
+        }
+        return Err(err);
+    }
+
+    if let Err(err) = crate::thread::append_process_capability_child_mirror(owner_process, parent_handle, child_handle) {
+        let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+        caps.remove(&child_handle);
+        if let Some(parent) = caps.get_mut(&parent_handle) {
+            parent.children.retain(|existing| *existing != child_handle);
+        }
+        drop(caps);
+        let _ = crate::process::remove_process_capability_child(owner_process, parent_handle, child_handle);
+        return Err(err);
+    }
+
+    if let Err(err) = crate::process::add_process_capability(new_owner_process, child.clone()) {
+        let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+        caps.remove(&child_handle);
+        if let Some(parent) = caps.get_mut(&parent_handle) {
+            parent.children.retain(|existing| *existing != child_handle);
+        }
+        drop(caps);
+        let _ = crate::process::remove_process_capability_child(owner_process, parent_handle, child_handle);
+        let _ = crate::thread::remove_process_capability_child_mirror(owner_process, parent_handle, child_handle);
+        return Err(err);
+    }
+
+    if let Err(err) = crate::thread::mirror_process_capability_to_threads(new_owner_process, child.clone()) {
+        let _ = crate::process::remove_process_capability(new_owner_process, child_handle);
+        let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+        caps.remove(&child_handle);
+        if let Some(parent) = caps.get_mut(&parent_handle) {
+            parent.children.retain(|existing| *existing != child_handle);
+        }
+        drop(caps);
+        let _ = crate::process::remove_process_capability_child(owner_process, parent_handle, child_handle);
+        let _ = crate::thread::remove_process_capability_child_mirror(owner_process, parent_handle, child_handle);
+        return Err(err);
+    }
 
     CAPABILITY_MANAGER.log_audit(AuditLogEntry::new_derive(
         owner_thread,
@@ -731,6 +826,7 @@ pub fn revoke_all_process_capabilities(process_id: crate::process::ProcessId) {
 
         drop(caps);
         let _ = crate::process::remove_process_capability(process_id, handle);
+        let _ = crate::thread::remove_process_capability_mirror(process_id, handle);
         CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
             AuditEventType::Revoke,
             process.primary_thread,
@@ -752,14 +848,9 @@ pub fn revoke_all_thread_capabilities(thread_id: ThreadId) {
         return;
     }
 
-    let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+    let owned_caps = crate::thread::list_thread_local_capabilities(thread_id);
 
-    // Collect all capability handles owned by this thread
-    let owned_caps: Vec<CapHandle> = caps
-        .iter()
-        .filter(|(_, cap)| cap.is_owned_by(thread_id))
-        .map(|(handle, _)| *handle)
-        .collect();
+    let mut caps = CAPABILITY_MANAGER.global_caps.lock();
 
     log_info!(
         LOG_ORIGIN,

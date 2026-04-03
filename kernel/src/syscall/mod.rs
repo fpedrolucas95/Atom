@@ -1230,18 +1230,6 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
     let kernel_stack_virt = crate::mm::vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_SIZE) as u64;
 
-    // Get the caller's address space so the new thread shares it
-    let caller_addr_space = crate::thread::get_thread_address_space(caller).unwrap_or(0);
-
-    // Create a userspace (Ring 3) context for the child thread.
-    // sys_thread_create is only callable from userspace, so child threads
-    // must also run in Ring 3 with the caller's address space.
-    let context = crate::thread::CpuContext::new_user(
-        entry_point,
-        stack_ptr,
-        caller_addr_space,
-    );
-
     let caller_process_id = match crate::thread::get_thread_process_id(caller) {
         Some(process_id) => process_id,
         None => {
@@ -1253,6 +1241,40 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
             return EINVAL;
         }
     };
+
+    let caller_addr_space = match crate::process::get_process_pml4(caller_process_id) {
+        Some(pml4_phys) => {
+            let cached_pml4 = crate::thread::get_thread_address_space(caller).unwrap_or(0);
+            debug_assert_eq!(
+                cached_pml4,
+                pml4_phys,
+                "thread_create must seed child threads from the caller process primary PML4, not a divergent cache: thread {} process {} cache 0x{:X} process 0x{:X}",
+                caller,
+                caller_process_id,
+                cached_pml4,
+                pml4_phys
+            );
+            pml4_phys
+        }
+        None => {
+            log_error!(
+                LOG_ORIGIN,
+                "thread_create rejected: caller {} process {} has no registered primary PML4",
+                caller,
+                caller_process_id
+            );
+            return EINVAL;
+        }
+    };
+
+    // Create a userspace (Ring 3) context for the child thread.
+    // sys_thread_create is only callable from userspace, so child threads
+    // must also run in Ring 3 with the process primary address space.
+    let context = crate::thread::CpuContext::new_user(
+        entry_point,
+        stack_ptr,
+        caller_addr_space,
+    );
 
     let tid = crate::thread::ThreadId::new();
     let cap_table = crate::cap::create_capability_table(tid);
@@ -2862,13 +2884,26 @@ fn sys_shared_region_create(size: u64) -> u64 {
         }
     };
 
-    match crate::shared_mem::create_region(caller, size as usize) {
+    let caller_process = match crate::thread::get_thread_process_id(caller) {
+        Some(process_id) => process_id,
+        None => {
+            log_error!(
+                "syscall",
+                "shared_region_create: thread {} has no process_id",
+                caller
+            );
+            return EPERM;
+        }
+    };
+
+    match crate::shared_mem::create_region(caller_process, size as usize) {
         Ok(region_id) => {
             log_debug!(
                 "syscall",
-                "shared_region_create: created region {:?} with size {} bytes",
+                "shared_region_create: created region {:?} with size {} bytes for process {}",
                 region_id,
-                size
+                size,
+                caller_process
             );
             region_id.raw()
         }
@@ -2938,6 +2973,18 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         }
     };
 
+    let caller_process = match crate::thread::get_thread_process_id(caller) {
+        Some(process_id) => process_id,
+        None => {
+            log_error!(
+                "syscall",
+                "shared_region_map: thread {} has no process_id",
+                caller
+            );
+            return EPERM;
+        }
+    };
+
     // Get the caller's PML4 (address space)
     let caller_pml4 = match crate::thread::get_thread_address_space(caller) {
         Some(pml4) => pml4,
@@ -2963,7 +3010,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
     let flags = crate::shared_mem::RegionFlags::from_raw(flags_raw);
 
-    match crate::shared_mem::map_region_in_pml4(region_id, caller, caller_pml4, virt_addr as usize, flags) {
+    match crate::shared_mem::map_region_in_pml4(region_id, caller_process, caller_pml4, virt_addr as usize, flags) {
         Ok(mapped_va) => {
             // Sanity-check: the kernel must never hand userspace the null address.
             // find_free_va starts above the identity-map ceiling (>= 0x20000000)
@@ -3027,9 +3074,33 @@ fn sys_shared_region_unmap(region_id_raw: u64) -> u64 {
         }
     };
 
+    let caller_process = match crate::thread::get_thread_process_id(caller) {
+        Some(process_id) => process_id,
+        None => {
+            log_error!(
+                "syscall",
+                "shared_region_unmap: thread {} has no process_id",
+                caller
+            );
+            return EPERM;
+        }
+    };
+
+    let caller_pml4 = match crate::thread::get_thread_address_space(caller) {
+        Some(pml4) => pml4,
+        None => {
+            log_error!(
+                "syscall",
+                "shared_region_unmap: caller thread {} not found",
+                caller
+            );
+            return EINVAL;
+        }
+    };
+
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
 
-    match crate::shared_mem::unmap_region(region_id, caller) {
+    match crate::shared_mem::unmap_region(region_id, caller_process, caller_pml4) {
         Ok(()) => {
             log_debug!(
                 "syscall",
@@ -3071,9 +3142,21 @@ fn sys_shared_region_destroy(region_id_raw: u64) -> u64 {
         }
     };
 
+    let caller_process = match crate::thread::get_thread_process_id(caller) {
+        Some(process_id) => process_id,
+        None => {
+            log_error!(
+                "syscall",
+                "shared_region_destroy: thread {} has no process_id",
+                caller
+            );
+            return EPERM;
+        }
+    };
+
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
 
-    match crate::shared_mem::destroy_region(region_id, caller) {
+    match crate::shared_mem::destroy_region(region_id, caller_process) {
         Ok(()) => {
             log_debug!(
                 "syscall",
@@ -3411,7 +3494,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 /// Registered IRQ handlers - maps IRQ number to (ThreadId, port for notification)
 static IRQ_HANDLERS: Mutex<BTreeMap<u8, (crate::thread::ThreadId, u64)>> = Mutex::new(BTreeMap::new());
-static CLEANED_FD_OWNERS: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+static CLEANED_FD_PROCESSES: Mutex<BTreeSet<crate::process::ProcessId>> =
+    Mutex::new(BTreeSet::new());
 
 /// Allowed IRQs for userspace drivers
 const ALLOWED_IRQS: [u8; 2] = [1, 12]; // Keyboard (IRQ1), Mouse (IRQ12)
@@ -3932,6 +4016,7 @@ fn spawn_process_internal(
     const USER_STACK_TOP: usize = 0x0000_8000_0000;
 
     let pid = ThreadId::new();
+    let process_id = crate::process::ProcessId::from(pid);
 
     // Each process gets its own address space - load at the standard base address
     // since each process has isolated virtual memory
@@ -3957,7 +4042,7 @@ fn spawn_process_internal(
     vm::clone_kernel_mappings(new_pml4_phys).map_err(|_| ENOMEM)?;
 
     // Create VMA map for this address space
-    vma::create_vma_map(new_pml4_phys);
+    vma::create_bootstrap_process_vma_map(process_id, new_pml4_phys);
 
     log_info!(
         "spawn",
@@ -3990,7 +4075,7 @@ fn spawn_process_internal(
     }
 
     // Register text VMA
-    vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: text_base,
         end: text_base + text_size,
         perms: VmaPermissions::read_exec(),
@@ -4031,7 +4116,7 @@ fn spawn_process_internal(
         }
 
         // Register data VMA
-        vma::insert_vma(new_pml4_phys, Vma {
+        vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
             start: data_base,
             end: data_base + data_size,
             perms: VmaPermissions::read_write(),
@@ -4063,7 +4148,7 @@ fn spawn_process_internal(
     }
 
     // Register BSS VMA
-    vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: bss_base,
         end: bss_base + align_up(bss_size),
         perms: VmaPermissions::read_write(),
@@ -4094,7 +4179,7 @@ fn spawn_process_internal(
     // Register stack VMA with growth support.
     // The VMA initially covers only the mapped pages but can grow downward
     // via demand paging when page faults occur below it.
-    vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: user_stack_base,
         end: user_stack_top,
         perms: VmaPermissions::read_write(),
@@ -4120,7 +4205,7 @@ fn spawn_process_internal(
         );
         return Err(ENOMEM);
     }
-    vma::insert_vma(new_pml4_phys, Vma {
+    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: heap_start,
         end: heap_start + PAGE_SIZE, // Minimal initial size
         perms: VmaPermissions::read_write(),
@@ -4183,7 +4268,7 @@ fn spawn_process_internal(
     // Create the thread with its own address space
     let thread = Thread {
         id: pid,
-        process_id: Some(crate::process::ProcessId::from(pid)),
+        process_id: Some(process_id),
         state: ThreadState::Ready,
         context,
         kernel_stack: kernel_stack_top,
@@ -4582,6 +4667,25 @@ fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
 // Virtual Memory Management Syscalls (mmap/munmap/mprotect/brk)
 // ---------------------------------------------------------------------------
 
+fn current_process_vma_context() -> Option<(crate::thread::ThreadId, crate::process::ProcessId, usize)> {
+    let tid = crate::sched::current_thread()?;
+    let process_id = crate::thread::get_thread_process_id(tid)?;
+    let process_pml4 = crate::process::get_process_pml4(process_id)?;
+    let cached_pml4 = crate::thread::get_thread_address_space(tid).unwrap_or(0);
+
+    assert_eq!(
+        cached_pml4,
+        process_pml4,
+        "VM/VMA selection must be Process-directed: thread {} process {} cache 0x{:X} process 0x{:X}",
+        tid,
+        process_id,
+        cached_pml4,
+        process_pml4
+    );
+
+    Some((tid, process_id, process_pml4 as usize))
+}
+
 /// mmap(addr_hint, length, prot, flags) -> mapped_addr | errno
 ///
 /// Maps anonymous private memory into the calling process's virtual address space.
@@ -4626,15 +4730,9 @@ fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
     // Round up to page boundary
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // Get current thread's PML4
-    let tid = match crate::sched::current_thread() {
-        Some(t) => t,
+    let (_tid, process_id, pml4) = match current_process_vma_context() {
+        Some(ctx) => ctx,
         None => return EPERM,
-    };
-
-    let pml4 = match crate::thread::get_thread_address_space(tid) {
-        Some(p) if p != 0 => p as usize,
-        _ => return EPERM,
     };
 
     // Build VMA permissions from prot flags
@@ -4661,10 +4759,13 @@ fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
             return EINVAL;
         }
         // Remove any existing mappings in this range
-        let removed = vma::remove_vma_range(pml4, addr, addr + length);
+        let removed = match vma::remove_process_vma_range(process_id, addr, addr + length) {
+            Ok(removed) => removed,
+            Err(_) => return EINVAL,
+        };
         // Unmap the physical pages for removed VMAs
         for old_vma in &removed {
-            unmap_vma_pages(pml4, old_vma);
+            unmap_vma_pages(process_id, pml4, old_vma);
         }
         addr
     } else {
@@ -4674,9 +4775,10 @@ fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
             atom_abi::USER_MMAP_START as usize
         };
 
-        match vma::find_free_region(pml4, hint_start, atom_abi::USER_MMAP_END as usize, length) {
-            Some(addr) => addr,
-            None => return ENOMEM,
+        match vma::find_process_free_region(process_id, hint_start, atom_abi::USER_MMAP_END as usize, length) {
+            Ok(Some(addr)) => addr,
+            Ok(None) => return ENOMEM,
+            Err(_) => return EPERM,
         }
     };
 
@@ -4689,7 +4791,7 @@ fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
         label: "mmap",
     };
 
-    match vma::insert_vma(pml4, new_vma) {
+    match vma::insert_process_vma(process_id, new_vma) {
         Ok(()) => virt_addr as u64,
         Err(_) => ENOMEM,
     }
@@ -4712,17 +4814,15 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    let tid = match crate::sched::current_thread() {
-        Some(t) => t,
+    let (_tid, process_id, pml4) = match current_process_vma_context() {
+        Some(ctx) => ctx,
         None => return EPERM,
     };
 
-    let pml4 = match crate::thread::get_thread_address_space(tid) {
-        Some(p) if p != 0 => p as usize,
-        _ => return EPERM,
+    let removed = match vma::remove_process_vma_range(process_id, addr, addr + length) {
+        Ok(removed) => removed,
+        Err(_) => return EINVAL,
     };
-
-    let removed = vma::remove_vma_range(pml4, addr, addr + length);
 
     if removed.is_empty() {
         return EINVAL;
@@ -4730,7 +4830,7 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 
     // Unmap physical pages
     for old_vma in &removed {
-        unmap_vma_pages(pml4, old_vma);
+        unmap_vma_pages(process_id, pml4, old_vma);
     }
 
     ESUCCESS
@@ -4753,14 +4853,9 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    let tid = match crate::sched::current_thread() {
-        Some(t) => t,
+    let (_tid, process_id, pml4) = match current_process_vma_context() {
+        Some(ctx) => ctx,
         None => return EPERM,
-    };
-
-    let pml4 = match crate::thread::get_thread_address_space(tid) {
-        Some(p) if p != 0 => p as usize,
-        _ => return EPERM,
     };
 
     let mut perms = VmaPermissions::NONE;
@@ -4774,7 +4869,7 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
         perms = perms.union(VmaPermissions::EXEC);
     }
 
-    if let Err(_) = vma::set_permissions(pml4, addr, addr + length, perms) {
+    if let Err(_) = vma::set_process_permissions(process_id, addr, addr + length, perms) {
         return EINVAL;
     }
 
@@ -4808,20 +4903,15 @@ fn sys_brk(new_brk: u64) -> u64 {
     use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::mm::pmm::PAGE_SIZE;
 
-    let tid = match crate::sched::current_thread() {
-        Some(t) => t,
+    let (_tid, process_id, pml4) = match current_process_vma_context() {
+        Some(ctx) => ctx,
         None => return ENOMEM,
-    };
-
-    let pml4 = match crate::thread::get_thread_address_space(tid) {
-        Some(p) if p != 0 => p as usize,
-        _ => return ENOMEM,
     };
 
     let heap_start = atom_abi::USER_HEAP_START as usize;
 
     // Find existing heap VMA
-    let current_brk = match vma::find_vma(pml4, heap_start) {
+    let current_brk = match vma::find_process_vma(process_id, heap_start) {
         Some(vma) if vma.label == "heap" => vma.end,
         _ => {
             // No heap VMA exists yet. If new_brk == 0, return the default start.
@@ -4843,7 +4933,7 @@ fn sys_brk(new_brk: u64) -> u64 {
                 label: "heap",
             };
 
-            match vma::insert_vma(pml4, heap_vma) {
+            match vma::insert_process_vma(process_id, heap_vma) {
                 Ok(()) => return new_brk_aligned as u64,
                 Err(_) => return ENOMEM,
             }
@@ -4865,7 +4955,9 @@ fn sys_brk(new_brk: u64) -> u64 {
     }
 
     // Remove old heap VMA and replace with resized one
-    vma::remove_vma(pml4, heap_start);
+    if vma::remove_process_vma(process_id, heap_start).is_err() {
+        return ENOMEM;
+    }
 
     if new_brk_aligned < current_brk {
         // Shrinking: unmap pages in the released range
@@ -4875,7 +4967,7 @@ fn sys_brk(new_brk: u64) -> u64 {
             if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
                 if crate::mm::vm::unmap_page_in_pml4(pml4, page).is_ok() {
                     crate::mm::pmm::free_page(phys);
-                    vma::account_unmap(pml4);
+                    let _ = vma::account_process_unmap(process_id);
                 }
             }
         }
@@ -4889,14 +4981,18 @@ fn sys_brk(new_brk: u64) -> u64 {
         label: "heap",
     };
 
-    match vma::insert_vma(pml4, new_heap) {
+    match vma::insert_process_vma(process_id, new_heap) {
         Ok(()) => new_brk_aligned as u64,
         Err(_) => ENOMEM,
     }
 }
 
 /// Helper: unmap all physical pages for a VMA by walking the page table
-fn unmap_vma_pages(pml4: usize, vma: &crate::mm::vma::Vma) {
+fn unmap_vma_pages(
+    process_id: crate::process::ProcessId,
+    pml4: usize,
+    vma: &crate::mm::vma::Vma,
+) {
     use crate::mm::pmm::PAGE_SIZE;
 
     for page in (vma.start..vma.end).step_by(PAGE_SIZE) {
@@ -4908,7 +5004,7 @@ fn unmap_vma_pages(pml4: usize, vma: &crate::mm::vma::Vma) {
                 crate::mm::vma::VmaBacking::Device { .. } => {},
                 _ => crate::mm::pmm::free_page(phys),
             }
-            crate::mm::vma::account_unmap(pml4);
+            let _ = crate::mm::vma::account_process_unmap(process_id);
         }
     }
 }
@@ -5200,65 +5296,64 @@ const MAX_PATH_BUF: usize = 256;
 
 #[derive(Clone, Copy)]
 struct FdOwnerContext {
-    owner_pml4: u64,
-    owner_process: Option<crate::process::ProcessId>,
-}
-
-fn current_owner_pml4() -> Option<u64> {
-    let tid = crate::sched::current_thread()?;
-    let pml4 = crate::thread::get_thread_address_space(tid)?;
-
-    if pml4 == 0 {
-        None
-    } else {
-        Some(pml4)
-    }
+    process_id: crate::process::ProcessId,
+    address_space_pml4: u64,
 }
 
 fn current_fd_owner_context() -> Option<FdOwnerContext> {
     let tid = crate::sched::current_thread()?;
-    let owner_pml4 = current_owner_pml4()?;
-    let owner_process = crate::thread::get_thread_process_id(tid);
+    let process_id = crate::thread::get_thread_process_id(tid)
+        .expect("FD operations require the current thread to have a valid ProcessId");
+    let address_space_pml4 = crate::thread::get_thread_address_space(tid)
+        .expect("FD operations require the current thread to have an address space");
+    assert_ne!(
+        address_space_pml4,
+        0,
+        "FD operations require the current thread to have a non-zero userspace PML4"
+    );
 
-    if let Some(process_id) = owner_process {
-        let process = crate::process::get_process(process_id)
-            .expect("userspace FD owner must resolve to a registered process");
-        assert_eq!(
-            process.pml4_phys,
-            owner_pml4,
-            "FD caller process {} PML4 0x{:X} must match caller owner_pml4 0x{:X}",
-            process_id,
-            process.pml4_phys,
-            owner_pml4
-        );
-    }
+    let process = crate::process::get_process(process_id)
+        .expect("FD caller process must resolve to a registered process");
+    assert_eq!(
+        process.pml4_phys,
+        address_space_pml4,
+        "FD caller process {} PML4 0x{:X} must match current thread PML4 0x{:X}",
+        process_id,
+        process.pml4_phys,
+        address_space_pml4
+    );
 
     Some(FdOwnerContext {
-        owner_pml4,
-        owner_process,
+        process_id,
+        address_space_pml4,
     })
 }
 
+fn fd_owner_process(fd: &KernelFd) -> crate::process::ProcessId {
+    fd.owner_process
+        .expect("in-use FD entries must always carry owner_process")
+}
+
 fn assert_fd_process_alignment(fd: &KernelFd) {
-    if let Some(process_id) = fd.owner_process {
-        let process = crate::process::get_process(process_id)
-            .expect("FD owner_process must resolve to a registered process");
-        assert_eq!(
-            process.pml4_phys,
-            fd.owner_pml4,
-            "FD owner process {} PML4 0x{:X} must match owner_pml4 0x{:X}",
-            process_id,
-            process.pml4_phys,
-            fd.owner_pml4
-        );
+    if !fd.in_use {
+        return;
     }
+
+    let process_id = fd_owner_process(fd);
+    let process = crate::process::get_process(process_id)
+        .expect("FD owner_process must resolve to a registered process");
+    debug_assert_ne!(
+        process.pml4_phys,
+        0,
+        "FD owner process {} must have a non-zero PML4",
+        process_id
+    );
 }
 
 /// A kernel-side open file/directory (zero-heap, stored in .bss).
 #[derive(Clone)]
 struct KernelFd {
     in_use: bool,
-    owner_pml4: u64,
     owner_process: Option<crate::process::ProcessId>,
     path: [u8; MAX_PATH_BUF],
     path_len: usize,
@@ -5276,7 +5371,6 @@ struct KernelFd {
 impl KernelFd {
     const EMPTY: Self = Self {
         in_use: false,
-        owner_pml4: 0,
         owner_process: None,
         path: [0u8; MAX_PATH_BUF],
         path_len: 0,
@@ -5346,15 +5440,7 @@ fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Resu
 
     assert_fd_process_alignment(&table[idx]);
 
-    if let Some(caller_process) = caller.owner_process {
-        if let Some(entry_process) = table[idx].owner_process {
-            if entry_process != caller_process {
-                return Err(EBADF);
-            }
-        }
-    }
-
-    if table[idx].owner_pml4 != caller.owner_pml4 {
+    if fd_owner_process(&table[idx]) != caller.process_id {
         return Err(EBADF);
     }
 
@@ -5368,29 +5454,19 @@ fn validate_fd_ownership_with_owner(
 ) -> u64 {
     assert_fd_process_alignment(&table[idx]);
 
-    if let Some(caller_process) = caller.owner_process {
-        if let Some(entry_process) = table[idx].owner_process {
-            if entry_process != caller_process {
-                return EBADF;
-            }
-        }
-    }
-
-    if table[idx].owner_pml4 != caller.owner_pml4 {
+    if fd_owner_process(&table[idx]) != caller.process_id {
         return EBADF;
     }
 
     ESUCCESS
 }
 
-fn note_fd_owner_activity(owner_pml4: u64) {
-    if owner_pml4 != 0 {
-        CLEANED_FD_OWNERS.lock().remove(&owner_pml4);
-    }
+fn note_fd_process_activity(process_id: crate::process::ProcessId) {
+    CLEANED_FD_PROCESSES.lock().remove(&process_id);
 }
 
-fn begin_fd_owner_cleanup(owner_pml4: u64) -> bool {
-    CLEANED_FD_OWNERS.lock().insert(owner_pml4)
+fn begin_fd_process_cleanup(process_id: crate::process::ProcessId) -> bool {
+    CLEANED_FD_PROCESSES.lock().insert(process_id)
 }
 
 fn get_fd_entry(
@@ -5411,61 +5487,23 @@ fn get_fd_entry(
     Ok((table, idx))
 }
 
-pub(crate) fn close_fds_for_owner(owner_pml4: u64) {
-    if owner_pml4 == 0 {
-        return;
-    }
-
-    if !begin_fd_owner_cleanup(owner_pml4) {
+pub(crate) fn close_fds_for_process(process_id: crate::process::ProcessId) {
+    if !begin_fd_process_cleanup(process_id) {
         log_debug!(
             "syscall",
-            "FD cleanup already ran for owner PML4 0x{:X} - skipping duplicate close_fds_for_owner",
-            owner_pml4
+            "FD cleanup already ran for process {} - skipping duplicate close_fds_for_process",
+            process_id
         );
         return;
     }
 
     let mut table = KERNEL_FD_TABLE.lock();
     for fd in table.iter_mut() {
-        if fd.in_use && fd.owner_pml4 == owner_pml4 {
+        if fd.in_use && fd_owner_process(fd) == process_id {
             fd.free_cache();
             *fd = KernelFd::EMPTY;
         }
     }
-}
-
-pub(crate) fn close_fds_for_process(process_id: crate::process::ProcessId) {
-    let Some(process) = crate::process::get_process(process_id) else {
-        log_debug!(
-            "syscall",
-            "FD cleanup requested for unknown process {} - skipping close_fds_for_process",
-            process_id
-        );
-        return;
-    };
-
-    debug_assert_eq!(
-        process.id,
-        process_id,
-        "Process registry returned mismatched process {} while closing FDs for {}",
-        process.id,
-        process_id
-    );
-    debug_assert_ne!(
-        process.pml4_phys,
-        0,
-        "close_fds_for_process requires a non-zero PML4 for process {}",
-        process_id
-    );
-    debug_assert_eq!(
-        crate::process::process_id_for_pml4(process.pml4_phys),
-        Some(process_id),
-        "Process {} must remain mapped from PML4 0x{:X} before FD cleanup",
-        process_id,
-        process.pml4_phys
-    );
-
-    close_fds_for_owner(process.pml4_phys);
 }
 
 /// Allocate an fd slot (returns 3..MAX_KERNEL_FDS-1, or EMFILE on full).
@@ -5475,14 +5513,13 @@ fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
         None => return Err(EBADF),
     };
 
-    note_fd_owner_activity(owner.owner_pml4);
+    note_fd_process_activity(owner.process_id);
     let mut table = KERNEL_FD_TABLE.lock();
     // fd 0/1/2 reserved for stdin/out/err
     for i in 3..MAX_KERNEL_FDS {
         if !table[i].in_use {
             table[i].in_use = true;
-            table[i].owner_pml4 = owner.owner_pml4;
-            table[i].owner_process = owner.owner_process;
+            table[i].owner_process = Some(owner.process_id);
             assert_fd_process_alignment(&table[i]);
             let plen = path.len().min(MAX_PATH_BUF);
             table[i].path[..plen].copy_from_slice(&path.as_bytes()[..plen]);
@@ -5703,7 +5740,6 @@ fn sys_fs_close(fd: u64) -> u64 {
     }
 
     table[idx].free_cache();
-    table[idx].owner_pml4 = 0;
     table[idx].owner_process = None;
     table[idx].in_use = false;
     ESUCCESS
@@ -5842,7 +5878,10 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         let mut page = start_page;
         while page <= end_page {
             crate::mm::vma::handle_page_fault(
-                caller.owner_pml4 as usize, page, 0x6 /* write|user|not-present */);
+                caller.address_space_pml4 as usize,
+                page,
+                0x6 /* write|user|not-present */,
+            );
             page += page_size;
         }
     }

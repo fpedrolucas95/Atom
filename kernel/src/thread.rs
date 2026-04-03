@@ -317,6 +317,8 @@ pub struct Thread {
     pub address_space: u64,
     pub priority: ThreadPriority,
     pub name: &'static str,
+    /// Mirror-only compatibility cache of the owning process capability state.
+    /// Userspace authorization must never consult this table directly.
     pub capability_table: CapabilityTable,
     /// Whether this thread executes in Ring 3 (userspace).
     /// This flag is set at creation time and never changes.
@@ -576,25 +578,9 @@ impl ThreadList {
             address_space: t.address_space,
             priority: t.priority,
             name: t.name,
-            capability_table: crate::cap::create_capability_table(t.id),
+            capability_table: t.capability_table.clone(),
             is_userspace: t.is_userspace,
         })
-    }
-
-    pub fn validate_capability(
-        &self,
-        thread_id: ThreadId,
-        cap_handle: crate::cap::CapHandle,
-        required_permission: crate::cap::CapPermissions,
-    ) -> Result<(), crate::cap::CapError> {
-        let threads = self.threads.lock();
-        let thread = threads
-            .iter()
-            .find(|t| t.id == thread_id)
-            .ok_or(crate::cap::CapError::NotFound)?;
-
-        thread.capability_table.validate(cap_handle, required_permission)?;
-        Ok(())
     }
 
     pub fn add_capability(
@@ -622,40 +608,130 @@ impl ThreadList {
         thread.capability_table.remove(cap_handle)
     }
 
-    pub fn has_capability(
+    pub fn local_capability(
         &self,
         thread_id: ThreadId,
         cap_handle: crate::cap::CapHandle,
-    ) -> bool {
+    ) -> Option<crate::cap::Capability> {
         let threads = self.threads.lock();
-        if let Some(thread) = threads.iter().find(|t| t.id == thread_id) {
-            thread.capability_table.contains(cap_handle)
-        } else {
-            false
-        }
+        let thread = threads.iter().find(|t| t.id == thread_id)?;
+        thread.capability_table.get(cap_handle).cloned()
     }
 
-    pub fn validate_capability_by_type<F>(
+    pub fn local_capability_handles(
         &self,
         thread_id: ThreadId,
-        required_permission: crate::cap::CapPermissions,
-        resource_filter: F,
-    ) -> bool
-    where
-        F: Fn(&crate::cap::ResourceType) -> bool,
-    {
+    ) -> Vec<crate::cap::CapHandle> {
         let threads = self.threads.lock();
-        if let Some(thread) = threads.iter().find(|t| t.id == thread_id) {
-            for handle in thread.capability_table.list() {
-                if let Some(cap) = thread.capability_table.get(handle) {
-                    if resource_filter(&cap.resource) && cap.has_permission(required_permission) {
-                        return true;
-                    }
+        let Some(thread) = threads.iter().find(|t| t.id == thread_id) else {
+            return Vec::new();
+        };
+
+        thread.capability_table.list()
+    }
+
+    pub fn mirror_process_capability(
+        &self,
+        process_id: ProcessId,
+        capability: crate::cap::Capability,
+    ) -> Result<(), crate::cap::CapError> {
+        let mut threads = self.threads.lock();
+
+        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+            thread.capability_table.set_owner_process(Some(process_id));
+
+            if let Some(existing) = thread.capability_table.get(capability.handle).cloned() {
+                debug_assert_eq!(existing.handle, capability.handle);
+                debug_assert_eq!(existing.resource, capability.resource);
+                debug_assert_eq!(existing.permissions, capability.permissions);
+                debug_assert_eq!(existing.owner, capability.owner);
+                debug_assert_eq!(existing.parent, capability.parent);
+                debug_assert_eq!(existing.children, capability.children);
+                continue;
+            }
+
+            thread.capability_table.insert(capability.clone())?;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_process_capability_mirror(
+        &self,
+        process_id: ProcessId,
+        cap_handle: crate::cap::CapHandle,
+    ) -> Option<crate::cap::Capability> {
+        let mut threads = self.threads.lock();
+        let mut removed: Option<crate::cap::Capability> = None;
+
+        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+            let thread_removed = thread.capability_table.remove(cap_handle);
+
+            debug_assert!(
+                thread_removed.is_some(),
+                "Capability {} missing from thread {} mirror for process {}",
+                cap_handle,
+                thread.id,
+                process_id
+            );
+
+            if let Some(existing) = removed.as_ref() {
+                if let Some(thread_removed) = thread_removed.as_ref() {
+                    debug_assert_eq!(existing.handle, thread_removed.handle);
+                    debug_assert_eq!(existing.resource, thread_removed.resource);
+                    debug_assert_eq!(existing.permissions, thread_removed.permissions);
+                    debug_assert_eq!(existing.owner, thread_removed.owner);
+                    debug_assert_eq!(existing.parent, thread_removed.parent);
+                    debug_assert_eq!(existing.children, thread_removed.children);
                 }
+            } else if let Some(thread_removed) = thread_removed {
+                removed = Some(thread_removed);
             }
         }
-        false
+
+        removed
     }
+
+    pub fn append_process_capability_child_mirror(
+        &self,
+        process_id: ProcessId,
+        parent_handle: crate::cap::CapHandle,
+        child_handle: crate::cap::CapHandle,
+    ) -> Result<(), crate::cap::CapError> {
+        let mut threads = self.threads.lock();
+
+        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+            let parent = thread
+                .capability_table
+                .get_mut(parent_handle)
+                .ok_or(crate::cap::CapError::NotFound)?;
+            if !parent.children.contains(&child_handle) {
+                parent.children.push(child_handle);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_process_capability_child_mirror(
+        &self,
+        process_id: ProcessId,
+        parent_handle: crate::cap::CapHandle,
+        child_handle: crate::cap::CapHandle,
+    ) -> Result<(), crate::cap::CapError> {
+        let mut threads = self.threads.lock();
+
+        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+            let parent = thread
+                .capability_table
+                .get_mut(parent_handle)
+                .ok_or(crate::cap::CapError::NotFound)?;
+            parent.children.retain(|existing| *existing != child_handle);
+        }
+
+        Ok(())
+    }
+
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -738,8 +814,125 @@ fn track_thread_process(thread: &Thread) {
     }
 }
 
+fn sync_thread_capability_mirror_from_process(thread: &mut Thread) {
+    thread.capability_table.set_owner_process(thread.process_id);
+
+    let Some(process_id) = thread.process_id else {
+        return;
+    };
+
+    let Some(process) = process::get_process(process_id) else {
+        debug_assert!(
+            false,
+            "Thread {} missing process {} while syncing capability mirror",
+            thread.id,
+            process_id
+        );
+        return;
+    };
+
+    debug_assert_eq!(
+        thread.capability_table.count(),
+        0,
+        "New thread {} should start with an empty capability mirror before sync",
+        thread.id
+    );
+
+    for handle in process.capability_table.list() {
+        let capability = process
+            .capability_table
+            .get(handle)
+            .cloned()
+            .expect("process capability listed but missing during thread mirror sync");
+        debug_assert!(
+            thread.capability_table.insert(capability).is_ok(),
+            "Failed to seed capability mirror for new thread {} from process {}",
+            thread.id,
+            process_id
+        );
+    }
+}
+
+fn debug_assert_capability_mirror_entry(
+    thread_id: ThreadId,
+    process_id: ProcessId,
+    cap_handle: crate::cap::CapHandle,
+) {
+    let local_cap = THREAD_LIST.local_capability(thread_id, cap_handle);
+    let process_cap = process::get_process_capability(process_id, cap_handle);
+
+    debug_assert_eq!(
+        local_cap.is_some(),
+        process_cap.is_some(),
+        "Capability {} mirror presence mismatch for thread {} and process {}",
+        cap_handle,
+        thread_id,
+        process_id
+    );
+
+    if let (Some(local_cap), Some(process_cap)) = (local_cap, process_cap) {
+        debug_assert_eq!(local_cap.handle, process_cap.handle);
+        debug_assert_eq!(local_cap.resource, process_cap.resource);
+        debug_assert_eq!(local_cap.permissions, process_cap.permissions);
+        debug_assert_eq!(local_cap.owner, process_cap.owner);
+        debug_assert_eq!(local_cap.parent, process_cap.parent);
+        debug_assert_eq!(local_cap.children, process_cap.children);
+    }
+}
+
+fn debug_assert_capability_mirror_process(thread_id: ThreadId, process_id: ProcessId) {
+    let local_handles = THREAD_LIST.local_capability_handles(thread_id);
+    let Some(process_state) = process::get_process(process_id) else {
+        debug_assert!(
+            false,
+            "Thread {} missing process {} while validating capability mirror",
+            thread_id,
+            process_id
+        );
+        return;
+    };
+
+    let process_handles = process_state.capability_table.list();
+
+    debug_assert_eq!(
+        local_handles.len(),
+        process_handles.len(),
+        "Capability mirror size mismatch for thread {} and process {}",
+        thread_id,
+        process_id
+    );
+
+    for handle in process_handles {
+        debug_assert_capability_mirror_entry(thread_id, process_id, handle);
+    }
+}
+
+fn require_process_capability_authority(
+    thread_id: ThreadId,
+) -> Result<ProcessId, crate::cap::CapError> {
+    let process_id = get_thread_process_id(thread_id).ok_or_else(|| {
+        debug_assert!(
+            false,
+            "capability authorization must be Process-owned; thread {} has no ProcessId",
+            thread_id
+        );
+        crate::cap::CapError::NotFound
+    })?;
+
+    debug_assert!(
+        process::get_process(process_id).is_some(),
+        "capability authorization requires registered process state for thread {} process {}",
+        thread_id,
+        process_id
+    );
+
+    Ok(process_id)
+}
+
 pub fn add_thread(thread: Thread) {
+    let mut thread = thread;
     track_thread_process(&thread);
+    sync_thread_capability_mirror_from_process(&mut thread);
     THREAD_LIST.add(thread);
 }
 
@@ -797,45 +990,82 @@ pub fn get_thread_process_id(thread_id: ThreadId) -> Option<ProcessId> {
     threads.iter().find(|t| t.id == thread_id).and_then(|t| t.process_id)
 }
 
+pub fn get_thread_process_pml4(thread_id: ThreadId) -> Option<u64> {
+    let (process_id, cached_pml4, is_userspace) = {
+        let threads = THREAD_LIST.threads.lock();
+        let thread = threads.iter().find(|t| t.id == thread_id)?;
+        (thread.process_id, thread.address_space, thread.is_userspace)
+    };
+
+    let process_id = process_id?;
+    let process_pml4 = process::get_process_pml4(process_id)?;
+
+    if is_userspace {
+        assert_eq!(
+            cached_pml4,
+            process_pml4,
+            "userspace thread {} must cache the same primary PML4 as process {}: 0x{:X} != 0x{:X}",
+            thread_id,
+            process_id,
+            cached_pml4,
+            process_pml4
+        );
+    }
+
+    Some(process_pml4)
+}
+
+pub(crate) fn mirror_process_capability_to_threads(
+    process_id: ProcessId,
+    capability: crate::cap::Capability,
+) -> Result<(), crate::cap::CapError> {
+    THREAD_LIST.mirror_process_capability(process_id, capability)
+}
+
+pub(crate) fn remove_process_capability_mirror(
+    process_id: ProcessId,
+    cap_handle: crate::cap::CapHandle,
+) -> Option<crate::cap::Capability> {
+    THREAD_LIST.remove_process_capability_mirror(process_id, cap_handle)
+}
+
+pub(crate) fn append_process_capability_child_mirror(
+    process_id: ProcessId,
+    parent_handle: crate::cap::CapHandle,
+    child_handle: crate::cap::CapHandle,
+) -> Result<(), crate::cap::CapError> {
+    THREAD_LIST.append_process_capability_child_mirror(process_id, parent_handle, child_handle)
+}
+
+pub(crate) fn remove_process_capability_child_mirror(
+    process_id: ProcessId,
+    parent_handle: crate::cap::CapHandle,
+    child_handle: crate::cap::CapHandle,
+) -> Result<(), crate::cap::CapError> {
+    THREAD_LIST.remove_process_capability_child_mirror(process_id, parent_handle, child_handle)
+}
+
+pub(crate) fn list_thread_local_capabilities(
+    thread_id: ThreadId,
+) -> Vec<crate::cap::CapHandle> {
+    THREAD_LIST.local_capability_handles(thread_id)
+}
+
 pub fn validate_thread_capability(
     thread_id: ThreadId,
     cap_handle: crate::cap::CapHandle,
     required_permission: crate::cap::CapPermissions,
 ) -> Result<(), crate::cap::CapError> {
-    let (has_local_caps, process_id) = {
-        let threads = THREAD_LIST.threads.lock();
-        let thread = threads
-            .iter()
-            .find(|t| t.id == thread_id)
-            .ok_or(crate::cap::CapError::NotFound)?;
-        (thread.capability_table.count() > 0, thread.process_id)
-    };
-
-    if has_local_caps {
-        log_debug!(
-            LOG_ORIGIN,
-            "validate_thread_capability: thread {} using thread-local capability table",
-            thread_id
-        );
-        return THREAD_LIST.validate_capability(thread_id, cap_handle, required_permission);
-    }
-
-    if let Some(process_id) = process_id {
-        log_debug!(
-            LOG_ORIGIN,
-            "validate_thread_capability: thread {} using process {} capability table fallback",
-            thread_id,
-            process_id
-        );
-        return process::validate_process_capability(process_id, cap_handle, required_permission);
-    }
+    let process_id = require_process_capability_authority(thread_id)?;
 
     log_debug!(
         LOG_ORIGIN,
-        "validate_thread_capability: thread {} has no local or process capability store",
-        thread_id
+        "validate_thread_capability: thread {} authorizing via process {} capability table",
+        thread_id,
+        process_id
     );
-    THREAD_LIST.validate_capability(thread_id, cap_handle, required_permission)
+    debug_assert_capability_mirror_entry(thread_id, process_id, cap_handle);
+    process::validate_process_capability(process_id, cap_handle, required_permission)
 }
 
 pub fn add_thread_capability(
@@ -844,16 +1074,25 @@ pub fn add_thread_capability(
 ) -> Result<crate::cap::CapHandle, crate::cap::CapError> {
     crate::cap::note_thread_capability_activity(thread_id);
 
-    let process_id = get_thread_process_id(thread_id);
-    let capability_for_process = capability.clone();
-    let handle = THREAD_LIST.add_capability(thread_id, capability)?;
+    let process_id = get_thread_process_id(thread_id).ok_or(crate::cap::CapError::NotFound)?;
+    debug_assert_eq!(
+        capability.owner,
+        process_id,
+        "Capability {} owner {} does not match thread {} process {}",
+        capability.handle,
+        capability.owner,
+        thread_id,
+        process_id
+    );
 
-    if let Some(process_id) = process_id {
-        if let Err(err) = process::add_process_capability(process_id, capability_for_process) {
-            let _ = THREAD_LIST.remove_capability(thread_id, handle);
-            return Err(err);
-        }
+    let handle = process::add_process_capability(process_id, capability.clone())?;
+
+    if let Err(err) = mirror_process_capability_to_threads(process_id, capability) {
+        let _ = process::remove_process_capability(process_id, handle);
+        return Err(err);
     }
+
+    debug_assert_capability_mirror_entry(thread_id, process_id, handle);
 
     Ok(handle)
 }
@@ -862,20 +1101,20 @@ pub fn remove_thread_capability(
     thread_id: ThreadId,
     cap_handle: crate::cap::CapHandle,
 ) -> Option<crate::cap::Capability> {
-    let process_id = get_thread_process_id(thread_id);
-    let removed = THREAD_LIST.remove_capability(thread_id, cap_handle);
+    let Some(process_id) = get_thread_process_id(thread_id) else {
+        return THREAD_LIST.remove_capability(thread_id, cap_handle);
+    };
+
+    let removed = process::remove_process_capability(process_id, cap_handle);
 
     if removed.is_some() {
-        if let Some(process_id) = process_id {
-            let removed_from_process = process::remove_process_capability(process_id, cap_handle);
-            debug_assert!(
-                removed_from_process.is_some(),
-                "Capability {} missing from process {} mirror while removing from thread {}",
-                cap_handle,
-                process_id,
-                thread_id
-            );
-        }
+        let removed_from_threads = remove_process_capability_mirror(process_id, cap_handle);
+        debug_assert!(
+            removed_from_threads.is_some(),
+            "Capability {} missing from thread mirrors while removing from process {}",
+            cap_handle,
+            process_id
+        );
     }
 
     removed
@@ -885,7 +1124,12 @@ pub fn thread_has_capability(
     thread_id: ThreadId,
     cap_handle: crate::cap::CapHandle,
 ) -> bool {
-    THREAD_LIST.has_capability(thread_id, cap_handle)
+    let Ok(process_id) = require_process_capability_authority(thread_id) else {
+        return false;
+    };
+
+    debug_assert_capability_mirror_entry(thread_id, process_id, cap_handle);
+    process::process_has_capability(process_id, cap_handle)
 }
 
 pub fn validate_thread_capability_by_type<F>(
@@ -896,47 +1140,22 @@ pub fn validate_thread_capability_by_type<F>(
 where
     F: Fn(&crate::cap::ResourceType) -> bool,
 {
-    let (has_local_caps, process_id) = {
-        let threads = THREAD_LIST.threads.lock();
-        let Some(thread) = threads.iter().find(|t| t.id == thread_id) else {
-            return false;
-        };
-        (thread.capability_table.count() > 0, thread.process_id)
+    let Ok(process_id) = require_process_capability_authority(thread_id) else {
+        return false;
     };
-
-    if has_local_caps {
-        log_debug!(
-            LOG_ORIGIN,
-            "validate_thread_capability_by_type: thread {} using thread-local capability table",
-            thread_id
-        );
-        return THREAD_LIST.validate_capability_by_type(
-            thread_id,
-            required_permission,
-            resource_filter,
-        );
-    }
-
-    if let Some(process_id) = process_id {
-        log_debug!(
-            LOG_ORIGIN,
-            "validate_thread_capability_by_type: thread {} using process {} capability table fallback",
-            thread_id,
-            process_id
-        );
-        return process::validate_process_capability_by_type(
-            process_id,
-            required_permission,
-            resource_filter,
-        );
-    }
 
     log_debug!(
         LOG_ORIGIN,
-        "validate_thread_capability_by_type: thread {} has no local or process capability store",
-        thread_id
+        "validate_thread_capability_by_type: thread {} authorizing via process {} capability table",
+        thread_id,
+        process_id
     );
-    THREAD_LIST.validate_capability_by_type(thread_id, required_permission, resource_filter)
+    debug_assert_capability_mirror_process(thread_id, process_id);
+    process::validate_process_capability_by_type(
+        process_id,
+        required_permission,
+        resource_filter,
+    )
 }
 
 extern "C" {
@@ -1108,13 +1327,13 @@ pub fn process_count() -> usize {
 }
 
 /// Get information about all threads for OOM killer decisions.
-/// Returns (ThreadId, name, address_space, is_userspace) for each thread.
-pub fn get_all_thread_info() -> alloc::vec::Vec<(ThreadId, &'static str, u64, bool)> {
+/// Returns (ThreadId, name, process_id, is_userspace) for each thread.
+pub fn get_all_thread_info() -> alloc::vec::Vec<(ThreadId, &'static str, Option<ProcessId>, bool)> {
     let threads = THREAD_LIST.threads.lock();
     threads
         .iter()
         .filter(|t| t.state != ThreadState::Exited)
-        .map(|t| (t.id, t.name, t.address_space, t.is_userspace))
+    .map(|t| (t.id, t.name, t.process_id, t.is_userspace))
         .collect()
 }
 
@@ -1473,7 +1692,30 @@ static ZOMBIE_THREADS: Mutex<Vec<ZombieInfo>> = Mutex::new(Vec::new());
 static CLEANED_ADDRESS_SPACES: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
 #[inline]
-fn other_threads_share_address_space_locked(
+fn threads_share_process_or_address_space(a: &Thread, b: &Thread) -> bool {
+    if let (Some(a_process_id), Some(b_process_id)) = (a.process_id, b.process_id) {
+        if a_process_id == b_process_id {
+            debug_assert_eq!(
+                a.address_space,
+                b.address_space,
+                "Threads {} and {} share process {} but diverge on address_space: 0x{:X} != 0x{:X}",
+                a.id,
+                b.id,
+                a_process_id,
+                a.address_space,
+                b.address_space
+            );
+            return true;
+        }
+
+        return false;
+    }
+
+    a.address_space != 0 && a.address_space == b.address_space
+}
+
+#[inline]
+fn other_threads_share_teardown_group_locked(
     current_tid: ThreadId,
     address_space_cr3: u64,
     threads: &[Thread],
@@ -1482,20 +1724,24 @@ fn other_threads_share_address_space_locked(
         return false;
     }
 
+    let Some(current_thread) = threads.iter().find(|t| t.id == current_tid) else {
+        return false;
+    };
+
+    debug_assert_eq!(
+        current_thread.address_space,
+        address_space_cr3,
+        "Thread {} teardown CR3 mismatch: thread cache 0x{:X} != teardown CR3 0x{:X}",
+        current_tid,
+        current_thread.address_space,
+        address_space_cr3
+    );
+
     threads.iter().any(|t| {
         t.id != current_tid
-            && t.address_space == address_space_cr3
             && t.state != ThreadState::Exited
+            && threads_share_process_or_address_space(current_thread, t)
     })
-}
-
-fn other_threads_share_address_space(current_tid: ThreadId, address_space_cr3: u64) -> bool {
-    let threads = THREAD_LIST.threads.lock();
-    other_threads_share_address_space_locked(current_tid, address_space_cr3, &threads)
-}
-
-pub(crate) fn has_live_sibling_in_address_space(current_tid: ThreadId, address_space_cr3: u64) -> bool {
-    other_threads_share_address_space(current_tid, address_space_cr3)
 }
 
 /// Performs the final, dangerous cleanup operations (freeing stack and PML4)
@@ -1510,23 +1756,41 @@ fn perform_final_cleanup(
     // Step 5-7: Complete page table walk and physical memory cleanup
     log_debug!(LOG_ORIGIN, "Final Step: Walking page tables and freeing physical frames for TID {}", thread_id);
 
+    let primary_address_space_cr3 = if let Some(process_id) = process_id {
+        let process_pml4 = process::get_process_pml4(process_id).expect(
+            "primary userspace address-space teardown requires a registered process PML4",
+        );
+        debug_assert_eq!(
+            process_pml4,
+            address_space_cr3,
+            "primary userspace address-space teardown must use the process-owned PML4: process {} has 0x{:X}, thread {} cached 0x{:X}",
+            process_id,
+            process_pml4,
+            thread_id,
+            address_space_cr3
+        );
+        process_pml4
+    } else {
+        address_space_cr3
+    };
+
     // We must ensure we are NOT using the PML4 we are about to free.
     // If we are currently on this PML4, this is a fatal logic error in the reaper.
     let current_cr3 = crate::arch::read_cr3();
-    if address_space_cr3 != 0 && address_space_cr3 == current_cr3 {
-        log_panic!(LOG_ORIGIN, "REAPER ERROR: Attempting to free active PML4 0x{:X}", address_space_cr3);
+    if primary_address_space_cr3 != 0 && primary_address_space_cr3 == current_cr3 {
+        log_panic!(LOG_ORIGIN, "REAPER ERROR: Attempting to free active PML4 0x{:X}", primary_address_space_cr3);
     }
 
-    let should_cleanup_address_space = if address_space_cr3 != 0 && address_space_cr3 != current_cr3 {
+    let should_cleanup_address_space = if primary_address_space_cr3 != 0 && primary_address_space_cr3 != current_cr3 {
         let threads = THREAD_LIST.threads.lock();
-        let shared = other_threads_share_address_space_locked(thread_id, address_space_cr3, &threads);
+        let shared = other_threads_share_teardown_group_locked(thread_id, primary_address_space_cr3, &threads);
 
         if shared {
             log_debug!(
                 LOG_ORIGIN,
                 "Skipping address-space teardown for TID {} (PML4 0x{:X}) - other active threads still share it",
                 thread_id,
-                address_space_cr3
+                primary_address_space_cr3
             );
             false
         } else if let Some(process_id) = process_id {
@@ -1536,34 +1800,34 @@ fn perform_final_cleanup(
                     "Skipping address-space teardown for TID {} (process {} / PML4 0x{:X}) until final process cleanup is claimed",
                     thread_id,
                     process_id,
-                    address_space_cr3
+                    primary_address_space_cr3
                 );
                 false
             } else {
                 let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
-                if cleaned.contains(&address_space_cr3) {
+                if cleaned.contains(&primary_address_space_cr3) {
                     log_debug!(
                         LOG_ORIGIN,
                         "Address-space teardown already completed for PML4 0x{:X} - skipping duplicate cleanup",
-                        address_space_cr3
+                        primary_address_space_cr3
                     );
                     false
                 } else {
-                    cleaned.insert(address_space_cr3);
+                    cleaned.insert(primary_address_space_cr3);
                     true
                 }
             }
         } else {
             let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
-            if cleaned.contains(&address_space_cr3) {
+            if cleaned.contains(&primary_address_space_cr3) {
                 log_debug!(
                     LOG_ORIGIN,
                     "Address-space teardown already completed for PML4 0x{:X} - skipping duplicate cleanup",
-                    address_space_cr3
+                    primary_address_space_cr3
                 );
                 false
             } else {
-                cleaned.insert(address_space_cr3);
+                cleaned.insert(primary_address_space_cr3);
                 true
             }
         }
@@ -1572,14 +1836,15 @@ fn perform_final_cleanup(
     };
 
     let pages_freed = if should_cleanup_address_space {
-        if other_threads_share_address_space(thread_id, address_space_cr3) {
+        let threads = THREAD_LIST.threads.lock();
+        if other_threads_share_teardown_group_locked(thread_id, primary_address_space_cr3, &threads) {
             log_error!(
                 LOG_ORIGIN,
                 "Refusing to destroy VMA/PML4 0x{:X} for TID {} because it is still shared",
-                address_space_cr3,
+                primary_address_space_cr3,
                 thread_id
             );
-            CLEANED_ADDRESS_SPACES.lock().remove(&address_space_cr3);
+            CLEANED_ADDRESS_SPACES.lock().remove(&primary_address_space_cr3);
             0
         } else {
             if let Some(process_id) = process_id {
@@ -1587,20 +1852,32 @@ fn perform_final_cleanup(
                     process::is_process_cleaned(process_id),
                     "Process {} must be marked cleaned before freeing PML4 0x{:X}",
                     process_id,
-                    address_space_cr3
+                    primary_address_space_cr3
                 );
             }
 
             // Destroy VMA map for this address space (must happen before freeing pages)
-            crate::mm::vma::destroy_vma_map(address_space_cr3 as usize);
+            if let Some(process_id) = process_id {
+                if let Err(err) = crate::mm::vma::destroy_process_vma_map(process_id) {
+                    log_panic!(
+                        LOG_ORIGIN,
+                        "Primary userspace address-space teardown must be Process-owned: failed to destroy VMA map for process {} on PML4 0x{:X}: {:?}",
+                        process_id,
+                        primary_address_space_cr3,
+                        err
+                    );
+                }
+            } else {
+                crate::mm::vma::destroy_vma_map(primary_address_space_cr3 as usize);
+            }
 
             // Thread has its own PML4 (userspace thread)
-            let user_pages = free_user_space_pages(address_space_cr3 as usize);
-            log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, address_space_cr3);
+            let user_pages = free_user_space_pages(primary_address_space_cr3 as usize);
+            log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, primary_address_space_cr3);
 
             // Free the PML4 itself
-            crate::mm::pmm::free_page(address_space_cr3 as usize);
-            log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", address_space_cr3);
+            crate::mm::pmm::free_page(primary_address_space_cr3 as usize);
+            log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", primary_address_space_cr3);
 
             user_pages
         }
@@ -1702,49 +1979,48 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     log_debug!(LOG_ORIGIN, "Step 2/10: Closing IPC ports");
     crate::ipc::close_all_thread_ports(thread_id);
 
-    // Step 3: Clean up shared memory regions
-    log_debug!(LOG_ORIGIN, "Step 3/10: Cleaning up shared memory");
-    crate::shared_mem::cleanup_thread_shared_memory(thread_id);
-
-    // Step 4: Claim process-owned final cleanup if this is the last live thread.
+    // Step 3: Claim process-owned final cleanup if this is the last live thread.
     let process_cleanup_claimed = if let Some(process_id) = thread_process_id {
         let claimed = process::claim_process_cleanup(process_id, thread_id, address_space_cr3);
         log_debug!(
             LOG_ORIGIN,
-            "Step 4/10: Process cleanup claim for process {} by thread {} => {}",
+            "Step 3/10: Process cleanup claim for process {} by thread {} => {}",
             process_id,
             thread_id,
             claimed
         );
         claimed
     } else {
-        log_debug!(LOG_ORIGIN, "Step 4/10: Kernel thread - no process cleanup claim");
+        log_debug!(LOG_ORIGIN, "Step 3/10: Kernel thread - no process cleanup claim");
         false
     };
 
-    // Step 5: Process-owned resources are cleaned exactly once, when the last
+    // Step 4: Process-owned resources are cleaned exactly once, when the last
     // userspace thread exits. Kernel threads keep the original thread-local path.
     if let Some(process_id) = thread_process_id {
         if process_cleanup_claimed {
-            log_debug!(LOG_ORIGIN, "Step 5/10: Closing process-owned FDs for {}", process_id);
+            log_debug!(LOG_ORIGIN, "Step 4/10: Cleaning up process-owned shared memory for {}", process_id);
+            crate::shared_mem::cleanup_process_shared_memory(process_id);
+
+            log_debug!(LOG_ORIGIN, "Step 4/10: Closing process-owned FDs for {}", process_id);
             crate::syscall::close_fds_for_process(process_id);
 
-            log_debug!(LOG_ORIGIN, "Step 5/10: Revoking process-owned capabilities for {}", process_id);
+            log_debug!(LOG_ORIGIN, "Step 4/10: Revoking process-owned capabilities for {}", process_id);
             crate::cap::revoke_all_process_capabilities(process_id);
         } else {
             log_debug!(
                 LOG_ORIGIN,
-                "Step 5/10: Skipping process-owned FD/cap cleanup for thread {} because sibling threads still exist or cleanup was already claimed",
+                "Step 4/10: Skipping process-owned shared_mem/FD/cap cleanup for thread {} because sibling threads still exist or cleanup was already claimed",
                 thread_id
             );
         }
     } else {
-        log_debug!(LOG_ORIGIN, "Step 5/10: Revoking kernel-thread capabilities");
+        log_debug!(LOG_ORIGIN, "Step 4/10: Revoking kernel-thread capabilities");
         crate::cap::revoke_all_thread_capabilities(thread_id);
     }
 
-    // Step 6: Clean up address spaces from manager
-    log_debug!(LOG_ORIGIN, "Step 6/10: Removing address spaces from manager");
+    // Step 5: Clean up address spaces from manager
+    log_debug!(LOG_ORIGIN, "Step 5/10: Removing address spaces from manager");
     crate::mm::addrspace::cleanup_thread_address_spaces(thread_id, address_space_cr3);
 
     // Step 8: Remove from scheduler (handled automatically when thread is removed or state is Exited)
