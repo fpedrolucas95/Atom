@@ -2891,13 +2891,14 @@ fn sys_cap_revoke(handle_raw: u64) -> u64 {
             let count = report.revoked.len();
             log_debug!(
                 "syscall",
-                "cap_revoke: status={:?} root={} revoked={} missing={} failed={} callbacks={}",
+                "cap_revoke: status={:?} root={} revoked={} missing={} failed={} callbacks={} callback_failures={}",
                 report.status,
                 report.root,
                 report.revoked.len(),
                 report.missing.len(),
                 report.failed.len(),
-                report.callbacks_executed
+                report.callbacks_executed(),
+                report.callback_failures()
             );
             if matches!(report.status, crate::cap::RevokeStatus::Failed) {
                 return EINVAL;

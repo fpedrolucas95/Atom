@@ -320,7 +320,6 @@ pub enum RevokeError {
     ProcessMutationFailed,
     ThreadMirrorMutationFailed,
     ParentLinkUpdateFailed,
-    CallbackFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,13 +329,29 @@ pub enum RevokeStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackError {
+    Recoverable(&'static str),
+    Fatal(&'static str),
+}
+
+pub type CallbackResult = Result<(), CallbackError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallbackExecutionResult {
+    pub resource_type: ResourceType,
+    pub handle: CapHandle,
+    pub callback_index: usize,
+    pub result: CallbackResult,
+}
+
 #[derive(Debug, Clone)]
 pub struct RevokeReport {
     pub root: CapHandle,
     pub revoked: Vec<CapHandle>,
     pub missing: Vec<CapHandle>,
     pub failed: Vec<(CapHandle, RevokeError)>,
-    pub callbacks_executed: usize,
+    pub callback_results: Vec<CallbackExecutionResult>,
     pub status: RevokeStatus,
 }
 
@@ -347,7 +362,7 @@ impl RevokeReport {
             revoked: Vec::new(),
             missing: Vec::new(),
             failed: Vec::new(),
-            callbacks_executed: 0,
+            callback_results: Vec::new(),
             status: RevokeStatus::Failed,
         }
     }
@@ -360,6 +375,17 @@ impl RevokeReport {
         } else {
             RevokeStatus::Failed
         };
+    }
+
+    pub fn callbacks_executed(&self) -> usize {
+        self.callback_results.len()
+    }
+
+    pub fn callback_failures(&self) -> usize {
+        self.callback_results
+            .iter()
+            .filter(|entry| entry.result.is_err())
+            .count()
     }
 }
 
@@ -645,22 +671,50 @@ impl CapabilityManager {
         callback_queue: &[(ResourceType, CapHandle)],
         report: &mut RevokeReport,
     ) {
-        let callback_snapshot = {
+        // Build invocation queue while holding callback registry lock.
+        // Callback execution always happens after this scope.
+        let callback_invocations = {
             let callbacks = REVOCATION_CALLBACKS.lock();
-            callbacks.clone()
-        };
+            let mut queue = Vec::new();
 
-        for (resource_type, handle) in callback_queue.iter().copied() {
-            let Some(callbacks) = callback_snapshot.get(&resource_type) else {
-                continue;
-            };
+            for (resource_type, handle) in callback_queue.iter().copied() {
+                let Some(registered_callbacks) = callbacks.get(&resource_type) else {
+                    continue;
+                };
 
-            for callback in callbacks {
-                report.callbacks_executed = report.callbacks_executed.saturating_add(1);
-                if matches!(callback(handle), CallbackResult::Failed) {
-                    report.failed.push((handle, RevokeError::CallbackFailed));
+                for (callback_index, callback) in registered_callbacks.iter().copied().enumerate() {
+                    queue.push(QueuedCallbackInvocation {
+                        resource_type,
+                        handle,
+                        callback_index,
+                        callback,
+                    });
                 }
             }
+
+            queue
+        };
+
+        for invocation in callback_invocations {
+            let result = (invocation.callback)(invocation.handle);
+
+            if let Err(err) = result {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Revocation callback failure: resource={:?} handle={} callback={} err={:?}",
+                    invocation.resource_type,
+                    invocation.handle,
+                    invocation.callback_index,
+                    err
+                );
+            }
+
+            report.callback_results.push(CallbackExecutionResult {
+                resource_type: invocation.resource_type,
+                handle: invocation.handle,
+                callback_index: invocation.callback_index,
+                result,
+            });
         }
     }
     
@@ -751,14 +805,16 @@ pub struct AuditStats {
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();
 static CLEANED_THREAD_CAPABILITIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallbackResult {
-    Completed,
-    Failed,
-}
-
 type RevocationCallback = fn(CapHandle) -> CallbackResult;
 type RevocationCallbackMap = BTreeMap<ResourceType, Vec<RevocationCallback>>;
+
+#[derive(Debug, Clone, Copy)]
+struct QueuedCallbackInvocation {
+    resource_type: ResourceType,
+    handle: CapHandle,
+    callback_index: usize,
+    callback: RevocationCallback,
+}
 
 static REVOCATION_CALLBACKS: Mutex<RevocationCallbackMap> = Mutex::new(BTreeMap::new());
 
@@ -847,11 +903,13 @@ pub fn get_capability_stats() -> CapabilityStats {
 
 /// Register a callback to be invoked when a capability of the specified resource type is revoked.
 /// Callbacks are invoked in registration order.
-/// 
+/// Callback contract is explicit: return `Ok(())` on success and `Err(CallbackError)` on failure.
+/// In `no_std`, callbacks must not panic; panic is a fatal kernel bug.
+///
 /// # Arguments
 /// * `resource_type` - The type of resource to register the callback for
 /// * `callback` - The function to call when a capability of this type is revoked
-/// 
+///
 /// # Requirements
 /// Implements Req 5.2: Allow registration of revocation callbacks per resource type
 pub fn register_revocation_callback(
@@ -1274,9 +1332,13 @@ pub fn revoke_all_thread_capabilities(thread_id: ThreadId) -> Vec<RevokeReport> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use spin::Mutex;
 
     static TEST_SERIAL: Mutex<()> = Mutex::new(());
+    static CALLBACK_TRACE: Mutex<Vec<(&'static str, u64)>> = Mutex::new(Vec::new());
+    static CALLBACK_FIXTURE: Mutex<Option<TestFixture>> = Mutex::new(None);
+    static CALLBACK_REENTRANT_REGISTERED: AtomicBool = AtomicBool::new(false);
 
     #[derive(Debug, Clone, Copy)]
     struct TestFixture {
@@ -1285,12 +1347,63 @@ mod tests {
         pml4: u64,
     }
 
+    fn reset_callback_test_state() {
+        CALLBACK_TRACE.lock().clear();
+        *CALLBACK_FIXTURE.lock() = None;
+        CALLBACK_REENTRANT_REGISTERED.store(false, Ordering::SeqCst);
+    }
+
+    fn callback_probe_subsystems(handle: CapHandle) -> CallbackResult {
+        CALLBACK_TRACE.lock().push(("probe", handle.raw()));
+
+        if let Some(fixture) = *CALLBACK_FIXTURE.lock() {
+            let _ = crate::process::get_process(fixture.pid);
+            let _ = crate::thread::list_thread_local_capabilities(fixture.tid);
+            let _ = crate::ipc::get_stats();
+            let _ = crate::mm::vma::get_process_stats(fixture.pid);
+        }
+
+        Ok(())
+    }
+
+    fn callback_first(handle: CapHandle) -> CallbackResult {
+        CALLBACK_TRACE.lock().push(("first", handle.raw()));
+        Ok(())
+    }
+
+    fn callback_second(handle: CapHandle) -> CallbackResult {
+        CALLBACK_TRACE.lock().push(("second", handle.raw()));
+        Ok(())
+    }
+
+    fn callback_error(handle: CapHandle) -> CallbackResult {
+        CALLBACK_TRACE.lock().push(("error", handle.raw()));
+        Err(CallbackError::Recoverable("test callback failure"))
+    }
+
+    fn callback_reentrant_register(handle: CapHandle) -> CallbackResult {
+        CALLBACK_TRACE.lock().push(("reentrant", handle.raw()));
+        if !CALLBACK_REENTRANT_REGISTERED.swap(true, Ordering::SeqCst) {
+            register_revocation_callback(
+                ResourceType::IpcPort { port_id: 95_009 },
+                callback_reentrant_late,
+            );
+        }
+        Ok(())
+    }
+
+    fn callback_reentrant_late(handle: CapHandle) -> CallbackResult {
+        CALLBACK_TRACE.lock().push(("late", handle.raw()));
+        Ok(())
+    }
+
     fn setup_fixture(seed: u64) -> TestFixture {
         let fixture = TestFixture {
             pid: ProcessId::from_raw(seed),
             tid: ThreadId::from_raw(seed),
             pml4: 0xC000_0000 + (seed << 12),
         };
+        reset_callback_test_state();
         cleanup_fixture(fixture);
 
         let thread = crate::thread::Thread {
@@ -1510,6 +1623,139 @@ mod tests {
         assert!(second.revoked.is_empty());
         assert!(second.missing.contains(&root.handle));
         assert!(lookup_capability(root.handle).is_none());
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_callback_can_query_other_subsystems_without_deadlock() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_006);
+
+        let (root, _, _) = install_simple_tree(fixture, 95_006);
+        *CALLBACK_FIXTURE.lock() = Some(fixture);
+        register_revocation_callback(
+            ResourceType::IpcPort { port_id: 95_006 },
+            callback_probe_subsystems,
+        );
+
+        let report = revoke_capability(root.handle, fixture.tid)
+            .expect("revoke must complete when callback queries subsystems");
+
+        assert_eq!(report.status, RevokeStatus::Complete);
+        assert_eq!(report.callbacks_executed(), report.revoked.len());
+        assert!(report.callback_results.iter().all(|entry| entry.result.is_ok()));
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_callback_error_is_recorded_without_aborting_revoke() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_007);
+
+        let (root, _, _) = install_simple_tree(fixture, 95_007);
+        register_revocation_callback(ResourceType::IpcPort { port_id: 95_007 }, callback_error);
+
+        let report = revoke_capability(root.handle, fixture.tid)
+            .expect("revoke must return report even with callback error");
+
+        assert_eq!(report.status, RevokeStatus::Complete);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.callback_failures(), report.revoked.len());
+        assert!(report.callback_results.iter().all(|entry| entry.result.is_err()));
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_multiple_callbacks_execute_outside_lock_in_deterministic_order() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_008);
+
+        let (root, _, _) = install_simple_tree(fixture, 95_008);
+        register_revocation_callback(ResourceType::IpcPort { port_id: 95_008 }, callback_first);
+        register_revocation_callback(ResourceType::IpcPort { port_id: 95_008 }, callback_second);
+
+        let report = revoke_capability(root.handle, fixture.tid)
+            .expect("revoke must return report for multiple callbacks");
+
+        assert_eq!(report.status, RevokeStatus::Complete);
+        assert_eq!(report.callbacks_executed(), report.revoked.len() * 2);
+        assert!(report.callback_results.iter().all(|entry| entry.result.is_ok()));
+
+        let expected_trace = report
+            .revoked
+            .iter()
+            .flat_map(|handle| [("first", handle.raw()), ("second", handle.raw())])
+            .collect::<Vec<_>>();
+        assert_eq!(*CALLBACK_TRACE.lock(), expected_trace);
+
+        let expected_indices = report
+            .revoked
+            .iter()
+            .flat_map(|_| [0usize, 1usize])
+            .collect::<Vec<_>>();
+        let reported_indices = report
+            .callback_results
+            .iter()
+            .map(|entry| entry.callback_index)
+            .collect::<Vec<_>>();
+        assert_eq!(reported_indices, expected_indices);
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_callback_reentrant_registration_does_not_deadlock_or_loop() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_009);
+
+        let (first_root, _, _) = install_simple_tree(fixture, 95_009);
+        register_revocation_callback(
+            ResourceType::IpcPort { port_id: 95_009 },
+            callback_reentrant_register,
+        );
+
+        let first_report = revoke_capability(first_root.handle, fixture.tid)
+            .expect("first revoke should succeed with reentrant callback");
+        assert_eq!(first_report.status, RevokeStatus::Complete);
+        assert_eq!(first_report.callbacks_executed(), first_report.revoked.len());
+
+        CALLBACK_TRACE.lock().clear();
+
+        let (second_root, _, _) = install_simple_tree(fixture, 95_009);
+        let second_report = revoke_capability(second_root.handle, fixture.tid)
+            .expect("second revoke should include late callback");
+        assert_eq!(second_report.status, RevokeStatus::Complete);
+        assert_eq!(second_report.callbacks_executed(), second_report.revoked.len() * 2);
+
+        let trace = CALLBACK_TRACE.lock().clone();
+        assert!(trace.iter().any(|(name, _)| *name == "reentrant"));
+        assert!(trace.iter().any(|(name, _)| *name == "late"));
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_callback_partial_failure_is_aggregated() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_010);
+
+        let (root, _, _) = install_simple_tree(fixture, 95_010);
+        register_revocation_callback(ResourceType::IpcPort { port_id: 95_010 }, callback_error);
+        register_revocation_callback(ResourceType::IpcPort { port_id: 95_010 }, callback_first);
+
+        let report = revoke_capability(root.handle, fixture.tid)
+            .expect("revoke must succeed with partial callback failures");
+
+        assert_eq!(report.status, RevokeStatus::Complete);
+        assert_eq!(report.callbacks_executed(), report.revoked.len() * 2);
+        assert_eq!(report.callback_failures(), report.revoked.len());
+        assert_eq!(
+            report.callback_results.len() - report.callback_failures(),
+            report.revoked.len()
+        );
 
         cleanup_fixture(fixture);
     }

@@ -125,11 +125,13 @@ No backtracking to a lower level is allowed while holding a higher-level lock.
 
 ## 7. Callback execution rules (INV-CB-001)
 
-1. Register and snapshot callbacks under `REVOCATION_CALLBACKS` lock.
-2. Invoke callbacks only after releasing `REVOCATION_CALLBACKS`.
-3. Callback execution is notification-only; it is not an integrity mechanism.
-4. In `no_std`, panic in callback is a fatal kernel bug. No panic recovery is promised.
-5. Callback code must avoid lock-order violations and reentrant structural deadlocks.
+1. Register callbacks under `REVOCATION_CALLBACKS` lock.
+2. Build callback invocation queue under `REVOCATION_CALLBACKS` lock, release the lock, then execute callbacks.
+3. Callback execution is notification-only and best-effort; it is not an integrity mechanism.
+4. Callback contract is explicit: `Result<(), CallbackError>`. No panic-based control flow is allowed.
+5. In `no_std`, panic in callback is a fatal kernel bug. No panic capture/recovery is promised.
+6. Callback failures must be surfaced in `RevokeReport.callback_results` and must not roll back the primary revoke mutation.
+7. Callback code must avoid lock-order violations and reentrant structural deadlocks.
 
 ## 8. Hot path rule: no global policy lookup (INV-HOT-001)
 
@@ -230,7 +232,9 @@ Normative rules:
 3. Execution continues on per-node failure and records every failure in `RevokeReport.failed`.
 4. Missing nodes are surfaced in `RevokeReport.missing`; no silent discard is allowed.
 5. Callback execution is a distinct phase after mutation and outside structural locks.
-6. Revoke result visibility is mandatory: each operation returns a `RevokeReport` with status `Complete`, `Partial`, or `Failed`.
+6. Callback outcome visibility is mandatory: each callback invocation is recorded in `RevokeReport.callback_results`.
+7. Callback failure is secondary to core revoke state: it is recorded but does not invalidate the main revoke outcome.
+8. Revoke result visibility is mandatory: each operation returns a `RevokeReport` with status `Complete`, `Partial`, or `Failed`.
 
 ## 13. Syscall section
 
