@@ -252,34 +252,38 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
     let from_userspace = (frame.cs & 0x3) == 0x3;
 
     // -----------------------------------------------------------------------
-    // Fast path: silently resolve demand-paged user-space page faults.
-    // This handles both:
-    //   - User-mode faults (error code 0x6 = write + user + not-present)
-    //   - Kernel-mode faults on user-space addresses (e.g., during
-    //     copy_nonoverlapping in write_buffer_to_user / syscall handlers)
-    // Only fall through to the diagnostic path for unresolvable faults.
+    // Page fault handling policy:
+    // - Faults are resolved by the VMA pipeline (classify -> admit -> materialize).
+    // - Resolved faults return to the faulting instruction.
+    // - Unresolvable userspace faults terminate the faulting thread/process.
+    // - Kernel-mode faults on user VMAs can still resolve through the same pipeline.
     // -----------------------------------------------------------------------
     if exception_number == 14 {
-        let cr2: u64;
-        unsafe {
-            core::arch::asm!(
-                "mov {}, cr2",
-                out(reg) cr2,
-                options(nomem, nostack, preserves_flags)
-            );
+        let cr2 = read_cr2();
+
+        if from_userspace {
+            if let Some(tid) = sched::current_thread() {
+                if handle_userspace_page_fault(tid, frame, cr2, error_code) {
+                    // Resolved — POP_ALL + iretq will retry the instruction.
+                    return;
+                }
+            }
         }
 
-        // Try demand paging for any page fault on user-space addresses,
-        // regardless of whether the CPU was in user mode or kernel mode
-        let is_user_addr = cr2 <= atom_abi::USER_CANONICAL_MAX;
-        if is_user_addr || from_userspace {
-            if let Some(tid) = sched::current_thread() {
-                if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
-                    if pml4 != 0
-                        && mm::vma::handle_page_fault(pml4 as usize, cr2 as usize, error_code) {
-                            // Resolved — POP_ALL + iretq will retry the instruction.
-                            return;
-                        }
+        // Kernel-mode faults may still be legitimate copy-to-user / VMA
+        // demand-paging activity. The resolver itself decides whether the
+        // address maps to a valid VMA.
+        if let Some(tid) = sched::current_thread() {
+            if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                if pml4 != 0 {
+                    let ctx = mm::vma::FaultContext::from_x86_error(cr2 as usize, error_code);
+                    if matches!(
+                        mm::vma::handle_page_fault(pml4 as usize, ctx, error_code),
+                        mm::vma::FaultResult::Resolved
+                    ) {
+                        // Resolved — POP_ALL + iretq will retry the instruction.
+                        return;
+                    }
                 }
             }
         }
@@ -325,14 +329,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
 
     match exception_number {
         14 => {
-            let cr2: u64;
-            unsafe {
-                core::arch::asm!(
-                    "mov {}, cr2",
-                    out(reg) cr2,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
+            let cr2 = read_cr2();
 
             let cr3: u64 = unsafe {
                 let v: u64;
@@ -471,11 +468,10 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 // higher-half identity map — no risk of double fault.
                 let user_rsp = frame.rsp;
 
-                // Validate RSP is in the user canonical range and aligned
+                // Validate only alignment; mapping validity is decided by VMA/PTE lookup.
                 let rsp_aligned = (user_rsp & 0x7) == 0;
-                let rsp_in_user_range = user_rsp > 0 && user_rsp <= 0x0000_7FFF_FFFF_FFF8;
 
-                if rsp_aligned && rsp_in_user_range {
+                if rsp_aligned {
                     // Walk the page tables to translate user RSP → physical
                     let rsp_page = (user_rsp & !0xFFF) as usize;
                     let rsp_offset = (user_rsp & 0xFFF) as usize;
@@ -553,10 +549,9 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                 } else {
                     log_panic!(
                         LOG_ORIGIN,
-                        "Cannot read return address: RSP={:#X} invalid (aligned={}, in_user_range={})",
+                        "Cannot read return address: RSP={:#X} invalid alignment (aligned={})",
                         user_rsp,
-                        rsp_aligned,
-                        rsp_in_user_range
+                        rsp_aligned
                     );
                 }
 
@@ -574,9 +569,6 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                         "User-space page fault (unresolvable) - terminating thread {}",
                         tid
                     );
-
-                    // Attempt notification first
-                    let _ = mm::policy::notify_page_fault(tid, cr2, error_code, frame.rip);
 
                     // Terminate the faulting thread
                     crate::thread::terminate_entity(
@@ -716,6 +708,105 @@ static mut TICKS: u64 = 0;
 static USER_MODE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn read_cr2() -> u64 {
+    let cr2: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, cr2",
+            out(reg) cr2,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    cr2
+}
+
+fn terminate_faulting_userspace_thread(
+    tid: crate::thread::ThreadId,
+    frame: &InterruptFrame,
+    cr2: u64,
+    error_code: u64,
+    fault_result: mm::vma::FaultResult,
+) -> ! {
+    let process_id = crate::thread::get_thread_process_id(tid);
+    log_panic!(
+        LOG_ORIGIN,
+        "USER PAGE FAULT -> terminating PID {:?} TID {}",
+        process_id,
+        tid
+    );
+    log_panic!(
+        LOG_ORIGIN,
+        "Fault context: RIP={:#016X} RSP={:#016X} CR2={:#016X} ERR={:#X} RESULT={:?}",
+        frame.rip,
+        frame.rsp,
+        cr2,
+        error_code,
+        fault_result
+    );
+
+    let reason = crate::thread::TerminationReason::PageFault {
+        address: cr2,
+        error_code,
+        rip: frame.rip,
+    };
+
+    crate::thread::terminate_entity(tid, reason);
+
+    let (_, next) = sched::on_timer_tick();
+    if let Some(next_id) = next {
+        log_info!(LOG_ORIGIN, "Switching to next thread {}", next_id);
+        crate::sched::perform_context_switch(tid, next_id);
+    }
+
+    log_panic!(
+        LOG_ORIGIN,
+        "No runnable threads available after terminating faulting userspace thread {}",
+        tid
+    );
+
+    loop {
+        halt();
+    }
+}
+
+fn handle_userspace_page_fault(
+    tid: crate::thread::ThreadId,
+    frame: &InterruptFrame,
+    cr2: u64,
+    error_code: u64,
+) -> bool {
+    let current_cr3 = crate::arch::read_cr3();
+    if current_cr3 == 0 {
+        terminate_faulting_userspace_thread(
+            tid,
+            frame,
+            cr2,
+            error_code,
+            mm::vma::FaultResult::InvalidAddress
+        );
+    }
+
+    let ctx = mm::vma::FaultContext::from_x86_error(cr2 as usize, error_code);
+    let result = mm::vma::handle_page_fault(current_cr3 as usize, ctx, error_code);
+
+    log_warn!(
+        LOG_ORIGIN,
+        "[PF] cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?}",
+        current_cr3,
+        cr2,
+        frame.rip,
+        error_code,
+        result
+    );
+
+    if matches!(result, mm::vma::FaultResult::Resolved) {
+        return true;
+    }
+
+    terminate_faulting_userspace_thread(tid, frame, cr2, error_code, result);
+}
 
 #[no_mangle]
 pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
@@ -871,6 +962,5 @@ pub fn print_stack_trace(stack_ptr: u64) {
 }
 
 fn is_canonical(addr: u64) -> bool {
-    let sign_extension = addr >> 48;
-    sign_extension == 0 || sign_extension == 0xFFFF
+    atom_abi::is_canonical(addr)
 }

@@ -694,7 +694,7 @@ extern "win64" fn rust_syscall_dispatcher(
     // the classic null-deref vector.  Log loudly so it can be diagnosed.
     if frame.user_rip == 0 {
         log_warn!(
-            LOG_ORIGIN,
+            "syscall",
             "SYSCALL-ENTRY ANOMALY: user_rip=0x0 \
              (tid={:?} syscall={} user_rsp={:#X} cr3={:#X}) \
              — null user RIP! Thread stack may be corrupted.",
@@ -703,7 +703,7 @@ extern "win64" fn rust_syscall_dispatcher(
             frame.user_rsp,
             entry_cr3,
         );
-    } else if frame.user_rip > atom_abi::USER_CANONICAL_MAX {
+    } else if !atom_abi::is_canonical(frame.user_rip) {
         log_warn!(
             LOG_ORIGIN,
             "SYSCALL-ENTRY ANOMALY: non-canonical user_rip={:#X} \
@@ -713,6 +713,14 @@ extern "win64" fn rust_syscall_dispatcher(
             syscall_num,
         );
     }
+
+    log_debug!(
+        LOG_ORIGIN,
+        "[ABI] version={} syscall={} tid={:?}",
+        atom_abi::ABI_VERSION,
+        syscall_num,
+        crate::sched::current_thread()
+    );
 
     log_debug!(
         LOG_ORIGIN,
@@ -793,26 +801,26 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_UNMAP_REGION => sys_unmap_region(arg0, arg1, arg2),
         SYS_REMAP_REGION => sys_remap_region(arg0, arg1, arg2, arg3),
         SYS_REGISTER_FAULT_HANDLER => sys_register_fault_handler(arg0),
-        SYS_MOUSE_POLL => sys_mouse_poll(arg0 as *mut u8),
+        SYS_MOUSE_POLL => sys_mouse_poll(arg0),
         SYS_IO_PORT_READ => sys_io_port_read(arg0 as u16, arg1 as u8),
         SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u8),
-        SYS_KEYBOARD_POLL => sys_keyboard_poll(arg0 as *mut u8),
-        SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0 as *mut u64),
+        SYS_KEYBOARD_POLL => sys_keyboard_poll(arg0),
+        SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0),
         SYS_GET_TICKS => sys_get_ticks(),
-        SYS_DEBUG_LOG => sys_debug_log(arg0 as *const u8, arg1 as usize),
+        SYS_DEBUG_LOG => sys_debug_log(arg0, arg1 as usize),
         SYS_REGISTER_IRQ_HANDLER => sys_register_irq_handler(arg0 as u8, arg1),
         SYS_MAP_FRAMEBUFFER => sys_map_framebuffer_to_user(arg0),
         SYS_UNREGISTER_IRQ_HANDLER => sys_unregister_irq_handler(arg0 as u8),
         SYS_IPC_WAIT_ANY => sys_ipc_wait_any(arg0, arg1, arg2),
         SYS_GET_IRQ_COUNT => sys_get_irq_count(arg0 as u8),
-        SYS_SPAWN_PROCESS => sys_spawn_process(arg0 as *const u8, arg1 as usize),
-        SYS_GET_MEMORY_INFO => sys_get_memory_info(arg0 as *mut u64),
-        SYS_LIST_PROCESSES => sys_list_processes(arg0 as *mut crate::thread::ProcessInfo, arg1 as usize),
+        SYS_SPAWN_PROCESS => sys_spawn_process(arg0, arg1 as usize),
+        SYS_GET_MEMORY_INFO => sys_get_memory_info(arg0),
+        SYS_LIST_PROCESSES => sys_list_processes(arg0, arg1 as usize),
         SYS_GET_PROCESS_COUNT => sys_get_process_count(),
-        SYS_READ_KLOG => sys_read_klog(arg0 as *mut u8, arg1 as usize),
+        SYS_READ_KLOG => sys_read_klog(arg0, arg1 as usize),
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
-        SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0 as *mut u8, arg1 as usize),
+        SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0, arg1 as usize),
 
         // Virtual memory management syscalls
         SYS_MMAP => sys_mmap(arg0, arg1, arg2, arg3),
@@ -853,17 +861,17 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_FS_STATVFS  => sys_fs_statvfs(arg0, arg1 as usize, arg2),
 
         // App launcher — spawn ATXF by path
-        SYS_SPAWN_FROM_PATH => sys_spawn_from_path(arg0 as *const u8, arg1 as usize),
+        SYS_SPAWN_FROM_PATH => sys_spawn_from_path(arg0, arg1 as usize),
 
         // Video mode management (BGA/VBE_DISPI)
         SYS_SET_VIDEO_MODE         => sys_set_video_mode(arg0, arg1),
-        SYS_GET_VIDEO_MODES        => sys_get_video_modes(arg0 as *mut u32, arg1 as usize),
-        SYS_GET_CURRENT_VIDEO_MODE => sys_get_current_video_mode(arg0 as *mut u64),
+        SYS_GET_VIDEO_MODES        => sys_get_video_modes(arg0, arg1 as usize),
+        SYS_GET_CURRENT_VIDEO_MODE => sys_get_current_video_mode(arg0),
         SYS_VIDEO_MODE_COUNT       => sys_video_mode_count(),
 
         _ => {
             log_warn!(
-                LOG_ORIGIN,
+                "syscall",
                 "Unknown syscall number: {}",
                 syscall_num
             );
@@ -927,15 +935,19 @@ extern "win64" fn rust_syscall_dispatcher(
     result
 }
 
-fn sys_mouse_poll(out_ptr: *mut u8) -> u64 {
-    if !validate_user_range(out_ptr as u64, 1) {
+fn sys_mouse_poll(out_ptr: u64) -> u64 {
+    let out_ptr = match validate_user_addr(out_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(out_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
     // Return next raw mouse byte for userspace driver to process
     if let Some(byte) = crate::input::poll_mouse_byte() {
         unsafe {
-            *out_ptr = byte;
+            *out_ptr.as_mut_ptr::<u8>() = byte;
         }
         return ESUCCESS;
     }
@@ -1013,14 +1025,18 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
 }
 
 /// Poll keyboard buffer for input (raw scancode)
-fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
-    if !validate_user_range(out_ptr as u64, 1) {
+fn sys_keyboard_poll(out_ptr: u64) -> u64 {
+    let out_ptr = match validate_user_addr(out_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(out_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
     if let Some(scancode) = crate::input::poll_keyboard_byte() {
         unsafe {
-            *out_ptr = scancode;
+            *out_ptr.as_mut_ptr::<u8>() = scancode;
         }
         return ESUCCESS;
     }
@@ -1028,13 +1044,18 @@ fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
 }
 
 /// Get framebuffer information for userspace graphics
-fn sys_get_framebuffer(info_ptr: *mut u64) -> u64 {
-    if !validate_user_range(info_ptr as u64, 5 * core::mem::size_of::<u64>()) {
+fn sys_get_framebuffer(info_ptr: u64) -> u64 {
+    let info_ptr = match validate_user_addr(info_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(info_ptr.as_u64(), 5 * core::mem::size_of::<u64>()).is_err() {
         return EINVAL;
     }
     
     if let Some((width, height)) = crate::graphics::get_dimensions() {
         if let Some(addr) = crate::graphics::get_framebuffer_address() {
+            let info_ptr = info_ptr.as_mut_ptr::<u64>();
             unsafe {
                 // Write: [address, width, height, stride, bytes_per_pixel]
                 *info_ptr = addr as u64;
@@ -1055,18 +1076,20 @@ fn sys_get_ticks() -> u64 {
 }
 
 /// Debug log from userspace
-fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
+fn sys_debug_log(msg_ptr: u64, len: usize) -> u64 {
     if len == 0 {
         return ESUCCESS;
     }
 
-    if len > 256 || !validate_user_range(msg_ptr as u64, len) {
+    let msg_ptr = match validate_user_addr(msg_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if len > 256 || validate_user_range(msg_ptr.as_u64(), len).is_err() {
         return EINVAL;
     }
 
-    let msg = unsafe {
-        core::slice::from_raw_parts(msg_ptr, len)
-    };
+    let msg = unsafe { core::slice::from_raw_parts(msg_ptr.as_ptr::<u8>(), len) };
 
     if let Ok(s) = core::str::from_utf8(msg) {
         log_info!("userspace", "{}", s);
@@ -1267,12 +1290,61 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         }
     };
 
+    let stack_ptr = match validate_user_addr(stack_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+
+    if crate::mm::validate_page_alignment(stack_ptr.as_usize()).is_err() {
+        log_warn!(
+            LOG_ORIGIN,
+            "thread_create rejected: stack top {:#X} is not page-aligned for guarded userspace stacks",
+            stack_ptr.as_u64()
+        );
+        return EINVAL;
+    }
+
+    let user_stack = crate::thread::UserStackMetadata::default_for_top(stack_ptr.as_usize());
+    let stack_span_len = (user_stack.top - user_stack.guard_base) as usize;
+    if atom_abi::validate_user_range(user_stack.guard_base as usize, stack_span_len).is_err() {
+        log_warn!(
+            LOG_ORIGIN,
+            "thread_create rejected: stack range guard=0x{:X} usable=0x{:X}-0x{:X} is outside userspace",
+            user_stack.guard_base,
+            user_stack.usable_base,
+            user_stack.top
+        );
+        return EINVAL;
+    }
+
+    if crate::mm::vm::query_mapping_in_pml4(caller_addr_space as usize, user_stack.guard_base as usize).is_ok() {
+        log_warn!(
+            LOG_ORIGIN,
+            "thread_create rejected: stack guard page 0x{:X} is already mapped",
+            user_stack.guard_base
+        );
+        return EINVAL;
+    }
+
+    for page_idx in 0..user_stack.mapped_pages {
+        let page_va = user_stack.usable_base as usize + page_idx * crate::mm::pmm::PAGE_SIZE;
+        if crate::mm::vm::query_mapping_in_pml4(caller_addr_space as usize, page_va).is_err() {
+            log_warn!(
+                LOG_ORIGIN,
+                "thread_create rejected: stack page 0x{:X} is not mapped in caller address space 0x{:X}",
+                page_va,
+                caller_addr_space
+            );
+            return EINVAL;
+        }
+    }
+
     // Create a userspace (Ring 3) context for the child thread.
     // sys_thread_create is only callable from userspace, so child threads
     // must also run in Ring 3 with the process primary address space.
     let context = crate::thread::CpuContext::new_user(
         entry_point,
-        stack_ptr,
+        stack_ptr.as_u64(),
         caller_addr_space,
     );
 
@@ -1299,6 +1371,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         name: "user_thread",
         capability_table: cap_table,
         is_userspace: true,
+        user_stack: Some(user_stack),
     };
 
     crate::thread::add_thread(thread);
@@ -1675,13 +1748,17 @@ fn sys_ipc_recv(
             core::cmp::min(msg.payload.len(), buffer_size as usize);
 
         if buffer_ptr != 0 && bytes_to_copy > 0 {
-            if !validate_user_range(buffer_ptr, bytes_to_copy) {
+            let buffer_ptr = match validate_user_addr(buffer_ptr) {
+                Ok(ptr) => ptr,
+                Err(e) => return e,
+            };
+            if validate_user_range(buffer_ptr.as_u64(), bytes_to_copy).is_err() {
                 return EINVAL;
             }
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     msg.payload.as_ptr(),
-                    buffer_ptr as *mut u8,
+                    buffer_ptr.as_mut_ptr::<u8>(),
                     bytes_to_copy
                 );
             }
@@ -1864,13 +1941,17 @@ fn sys_ipc_send_async(
 
     let mut payload = alloc::vec::Vec::new();
     if payload_len > 0 && payload_ptr != 0 {
-        if !validate_user_range(payload_ptr, payload_len as usize) {
+        let payload_ptr = match validate_user_addr(payload_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        if validate_user_range(payload_ptr.as_u64(), payload_len as usize).is_err() {
             return EINVAL;
         }
         payload.resize(payload_len as usize, 0);
         unsafe {
             core::ptr::copy_nonoverlapping(
-                payload_ptr as *const u8,
+                payload_ptr.as_ptr::<u8>(),
                 payload.as_mut_ptr(),
                 payload_len as usize
             );
@@ -1964,13 +2045,17 @@ fn sys_ipc_try_recv(
                 core::cmp::min(msg.payload.len(), buffer_size as usize);
 
             if buffer_ptr != 0 && bytes_to_copy > 0 {
-                if !validate_user_range(buffer_ptr, bytes_to_copy) {
+                let buffer_ptr = match validate_user_addr(buffer_ptr) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return e,
+                };
+                if validate_user_range(buffer_ptr.as_u64(), bytes_to_copy).is_err() {
                     return EINVAL;
                 }
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         msg.payload.as_ptr(),
-                        buffer_ptr as *mut u8,
+                        buffer_ptr.as_mut_ptr::<u8>(),
                         bytes_to_copy
                     );
                 }
@@ -2053,16 +2138,20 @@ fn sys_ipc_trace_read(buffer_ptr: u64, max_events: u64) -> u64 {
     let available = events.len();
 
     if buffer_ptr != 0 {
+        let buffer_ptr = match validate_user_addr(buffer_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
         let to_copy = core::cmp::min(available, max_events as usize);
         let write_bytes = match to_copy.checked_mul(core::mem::size_of::<RawIpcTraceEvent>()) {
             Some(v) => v,
             None => return EINVAL,
         };
-        if !validate_user_range(buffer_ptr, write_bytes) {
+        if validate_user_range(buffer_ptr.as_u64(), write_bytes).is_err() {
             return EINVAL;
         }
         unsafe {
-            let buffer = buffer_ptr as *mut RawIpcTraceEvent;
+            let buffer = buffer_ptr.as_mut_ptr::<RawIpcTraceEvent>();
             for (idx, event) in events.iter().take(to_copy).enumerate() {
                 buffer.add(idx).write(RawIpcTraceEvent::from(event));
             }
@@ -2119,11 +2208,15 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
             );
 
             if stats_ptr != 0 {
-                if !validate_user_range(stats_ptr, core::mem::size_of::<RawIpcPortStats>()) {
+                let stats_ptr = match validate_user_addr(stats_ptr) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return e,
+                };
+                if validate_user_range(stats_ptr.as_u64(), core::mem::size_of::<RawIpcPortStats>()).is_err() {
                     return EINVAL;
                 }
                 unsafe {
-                    (stats_ptr as *mut RawIpcPortStats).write(stats.into());
+                    stats_ptr.as_mut_ptr::<RawIpcPortStats>().write(stats.into());
                 }
             }
 
@@ -2161,6 +2254,16 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
     if count == 0 {
         log_debug!("syscall", "ipc_send_batch: empty batch");
         return ESUCCESS;
+    }
+    if messages_ptr == 0 {
+        return EINVAL;
+    }
+    let _messages_ptr = match validate_user_addr(messages_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(_messages_ptr.as_u64(), 1).is_err() {
+        return EINVAL;
     }
 
     if count > crate::ipc::MAX_BATCH_SIZE as u64 {
@@ -2238,6 +2341,16 @@ fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 
     if max_count == 0 {
         log_debug!("syscall", "ipc_recv_batch: max_count = 0");
         return 0;
+    }
+    if buffer_ptr == 0 {
+        return EINVAL;
+    }
+    let _buffer_ptr = match validate_user_addr(buffer_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(_buffer_ptr.as_u64(), 1).is_err() {
+        return EINVAL;
     }
 
     if max_count > crate::ipc::MAX_BATCH_SIZE as u64 {
@@ -2840,8 +2953,19 @@ fn sys_cap_query_children(handle_raw: u64, buffer_ptr: u64, buffer_size: u64) ->
 
             if buffer_ptr != 0 && buffer_size > 0 {
                 let to_copy = core::cmp::min(count, buffer_size as usize);
+                let write_bytes = match to_copy.checked_mul(core::mem::size_of::<u64>()) {
+                    Some(bytes) => bytes,
+                    None => return EINVAL,
+                };
+                let buffer_ptr = match validate_user_addr(buffer_ptr) {
+                    Ok(ptr) => ptr,
+                    Err(e) => return e,
+                };
+                if validate_user_range(buffer_ptr.as_u64(), write_bytes).is_err() {
+                    return EINVAL;
+                }
                 unsafe {
-                    let buffer = buffer_ptr as *mut u64;
+                    let buffer = buffer_ptr.as_mut_ptr::<u64>();
                     for (i, child) in children.iter().enumerate().take(to_copy) {
                         *buffer.add(i) = child.raw();
                     }
@@ -2978,8 +3102,16 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
 
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
     let flags = crate::shared_mem::RegionFlags::from_raw(flags_raw);
+    let requested_addr = if virt_addr == 0 {
+        None
+    } else {
+        match validate_user_addr(virt_addr) {
+            Ok(addr) => Some(addr),
+            Err(e) => return e,
+        }
+    };
 
-    match crate::shared_mem::map_region_in_pml4(region_id, caller_process, caller_pml4, virt_addr as usize, flags) {
+    match crate::shared_mem::map_region_in_pml4(region_id, caller_process, caller_pml4, requested_addr, flags) {
         Ok(mapped_va) => {
             // Sanity-check: the kernel must never hand userspace the null address.
             // find_free_va starts above the identity-map ceiling (>= 0x20000000)
@@ -2992,6 +3124,21 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
                 );
                 return EINVAL;
             }
+            if validate_user_return_addr(mapped_va as atom_abi::UserVirtAddr).is_err() {
+                log_error!(
+                    "syscall",
+                    "[ABI VIOLATION] shared_region_map returned invalid userspace VA {:#X} for region {:?}",
+                    mapped_va,
+                    region_id
+                );
+                return EINVAL;
+            }
+            log_info!(
+                "syscall",
+                "[ABI] return addr={:#x} pid={} syscall=shared_region_map",
+                mapped_va,
+                caller_process
+            );
             log_info!(
                 "syscall",
                 "shared_region_map: region {:?} mapped at actual_va={:#X} (requested={:#x})",
@@ -3261,6 +3408,10 @@ fn sys_map_region(
     };
 
     let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
+    let user_range = match atom_abi::validate_user_range(virt_addr as usize, size as usize) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
 
     // Security: memory isolation enforced by AddressSpaceManager::is_owned_by()
     // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
@@ -3272,9 +3423,8 @@ fn sys_map_region(
     match crate::mm::addrspace::map_region(
         as_id,
         caller,
-        virt_addr as usize,
+        user_range,
         phys_addr as usize,
-        size as usize,
         flags,
     ) {
         Ok(()) => {
@@ -3314,6 +3464,10 @@ fn sys_unmap_region(as_id_raw: u64, virt_addr: u64, size: u64) -> u64 {
     };
 
     let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
+    let user_range = match atom_abi::validate_user_range(virt_addr as usize, size as usize) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
 
     // Security: memory isolation enforced by AddressSpaceManager::is_owned_by()
     // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
@@ -3322,8 +3476,7 @@ fn sys_unmap_region(as_id_raw: u64, virt_addr: u64, size: u64) -> u64 {
     match crate::mm::addrspace::unmap_region(
         as_id,
         caller,
-        virt_addr as usize,
-        size as usize,
+        user_range,
     ) {
         Ok(()) => {
             log_debug!(
@@ -3372,6 +3525,14 @@ fn sys_remap_region(as_id_raw: u64, old_virt: u64, new_virt: u64, size: u64) -> 
     };
 
     let as_id = crate::mm::addrspace::AddressSpaceId::from_raw(as_id_raw);
+    let old_range = match atom_abi::validate_user_range(old_virt as usize, size as usize) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+    let new_range = match atom_abi::validate_user_range(new_virt as usize, size as usize) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
 
     // Security: memory isolation enforced by AddressSpaceManager::is_owned_by()
     // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
@@ -3380,9 +3541,8 @@ fn sys_remap_region(as_id_raw: u64, old_virt: u64, new_virt: u64, size: u64) -> 
     match crate::mm::addrspace::remap_region(
         as_id,
         caller,
-        old_virt as usize,
-        new_virt as usize,
-        size as usize,
+        old_range,
+        new_range,
     ) {
         Ok(()) => {
             log_debug!(
@@ -3614,11 +3774,15 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
 
     // Write info to user buffer if provided
     if user_buffer != 0 {
-        if !validate_user_range(user_buffer, 6 * core::mem::size_of::<u64>()) {
+        let user_buffer = match validate_user_addr(user_buffer) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        if validate_user_range(user_buffer.as_u64(), 6 * core::mem::size_of::<u64>()).is_err() {
             return EINVAL;
         }
 
-        let info_ptr = user_buffer as *mut u64;
+        let info_ptr = user_buffer.as_mut_ptr::<u64>();
         unsafe {
             core::ptr::write_volatile(info_ptr, address as u64);
             core::ptr::write_volatile(info_ptr.add(1), width as u64);
@@ -3704,14 +3868,18 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         Some(v) => v,
         None => return EINVAL,
     };
-    if !validate_user_range(ports_ptr, read_bytes) {
+    let ports_ptr = match validate_user_addr(ports_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(ports_ptr.as_u64(), read_bytes).is_err() {
         return EINVAL;
     }
 
     // Read port IDs from userspace
     let mut ports = alloc::vec::Vec::with_capacity(count as usize);
     unsafe {
-        let ptr = ports_ptr as *const u64;
+        let ptr = ports_ptr.as_ptr::<u64>();
         for i in 0..count as usize {
             ports.push(crate::ipc::PortId::from_raw(*ptr.add(i)));
         }
@@ -3817,19 +3985,32 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
 /// # Returns
 /// * On success: The new process ID (PID)
 /// * On failure: Error code (EINVAL, ENOTFOUND, ENOMEM)
-fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
+fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn";
 
-    log_info!(LOG_ORIGIN, "spawn_process(name_ptr={:p}, name_len={})", name_ptr, name_len);
+    log_info!(
+        LOG_ORIGIN,
+        "spawn_process(name_ptr={:#X}, name_len={})",
+        name_ptr,
+        name_len
+    );
 
     // Validate arguments
-    if name_len == 0 || name_len > 64 || !validate_user_range(name_ptr as u64, name_len) {
+    if name_len == 0 || name_len > 64 {
         log_warn!(LOG_ORIGIN, "spawn_process: invalid arguments");
+        return EINVAL;
+    }
+    let name_ptr = match validate_user_addr(name_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(name_ptr.as_u64(), name_len).is_err() {
+        log_warn!(LOG_ORIGIN, "spawn_process: invalid userspace range");
         return EINVAL;
     }
 
     // Copy name from userspace
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr.as_ptr::<u8>(), name_len) };
     let name = match core::str::from_utf8(name_bytes) {
         Ok(s) => s.trim_end_matches('\0'),
         Err(_) => {
@@ -3963,7 +4144,7 @@ fn get_static_driver_name(name: &str) -> &'static str {
 ///
 /// This function now integrates with the VMA subsystem:
 /// - Text, data, and BSS sections are still eagerly mapped (they contain data)
-/// - The user stack uses a VMA with demand paging + guard page
+/// - The user stack uses a fixed mapped region with one unmapped guard page
 /// - A heap VMA is pre-registered for brk() support
 fn spawn_process_internal(
     name: &str,
@@ -3978,11 +4159,8 @@ fn spawn_process_internal(
     use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
-    const USER_STACK_PAGES: usize = 16;   // 64KB initial stack (rest demand-paged)
-    const USER_STACK_MAX_PAGES: usize = 256;  // 1MB max stack
-    const USER_STACK_MAX_SIZE: usize = USER_STACK_MAX_PAGES * PAGE_SIZE;
     const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
-    const USER_STACK_TOP: usize = 0x0000_8000_0000;
+    const USER_STACK_TOP: usize = atom_abi::USER_STACK_TOP as usize;
 
     let pid = ThreadId::new();
     let process_id = crate::process::ProcessId::from(pid);
@@ -3991,9 +4169,8 @@ fn spawn_process_internal(
     // since each process has isolated virtual memory
     let text_base = USER_EXEC_LOAD_BASE;
     let user_stack_top = USER_STACK_TOP;
-    // Initial stack: only map a small portion, the rest will be demand-paged
-    let initial_stack_size = USER_STACK_PAGES * PAGE_SIZE;
-    let user_stack_base = user_stack_top - initial_stack_size;
+    let stack_layout = crate::thread::UserStackMetadata::default_for_top(user_stack_top);
+    let user_stack_base = stack_layout.usable_base as usize;
 
     log_info!(
         "spawn",
@@ -4131,13 +4308,11 @@ fn spawn_process_internal(
         ENOMEM
     })?;
 
-    // Allocate user stack with demand paging support
-    // Only map a small initial portion; the rest grows via page faults.
-    // The stack VMA covers the full potential range, but only initial pages are mapped.
-    let stack_phys = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
+    // Allocate the full userspace stack while leaving the guard page unmapped.
+    let stack_phys = pmm::alloc_pages_zeroed(atom_abi::DEFAULT_USER_STACK_PAGES)
         .ok_or(ENOMEM)?;
 
-    for i in 0..USER_STACK_PAGES {
+    for i in 0..atom_abi::DEFAULT_USER_STACK_PAGES {
         let virt = user_stack_base + i * PAGE_SIZE;
         let phys = stack_phys + i * PAGE_SIZE;
         vm::remap_page_in_pml4(
@@ -4148,16 +4323,12 @@ fn spawn_process_internal(
         ).map_err(|_| ENOMEM)?;
     }
 
-    // Register stack VMA with growth support.
-    // The VMA initially covers only the mapped pages but can grow downward
-    // via demand paging when page faults occur below it.
+    // Register the mapped stack range only. The guard page below it remains unmapped.
     vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: user_stack_base,
         end: user_stack_top,
         perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Stack {
-            max_size: USER_STACK_MAX_SIZE,
-        },
+        backing: VmaBacking::Anonymous,
         label: "stack",
     }).map_err(|e| {
         log_error!("spawn", "Failed to insert stack VMA for '{}': {:?}", name, e);
@@ -4200,14 +4371,16 @@ fn spawn_process_internal(
 
     log_info!(
         "spawn",
-        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, stack=0x{:X}-0x{:X} (growable to {}KB), entry=0x{:X}",
+        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, stack_guard=0x{:X}-0x{:X}, stack=0x{:X}-0x{:X} ({}KB), entry=0x{:X}",
         text_base,
         text_base + text_size,
         data_base,
         bss_base,
+        stack_layout.guard_base,
+        stack_layout.usable_base,
         user_stack_base,
         user_stack_top,
-        USER_STACK_MAX_SIZE / 1024,
+        stack_layout.usable_size() / 1024,
         entry_point
     );
 
@@ -4250,6 +4423,7 @@ fn spawn_process_internal(
         name: static_name,
         capability_table: cap::create_capability_table(pid),
         is_userspace: true,
+        user_stack: Some(stack_layout),
     };
 
     // The thread must exist in THREAD_LIST before capabilities can be inserted
@@ -4364,41 +4538,26 @@ fn spawn_process_internal(
 //   EIO      — FAT32 driver not available
 //
 // ---------------------------------------------------------------------------
-fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
+fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn_from_path";
     const MAX_PATH: usize = 256;
 
     // ── 1. Validate raw pointer and length ─────────────────────────────────
-    if path_ptr.is_null() || path_len == 0 || path_len > MAX_PATH {
+    if path_len == 0 || path_len > MAX_PATH {
         log_warn!(
             LOG_ORIGIN,
-            "spawn_from_path: invalid arguments (ptr={:p}, len={})",
+            "spawn_from_path: invalid arguments (ptr={:#X}, len={})",
             path_ptr,
             path_len
         );
         return EINVAL;
     }
-
-    // ── 2. Validate that the entire range lies within userspace ────────────
-    //
-    // USER_VA_LIMIT is the last byte of the canonical lower-half range on
-    // x86-64 (0x0000_7FFF_FFFF_FFFF).  We ensure:
-    //   a) The start address is non-null (checked above via is_null()).
-    //   b) The computed end address does not wrap around (overflow check).
-    //   c) The end address does not reach into the kernel upper half.
-    {
-        use crate::mm::addrspace::USER_VA_LIMIT;
-        let start = path_ptr as usize;
-        let end = start.wrapping_add(path_len);
-        if end < start || end as u64 > USER_VA_LIMIT {
-            log_warn!(
-                LOG_ORIGIN,
-                "spawn_from_path: path range [{:#x}..{:#x}) is outside userspace",
-                start,
-                end
-            );
-            return EINVAL;
-        }
+    let path_ptr = match validate_user_addr(path_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(path_ptr.as_u64(), path_len).is_err() {
+        return EINVAL;
     }
 
     // ── 3. Copy path bytes from userspace into a kernel-owned buffer ───────
@@ -4408,7 +4567,9 @@ fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
     // We copy into a fixed-size stack buffer so that later code never holds
     // a reference into user memory (which could be concurrently modified).
     let mut path_buf = [0u8; MAX_PATH];
-    unsafe { core::ptr::copy_nonoverlapping(path_ptr, path_buf.as_mut_ptr(), path_len); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(path_ptr.as_ptr::<u8>(), path_buf.as_mut_ptr(), path_len);
+    }
     let path_bytes = &path_buf[..path_len];
 
     let path = match core::str::from_utf8(path_bytes) {
@@ -4526,13 +4687,18 @@ fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
 /// # Returns
 /// * ESUCCESS if successful
 /// * EINVAL if pointer is invalid
-fn sys_get_memory_info(info_ptr: *mut u64) -> u64 {
-    if !validate_user_range(info_ptr as u64, 2 * core::mem::size_of::<u64>()) {
+fn sys_get_memory_info(info_ptr: u64) -> u64 {
+    let info_ptr = match validate_user_addr(info_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(info_ptr.as_u64(), 2 * core::mem::size_of::<u64>()).is_err() {
         return EINVAL;
     }
 
     let (total_kb, free_kb) = crate::mm::pmm::get_memory_stats();
 
+    let info_ptr = info_ptr.as_mut_ptr::<u64>();
     unsafe {
         *info_ptr.offset(0) = total_kb;
         *info_ptr.offset(1) = free_kb;
@@ -4549,10 +4715,14 @@ fn sys_get_memory_info(info_ptr: *mut u64) -> u64 {
 ///
 /// # Returns
 /// * Number of processes written, or EINVAL if buffer is null
-fn sys_list_processes(buffer: *mut crate::thread::ProcessInfo, max_count: usize) -> u64 {
-    if buffer.is_null() || max_count == 0 {
+fn sys_list_processes(buffer: u64, max_count: usize) -> u64 {
+    if max_count == 0 {
         return EINVAL;
     }
+    let buffer = match validate_user_addr(buffer) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
 
     // Create a temporary buffer on stack
     let mut temp_buffer = [crate::thread::ProcessInfo {
@@ -4568,13 +4738,14 @@ fn sys_list_processes(buffer: *mut crate::thread::ProcessInfo, max_count: usize)
         Some(v) => v,
         None => return EINVAL,
     };
-    if !validate_user_range(buffer as u64, write_bytes) {
+    if validate_user_range(buffer.as_u64(), write_bytes).is_err() {
         return EINVAL;
     }
 
     let count = crate::thread::list_processes(&mut temp_buffer[..actual_count]);
 
     // Copy to userspace buffer
+    let buffer = buffer.as_mut_ptr::<crate::thread::ProcessInfo>();
     unsafe {
         for (i, item) in temp_buffer.iter().enumerate().take(count) {
             *buffer.add(i) = *item;
@@ -4597,8 +4768,15 @@ fn sys_get_process_count() -> u64 {
 ///
 /// # Returns
 /// * Number of bytes written, or EINVAL if buffer is null
-fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
-    if max_len == 0 || !validate_user_range(buffer as u64, max_len) {
+fn sys_read_klog(buffer: u64, max_len: usize) -> u64 {
+    if max_len == 0 {
+        return EINVAL;
+    }
+    let buffer = match validate_user_addr(buffer) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(buffer.as_u64(), max_len).is_err() {
         return EINVAL;
     }
 
@@ -4606,7 +4784,7 @@ fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
     let copy_len = log_data.len().min(max_len);
 
     unsafe {
-        core::ptr::copy_nonoverlapping(log_data.as_ptr(), buffer, copy_len);
+        core::ptr::copy_nonoverlapping(log_data.as_ptr(), buffer.as_mut_ptr::<u8>(), copy_len);
     }
 
     copy_len as u64
@@ -4620,8 +4798,15 @@ fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
 ///
 /// # Returns
 /// * Number of bytes written, or EINVAL if buffer is null
-fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
-    if max_len == 0 || !validate_user_range(buffer as u64, max_len) {
+fn sys_get_cpu_brand(buffer: u64, max_len: usize) -> u64 {
+    if max_len == 0 {
+        return EINVAL;
+    }
+    let buffer = match validate_user_addr(buffer) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(buffer.as_u64(), max_len).is_err() {
         return EINVAL;
     }
 
@@ -4629,7 +4814,7 @@ fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
     let copy_len = brand.len().min(max_len);
 
     unsafe {
-        core::ptr::copy_nonoverlapping(brand.as_ptr(), buffer, copy_len);
+        core::ptr::copy_nonoverlapping(brand.as_ptr(), buffer.as_mut_ptr::<u8>(), copy_len);
     }
 
     copy_len as u64
@@ -4667,7 +4852,12 @@ fn current_process_vma_context() -> Option<(crate::thread::ThreadId, crate::proc
 /// **Supported flags:** `MAP_ANONYMOUS | MAP_PRIVATE` (optionally `| MAP_FIXED`).
 /// Any other combination (e.g. `MAP_SHARED`, missing `MAP_ANONYMOUS`,
 /// or unknown flag bits) is rejected with `EINVAL`.
-fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
+fn sys_mmap(
+    addr_hint: atom_abi::UserVirtAddr,
+    length: u64,
+    prot: u64,
+    flags: u64,
+) -> atom_abi::UserVirtAddr {
     use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::mm::pmm::PAGE_SIZE;
 
@@ -4724,53 +4914,215 @@ fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
     // Determine the virtual address
     let virt_addr = if fixed {
         let addr = addr_hint as usize;
-        let end = match addr.checked_add(length) {
-            Some(end) => end,
-            None => return EINVAL,
+        let user_range = match atom_abi::validate_user_range(addr, length) {
+            Ok(range) => range,
+            Err(_) => {
+                log_error!(
+                    "syscall",
+                    "[MMAP_ERROR] reason=invalid_user_range addr={:#X} size={} hint={:#X} flags={:#X}",
+                    addr_hint,
+                    length,
+                    addr_hint,
+                    flags
+                );
+                return EINVAL;
+            }
         };
+        let end = user_range.end_exclusive();
         if crate::mm::validate_page_range(addr, end).is_err() {
+            log_error!(
+                "syscall",
+                "[MMAP_ERROR] reason=invalid_page_range addr={:#X} size={} hint={:#X} flags={:#X}",
+                addr_hint,
+                length,
+                addr_hint,
+                flags
+            );
             return EINVAL;
         }
-        if crate::mm::validate_user_space_bounds(addr, length).is_err()
+        if addr < atom_abi::USER_MMAP_START as usize
             || end > atom_abi::USER_MMAP_END as usize
         {
+            log_error!(
+                "syscall",
+                "[MMAP_ERROR] reason=outside_mmap_window addr={:#X} size={} hint={:#X} flags={:#X}",
+                addr_hint,
+                length,
+                addr_hint,
+                flags
+            );
             return EINVAL;
         }
         // Remove any existing mappings in this range
         let removed = match vma::remove_process_vma_range(process_id, addr, end) {
             Ok(removed) => removed,
-            Err(_) => return EINVAL,
+            Err(_) => {
+                log_error!(
+                    "syscall",
+                    "[MMAP_ERROR] reason=remove_range_failed addr={:#X} size={} hint={:#X} flags={:#X}",
+                    addr_hint,
+                    length,
+                    addr_hint,
+                    flags
+                );
+                return EINVAL;
+            }
         };
         // Unmap the physical pages for removed VMAs
         for old_vma in &removed {
             unmap_vma_pages(process_id, pml4, old_vma);
         }
+        log_info!(
+            "syscall",
+            "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode=fixed",
+            addr,
+            length,
+            end
+        );
         addr
     } else {
-        let hint_start = if addr_hint != 0 && addr_hint as usize >= atom_abi::USER_MMAP_START as usize {
-            addr_hint as usize
+        let hint_start = if addr_hint != 0 {
+            match atom_abi::validate_user_addr(addr_hint as usize) {
+                Ok(hint) if hint.as_usize() >= atom_abi::USER_MMAP_START as usize => hint.as_usize(),
+                _ => atom_abi::USER_MMAP_START as usize,
+            }
         } else {
             atom_abi::USER_MMAP_START as usize
         };
 
         match vma::find_process_free_region(process_id, hint_start, atom_abi::USER_MMAP_END as usize, length) {
-            Ok(Some(addr)) => addr,
-            Ok(None) => return ENOMEM,
-            Err(_) => return EPERM,
+            Ok(Some(addr)) => {
+                let next = match addr.checked_add(length) {
+                    Some(next) => next,
+                    None => {
+                        log_error!(
+                            "syscall",
+                            "[MMAP_ERROR] reason=overflow addr={:#X} size={} hint={:#X} flags={:#X}",
+                            addr,
+                            length,
+                            addr_hint,
+                            flags
+                        );
+                        return EINVAL;
+                    }
+                };
+                log_info!(
+                    "syscall",
+                    "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode=first_fit",
+                    addr,
+                    length,
+                    next
+                );
+                addr
+            }
+            Ok(None) => {
+                log_error!(
+                    "syscall",
+                    "[MMAP_ERROR] reason=no_free_region addr={:#X} size={} hint={:#X} flags={:#X}",
+                    hint_start,
+                    length,
+                    addr_hint,
+                    flags
+                );
+                return ENOMEM;
+            }
+            Err(_) => {
+                log_error!(
+                    "syscall",
+                    "[MMAP_ERROR] reason=find_free_region_failed addr={:#X} size={} hint={:#X} flags={:#X}",
+                    hint_start,
+                    length,
+                    addr_hint,
+                    flags
+                );
+                return EPERM;
+            }
         }
     };
+
+    let virt_end = match virt_addr.checked_add(length) {
+        Some(end) => end,
+        None => {
+            log_error!(
+                "syscall",
+                "[MMAP_ERROR] reason=overflow addr={:#X} size={} hint={:#X} flags={:#X}",
+                virt_addr,
+                length,
+                addr_hint,
+                flags
+            );
+            return EINVAL;
+        }
+    };
+
+    debug_assert!(
+        virt_end <= atom_abi::USER_MMAP_END as usize,
+        "mmap allocation escaped window: start=0x{:X} end=0x{:X} limit=0x{:X}",
+        virt_addr,
+        virt_end,
+        atom_abi::USER_MMAP_END
+    );
 
     // Create the VMA (lazy: no physical pages allocated yet)
     let new_vma = Vma {
         start: virt_addr,
-        end: virt_addr + length,
+        end: virt_end,
         perms,
         backing: VmaBacking::Anonymous,
         label: "mmap",
     };
 
+    log_info!(
+        "syscall",
+        "[VMA_INSERT] pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} prot=0x{:X} flags=0x{:X} backing=Anonymous label=mmap",
+        process_id,
+        pml4,
+        new_vma.start,
+        new_vma.end,
+        prot,
+        flags
+    );
+
+    let mapped_addr = virt_addr as atom_abi::UserVirtAddr;
+    if !validate_mmap_return_addr(mapped_addr, length) {
+        log_error!(
+            "syscall",
+            "[MMAP_ERROR] reason=invalid_return_addr addr={:#X} size={} hint={:#X} flags={:#X}",
+            mapped_addr,
+            length,
+            addr_hint,
+            flags
+        );
+        log_error!(
+            "syscall",
+            "[ABI VIOLATION] [MMAP] pid={} invalid mmap VA selected: addr={:#X} size={} hint={:#X}",
+            process_id,
+            mapped_addr,
+            length,
+            addr_hint
+        );
+        return EINVAL;
+    }
+
     match vma::insert_process_vma(process_id, new_vma) {
-        Ok(()) => virt_addr as u64,
+        Ok(()) => {
+            log_info!(
+                "syscall",
+                "[ABI] return addr={:#x} pid={} syscall=mmap",
+                mapped_addr,
+                process_id
+            );
+            log_info!(
+                "syscall",
+                "[MMAP] pid={} addr={:#X} size={} hint={:#X} flags={:#X}",
+                process_id,
+                mapped_addr,
+                length,
+                addr_hint,
+                flags
+            );
+            mapped_addr
+        }
         Err(_) => ENOMEM,
     }
 }
@@ -4791,10 +5143,11 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
     }
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let end = match addr.checked_add(length) {
-        Some(end) => end,
-        None => return EINVAL,
+    let user_range = match atom_abi::validate_user_range(addr, length) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
     };
+    let end = user_range.end_exclusive();
     if crate::mm::validate_page_range(addr, end).is_err() {
         return EINVAL;
     }
@@ -4837,10 +5190,11 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     }
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let end = match addr.checked_add(length) {
-        Some(end) => end,
-        None => return EINVAL,
+    let user_range = match atom_abi::validate_user_range(addr, length) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
     };
+    let end = user_range.end_exclusive();
     if crate::mm::validate_page_range(addr, end).is_err() {
         return EINVAL;
     }
@@ -5009,13 +5363,61 @@ fn unmap_vma_pages(
 
 use alloc::vec::Vec;
 
-// Helper: validate userspace pointer is in canonical range
 #[inline]
-fn validate_user_range(ptr: u64, size: usize) -> bool {
-    if size == 0 {
-        return true;
+fn map_user_address_error(err: atom_abi::UserAddressError) -> u64 {
+    match err {
+        atom_abi::UserAddressError::NonCanonical
+        | atom_abi::UserAddressError::BelowUserMin
+        | atom_abi::UserAddressError::AboveUserMax
+        | atom_abi::UserAddressError::Overflow
+        | atom_abi::UserAddressError::EmptyRange => EINVAL,
     }
-    ptr != 0 && crate::mm::validate_user_space_bounds(ptr as usize, size).is_ok()
+}
+
+#[inline]
+fn validate_user_addr(addr: u64) -> Result<atom_abi::UserVAddr, u64> {
+    atom_abi::validate_user_addr(addr as usize).map_err(map_user_address_error)
+}
+
+#[inline]
+fn validate_user_range(ptr: u64, size: usize) -> Result<atom_abi::UserRange, u64> {
+    atom_abi::validate_user_range(ptr as usize, size).map_err(map_user_address_error)
+}
+
+#[inline]
+fn validate_user_return_addr(addr: atom_abi::UserVirtAddr) -> Result<atom_abi::UserVAddr, atom_abi::UserAddressError> {
+    atom_abi::validate_user_return_addr(addr as usize)
+}
+
+#[inline]
+fn validate_mmap_return_addr(addr: atom_abi::UserVirtAddr, size: usize) -> bool {
+    let base = match validate_user_return_addr(addr) {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+
+    if atom_abi::validate_user_range(base.as_usize(), size).is_err() {
+        return false;
+    }
+
+    if !addr.is_multiple_of(crate::mm::pmm::PAGE_SIZE as u64) {
+        return false;
+    }
+
+    if !atom_abi::is_user_mmap_addr(addr) {
+        return false;
+    }
+
+    let end = match addr.checked_add(size as u64) {
+        Some(end) => end,
+        None => return false,
+    };
+
+    if end > atom_abi::USER_MMAP_END {
+        return false;
+    }
+
+    true
 }
 
 // Helper: safely copy string from userspace
@@ -5024,13 +5426,10 @@ fn copy_string_from_user(ptr: u64, len: usize) -> Result<alloc::string::String, 
         return Err(ENAMETOOLONG);
     }
 
-    if !validate_user_range(ptr, len) {
-        return Err(EINVAL);
-    }
+    let user_ptr = validate_user_addr(ptr)?;
+    validate_user_range(user_ptr.as_u64(), len)?;
 
-    match core::str::from_utf8(unsafe {
-        core::slice::from_raw_parts(ptr as *const u8, len)
-    }) {
+    match core::str::from_utf8(unsafe { core::slice::from_raw_parts(user_ptr.as_ptr::<u8>(), len) }) {
         Ok(s) => Ok(alloc::string::String::from(s)),
         Err(_) => Err(EINVAL),
     }
@@ -5042,17 +5441,14 @@ fn copy_buffer_from_user(ptr: u64, len: usize, max_len: usize) -> Result<Vec<u8>
         return Err(EINVAL);
     }
 
-    if !validate_user_range(ptr, len) {
-        return Err(EINVAL);
-    }
+    let user_ptr = validate_user_addr(ptr)?;
+    validate_user_range(user_ptr.as_u64(), len)?;
 
-    Ok(unsafe {
-        core::slice::from_raw_parts(ptr as *const u8, len).to_vec()
-    })
+    Ok(unsafe { core::slice::from_raw_parts(user_ptr.as_ptr::<u8>(), len).to_vec() })
 }
 
 // Helper: safely write buffer to userspace
-fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
+fn write_buffer_to_user(dst_ptr: atom_abi::UserVAddr, src: &[u8]) -> Result<(), u64> {
     if src.is_empty() {
         return Ok(());
     }
@@ -5067,13 +5463,9 @@ fn write_buffer_to_user(dst_ptr: u64, src: &[u8]) -> Result<(), u64> {
         return Err(EINVAL);
     }
 
-    if !validate_user_range(dst_ptr, src.len()) {
-        return Err(EINVAL);
-    }
+    validate_user_range(dst_ptr.as_u64(), src.len())?;
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr as *mut u8, src.len());
-    }
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr.as_mut_ptr::<u8>(), src.len()) }
 
     Ok(())
 }
@@ -5094,7 +5486,14 @@ fn sys_kern_fs_read_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: 
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    if buf_len == 0 || !validate_user_range(buf_ptr, 1) {
+    if buf_len == 0 {
+        return EINVAL;
+    }
+    let buf_ptr = match validate_user_addr(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
@@ -5128,7 +5527,14 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    if buf_len == 0 || !validate_user_range(buf_ptr, 1) {
+    if buf_len == 0 {
+        return EINVAL;
+    }
+    let buf_ptr = match validate_user_addr(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
@@ -5166,7 +5572,11 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
                 rec[7] = ftype;
                 rec[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
 
-                if let Err(e) = write_buffer_to_user(buf_ptr + pos as u64, &rec[..rec_len]) {
+                let dst_ptr = match buf_ptr.checked_add(pos) {
+                    Ok(ptr) => ptr,
+                    Err(err) => return map_user_address_error(err),
+                };
+                if let Err(e) = write_buffer_to_user(dst_ptr, &rec[..rec_len]) {
                     return e;
                 }
 
@@ -5193,7 +5603,11 @@ fn sys_kern_fs_stat_path(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    if !validate_user_range(stat_ptr, 1) {
+    let stat_ptr = match validate_user_addr(stat_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(stat_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
@@ -5205,7 +5619,7 @@ fn sys_kern_fs_stat_path(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
 
 /// Internal helper: stat a path and write the 80-byte result to userspace.
 /// Uses `fat32::stat_path()` so NO file data is read.
-fn fill_stat_to_user(path: &str, stat_ptr: u64) -> u64 {
+fn fill_stat_to_user(path: &str, stat_ptr: atom_abi::UserVAddr) -> u64 {
     let mut buf = [0u8; 80];
 
     // Root directory special case
@@ -5373,10 +5787,9 @@ fn copy_path_from_user(ptr: u64, len: usize) -> Result<([u8; MAX_PATH_BUF], usiz
     if len == 0 || len > MAX_PATH_BUF {
         return Err(ENAMETOOLONG);
     }
-    if !validate_user_range(ptr, 1) {
-        return Err(EINVAL);
-    }
-    let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    let ptr = validate_user_addr(ptr)?;
+    validate_user_range(ptr.as_u64(), len)?;
+    let src = unsafe { core::slice::from_raw_parts(ptr.as_ptr::<u8>(), len) };
     // Validate UTF-8
     if core::str::from_utf8(src).is_err() {
         return Err(EINVAL);
@@ -5720,16 +6133,34 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return 0; // POSIX: read(count=0) returns 0, not EINVAL
     }
 
-    if !validate_user_range(buf_ptr, 1) {
-        log_warn!(LOG_ORIGIN, "sys_fs_read: buf_ptr={:#X} fails validate_user_pointer", buf_ptr);
+    let buf_ptr = match validate_user_addr(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            log_warn!(LOG_ORIGIN, "sys_fs_read: invalid buf_ptr");
+            return EINVAL;
+        }
+    };
+    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
+        log_warn!(
+            LOG_ORIGIN,
+            "sys_fs_read: buf_ptr={:#X} fails validate_user_pointer",
+            buf_ptr.as_u64()
+        );
         return EINVAL;
     }
 
     // Validate that the ENTIRE destination range lies in userspace
-    let buf_end = buf_ptr.saturating_add(count as u64).saturating_sub(1);
-    if !validate_user_range(buf_end, 1) {
-        log_warn!(LOG_ORIGIN, "sys_fs_read: buf range [{:#X}..{:#X}] exceeds user canonical max",
-            buf_ptr, buf_end);
+    let buf_end = match buf_ptr.checked_add(count.saturating_sub(1)) {
+        Ok(end) => end,
+        Err(_) => return EINVAL,
+    };
+    if validate_user_range(buf_end.as_u64(), 1).is_err() {
+        log_warn!(
+            LOG_ORIGIN,
+            "sys_fs_read: buf range [{:#X}..{:#X}] exceeds user canonical max",
+            buf_ptr.as_u64(),
+            buf_end.as_u64()
+        );
         return EINVAL;
     }
 
@@ -5828,8 +6259,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     // ── Pre-fault user pages ───────────────────────────────────────────
     {
         let page_size: usize = 4096;
-        let start_page = buf_ptr as usize & !(page_size - 1);
-        let end_addr = buf_ptr as usize + to_read;
+        let start_page = buf_ptr.as_usize() & !(page_size - 1);
+        let end_addr = buf_ptr.as_usize() + to_read;
         let end_page = if to_read > 0 {
             (end_addr - 1) & !(page_size - 1)
         } else {
@@ -5837,11 +6268,22 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         };
         let mut page = start_page;
         while page <= end_page {
-            crate::mm::vma::handle_page_fault(
-                caller.address_space_pml4 as usize,
+            let ctx = crate::mm::vma::FaultContext::from_x86_error(
                 page,
-                0x6 /* write|user|not-present */,
+                0x6, // write|user|not-present
             );
+            let result = crate::mm::vma::handle_page_fault(
+                caller.address_space_pml4 as usize,
+                ctx,
+                0x6,
+            );
+            match result {
+                crate::mm::vma::FaultResult::Resolved => {}
+                crate::mm::vma::FaultResult::OutOfMemory => return ENOMEM,
+                crate::mm::vma::FaultResult::InvalidAddress
+                | crate::mm::vma::FaultResult::ProtectionViolation
+                | crate::mm::vma::FaultResult::NotHandled => return EINVAL,
+            }
             page += page_size;
         }
     }
@@ -5863,11 +6305,18 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     if count == 0 {
         return 0;
     }
-    if !validate_user_range(buf_ptr, 1) {
+    let buf_ptr = match validate_user_addr(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
-    let buf_end = buf_ptr.saturating_add(count as u64).saturating_sub(1);
-    if !validate_user_range(buf_end, 1) {
+    let buf_end = match buf_ptr.checked_add(count.saturating_sub(1)) {
+        Ok(end) => end,
+        Err(_) => return EINVAL,
+    };
+    if validate_user_range(buf_end.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
@@ -5896,7 +6345,7 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     }
 
     if count > 0 {
-        let src = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, count) };
+        let src = unsafe { core::slice::from_raw_parts(buf_ptr.as_ptr::<u8>(), count) };
         let dst = unsafe {
             core::slice::from_raw_parts_mut(
                 (table[idx].cache_ptr + write_offset) as *mut u8,
@@ -5922,7 +6371,14 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
     log_debug!(LOG_ORIGIN, "sys_fs_readdir(dirfd={}, count={})", dirfd, count);
 
-    if count == 0 || !validate_user_range(dirent_ptr, 1) {
+    if count == 0 {
+        return EINVAL;
+    }
+    let dirent_ptr = match validate_user_addr(dirent_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    if validate_user_range(dirent_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
@@ -5993,7 +6449,11 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
                 rec[7] = ftype;
                 rec[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
 
-                if let Err(e) = write_buffer_to_user(dirent_ptr + pos as u64, &rec[..rec_len]) {
+                let dst_ptr = match dirent_ptr.checked_add(pos) {
+                    Ok(ptr) => ptr,
+                    Err(err) => return map_user_address_error(err),
+                };
+                if let Err(e) = write_buffer_to_user(dst_ptr, &rec[..rec_len]) {
                     return e;
                 }
 
@@ -6193,7 +6653,11 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
 
 /// Get file status by descriptor
 fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
-    if !validate_user_range(stat_ptr, 1) {
+    let stat_ptr = match validate_user_addr(stat_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    if validate_user_range(stat_ptr.as_u64(), 1).is_err() {
         return EINVAL;
     }
 
@@ -6392,13 +6856,14 @@ fn sys_set_video_mode(packed_res: u64, bpp_raw: u64) -> u64 {
 ///   [4] flags (bit 0: LFB available — always 1 for BGA modes)
 ///
 /// Returns: number of modes written (>= 0), or EINVAL if buf_ptr is null.
-fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
-    if buf_ptr.is_null() {
-        return EINVAL;
-    }
+fn sys_get_video_modes(buf_ptr: u64, max_modes: usize) -> u64 {
     if max_modes == 0 {
         return 0;
     }
+    let buf_ptr = match validate_user_addr(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
 
     // Use a kernel-side buffer to avoid writing directly from the mode table
     let mut kernel_modes = [crate::drivers::bga::VideoMode { width: 0, height: 0, bpp: 0, refresh_rate: 0 }; 32];
@@ -6409,10 +6874,11 @@ fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
         Some(v) => v,
         None => return EINVAL,
     };
-    if !validate_user_range(buf_ptr as u64, write_bytes) {
+    if validate_user_range(buf_ptr.as_u64(), write_bytes).is_err() {
         return EINVAL;
     }
 
+    let buf_ptr = buf_ptr.as_mut_ptr::<u32>();
     unsafe {
         for (i, m) in kernel_modes.iter().enumerate().take(count) {
             let base = buf_ptr.add(i * 5);
@@ -6441,13 +6907,18 @@ fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
 ///   Bytes [28..32] mode_active     (u32) 1 if a mode has been set
 ///
 /// Returns ESUCCESS, or EINVAL if buf_ptr is null.
-fn sys_get_current_video_mode(buf_ptr: *mut u64) -> u64 {
-    if !validate_user_range(buf_ptr as u64, 4 * core::mem::size_of::<u64>()) {
+fn sys_get_current_video_mode(buf_ptr: u64) -> u64 {
+    let buf_ptr = match validate_user_addr(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(buf_ptr.as_u64(), 4 * core::mem::size_of::<u64>()).is_err() {
         return EINVAL;
     }
 
     let info = crate::graphics::get_kernel_video_info();
 
+    let buf_ptr = buf_ptr.as_mut_ptr::<u64>();
     unsafe {
         // lfb_phys (u64, 8 bytes)
         buf_ptr.add(0).write_volatile(info.lfb_phys);

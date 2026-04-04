@@ -1,25 +1,31 @@
-# Requirements Document: Kernel Robustness Improvements
+# Requirements Document: Kernel Robustness Improvements — Migração Arquitetural Dirigida por Invariantes
 
 ## Introduction
 
-This document specifies the functional and non-functional requirements for improving the robustness of the Atom kernel's memory management, error handling, resource accounting, and cleanup logic. The improvements address critical gaps that can lead to system panics, resource leaks, and undefined behavior under stress conditions.
+Este documento especifica os requisitos funcionais e não-funcionais para as melhorias de robustez do kernel Atom, organizados em duas camadas:
 
-The requirements are derived from comprehensive codebase analysis that identified four critical issue categories: memory safety validation gaps, capability system complexity, OOM management limitations, and thread cleanup coordination challenges. The solution consolidates improvements across six focus areas while maintaining compatibility with existing kernel subsystems.
+**Camada 1 — Melhorias Incrementais (Requisitos 1–20):** Validação de memória, hardening de capabilities, OOM graceful degradation, cleanup de threads, resource limits e observabilidade. Parcialmente implementados (Fases 1–3 completas).
+
+**Camada 2 — Migração Arquitetural (Requisitos 21–36):** Invariantes arquiteturais que resolvem o problema central de fronteiras mal definidas entre MM, processo, OOM e capability lifecycle. Estes requisitos capturam os contratos explícitos que o kernel deve obedecer ao fim da migração.
 
 ## Glossary
 
-- **PMM**: Physical Memory Manager - manages allocation of physical memory pages
-- **VMM**: Virtual Memory Manager - manages virtual address spaces and page tables
-- **VMA**: Virtual Memory Area - tracks virtual memory regions per address space
-- **PML4**: Page Map Level 4 - top-level page table structure in x86_64 paging
-- **OOM**: Out Of Memory - condition when physical memory is exhausted
-- **Capability**: Unforgeable token granting access to a kernel resource
-- **Thread**: Execution context with its own stack and register state
-- **Process**: Collection of threads sharing an address space and resources
-- **Validation_Layer**: Component that validates inputs before operations
-- **Resource_Accounting**: Component that tracks resource usage per process
-- **Cleanup_Coordinator**: Component that manages thread resource cleanup
-- **Memory_Pressure**: Metric indicating how close the system is to OOM
+- **PMM**: Physical Memory Manager
+- **VMM**: Virtual Memory Manager
+- **VMA**: Virtual Memory Area
+- **PML4**: Page Map Level 4 — estrutura de paginação x86_64
+- **OOM**: Out Of Memory
+- **Capability**: Token infalsificável que concede acesso a recurso do kernel
+- **ABI**: Application Binary Interface — contrato kernel/userspace em `shared/abi`
+- **UserVAddr**: Tipo opaco para endereço de userspace validado pelo ABI
+- **UserRange**: Tipo opaco para range de userspace validado pelo ABI
+- **FaultResult**: Resultado tipado de resolução de page fault (substitui bool)
+- **ProcessState**: Estado explícito do ciclo de vida de um processo
+- **RevokeReport**: Resultado agregado de revogação de capability
+- **Validation_Layer**: Componente que valida inputs antes de operações
+- **Resource_Accounting**: Componente que rastreia uso de recursos por processo
+- **Cleanup_Coordinator**: Componente que gerencia cleanup de recursos de thread
+- **Memory_Pressure**: Métrica indicando proximidade de OOM
 
 ## Requirements
 
@@ -263,5 +269,217 @@ The requirements are derived from comprehensive codebase analysis that identifie
 1. THE Validation_Layer SHALL add no more than 20 CPU cycles per memory operation
 2. THE Resource_Accounting SHALL add no more than 10 CPU cycles per resource allocation
 3. THE Cleanup_Coordinator SHALL complete cleanup in O(r) time where r is the number of resources
-4. THE OOM_Manager SHALL complete victim selection in O(n) time where n is the number of threads
+4. THE OOM_Manager SHALL complete victim selection in O(n) time where n is the number of processes
 5. THE kernel SHALL cache frequently computed values (e.g., memory pressure) to avoid repeated computation
+
+---
+
+## Architectural Migration Requirements (Invariant-Driven)
+
+Os requisitos a seguir capturam os invariantes arquiteturais que devem ser verdadeiros ao fim da migração. Cada requisito corresponde a um invariante do sistema que elimina uma fronteira mal definida entre subsistemas.
+
+### Requirement 21: Fonte Única de Verdade para Endereços de Userspace
+
+**User Story:** As a kernel developer, I want a single authoritative definition of valid userspace addresses, so that validation logic cannot diverge between subsystems.
+
+#### Acceptance Criteria
+
+1. THE ABI module (`shared/abi`) SHALL be the sole authority for userspace address validation
+2. THE kernel SHALL NOT contain any validation of userspace addresses based on `KERNEL_BASE` local constant after migration
+3. THE syscall layer SHALL only accept `UserVAddr` and `UserRange` typed values for userspace pointers, never raw `usize`
+4. THE MM subsystem SHALL NOT accept raw `usize` for userspace pointers without prior ABI validation
+5. WHEN `validate_user_addr(addr)` is called, THEN it SHALL return `UserAddressError::NonCanonical` for non-canonical addresses, `UserAddressError::BelowUserMin` for null/low addresses, `UserAddressError::AboveUserMax` for kernel-space addresses
+6. THE ABI SHALL export `validate_user_addr`, `validate_user_range`, and `validate_user_return_addr` as the canonical validation API
+7. AFTER migration, there SHALL be no code path that validates userspace pointers via `KERNEL_BASE` comparison
+
+### Requirement 22: Resultado Tipado de Page Fault
+
+**User Story:** As a kernel developer, I want page fault resolution to return typed errors, so that callers can make decisions based on the specific failure reason without heuristics.
+
+#### Acceptance Criteria
+
+1. THE fault resolution path SHALL return `FaultResult = Result<FaultResolved, FaultError>` instead of `bool`
+2. THE `FaultError` enum SHALL include variants: `NoVma`, `AccessViolation`, `WriteToReadonly`, `ExecViolation`, `AddressNotUser`, `QuotaExceeded`, `PhysicalAllocFailed`, `MapFailed`, `ProcessContextMissing`, `InvariantBroken`
+3. WHEN a fault cannot be resolved, THE fault handler SHALL return the specific `FaultError` variant matching the cause
+4. THE caller of fault resolution SHALL NOT perform textual heuristics to determine the failure reason
+5. ALL log messages for fault failures SHALL include the typed `FaultError` variant
+
+### Requirement 23: Separação de Mecanismo e Policy no Fault Path
+
+**User Story:** As a kernel developer, I want fault resolution separated into classifier, admission, and materializer layers, so that each layer has a single responsibility.
+
+#### Acceptance Criteria
+
+1. THE fault path SHALL be organized into three distinct layers: `classify_fault`, `admit_memory_growth`, `materialize_fault`
+2. THE `classify_fault` function SHALL only determine VMA membership and access permission — it SHALL NOT consult quota, OOM registry, or policy manager
+3. THE `admit_memory_growth` function SHALL only determine if the process can grow — it SHALL NOT allocate physical memory
+4. THE `materialize_fault` function SHALL only perform physical allocation, zero-fill, mapping, and accounting — it SHALL NOT look up process identity from PML4 or consult global OOM state
+5. THE `materialize_fault` function SHALL receive a `ProcessMemoryContext` as explicit parameter, not derive it from global state
+6. AFTER migration, `resolve_anon_fault` SHALL NOT call `get_process_memory_usage()` or `process_id_for_pml4()` in the hot path
+
+### Requirement 24: OOM Opera por Processo
+
+**User Story:** As a kernel developer, I want OOM to kill entire processes, not individual threads, so that the system does not enter zombie process states.
+
+#### Acceptance Criteria
+
+1. THE OOM killer SHALL select a victim process, not a victim thread
+2. WHEN an OOM victim is selected, THE OOM_Manager SHALL transition the process to `ProcessState::Dying(KillReason::Oom)`
+3. WHEN a process enters `Dying` state, THE fault materializer SHALL reject new fault materializations for that process
+4. WHEN a process enters `Dying` state, THE OOM_Manager SHALL terminate ALL threads of that process
+5. WHEN a process enters `Dying` state, THE OOM_Manager SHALL trigger unified teardown: address space, capabilities, IPC ports
+6. AFTER OOM kill completes, THE process SHALL be in `Dead` state with all resources released
+7. THE `count_processes_over_limit` function SHALL use snapshot-based analysis and SHALL NOT hold registry lock during deep queries
+
+### Requirement 25: ProcessState Explícito
+
+**User Story:** As a kernel developer, I want explicit process lifecycle states, so that subsystems can make correct decisions without heuristics.
+
+#### Acceptance Criteria
+
+1. THE `Process` struct SHALL include a `state: ProcessState` field
+2. THE `ProcessState` enum SHALL include variants: `Running`, `Exiting(ExitReason)`, `Dying(KillReason)`, `Dead`
+3. THE `KillReason` enum SHALL include variants: `Oom`, `FatalFault`, `CapabilityViolation`
+4. WHEN a process is in `Dying` state, THE fault materializer SHALL return `FaultError::ProcessContextMissing`
+5. THE `transition_to_dying` function SHALL be atomic and SHALL prevent concurrent transitions
+6. THE process state SHALL be observable via `get_process_state(process_id) -> Option<ProcessState>`
+
+### Requirement 26: Capability Revoke Transacional
+
+**User Story:** As a kernel developer, I want capability revocation to be transactional, so that partial revocation is never silently ignored.
+
+#### Acceptance Criteria
+
+1. THE capability revocation SHALL use a two-phase protocol: mark as `Revoking`, then commit removal
+2. WHEN a capability is in `Revoking` state, THE capability system SHALL reject new uses of that capability
+3. THE revocation SHALL return `RevokeReport` containing `revoked: Vec<CapHandle>` and `failed: Vec<(CapHandle, RevokeError)>`
+4. WHEN a child capability fails to revoke, THE failure SHALL be recorded in `RevokeReport.failed` — it SHALL NOT be silently discarded
+5. THE `RevokeError` enum SHALL include variants: `ChildRevokeFailed(CapHandle)`, `Busy(CapHandle)`, `InvariantBroken`
+6. AFTER migration, there SHALL be no occurrence of `let _ = self.revoke(...)` or equivalent error-discarding patterns in the codebase
+7. THE state of the capability tree SHALL be observable and consistent after any revocation attempt
+
+### Requirement 27: Callbacks Fora de Lock Estrutural
+
+**User Story:** As a kernel developer, I want revocation callbacks to execute outside structural locks, so that callbacks cannot cause deadlocks.
+
+#### Acceptance Criteria
+
+1. THE `invoke_revocation_callbacks` function SHALL snapshot the callback list before invocation
+2. THE `REVOCATION_CALLBACKS` lock SHALL be released before any callback is invoked
+3. WHEN callbacks are invoked, THE `REVOCATION_CALLBACKS` lock SHALL NOT be held
+4. THE documentation for revocation callbacks SHALL state explicitly: "panic in a callback is a fatal kernel bug"
+5. THE kernel SHALL NOT promise panic recovery for callbacks in no_std environments
+6. AFTER migration, there SHALL be no code path where a callback executes while `REVOCATION_CALLBACKS` is locked
+
+### Requirement 28: Hierarquia Global de Locks Documentada
+
+**User Story:** As a kernel developer, I want a documented and enforced lock acquisition order, so that deadlocks from accidental lock inversion are structurally impossible.
+
+#### Acceptance Criteria
+
+1. THE kernel SHALL maintain a `KERNEL_INVARIANTS.md` document defining the global lock order
+2. THE lock hierarchy SHALL define levels: Scheduler(1) > ProcessRegistry(2) > Process(3) > AddressSpace/VMA(4) > PMM/VMM(5), CapabilityRegistry(2b) > CapabilityObject(3b), CallbackRegistry(snapshot-only)
+3. WHEN a function holds a lock at level N, it SHALL NOT call any function that acquires a lock at level ≤ N
+4. WHEN a global scan is needed, THE scan SHALL use snapshot iteration and SHALL NOT hold the registry lock during deep analysis
+5. CRITICAL functions SHALL include lock contract comments documenting which locks they acquire and which they must not be called under
+6. THE `oom.rs`, `vma.rs`, and `cap.rs` modules SHALL follow the formal lock order
+
+### Requirement 29: Sem assert!/panic! em Caminhos Operacionais
+
+**User Story:** As a kernel developer, I want operational errors to produce structured results instead of kernel panics, so that a single process failure cannot crash the entire system.
+
+#### Acceptance Criteria
+
+1. THE syscall hot path SHALL NOT contain `assert_eq!` or `assert!` macros for operational conditions
+2. THE `log_panic!` macro SHALL NOT be used for operational errors related to userspace or process state
+3. WHEN a syscall context error occurs (missing process, invalid return address, PML4 mismatch), THE kernel SHALL return a `SyscallContextError` and trigger local process teardown
+4. THE `SyscallContextError` enum SHALL include variants: `ProcessContextMismatch`, `InvalidUserReturnAddress`, `MissingAddressSpace`, `ThreadMetadataDrift`
+5. AFTER migration, `assert!`/`panic!` SHALL be reserved for structural kernel invariant violations only (e.g., corrupted central tables)
+6. WHEN an operational error triggers process teardown, THE kernel SHALL continue running for other processes
+
+### Requirement 30: Interfaces de Ownership Claras entre Subsistemas
+
+**User Story:** As a kernel developer, I want clear ownership boundaries between MM, Process, OOM, Capabilities, and IPC, so that each subsystem has a single responsibility.
+
+#### Acceptance Criteria
+
+1. THE MM subsystem SHALL own: VMA lookup, page admission input, physical materialization, mapping
+2. THE Process subsystem SHALL own: address space ownership, aggregated accounting, lifecycle state, quota metadata
+3. THE OOM subsystem SHALL own: global pressure assessment, victim selection, process kill initiation
+4. THE Capability subsystem SHALL own: derivation graph, revoke state machine; callbacks SHALL be notifications only, not integrity mechanisms
+5. THE IPC/Callback subsystem SHALL react to external events without holding structural locks and without influencing revocation atomicity
+6. AFTER migration, no subsystem SHALL reach into another subsystem's internal state without going through the defined interface
+
+### Requirement 31: Documento de Invariantes do Kernel
+
+**User Story:** As a kernel developer, I want a formal invariants document, so that all contributors understand the architectural contracts before modifying critical subsystems.
+
+#### Acceptance Criteria
+
+1. THE kernel SHALL include a `KERNEL_INVARIANTS.md` document at the repository root or kernel directory
+2. THE document SHALL define: memory addressing model, global lock order, memory ownership semantics, revoke semantics, OOM semantics
+3. THE document SHALL be updated before any code change that affects the defined invariants
+4. THE document SHALL include: for each invariant, the invariant statement, the subsystem responsible, and the consequence of violation
+5. THE document SHALL be the reference for code review of changes to `mm/`, `cap.rs`, `process.rs`, `oom.rs`
+
+### Requirement 32: Unificação do Contrato de Endereços de Userspace
+
+**User Story:** As a kernel developer, I want the ABI to be the single source of truth for userspace address validation, eliminating the local KERNEL_BASE-based check.
+
+#### Acceptance Criteria
+
+1. THE functions `is_valid_user_address`, `is_valid_user_range`, `is_valid_user_return_address` SHALL be defined only in `shared/abi`
+2. THE `validate_user_space_bounds()` function in `kernel/src/mm/mod.rs` SHALL be replaced by ABI-based validation
+3. THE `UserVAddr` and `UserRange` types SHALL be new opaque types that can only be constructed via ABI validation functions
+4. THE syscall layer SHALL use only the typed API for userspace pointer validation
+5. AFTER migration, there SHALL be no duplicate validation logic between ABI and kernel MM
+
+### Requirement 33: Accounting de Memória por Processo Unificado
+
+**User Story:** As a kernel developer, I want a single source of truth for per-process memory accounting, so that OOM decisions are based on accurate data without deep lock chains.
+
+#### Acceptance Criteria
+
+1. THE per-process memory accounting SHALL have a single authoritative source updated at map/unmap/materialization events
+2. THE OOM subsystem SHALL query aggregated accounting snapshots, not reconstruct memory usage via deep registry scans
+3. THE `get_process_memory_snapshot()` function SHALL return a lightweight snapshot without holding nested locks
+4. THE accounting SHALL be updated atomically at each map and unmap event
+5. AFTER migration, the OOM killer SHALL NOT call `get_process_memory_usage()` while holding any registry lock
+
+### Requirement 34: Teardown Unificado de Processo
+
+**User Story:** As a kernel developer, I want a unified process teardown path, so that all resources are deterministically released when a process dies for any reason.
+
+#### Acceptance Criteria
+
+1. THE kernel SHALL have a single `cleanup_process_resources(process_id)` function used for all process termination paths (normal exit, OOM kill, fatal fault)
+2. WHEN `cleanup_process_resources` is called, it SHALL release: address space, all capabilities, all IPC ports, all shared memory regions
+3. THE teardown SHALL be idempotent — calling it multiple times SHALL produce the same result
+4. AFTER teardown completes, THE process SHALL be in `Dead` state
+5. THE teardown function SHALL log a structured summary of all resources released
+
+### Requirement 35: Sequência de Merge Controlada
+
+**User Story:** As a kernel developer, I want the architectural migration to follow a defined merge sequence, so that each step is independently verifiable and does not break existing functionality.
+
+#### Acceptance Criteria
+
+1. THE migration SHALL follow this sequence: (1) Address contract unification, (2) FaultResult typed, (3) Fault path split, (4) Process memory accounting unified, (5) OOM by process, (6) Lock hierarchy cleanup, (7) Cap revoke redesign, (8) Callback isolation, (9) Operational error handling cleanup
+2. EACH step SHALL be independently mergeable without breaking existing tests
+3. EACH step SHALL have a Definition of Done that can be verified by code inspection
+4. THE migration SHALL NOT proceed to step N+1 until step N passes all existing tests
+5. AFTER all 9 steps, the system SHALL satisfy all 8 architectural invariants defined in the design document
+
+### Requirement 36: Critérios de Pronto do Sistema
+
+**User Story:** As a kernel developer, I want unambiguous system-level acceptance criteria for the migration, so that completion can be verified objectively.
+
+#### Acceptance Criteria
+
+1. AFTER migration: "Userspace pointer válido é definido onde?" SHALL have exactly one answer: ABI (`shared/abi`)
+2. AFTER migration: "Quem decide quota/política de memória?" SHALL have exactly one answer: camada de admission/policy, não fault materializer
+3. AFTER migration: "OOM mata quem?" SHALL have exactly one answer: processo (não thread individual)
+4. AFTER migration: "Revogação parcial pode passar silenciosa?" SHALL have exactly one answer: não
+5. AFTER migration: "Callback roda sob lock?" SHALL have exactly one answer: não
+6. AFTER migration: "Erro operacional panica kernel?" SHALL have exactly one answer: não, salvo corrupção estrutural real
+7. AFTER migration: "Existe lock order documentado e seguido?" SHALL have exactly one answer: sim, em `KERNEL_INVARIANTS.md`

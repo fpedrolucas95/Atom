@@ -1097,7 +1097,7 @@ impl Compositor {
         let init_pixels = (fb.stride() * fb.height()) as usize;
         let mut backbuffer = alloc::vec![0u32; MAX_BACKBUFFER_PIXELS.max(init_pixels)];
         let backbuffer_fb = Framebuffer::new_custom(
-            backbuffer.as_mut_ptr() as usize,
+            backbuffer.as_mut_ptr() as u64,
             fb.width(),
             fb.height(),
             fb.stride(),
@@ -1659,7 +1659,7 @@ impl Compositor {
             None => return,
         };
         let new_backbuffer_fb = match Framebuffer::new_custom(
-            self._backbuffer.as_mut_ptr() as usize,
+            self._backbuffer.as_mut_ptr() as u64,
             new_fb.width(),
             new_fb.height(),
             new_fb.stride(),
@@ -2744,7 +2744,7 @@ impl Compositor {
         for sy in 0..straight_height {
             let src_offset = (sy * src_stride) as usize * fb_bpp;
             let dst_offset = ((dest_y + sy) * fb_stride + dest_x) as usize * fb_bpp;
-            let src_ptr = (src_addr + src_offset) as *const u8;
+            let src_ptr = ((src_addr as usize) + src_offset) as *const u8;
             let dst_ptr = (fb_addr + dst_offset) as *mut u8;
             unsafe {
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize * fb_bpp);
@@ -2764,7 +2764,7 @@ impl Compositor {
             if row_width > 0 {
                 let src_offset = (sy * src_stride + int_offset) as usize * fb_bpp;
                 let dst_offset = (row_y * fb_stride + dest_x + int_offset) as usize * fb_bpp;
-                let src_ptr = (src_addr + src_offset) as *const u8;
+                let src_ptr = ((src_addr as usize) + src_offset) as *const u8;
                 let dst_ptr = (fb_addr + dst_offset) as *mut u8;
                 unsafe {
                     core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_width as usize * fb_bpp);
@@ -2776,7 +2776,7 @@ impl Compositor {
 
                 let left_src_x = int_offset - 1;
                 let left_src_offset = (sy * src_stride + left_src_x) as usize * fb_bpp;
-                let left_pixel = unsafe { ((src_addr + left_src_offset) as *const u32).read_volatile() };
+                let left_pixel = unsafe { (((src_addr as usize) + left_src_offset) as *const u32).read_volatile() };
                 self.backbuffer_fb.fill_rect_alpha(
                     dest_x + left_src_x,
                     row_y,
@@ -2788,7 +2788,7 @@ impl Compositor {
 
                 let right_src_x = copy_width - int_offset;
                 let right_src_offset = (sy * src_stride + right_src_x) as usize * fb_bpp;
-                let right_pixel = unsafe { ((src_addr + right_src_offset) as *const u32).read_volatile() };
+                let right_pixel = unsafe { (((src_addr as usize) + right_src_offset) as *const u32).read_volatile() };
                 self.backbuffer_fb.fill_rect_alpha(
                     dest_x + right_src_x,
                     row_y,
@@ -2979,10 +2979,14 @@ pub extern "efiapi" fn efi_main(
 
 fn main() -> ! {
     log("Atom Desktop Environment v1.0");
+    log("ui_shell: startup begin");
 
     let fb_info = match get_framebuffer() {
         Some(info) => info,
-        None => exit(1),
+        None => {
+            log("ui_shell: failed to get framebuffer info");
+            exit(1)
+        }
     };
 
     // Reserve enough heap for:
@@ -3000,26 +3004,46 @@ fn main() -> ! {
 
     let region_id = match shared_region_create(heap_size) {
         Ok(id) => id,
-        Err(_) => exit(1),
+        Err(_) => {
+            log("ui_shell: failed to create shared heap region");
+            exit(1)
+        }
     };
 
     let heap_start = match shared_region_map(region_id, 0, SharedMemFlags::READ_WRITE) {
         Ok(addr) => addr,
-        Err(_) => exit(1),
+        Err(_) => {
+            log("ui_shell: failed to map shared heap region");
+            exit(1)
+        }
     };
 
-    ALLOCATOR.init(heap_start, heap_size);
+    ALLOCATOR.init(heap_start as usize, heap_size);
 
     let fb = match Framebuffer::new() {
         Some(fb) => fb,
-        None => exit(1),
+        None => {
+            log("ui_shell: failed to create framebuffer handle");
+            exit(1)
+        }
     };
 
     let mut compositor = Compositor::new(fb);
 
-    let _ = libipc::protocol::register_service("compositor", compositor.event_port);
-    let _ = libipc::protocol::register_service("compositor.register", compositor.register_port);
-    let _ = libipc::protocol::register_service("compositor.wm", compositor.register_port);
+    log("ui_shell: registering compositor services");
+    if libipc::protocol::register_service("compositor", compositor.event_port).is_err() {
+        log("ui_shell: failed to register service 'compositor'");
+        exit(1);
+    }
+    if libipc::protocol::register_service("compositor.register", compositor.register_port).is_err() {
+        log("ui_shell: failed to register service 'compositor.register'");
+        exit(1);
+    }
+    if libipc::protocol::register_service("compositor.wm", compositor.register_port).is_err() {
+        log("ui_shell: failed to register service 'compositor.wm'");
+        exit(1);
+    }
+    log("ui_shell: compositor services registered");
 
     compositor.run()
 }

@@ -192,6 +192,30 @@ impl From<ValidationError> for VmError {
     }
 }
 
+fn map_user_address_validation_error(
+    addr: usize,
+    err: atom_abi::UserAddressError,
+) -> ValidationError {
+    match err {
+        atom_abi::UserAddressError::EmptyRange => ValidationError::InvalidSize {
+            size: 0,
+            max_size: usize::MAX,
+        },
+        atom_abi::UserAddressError::Overflow => ValidationError::OutOfBounds {
+            addr,
+            min: atom_abi::USER_SPACE_MIN as usize,
+            max: atom_abi::USER_SPACE_MAX as usize - 1,
+        },
+        atom_abi::UserAddressError::NonCanonical
+        | atom_abi::UserAddressError::BelowUserMin
+        | atom_abi::UserAddressError::AboveUserMax => ValidationError::OutOfBounds {
+            addr,
+            min: atom_abi::USER_SPACE_MIN as usize,
+            max: atom_abi::USER_SPACE_MAX as usize - 1,
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFlags(u64);
 
@@ -567,7 +591,8 @@ pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageF
     // Validate user-space bounds if this is a user-space mapping
     let is_user_mapping = (flags.bits() & PageFlags::USER.bits()) != 0;
     if is_user_mapping {
-        crate::mm::validate_user_space_bounds(virt, pmm::PAGE_SIZE)?;
+        atom_abi::validate_user_range(virt, pmm::PAGE_SIZE)
+            .map_err(|err| VmError::Validation(map_user_address_validation_error(virt, err)))?;
     }
 
     map_page_internal(pml4_phys, virt, phys, flags)

@@ -45,7 +45,6 @@ use core::fmt;
 
 // Constants for validation
 const PAGE_SIZE: usize = 4096;
-const KERNEL_BASE: usize = 0xFFFF_8000_0000_0000;
 
 /// Validation errors for memory operations
 ///
@@ -211,61 +210,6 @@ pub fn validate_unprotected_resource(
     }
 }
 
-/// Validates that a user-space address and size are within valid bounds
-///
-/// This function ensures that user-space memory operations stay within the
-/// lower canonical address range and do not overlap with kernel space. The
-/// kernel space begins at KERNEL_BASE (0xFFFF_8000_0000_0000), and all
-/// user-space addresses must be strictly below this boundary.
-///
-/// # Arguments
-/// * `addr` - The starting address to validate
-/// * `size` - The size of the memory region in bytes
-///
-/// # Returns
-/// * `Ok(())` if the entire range [addr, addr+size) is in valid user space
-/// * `Err(ValidationError::OutOfBounds)` if any part of the range is invalid
-///
-/// # Examples
-/// ```
-/// // Valid user-space address
-/// assert!(validate_user_space_bounds(0x1000, 0x1000).is_ok());
-/// 
-/// // Invalid kernel-space address
-/// assert!(validate_user_space_bounds(0xFFFF_8000_0000_0000, 0x1000).is_err());
-/// 
-/// // Invalid range that crosses into kernel space
-/// assert!(validate_user_space_bounds(0xFFFF_7FFF_FFFF_F000, 0x2000).is_err());
-/// ```
-pub fn validate_user_space_bounds(addr: usize, size: usize) -> Result<(), ValidationError> {
-    // Check if the starting address is in kernel space
-    if addr >= KERNEL_BASE {
-        return Err(ValidationError::OutOfBounds {
-            addr,
-            min: 0,
-            max: KERNEL_BASE - 1,
-        });
-    }
-    
-    // Check for overflow when computing end address
-    let end = addr.checked_add(size).ok_or(ValidationError::OutOfBounds {
-        addr,
-        min: 0,
-        max: KERNEL_BASE - 1,
-    })?;
-    
-    // Check if the end address crosses into kernel space
-    if end > KERNEL_BASE {
-        return Err(ValidationError::OutOfBounds {
-            addr,
-            min: 0,
-            max: KERNEL_BASE - 1,
-        });
-    }
-    
-    Ok(())
-}
-
 pub unsafe fn init(memory_map: &MemoryMap) {
     pmm::init(memory_map);
     vm::init(memory_map);
@@ -279,8 +223,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_page_alignment, validate_size, validate_unprotected_resource,
-        validate_user_space_bounds, ValidationError,
+        validate_page_alignment, validate_size, validate_unprotected_resource, ValidationError,
     };
 
     #[test]
@@ -320,15 +263,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn user_space_bounds_validation_rejects_kernel_and_overflow_ranges() {
-        assert!(matches!(
-            validate_user_space_bounds(0xFFFF_8000_0000_0000, 0x1000),
-            Err(ValidationError::OutOfBounds { .. })
-        ));
-        assert!(matches!(
-            validate_user_space_bounds(usize::MAX - 0x1000, 0x2000),
-            Err(ValidationError::OutOfBounds { .. })
-        ));
-    }
 }

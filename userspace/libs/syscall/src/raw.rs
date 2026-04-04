@@ -109,6 +109,12 @@ pub mod numbers {
     pub const SYS_GET_CURRENT_VIDEO_MODE: u64 = 79;
     /// Get total count of available modes: () -> count
     pub const SYS_VIDEO_MODE_COUNT:       u64 = 80;
+
+    // Virtual memory management syscalls
+    pub const SYS_MMAP:      u64 = 100;
+    pub const SYS_MUNMAP:    u64 = 101;
+    pub const SYS_MPROTECT:  u64 = 102;
+    pub const SYS_BRK:       u64 = 103;
 }
 
 /// Raw syscall with no arguments

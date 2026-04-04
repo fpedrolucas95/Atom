@@ -1,7 +1,7 @@
 // Virtual Memory Area (VMA) Management
 //
 // Implements per-address-space tracking of virtual memory regions with
-// support for demand paging, lazy allocation, and memory policy enforcement.
+// support for demand paging and lazy allocation.
 //
 // Each VMA describes a contiguous virtual address range with uniform
 // properties (permissions, backing type, etc.). VMAs are stored in a
@@ -10,14 +10,13 @@
 // Key features:
 // - Track virtual regions per address space (anon, file-backed, shared, device)
 // - Support demand paging: reserve virtual ranges without physical backing
-// - Stack growth with guard pages
+// - Stack regions with guard pages
 // - Free virtual address allocation (find_free_region)
 // - Per-process memory accounting (resident vs reserved)
 //
 // Design principles:
 // - VMAs are metadata only; physical pages are allocated on demand via page faults
 // - Guard pages are never mapped and trigger controlled faults
-// - Stack VMAs grow downward automatically when faults occur near the guard
 
 use alloc::collections::BTreeMap;
 use spin::Mutex;
@@ -43,6 +42,74 @@ pub enum VmaBacking {
     Device {
         phys_base: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessType {
+    Read,
+    Write,
+    Execute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtAddr(usize);
+
+impl VirtAddr {
+    pub const fn new(addr: usize) -> Self {
+        Self(addr)
+    }
+
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+
+    pub const fn page_base(self) -> usize {
+        self.0 & !(PAGE_SIZE - 1)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultContext {
+    pub addr: VirtAddr,
+    pub access: AccessType,
+    pub is_user: bool,
+}
+
+impl FaultContext {
+    pub fn from_x86_error(addr: usize, error_code: u64) -> Self {
+        // x86 page-fault decode:
+        // bit 1 = write access
+        // bit 2 = user access
+        // bit 4 = instruction fetch
+        let access = if (error_code & 0x10) != 0 {
+            AccessType::Execute
+        } else if (error_code & 0x2) != 0 {
+            AccessType::Write
+        } else {
+            AccessType::Read
+        };
+
+        Self {
+            addr: VirtAddr::new(addr),
+            access,
+            is_user: (error_code & 0x4) != 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultResult {
+    Resolved,
+    InvalidAddress,
+    ProtectionViolation,
+    OutOfMemory,
+    NotHandled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassifiedFault {
+    NonPresent,
+    Protection,
 }
 
 /// Protection flags for a VMA region
@@ -117,6 +184,14 @@ impl Vma {
     /// Check if this VMA overlaps with the given range [start, end)
     pub fn overlaps(&self, start: usize, end: usize) -> bool {
         self.start < end && start < self.end
+    }
+
+    fn permits(&self, access: AccessType) -> bool {
+        match access {
+            AccessType::Read => self.perms.contains(VmaPermissions::READ),
+            AccessType::Write => self.perms.contains(VmaPermissions::WRITE),
+            AccessType::Execute => self.perms.contains(VmaPermissions::EXEC),
+        }
     }
 }
 
@@ -231,7 +306,8 @@ impl VmaMap {
                 break;
             }
  
-            if candidate + size <= vma.start {
+            let candidate_end = candidate.checked_add(size)?;
+            if candidate_end <= vma.start {
                 // Found a gap before this VMA
                 return Some(candidate);
             }
@@ -241,7 +317,8 @@ impl VmaMap {
         }
 
         // Check if there's space after the last VMA
-        if candidate + size <= high {
+        let candidate_end = candidate.checked_add(size)?;
+        if candidate_end <= high {
             Some(candidate)
         } else {
             None
@@ -547,6 +624,14 @@ pub fn get_process_stats(process_id: ProcessId) -> Option<VmaStats> {
 /// Create a new VmaMap for the given address space (PML4 phys addr)
 pub fn create_vma_map(pml4_phys: usize) {
     let mut registry = VMA_REGISTRY.lock();
+    if registry.contains_key(&pml4_phys) {
+        log_warn!(
+            LOG_ORIGIN,
+            "[VMA_FAIL] reason=duplicate_map_create pml4=0x{:X}",
+            pml4_phys
+        );
+        return;
+    }
     registry.insert(pml4_phys, VmaMap::new());
     log_debug!(LOG_ORIGIN, "Created VMA map for PML4=0x{:X}", pml4_phys);
 }
@@ -563,7 +648,32 @@ pub fn destroy_vma_map(pml4_phys: usize) {
 pub fn insert_vma(pml4_phys: usize, vma: Vma) -> Result<(), VmaError> {
     let mut registry = VMA_REGISTRY.lock();
     let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
-    map.insert(vma)
+    log_debug!(
+        LOG_ORIGIN,
+        "[VMA_INSERT] pml4=0x{:X} start=0x{:X} end=0x{:X} perms=0x{:X} backing={:?} label={}",
+        pml4_phys,
+        vma.start,
+        vma.end,
+        vma.perms.bits(),
+        vma.backing,
+        vma.label
+    );
+    let result = map.insert(vma);
+    match &result {
+        Ok(()) => log_debug!(
+            LOG_ORIGIN,
+            "[VMA_INSERT] result=ok pml4=0x{:X} vma_count={}",
+            pml4_phys,
+            map.len()
+        ),
+        Err(err) => log_warn!(
+            LOG_ORIGIN,
+            "[VMA_FAIL] reason=insert_failed pml4=0x{:X} err={:?}",
+            pml4_phys,
+            err
+        ),
+    }
+    result
 }
 
 /// Remove a VMA from an address space
@@ -589,8 +699,40 @@ pub fn remove_vma_range(pml4_phys: usize, start: usize, end: usize) -> alloc::ve
 /// Find the VMA containing a given address
 pub fn find_vma(pml4_phys: usize, addr: usize) -> Option<Vma> {
     let registry = VMA_REGISTRY.lock();
-    let map = registry.get(&pml4_phys)?;
-    map.find(addr).cloned()
+    let map = match registry.get(&pml4_phys) {
+        Some(map) => map,
+        None => {
+            log_warn!(
+                LOG_ORIGIN,
+                "[VMA_LOOKUP] pml4=0x{:X} addr=0x{:X} result=no_registry",
+                pml4_phys,
+                addr
+            );
+            return None;
+        }
+    };
+    let result = map.find(addr).cloned();
+    match &result {
+        Some(vma) => log_debug!(
+            LOG_ORIGIN,
+            "[VMA_LOOKUP] pml4=0x{:X} addr=0x{:X} result=hit start=0x{:X} end=0x{:X} perms=0x{:X} backing={:?} label={}",
+            pml4_phys,
+            addr,
+            vma.start,
+            vma.end,
+            vma.perms.bits(),
+            vma.backing,
+            vma.label
+        ),
+        None => log_warn!(
+            LOG_ORIGIN,
+            "[VMA_LOOKUP] pml4=0x{:X} addr=0x{:X} result=miss vma_count={}",
+            pml4_phys,
+            addr,
+            map.len()
+        ),
+    }
+    result
 }
 
 /// Find a free virtual region in an address space
@@ -654,169 +796,73 @@ fn align_up(val: usize, align: usize) -> usize {
 // Demand paging: page fault resolution
 // ---------------------------------------------------------------------------
 
-/// Attempt to resolve a user-space page fault via demand paging.
-///
-/// Returns `true` if the fault was resolved (page mapped, execution can resume).
-/// Returns `false` if the fault is unresolvable (invalid address, permission
-/// violation, out of memory, etc.).
-///
-/// The lock on `VMA_REGISTRY` is held only for the VMA lookup and validation
-/// phase.  PMM allocation and page-table manipulation happen *outside* the
-/// lock so that future changes to those subsystems cannot deadlock against
-/// VMA_REGISTRY, and interrupt latency is kept low during bitmap scans.
-///
-/// # Arguments
-/// * `pml4_phys` - The faulting process's PML4 physical address
-/// * `fault_addr` - The virtual address that caused the fault (CR2)
-/// * `error_code` - The x86_64 page fault error code
-pub fn handle_page_fault(pml4_phys: usize, fault_addr: usize, error_code: u64) -> bool {
-    let page_addr = fault_addr & !(PAGE_SIZE - 1);
-
-    // Error code bits
-    let present = error_code & 0x1 != 0;  // page was present
-    let write = error_code & 0x2 != 0;    // write access
-    let _user = error_code & 0x4 != 0;    // user-mode access
-    let reserved = error_code & 0x8 != 0; // reserved bit set in PTE
-
-    // Reserved bit faults are always hardware errors — never resolvable
-    if reserved {
-        return false;
+fn classify_fault(error_code: u64) -> ClassifiedFault {
+    // x86 PF error bit 0: 0 = non-present, 1 = protection violation.
+    if (error_code & 0x1) != 0 {
+        ClassifiedFault::Protection
+    } else {
+        ClassifiedFault::NonPresent
     }
-
-    // If the page was already present, this is a permission violation
-    // (e.g., write to read-only). We don't handle COW yet.
-    if present {
-        return false;
-    }
-
-    // ── Phase 1: hold VMA_REGISTRY only for the lookup / validation ──
-    let vma = {
-        let mut registry = VMA_REGISTRY.lock();
-        let map = match registry.get_mut(&pml4_phys) {
-            Some(m) => m,
-            None => return false,
-        };
-
-        // Find which VMA covers the fault address
-        let vma = match map.find(page_addr) {
-            Some(v) => v.clone(),
-            None => {
-                // Check if this is a stack growth fault:
-                // Look for a stack VMA just above the fault address
-                // (stacks grow downward, so the fault is below the current VMA start)
-                let grew = try_grow_stack(map, fault_addr);
-                if grew {
-                    // Stack grew — now the VMA covers fault_addr.
-                    match map.find(page_addr) {
-                        Some(v) => v.clone(),
-                        None => return false,
-                    }
-                } else {
-                    return false;
-                }
-            }
-        };
-
-        // Validate permissions
-        if write && !vma.perms.contains(VmaPermissions::WRITE) {
-            log_debug!(LOG_ORIGIN, "PF denied: write to non-writable VMA at 0x{:X}", fault_addr);
-            return false;
-        }
-        if !write && !vma.perms.contains(VmaPermissions::READ) {
-            log_debug!(LOG_ORIGIN, "PF denied: read on non-readable VMA at 0x{:X}", fault_addr);
-            return false;
-        }
-
-        // Validate backing type
-        match vma.backing {
-            VmaBacking::Anonymous | VmaBacking::Stack { .. } => {}
-            VmaBacking::Device { .. } => {
-                // Device mappings should already be mapped. If we get a fault,
-                // something is wrong.
-                log_warn!(LOG_ORIGIN, "PF on device VMA at 0x{:X} — unexpected", fault_addr);
-                return false;
-            }
-        }
-
-        // Check resident limit while we still hold the lock
-        if !map.can_map_page() {
-            log_warn!(LOG_ORIGIN, "Resident page limit reached for PML4=0x{:X}", pml4_phys);
-            return false;
-        }
-
-        vma
-        // ── lock dropped here ──
-    };
-
-    // ── Phase 2: allocate + map without holding VMA_REGISTRY ──
-    resolve_anon_fault(pml4_phys, page_addr, &vma)
 }
 
-/// Resolve an anonymous (zero-fill) page fault.
-///
-/// Called *after* the VMA_REGISTRY lock has been released.  Re-acquires the
-/// lock only briefly at the end to update resident-page accounting.
-fn resolve_anon_fault(
+fn admit_fault(ctx: &FaultContext, vma: &Vma) -> Result<(), FaultResult> {
+    if vma.permits(ctx.access) {
+        Ok(())
+    } else {
+        Err(FaultResult::ProtectionViolation)
+    }
+}
+
+fn materialize_fault(
     pml4_phys: usize,
-    page_addr: usize,
+    ctx: &FaultContext,
+    classified: ClassifiedFault,
     vma: &Vma,
-) -> bool {
+) -> FaultResult {
+    match classified {
+        ClassifiedFault::Protection => FaultResult::ProtectionViolation,
+        ClassifiedFault::NonPresent => match vma.backing {
+            VmaBacking::Anonymous | VmaBacking::Stack { .. } => materialize_anon(pml4_phys, ctx, vma),
+            _ => FaultResult::NotHandled,
+        },
+    }
+}
+
+fn materialize_anon(
+    pml4_phys: usize,
+    ctx: &FaultContext,
+    vma: &Vma,
+) -> FaultResult {
     use crate::mm::pmm;
-    use crate::mm::vm::{self, PageFlags};
+    use crate::mm::vm::{self, PageFlags, VmError};
 
-    // ── Guard: do NOT replace an already-present page ──────────────────
-    // This can happen when handle_page_fault is called with a synthetic
-    // error code (e.g. the pre-fault path in sys_fs_read passes
-    // "not-present" even though the page may already be mapped).
-    // Replacing a live page with a zeroed page would destroy stack data
-    // (return addresses, local variables) and cause RIP=0x0 crashes.
+    let page_addr = ctx.addr.page_base();
+
     if vm::is_page_present_in_pml4(pml4_phys, page_addr) {
-        return true; // already mapped — nothing to do
+        log_debug!(
+            LOG_ORIGIN,
+            "[PF] materialize=anon pml4=0x{:X} page=0x{:X} result=already_present label={}",
+            pml4_phys,
+            page_addr,
+            vma.label
+        );
+        return FaultResult::Resolved;
     }
 
-    // ── Check per-process memory limits before allocation (Req 7.2, 7.3) ──
-    if let Some(process_id) = crate::process::process_id_for_pml4(pml4_phys as u64) {
-        if let Some(usage) = crate::process::get_process_memory_usage(process_id) {
-            // Check hard limit (0 = unlimited)
-            if usage.limit_pages > 0 && usage.resident_pages >= usage.limit_pages {
-                log_warn!(
-                    LOG_ORIGIN,
-                    "Process {} memory hard limit exceeded: {} >= {} pages, denying allocation at 0x{:X}",
-                    process_id,
-                    usage.resident_pages,
-                    usage.limit_pages,
-                    page_addr
-                );
-                return false;
-            }
-
-            // Check soft limit (80% of hard limit) - warn but allow
-            if usage.limit_pages > 0 {
-                let soft_limit = (usage.limit_pages * 80) / 100;
-                if usage.resident_pages >= soft_limit && usage.resident_pages < usage.limit_pages {
-                    log_warn!(
-                        LOG_ORIGIN,
-                        "Process {} memory soft limit exceeded: {} >= {} pages (hard limit: {})",
-                        process_id,
-                        usage.resident_pages,
-                        soft_limit,
-                        usage.limit_pages
-                    );
-                }
-            }
-        }
-    }
-
-    // Allocate a zeroed physical page (no VMA lock held)
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,
         None => {
-            log_warn!(LOG_ORIGIN, "OOM: cannot allocate page for demand fault at 0x{:X}", page_addr);
-            return false;
+            log_warn!(
+                LOG_ORIGIN,
+                "[PF] materialize=anon pml4=0x{:X} page=0x{:X} result=oom label={}",
+                pml4_phys,
+                page_addr,
+                vma.label
+            );
+            return FaultResult::OutOfMemory;
         }
     };
 
-    // Build page flags from VMA permissions
     let mut flags = PageFlags::PRESENT | PageFlags::USER;
     if vma.perms.contains(VmaPermissions::WRITE) {
         flags |= PageFlags::WRITABLE;
@@ -825,89 +871,152 @@ fn resolve_anon_fault(
         flags |= PageFlags::NO_EXECUTE;
     }
 
-    // Map the page into the process's address space (no VMA lock held)
     match vm::remap_page_in_pml4(pml4_phys, page_addr, phys, flags) {
         Ok(()) => {
-            // ── Phase 3: briefly re-acquire lock for accounting ──
             {
                 let mut registry = VMA_REGISTRY.lock();
                 if let Some(map) = registry.get_mut(&pml4_phys) {
                     map.account_map();
                 }
             }
+
             log_debug!(
                 LOG_ORIGIN,
-                "Demand-paged: virt=0x{:X} -> phys=0x{:X} ({})",
+                "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} access={:?} user={} label={} result=mapped",
+                pml4_phys,
                 page_addr,
                 phys,
+                ctx.access,
+                ctx.is_user,
                 vma.label
             );
-            true
+            FaultResult::Resolved
         }
-        Err(e) => {
-            // Failed to map — free the page we just allocated
+        Err(err) => {
             let _ = pmm::free_page(phys);
+            let result = if matches!(err, VmError::OutOfMemory) {
+                FaultResult::OutOfMemory
+            } else {
+                FaultResult::NotHandled
+            };
             log_warn!(
                 LOG_ORIGIN,
-                "Failed to map demand page at 0x{:X}: {:?}",
+                "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} result={:?} err={:?} label={}",
+                pml4_phys,
                 page_addr,
-                e
+                phys,
+                result,
+                err,
+                vma.label
             );
-            false
+            result
         }
     }
 }
 
-/// Try to grow a stack VMA to cover `fault_addr`.
-/// Returns true if the stack was successfully grown.
-fn try_grow_stack(map: &mut VmaMap, fault_addr: usize) -> bool {
-    let page_addr = fault_addr & !(PAGE_SIZE - 1);
+/// Attempt to resolve a page fault with a deterministic pipeline:
+/// classify -> admit -> materialize.
+pub fn handle_page_fault(
+    pml4_phys: usize,
+    ctx: FaultContext,
+    error_code: u64,
+) -> FaultResult {
+    let classified = classify_fault(error_code);
+    let page_addr = ctx.addr.page_base();
 
-    // Look for a stack VMA whose start is just above the fault address.
-    // Stacks grow downward, so the fault will be at an address just below
-    // the current VMA start.
-    //
-    // We check VMAs within a reasonable window (one guard page = one page below).
-    // The "real" guard page is the unmapped page at VMA.start - PAGE_SIZE.
+    log_debug!(
+        LOG_ORIGIN,
+        "[PF] classify={:?} addr=0x{:X} access={:?} user={} err={:#X} pml4=0x{:X}",
+        classified,
+        ctx.addr.as_usize(),
+        ctx.access,
+        ctx.is_user,
+        error_code,
+        pml4_phys
+    );
 
-    // Find candidate stack VMAs
-    let mut candidate_start: Option<usize> = None;
-
-    for (&start, vma) in map.regions.iter() {
-        if let VmaBacking::Stack { .. } = vma.backing {
-            // Check if fault_addr is in the growth window:
-            // Between (start - PAGE_SIZE) and start (the guard page area)
-            if page_addr < start && page_addr >= start.saturating_sub(PAGE_SIZE) {
-                candidate_start = Some(start);
-                break;
-            }
-        }
+    // Bit 3 indicates reserved-bit violation in x86 page-fault errors.
+    if (error_code & 0x8) != 0 {
+        log_warn!(
+            LOG_ORIGIN,
+            "[PF] classify={:?} addr=0x{:X} result=not_handled reason=reserved_bit pml4=0x{:X}",
+            classified,
+            ctx.addr.as_usize(),
+            pml4_phys
+        );
+        return FaultResult::NotHandled;
     }
 
-    if let Some(old_start) = candidate_start {
-        match map.grow_stack(old_start) {
-            Ok(new_start) => {
-                log_debug!(
-                    LOG_ORIGIN,
-                    "Stack grown: old_start=0x{:X} -> new_start=0x{:X}",
-                    old_start,
-                    new_start
-                );
-                true
-            }
-            Err(e) => {
+    let vma = {
+        let registry = VMA_REGISTRY.lock();
+        let map = match registry.get(&pml4_phys) {
+            Some(map) => map,
+            None => {
                 log_warn!(
                     LOG_ORIGIN,
-                    "Stack growth failed at 0x{:X}: {:?}",
-                    fault_addr,
-                    e
+                    "[PF] vma_hit=false addr=0x{:X} page=0x{:X} pml4=0x{:X} reason=no_registry",
+                    ctx.addr.as_usize(),
+                    page_addr,
+                    pml4_phys
                 );
-                false
+                return FaultResult::InvalidAddress;
+            }
+        };
+
+        match map.find(page_addr) {
+            Some(vma) => {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[PF] vma_hit=true addr=0x{:X} page=0x{:X} start=0x{:X} end=0x{:X} perms=0x{:X} backing={:?} label={}",
+                    ctx.addr.as_usize(),
+                    page_addr,
+                    vma.start,
+                    vma.end,
+                    vma.perms.bits(),
+                    vma.backing,
+                    vma.label
+                );
+                vma.clone()
+            }
+            None => {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "[PF] vma_hit=false addr=0x{:X} page=0x{:X} pml4=0x{:X} reason=miss vma_count={}",
+                    ctx.addr.as_usize(),
+                    page_addr,
+                    pml4_phys,
+                    map.len()
+                );
+                return FaultResult::InvalidAddress;
             }
         }
-    } else {
-        false
+    };
+
+    if let Err(result) = admit_fault(&ctx, &vma) {
+        log_warn!(
+            LOG_ORIGIN,
+            "[PF] admit=deny addr=0x{:X} access={:?} perms=0x{:X} result={:?} label={}",
+            ctx.addr.as_usize(),
+            ctx.access,
+            vma.perms.bits(),
+            result,
+            vma.label
+        );
+        return result;
     }
+
+    let result = materialize_fault(pml4_phys, &ctx, classified, &vma);
+    log_debug!(
+        LOG_ORIGIN,
+        "[PF] result={:?} addr=0x{:X} page=0x{:X} access={:?} user={} label={}",
+        result,
+        ctx.addr.as_usize(),
+        page_addr,
+        ctx.access,
+        ctx.is_user,
+        vma.label
+    );
+    result
 }
 
 pub fn init() {

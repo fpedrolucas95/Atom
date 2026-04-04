@@ -15,6 +15,11 @@
 #include <stdint.h>
 #include <errno.h>
 
+typedef uint64_t atom_user_virt_addr_t;
+typedef uint64_t atom_user_offset_t;
+
+#define ATOM_ABI_VERSION      1
+
 /* -----------------------------------------------------------------------
  * Syscall numbers — must match kernel/src/syscall/mod.rs
  * ----------------------------------------------------------------------- */
@@ -76,6 +81,16 @@
 #define ATOM_MAP_PRIVATE     0x02
 #define ATOM_MAP_ANONYMOUS   0x20
 #define ATOM_MAP_FIXED       0x10
+
+/* -----------------------------------------------------------------------
+ * Userspace virtual-address ABI
+ * ----------------------------------------------------------------------- */
+#define ATOM_USER_CANONICAL_MAX UINT64_C(0x00007FFFFFFFFFFF)
+#define ATOM_USER_SPACE_MIN     UINT64_C(0x0000000000001000)
+#define ATOM_USER_MMAP_START    UINT64_C(0x0000200000000000)
+#define ATOM_USER_MMAP_END      UINT64_C(0x0000700000000000)
+#define ATOM_USER_SPACE_MAX     UINT64_C(0x0000800000000000)
+#define ATOM_USER_PTR_HIGH_MASK UINT64_C(0xFFFF000000000000)
 
 /* -----------------------------------------------------------------------
  * Kernel error codes — u64::MAX - N (from shared/abi/src/lib.rs)
@@ -238,6 +253,35 @@ static inline uint64_t atom_syscall6(uint64_t num, uint64_t a1, uint64_t a2,
 static inline int atom_is_error(uint64_t v)
 {
     return v >= KERN_ERR_THRESHOLD;
+}
+
+static inline int atom_user_va_is_canonical(atom_user_virt_addr_t addr)
+{
+    uint64_t sign = (addr >> 47) & UINT64_C(1);
+    uint64_t upper = addr >> 48;
+    return sign == 0 ? upper == 0 : upper == UINT64_C(0xFFFF);
+}
+
+static inline int atom_user_va_is_valid(atom_user_virt_addr_t addr)
+{
+    return atom_user_va_is_canonical(addr) &&
+           addr >= ATOM_USER_SPACE_MIN &&
+           addr < ATOM_USER_SPACE_MAX;
+}
+
+static inline int atom_user_va_is_mmap(atom_user_virt_addr_t addr)
+{
+    return addr >= ATOM_USER_MMAP_START && addr < ATOM_USER_MMAP_END;
+}
+
+static inline int atom_user_va_has_suspicious_high_bits(atom_user_virt_addr_t addr)
+{
+    return (addr & ATOM_USER_PTR_HIGH_MASK) != 0;
+}
+
+static inline int is_valid_user_ptr(uint64_t addr)
+{
+    return atom_user_va_is_valid(addr);
 }
 
 /* -----------------------------------------------------------------------

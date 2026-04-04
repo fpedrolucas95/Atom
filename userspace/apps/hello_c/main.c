@@ -32,8 +32,13 @@
 
 /* Return value ≥ this threshold means error (kernel convention: MAX-256) */
 #define KERN_ERR_THRESHOLD 0xFFFFFFFFFFFFFF00ULL
+#define ATOM_USER_SPACE_MIN 0x0000000000001000ULL
+#define ATOM_USER_CANONICAL_MAX 0x00007FFFFFFFFFFFULL
 
 static inline bool is_err(uint64_t v) { return v >= KERN_ERR_THRESHOLD; }
+static inline bool is_valid_user_va(uint64_t v) {
+    return v >= ATOM_USER_SPACE_MIN && v <= ATOM_USER_CANONICAL_MAX;
+}
 
 static inline uint64_t sc0(uint64_t n) {
     uint64_t r;
@@ -94,9 +99,9 @@ static int ipc_try_recv(uint64_t port, void *buf, uint32_t len) {
     return is_err(r) ? -1 : (int)r;
 }
 /* map shared region: SYS_SHARED_REGION_MAP(region_id, 0=auto_va, flags=3=rw) */
-static uintptr_t shared_map(uint64_t region_id) {
+static uint64_t shared_map(uint64_t region_id) {
     uint64_t r = sc3(SYS_SHARED_REGION_MAP, region_id, 0ULL, 3ULL);
-    return is_err(r) ? 0 : (uintptr_t)r;
+    return (!is_err(r) && is_valid_user_va(r)) ? r : 0;
 }
 
 /* =========================================================================

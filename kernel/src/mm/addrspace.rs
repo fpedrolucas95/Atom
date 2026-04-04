@@ -25,7 +25,7 @@
 // - Mapping operations delegate to the lower-level `vm` module for page table work
 //
 // Correctness and safety notes:
-// - Kernel base (`KERNEL_BASE`) defines a hard boundary enforced on all mappings
+// - Userspace mappings must satisfy the ABI-validated user address contract
 // - Mapping size is capped (`MAX_REGION_SIZE`) to limit abuse and fragmentation
 // - Rollback logic ensures no silent partial mappings on failure
 // - `mapping_count` prevents destroying address spaces still in active use
@@ -50,6 +50,7 @@ use crate::mm::pmm;
 use crate::mm::vm::{self, PageFlags, VmError};
 use crate::thread::ThreadId;
 use crate::{log_info, log_warn, log_error};
+use atom_abi::UserRange;
 
 static CLEANED_THREAD_ADDRESS_SPACES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
 
@@ -88,8 +89,6 @@ impl core::fmt::Display for AddressSpaceId {
         write!(f, "AS:{}", self.0)
     }
 }
-
-const KERNEL_BASE: usize = 0xFFFF_8000_0000_0000;
 
 // Re-export from the shared ABI crate — single source of truth.
 // These are pub so that other kernel modules (shared_mem, executable, etc.)
@@ -299,15 +298,16 @@ impl AddressSpaceManager {
         &self,
         id: AddressSpaceId,
         caller: ThreadId,
-        virt_addr: usize,
+        user_range: UserRange,
         phys_addr: usize,
-        size: usize,
         flags: PageFlags,
     ) -> Result<(), AddressSpaceError> {
+        let virt_addr = user_range.start();
+        let size = user_range.len();
+
         crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
         crate::mm::validate_page_alignment(phys_addr).map_err(map_validation_error)?;
         crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
-        crate::mm::validate_user_space_bounds(virt_addr, size).map_err(map_validation_error)?;
 
         let mut spaces = self.spaces.lock();
         let addrspace = spaces.get_mut(&id).ok_or(AddressSpaceError::NotFound)?;
@@ -395,12 +395,13 @@ impl AddressSpaceManager {
         &self,
         id: AddressSpaceId,
         caller: ThreadId,
-        virt_addr: usize,
-        size: usize,
+        user_range: UserRange,
     ) -> Result<(), AddressSpaceError> {
+        let virt_addr = user_range.start();
+        let size = user_range.len();
+
         crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
         crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
-        crate::mm::validate_user_space_bounds(virt_addr, size).map_err(map_validation_error)?;
 
         let mut spaces = self.spaces.lock();
         let addrspace = spaces.get_mut(&id).ok_or(AddressSpaceError::NotFound)?;
@@ -457,15 +458,20 @@ impl AddressSpaceManager {
         &self,
         id: AddressSpaceId,
         caller: ThreadId,
-        old_virt: usize,
-        new_virt: usize,
-        size: usize,
+        old_range: UserRange,
+        new_range: UserRange,
     ) -> Result<(), AddressSpaceError> {
+        if old_range.len() != new_range.len() {
+            return Err(AddressSpaceError::InvalidSize);
+        }
+
+        let old_virt = old_range.start();
+        let new_virt = new_range.start();
+        let size = old_range.len();
+
         crate::mm::validate_page_alignment(old_virt).map_err(map_validation_error)?;
         crate::mm::validate_page_alignment(new_virt).map_err(map_validation_error)?;
         crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
-        crate::mm::validate_user_space_bounds(old_virt, size).map_err(map_validation_error)?;
-        crate::mm::validate_user_space_bounds(new_virt, size).map_err(map_validation_error)?;
 
         let spaces = self.spaces.lock();
         let addrspace = spaces.get(&id).ok_or(AddressSpaceError::NotFound)?;
@@ -564,7 +570,12 @@ static ADDRESS_SPACE_MANAGER: AddressSpaceManager = AddressSpaceManager::new();
 
 pub fn init() {
     log_info!(LOG_ORIGIN, "Address space management initialized (Phase 5.1)");
-    log_info!(LOG_ORIGIN, "Kernel base: 0x{:X}", KERNEL_BASE);
+    log_info!(
+        LOG_ORIGIN,
+        "User VA window (ABI): 0x{:X}..0x{:X}",
+        atom_abi::USER_SPACE_MIN,
+        atom_abi::USER_SPACE_MAX
+    );
     log_info!(LOG_ORIGIN, "Max region size: {} MB", MAX_REGION_SIZE / (1024 * 1024));
 }
 
@@ -582,31 +593,28 @@ pub fn destroy_address_space(
 pub fn map_region(
     id: AddressSpaceId,
     caller: ThreadId,
-    virt_addr: usize,
+    user_range: UserRange,
     phys_addr: usize,
-    size: usize,
     flags: PageFlags,
 ) -> Result<(), AddressSpaceError> {
-    ADDRESS_SPACE_MANAGER.map_region(id, caller, virt_addr, phys_addr, size, flags)
+    ADDRESS_SPACE_MANAGER.map_region(id, caller, user_range, phys_addr, flags)
 }
 
 pub fn unmap_region(
     id: AddressSpaceId,
     caller: ThreadId,
-    virt_addr: usize,
-    size: usize,
+    user_range: UserRange,
 ) -> Result<(), AddressSpaceError> {
-    ADDRESS_SPACE_MANAGER.unmap_region(id, caller, virt_addr, size)
+    ADDRESS_SPACE_MANAGER.unmap_region(id, caller, user_range)
 }
 
 pub fn remap_region(
     id: AddressSpaceId,
     caller: ThreadId,
-    old_virt: usize,
-    new_virt: usize,
-    size: usize,
+    old_range: UserRange,
+    new_range: UserRange,
 ) -> Result<(), AddressSpaceError> {
-    ADDRESS_SPACE_MANAGER.remap_region(id, caller, old_virt, new_virt, size)
+    ADDRESS_SPACE_MANAGER.remap_region(id, caller, old_range, new_range)
 }
 
 #[allow(dead_code)]

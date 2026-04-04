@@ -112,6 +112,8 @@ pub enum TerminationReason {
     NormalExit { exit_code: u64 },
     /// Killed due to page fault
     PageFault { address: u64, error_code: u64, rip: u64 },
+    /// Killed due to userspace stack overflow (guard-page hit)
+    StackOverflow { address: u64, error_code: u64, rip: u64, rsp: u64 },
     /// Killed due to general protection fault
     GeneralProtectionFault { error_code: u64, rip: u64 },
     /// Killed due to other exception
@@ -129,6 +131,7 @@ impl TerminationReason {
         match self {
             TerminationReason::NormalExit { exit_code } => *exit_code,
             TerminationReason::PageFault { .. } => 0xFFFF_FFFF_0000_000E,
+            TerminationReason::StackOverflow { .. } => 0xFFFF_FFFF_0000_00F0,
             TerminationReason::GeneralProtectionFault { .. } => 0xFFFF_FFFF_0000_000D,
             TerminationReason::Exception { vector, .. } => 0xFFFF_FFFF_0000_0000 | vector,
             TerminationReason::KilledByKernel { reason_code } => 0xFFFF_FFFE_0000_0000 | reason_code,
@@ -141,6 +144,7 @@ impl TerminationReason {
         match self {
             TerminationReason::NormalExit { .. } => "normal exit",
             TerminationReason::PageFault { .. } => "page fault",
+            TerminationReason::StackOverflow { .. } => "stack overflow",
             TerminationReason::GeneralProtectionFault { .. } => "general protection fault",
             TerminationReason::Exception { .. } => "exception",
             TerminationReason::KilledByKernel { .. } => "killed by kernel",
@@ -172,6 +176,50 @@ pub enum ThreadPriority {
 
 const LOG_ORIGIN: &str = "thread";
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserStackMetadata {
+    pub guard_base: u64,
+    pub usable_base: u64,
+    pub top: u64,
+    pub mapped_pages: usize,
+}
+
+impl UserStackMetadata {
+    pub fn for_top(top: usize, mapped_pages: usize) -> Self {
+        let usable_size = mapped_pages * crate::mm::pmm::PAGE_SIZE;
+        let usable_base = top
+            .checked_sub(usable_size)
+            .expect("userspace stack usable base underflow");
+        let guard_size = atom_abi::USER_STACK_GUARD_PAGES * crate::mm::pmm::PAGE_SIZE;
+        let guard_base = usable_base
+            .checked_sub(guard_size)
+            .expect("userspace stack guard base underflow");
+
+        Self {
+            guard_base: guard_base as u64,
+            usable_base: usable_base as u64,
+            top: top as u64,
+            mapped_pages,
+        }
+    }
+
+    pub fn default_for_top(top: usize) -> Self {
+        Self::for_top(top, atom_abi::DEFAULT_USER_STACK_PAGES)
+    }
+
+    pub fn guard_end(&self) -> u64 {
+        self.usable_base
+    }
+
+    pub fn usable_size(&self) -> u64 {
+        self.top - self.usable_base
+    }
+
+    pub fn contains_guard_address(&self, addr: u64) -> bool {
+        addr >= self.guard_base && addr < self.guard_end()
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -324,6 +372,8 @@ pub struct Thread {
     /// based on address_space comparison or context.cs inspection (which
     /// reflects kernel CS after a syscall save, not the thread's true CPL).
     pub is_userspace: bool,
+    /// Userspace stack layout for explicit guard-page diagnostics.
+    pub user_stack: Option<UserStackMetadata>,
 }
 
 impl Thread {
@@ -372,6 +422,7 @@ impl Thread {
             name,
             capability_table,
             is_userspace: false,
+            user_stack: None,
         }
     }
 
@@ -574,6 +625,7 @@ impl ThreadList {
             name: t.name,
             capability_table: t.capability_table.clone(),
             is_userspace: t.is_userspace,
+            user_stack: t.user_stack,
         })
     }
 
@@ -982,6 +1034,29 @@ pub fn get_thread_address_space(thread_id: ThreadId) -> Option<u64> {
 pub fn get_thread_process_id(thread_id: ThreadId) -> Option<ProcessId> {
     let threads = THREAD_LIST.threads.lock();
     threads.iter().find(|t| t.id == thread_id).and_then(|t| t.process_id)
+}
+
+pub fn get_thread_user_stack(thread_id: ThreadId) -> Option<UserStackMetadata> {
+    let threads = THREAD_LIST.threads.lock();
+    threads
+        .iter()
+        .find(|t| t.id == thread_id)
+        .and_then(|t| t.user_stack)
+}
+
+pub fn classify_user_stack_guard_fault(
+    thread_id: ThreadId,
+    fault_addr: u64,
+) -> Option<(Option<ProcessId>, UserStackMetadata)> {
+    let threads = THREAD_LIST.threads.lock();
+    let thread = threads.iter().find(|t| t.id == thread_id)?;
+    let stack = thread.user_stack?;
+
+    if !thread.is_userspace || !stack.contains_guard_address(fault_addr) {
+        return None;
+    }
+
+    Some((thread.process_id, stack))
 }
 
 pub fn get_thread_process_pml4(thread_id: ThreadId) -> Option<u64> {
@@ -1443,8 +1518,7 @@ pub fn capture_current_context() -> CpuContext {
 }
 
 fn is_canonical(addr: u64) -> bool {
-    let sign_extension = addr >> 48;
-    sign_extension == 0 || sign_extension == 0xFFFF
+    atom_abi::is_canonical(addr)
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {

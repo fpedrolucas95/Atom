@@ -50,6 +50,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
+use atom_abi::{UserAddressError, UserRange, UserVAddr};
 use crate::mm::{pmm, vm};
 use crate::process::{self, ProcessId};
 use crate::log_info;
@@ -274,7 +275,7 @@ impl SharedRegion {
     fn map(
         &mut self,
         process_id: ProcessId,
-        virt_addr: usize,
+        user_range: UserRange,
         flags: RegionFlags,
         pml4_phys: usize,
     ) -> Result<usize, SharedMemError> {
@@ -282,9 +283,10 @@ impl SharedRegion {
             return Err(SharedMemError::RegionInUse);
         }
 
+        let virt_addr = user_range.start();
+
         debug_assert_process_pml4_alignment(process_id, pml4_phys);
         crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
-        crate::mm::validate_user_space_bounds(virt_addr, self.size).map_err(map_validation_error)?;
 
         // Duplicate check: a process may map a region only once.
         let already_mapped = self.mappings.iter().any(|m| m.process_id == process_id);
@@ -698,25 +700,30 @@ impl SharedMemManager {
         &self,
         region_id: RegionId,
         process_id: ProcessId,
-        virt_addr: usize,
+        virt_addr: Option<UserVAddr>,
         flags: RegionFlags,
     ) -> Result<usize, SharedMemError> {
         let pml4_phys = process_pml4(process_id)?;
         let mut regions = self.regions.lock();
 
-        let effective_va = if virt_addr == 0 {
+        let region_size = regions
+            .get(&region_id)
+            .ok_or(SharedMemError::InvalidRegion)?
+            .size;
+
+        let effective_va = if let Some(base) = virt_addr {
+            Self::validate_explicit_va(base, region_size)?
+        } else {
             let size = regions.get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?
                 .size;
             Self::find_free_va(&regions, size, process_id, pml4_phys)?
-        } else {
-            Self::validate_explicit_va(virt_addr, regions.get(&region_id)
-                .ok_or(SharedMemError::InvalidRegion)?.size)?;
-            virt_addr
         };
 
+        let effective_range = atom_abi::validate_user_range(effective_va, region_size)
+            .map_err(map_user_address_error)?;
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
-        region.map(process_id, effective_va, flags, pml4_phys)
+        region.map(process_id, effective_range, flags, pml4_phys)
     }
 
     fn map_region_in_pml4(
@@ -724,52 +731,43 @@ impl SharedMemManager {
         region_id: RegionId,
         process_id: ProcessId,
         pml4_phys: usize,
-        virt_addr: usize,
+        virt_addr: Option<UserVAddr>,
         flags: RegionFlags,
     ) -> Result<usize, SharedMemError> {
         debug_assert_process_pml4_alignment(process_id, pml4_phys);
         let mut regions = self.regions.lock();
 
-        let effective_va = if virt_addr == 0 {
+        let region_size = regions
+            .get(&region_id)
+            .ok_or(SharedMemError::InvalidRegion)?
+            .size;
+
+        let effective_va = if let Some(base) = virt_addr {
+            Self::validate_explicit_va(base, region_size)?
+        } else {
             let size = regions.get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?
                 .size;
             Self::find_free_va(&regions, size, process_id, pml4_phys)?
-        } else {
-            Self::validate_explicit_va(virt_addr, regions.get(&region_id)
-                .ok_or(SharedMemError::InvalidRegion)?.size)?;
-            virt_addr
         };
 
+        let effective_range = atom_abi::validate_user_range(effective_va, region_size)
+            .map_err(map_user_address_error)?;
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
-        region.map(process_id, effective_va, flags, pml4_phys)
+        region.map(process_id, effective_range, flags, pml4_phys)
     }
 
     /// Validate that an explicit (user-provided) virtual address is sane:
     /// page-aligned, non-null, within the user canonical range, and won't
     /// overflow.
     ///
-    /// Note: callers pass virt_addr == 0 to `map_region_in_pml4` as the
-    /// auto-assign sentinel; that case is intercepted *before* this function
-    /// is called (the `if virt_addr == 0 { find_free_va }` branch).
-    /// This guard therefore never sees 0, but it defends against any future
-    /// refactor that accidentally removes that early-out.
-    fn validate_explicit_va(virt_addr: usize, region_size: usize) -> Result<(), SharedMemError> {
-        // Guard the null page and the entire first-page range.  Mapping
-        // shared memory over VA 0x0 would cause null-pointer calls to land
-        // on live data (potentially executed if NX is not set), hiding
-        // bugs and enabling privilege escalation.
-        if virt_addr < pmm::PAGE_SIZE {
-            log_debug!(
-                LOG_ORIGIN,
-                "validate_explicit_va: rejected virt=0x{:X} — null-page guard (< PAGE_SIZE)",
-                virt_addr
-            );
-            return Err(SharedMemError::Unaligned);
-        }
-
-        crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
-        crate::mm::validate_user_space_bounds(virt_addr, region_size).map_err(map_validation_error)
+    /// Note: callers pass `None` to `map_region_in_pml4` as the auto-assign
+    /// sentinel; that case is intercepted *before* this function is called.
+    fn validate_explicit_va(virt_addr: UserVAddr, region_size: usize) -> Result<usize, SharedMemError> {
+        let base = virt_addr.as_usize();
+        crate::mm::validate_page_alignment(base).map_err(map_validation_error)?;
+        atom_abi::validate_user_range(base, region_size).map_err(map_user_address_error)?;
+        Ok(base)
     }
 
     /// Unmap a region from the given process.
@@ -896,6 +894,16 @@ fn map_validation_error(err: crate::mm::ValidationError) -> SharedMemError {
     }
 }
 
+fn map_user_address_error(err: UserAddressError) -> SharedMemError {
+    match err {
+        UserAddressError::NonCanonical
+        | UserAddressError::BelowUserMin
+        | UserAddressError::AboveUserMax
+        | UserAddressError::Overflow => SharedMemError::MappingFailed,
+        UserAddressError::EmptyRange => SharedMemError::InvalidSize,
+    }
+}
+
 impl core::fmt::Display for SharedMemError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -968,25 +976,25 @@ pub fn create_region(owner_process: ProcessId, size: usize) -> Result<RegionId, 
 }
 
 /// Map a shared region into a thread's address space.
-/// If `virt_addr == 0`, the kernel auto-assigns a VA from the shared memory range.
+/// If `virt_addr` is `None`, the kernel auto-assigns a VA from the shared memory range.
 /// Returns the virtual address where the region was mapped.
 pub fn map_region(
     region_id: RegionId,
     process_id: ProcessId,
-    virt_addr: usize,
+    virt_addr: Option<UserVAddr>,
     flags: RegionFlags,
 ) -> Result<usize, SharedMemError> {
     SHARED_MEM_MANAGER.map_region(region_id, process_id, virt_addr, flags)
 }
 
 /// Map a shared region into a specific PML4 (address space).
-/// If `virt_addr == 0`, the kernel auto-assigns a VA from the shared memory range.
+/// If `virt_addr` is `None`, the kernel auto-assigns a VA from the shared memory range.
 /// Returns the virtual address where the region was mapped.
 pub fn map_region_in_pml4(
     region_id: RegionId,
     process_id: ProcessId,
     pml4_phys: u64,
-    virt_addr: usize,
+    virt_addr: Option<UserVAddr>,
     flags: RegionFlags,
 ) -> Result<usize, SharedMemError> {
     SHARED_MEM_MANAGER.map_region_in_pml4(region_id, process_id, pml4_phys as usize, virt_addr, flags)

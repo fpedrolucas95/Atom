@@ -241,8 +241,13 @@ fn handle_request(header: MessageHeader, payload: &[u8]) {
     match header.msg_type {
         MessageType::NsRegister => {
             if let Some(msg) = NsRegisterMsg::from_bytes(payload) {
-                atom_syscall::debug::log("namesvc: registering service");
                 let name = name_to_str(&msg.name);
+                let debug_msg = alloc::format!(
+                    "namesvc: registering service '{}' on port {}",
+                    name,
+                    msg.port
+                );
+                atom_syscall::debug::log(&debug_msg);
                 let _ = unsafe { REGISTRY.register(name, msg.port) };
 
                 // Check if there are any pending lookups for this service
@@ -251,37 +256,20 @@ fn handle_request(header: MessageHeader, payload: &[u8]) {
                     if let Some(reply_port) = reply_port_opt {
                         let resp = NsResponseMsg { port: msg.port };
                         let _ = send_message(*reply_port, MessageType::NsResponse, &resp.to_bytes());
-                        let debug_msg = alloc::format!(
-                            "namesvc: responded to pending lookup for '{}' with port {}",
-                            name, msg.port
-                        );
-                        atom_syscall::debug::log(&debug_msg);
                     }
                 }
             }
         }
         MessageType::NsLookup => {
             if let Some(msg) = NsLookupMsg::from_bytes(payload) {
-                atom_syscall::debug::log("namesvc: lookup service");
                 let name = name_to_str(&msg.name);
-
                 // Try immediate lookup
                 if let Some(found_port) = unsafe { REGISTRY.lookup(name) } {
                     let resp = NsResponseMsg { port: found_port };
                     let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
-                    let debug_msg = alloc::format!(
-                        "namesvc: immediate lookup for '{}' returned port {}",
-                        name, found_port
-                    );
-                    atom_syscall::debug::log(&debug_msg);
                 } else {
                     // Service not found - add to pending queue
                     if unsafe { PENDING_QUEUE.add(name, msg.reply_port) }.is_ok() {
-                        let debug_msg = alloc::format!(
-                            "namesvc: lookup for '{}' queued as pending",
-                            name
-                        );
-                        atom_syscall::debug::log(&debug_msg);
                     } else {
                         // Queue full - respond with error
                         let resp = NsResponseMsg { port: 0 };

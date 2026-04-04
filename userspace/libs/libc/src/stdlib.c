@@ -79,6 +79,15 @@ static inline uint64_t page_align(uint64_t n)
     return (n + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 }
 
+static inline void validate_alloc_ptr_or_abort(atom_user_virt_addr_t addr)
+{
+    if (!is_valid_user_ptr(addr) ||
+        !atom_user_va_is_mmap(addr) ||
+        atom_user_va_has_suspicious_high_bits(addr)) {
+        abort();
+    }
+}
+
 void *malloc(size_t size)
 {
     if (size == 0) size = 1;
@@ -88,7 +97,7 @@ void *malloc(size_t size)
     size_t total      = user_size + HDR_SIZE;
     size_t map_size   = page_align(total);
 
-    uint64_t ret = atom_syscall4(
+    atom_user_virt_addr_t ret = atom_syscall4(
         SYS_MMAP,
         0,
         (uint64_t)map_size,
@@ -100,6 +109,8 @@ void *malloc(size_t size)
         errno = ENOMEM;
         return NULL;
     }
+
+    validate_alloc_ptr_or_abort(ret);
 
     malloc_hdr_t *hdr = (malloc_hdr_t *)(uintptr_t)ret;
     hdr->mapped_size = map_size;

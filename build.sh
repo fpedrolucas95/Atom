@@ -766,7 +766,9 @@ if [ "$RUN" = true ]; then
         -device VGA \
         -usb \
         -device usb-mouse \
-        -serial stdio \
+        -serial file:serial.log \
         -debugcon file:serial_log.txt \
-        -global isa-debugcon.iobase=0xE9
+        -global isa-debugcon.iobase=0xE9 \
+        -d int,pcall,guest_errors,unimp \
+        -D qemu_execution.log
 fi

@@ -511,15 +511,21 @@ pub fn set_process_memory_limit(process_id: ProcessId, limit_pages: usize) -> Re
 /// # Requirements
 /// Implements Req 7.1, Req 7.5
 pub fn get_process_memory_usage(process_id: ProcessId) -> Option<MemoryUsage> {
-    let registry = PROCESS_REGISTRY.lock();
-    let process = registry.get(&process_id)?;
-    
-    // Get VMA stats for the process
+    let limit_pages = {
+        let registry = PROCESS_REGISTRY.lock();
+        let process = registry.get(&process_id)?;
+        process.memory_limit_pages
+    };
+
+    // IMPORTANT: do not hold PROCESS_REGISTRY while querying VMA stats.
+    // The VMA helper resolves the process primary PML4 through process APIs,
+    // so keeping the process lock here would deadlock on nested lock acquisition
+    // during page-fault handling.
     let vma_stats = crate::mm::vma::get_process_stats(process_id)?;
-    
+
     Some(MemoryUsage {
         resident_pages: vma_stats.resident_pages,
-        limit_pages: process.memory_limit_pages,
+        limit_pages,
         reserved_bytes: vma_stats.reserved_bytes,
     })
 }

@@ -83,7 +83,7 @@ impl Surface {
 
         if let Some(addr) = inner.shared.address() {
             let offset = (y * inner.shared.stride() + x) as usize * inner.shared.bytes_per_pixel();
-            let ptr = (addr + offset) as *const u32;
+            let ptr = ((addr as usize) + offset) as *const u32;
             let value = unsafe { ptr.read_volatile() };
             return Some(Color::rgb(
                 (value & 0xFF) as u8,

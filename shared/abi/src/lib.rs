@@ -13,16 +13,135 @@
 #![no_std]
 
 // ---------------------------------------------------------------------------
+// Userspace virtual-address ABI types
+// ---------------------------------------------------------------------------
+
+/// Global ABI version for the kernel/userspace contract.
+pub const ABI_VERSION: u32 = 1;
+
+/// Canonical 64-bit userspace virtual address passed across the kernel/userspace ABI.
+pub type UserVirtAddr = u64;
+
+/// Typed userspace virtual address validated by the ABI contract.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UserVAddr(usize);
+
+impl UserVAddr {
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+
+    #[inline]
+    pub const fn as_u64(self) -> UserVirtAddr {
+        self.0 as UserVirtAddr
+    }
+
+    #[inline]
+    pub const fn as_ptr<T>(self) -> *const T {
+        self.0 as *const T
+    }
+
+    #[inline]
+    pub const fn as_mut_ptr<T>(self) -> *mut T {
+        self.0 as *mut T
+    }
+
+    #[inline]
+    pub fn checked_add(self, offset: usize) -> Result<Self, UserAddressError> {
+        let next = self.0.checked_add(offset).ok_or(UserAddressError::Overflow)?;
+        validate_user_addr(next)
+    }
+}
+
+impl TryFrom<usize> for UserVAddr {
+    type Error = UserAddressError;
+
+    #[inline]
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        validate_user_addr(value)
+    }
+}
+
+impl TryFrom<UserVirtAddr> for UserVAddr {
+    type Error = UserAddressError;
+
+    #[inline]
+    fn try_from(value: UserVirtAddr) -> Result<Self, Self::Error> {
+        validate_user_addr(value as usize)
+    }
+}
+
+/// Typed userspace range validated by the ABI contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserRange {
+    base: UserVAddr,
+    len: usize,
+}
+
+impl UserRange {
+    #[inline]
+    pub const fn base(self) -> UserVAddr {
+        self.base
+    }
+
+    #[inline]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub const fn start(self) -> usize {
+        self.base.as_usize()
+    }
+
+    #[inline]
+    pub fn end_exclusive(self) -> usize {
+        self.base.as_usize() + self.len
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserAddressError {
+    NonCanonical,
+    BelowUserMin,
+    AboveUserMax,
+    Overflow,
+    EmptyRange,
+}
+
+/// Offset within a userspace-owned object or mapping.
+///
+/// Keep offsets distinct from absolute virtual addresses so APIs can make
+/// intent explicit and avoid accidental base/offset recomposition bugs.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UserOffset(pub u64);
+
+// ---------------------------------------------------------------------------
 // User virtual-address limits
 // ---------------------------------------------------------------------------
 
 /// Last valid byte in the lower-half canonical range on x86-64.
 /// Any user-space pointer must be ≤ this value.
-pub const USER_CANONICAL_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
+pub const USER_CANONICAL_MAX: UserVirtAddr = 0x0000_7FFF_FFFF_FFFF;
 
 /// Alias for `USER_CANONICAL_MAX`.  Syscall return values strictly above
 /// this are guaranteed to be kernel error codes (which live near `u64::MAX`).
-pub const USER_VA_LIMIT: u64 = USER_CANONICAL_MAX;
+pub const USER_VA_LIMIT: UserVirtAddr = USER_CANONICAL_MAX;
+
+/// Lowest non-null userspace virtual address accepted across the ABI.
+///
+/// The first page remains guarded so that null-pointer dereferences fault
+/// predictably instead of aliasing valid memory.
+pub const USER_SPACE_MIN: UserVirtAddr = 0x0000_0000_0000_1000;
+
+/// Exclusive upper bound for lower-half userspace pointers.
+pub const USER_SPACE_MAX: UserVirtAddr = 0x0000_8000_0000_0000;
+
+/// Bitmask used to flag suspiciously high bits in a userspace pointer.
+pub const USER_PTR_HIGH_BITS_MASK: UserVirtAddr = 0xFFFF_0000_0000_0000;
 
 // ---------------------------------------------------------------------------
 // Syscall error codes
@@ -85,6 +204,87 @@ pub fn is_syscall_error(value: u64) -> bool {
     value >= SYSCALL_ERROR_THRESHOLD
 }
 
+/// Returns true when `addr` is canonical on x86-64.
+#[inline]
+pub fn is_canonical(addr: UserVirtAddr) -> bool {
+    let sign = (addr >> 47) & 1;
+    let upper = addr >> 48;
+
+    match sign {
+        0 => upper == 0,
+        _ => upper == 0xFFFF,
+    }
+}
+
+/// Returns true when `addr` is within the canonical lower userspace range.
+#[inline]
+pub fn is_canonical_user_va(addr: UserVirtAddr) -> bool {
+    is_canonical(addr) && addr <= USER_CANONICAL_MAX
+}
+
+/// Returns true when `addr` is a non-null userspace address accepted by the ABI.
+#[inline]
+pub fn is_valid_user_va(addr: UserVirtAddr) -> bool {
+    addr >= USER_SPACE_MIN && addr < USER_SPACE_MAX
+}
+
+/// Returns true when `addr` lies inside the anonymous mmap window.
+#[inline]
+pub fn is_user_mmap_addr(addr: UserVirtAddr) -> bool {
+    addr >= USER_MMAP_START && addr < USER_MMAP_END
+}
+
+/// Returns true when the upper bits of `addr` look suspicious for a lower-half
+/// userspace pointer.
+#[inline]
+pub fn has_suspicious_user_high_bits(addr: UserVirtAddr) -> bool {
+    addr & USER_PTR_HIGH_BITS_MASK != 0
+}
+
+/// Validates and returns a typed userspace virtual address.
+#[inline]
+pub fn validate_user_addr(addr: usize) -> Result<UserVAddr, UserAddressError> {
+    let addr_u64 = addr as UserVirtAddr;
+
+    if !is_canonical(addr_u64) {
+        return Err(UserAddressError::NonCanonical);
+    }
+    if addr_u64 < USER_SPACE_MIN {
+        return Err(UserAddressError::BelowUserMin);
+    }
+    if addr_u64 >= USER_SPACE_MAX {
+        return Err(UserAddressError::AboveUserMax);
+    }
+
+    Ok(UserVAddr(addr))
+}
+
+/// Validates and returns a typed userspace virtual address range.
+#[inline]
+pub fn validate_user_range(base: usize, len: usize) -> Result<UserRange, UserAddressError> {
+    if len == 0 {
+        return Err(UserAddressError::EmptyRange);
+    }
+
+    let base = validate_user_addr(base)?;
+    let end_exclusive = base
+        .as_usize()
+        .checked_add(len)
+        .ok_or(UserAddressError::Overflow)?;
+
+    if (end_exclusive as UserVirtAddr) > USER_SPACE_MAX {
+        return Err(UserAddressError::AboveUserMax);
+    }
+
+    Ok(UserRange { base, len })
+}
+
+/// Validates a userspace return address produced by a syscall path.
+#[inline]
+pub fn validate_user_return_addr(addr: usize) -> Result<UserVAddr, UserAddressError> {
+    validate_user_addr(addr)
+}
+
 // ---------------------------------------------------------------------------
 // Virtual memory syscall constants (mmap/munmap/mprotect/brk)
 // ---------------------------------------------------------------------------
@@ -101,11 +301,23 @@ pub const MAP_PRIVATE: u64 = 0x02;
 pub const MAP_FIXED: u64 = 0x10;
 
 /// Default user heap start (above typical text/data/bss)
-pub const USER_HEAP_START: u64 = 0x0000_0010_0000_0000;
+pub const USER_HEAP_START: UserVirtAddr = 0x0000_0010_0000_0000;
 
 /// Default mmap region for dynamic allocations
-pub const USER_MMAP_START: u64 = 0x0000_2000_0000_0000;
-pub const USER_MMAP_END: u64 = 0x0000_7000_0000_0000;
+pub const USER_MMAP_START: UserVirtAddr = 0x0000_2000_0000_0000;
+pub const USER_MMAP_END: UserVirtAddr = 0x0000_7000_0000_0000;
+
+/// Standard userspace stack top.
+pub const USER_STACK_TOP: UserVirtAddr = 0x0000_8000_0000;
+
+/// Number of unmapped guard pages reserved below each userspace stack.
+pub const USER_STACK_GUARD_PAGES: usize = 1;
+
+/// Default number of mapped pages for each userspace stack.
+pub const DEFAULT_USER_STACK_PAGES: usize = 64; // 256 KiB
+
+/// Default mapped userspace stack size in bytes.
+pub const DEFAULT_USER_STACK_SIZE: usize = DEFAULT_USER_STACK_PAGES * 4096;
 
 // ---------------------------------------------------------------------------
 // Graphics / video mode constants
@@ -173,3 +385,64 @@ pub const S_IFBLK: u32 = 0o060000;
 pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFIFO: u32 = 0o010000;
 pub const S_IFSOCK: u32 = 0o140000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_lower_half_addresses_are_accepted() {
+        assert!(is_canonical(0x0000_0000_2000_0000));
+        assert!(is_canonical(USER_MMAP_START));
+        assert!(is_canonical(USER_CANONICAL_MAX));
+    }
+
+    #[test]
+    fn non_canonical_addresses_are_rejected() {
+        assert!(!is_canonical(0x0000_8000_0000_0000));
+        assert!(!is_canonical(0x0001_0000_0000_0000));
+        assert!(!is_canonical(0x0000_2000_0000_0000 << 16));
+    }
+
+    #[test]
+    fn user_va_validation_enforces_range_and_canonicality() {
+        assert!(!is_valid_user_va(0));
+        assert!(!is_valid_user_va(USER_SPACE_MIN - 1));
+        assert!(is_valid_user_va(USER_SPACE_MIN));
+        assert!(is_valid_user_va(USER_MMAP_START));
+        assert!(!is_valid_user_va(0x0000_2000_0000_0000 << 16));
+    }
+
+    #[test]
+    fn typed_user_addr_validation_enforces_abi_contract() {
+        assert!(validate_user_addr(USER_SPACE_MIN as usize).is_ok());
+        assert_eq!(
+            validate_user_addr((USER_SPACE_MIN - 1) as usize),
+            Err(UserAddressError::BelowUserMin)
+        );
+        assert_eq!(
+            validate_user_addr(USER_SPACE_MAX as usize),
+            Err(UserAddressError::AboveUserMax)
+        );
+        assert_eq!(
+            validate_user_addr(0x0001_0000_0000_0000usize),
+            Err(UserAddressError::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn typed_user_range_validation_rejects_empty_and_overflowing_ranges() {
+        assert_eq!(
+            validate_user_range(USER_SPACE_MIN as usize, 0),
+            Err(UserAddressError::EmptyRange)
+        );
+        assert_eq!(
+            validate_user_range((USER_SPACE_MAX - 1) as usize, 2),
+            Err(UserAddressError::AboveUserMax)
+        );
+        assert_eq!(
+            validate_user_range(usize::MAX - 1, 8),
+            Err(UserAddressError::NonCanonical)
+        );
+    }
+}

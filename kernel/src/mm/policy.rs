@@ -28,6 +28,7 @@ const LOG_ORIGIN: &str = "mem-policy";
 const MSG_TYPE_PAGE_FAULT: u32 = 0xF001;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MemoryPolicyError {
     InvalidPort,
     PermissionDenied,
@@ -89,6 +90,7 @@ impl MemoryPolicyManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn notify_page_fault(
         &self,
         tid: ThreadId,
@@ -139,6 +141,7 @@ pub fn register_page_fault_handler(
     POLICY_MANAGER.register_page_fault_handler(port_id, caller)
 }
 
+#[allow(dead_code)]
 pub fn notify_page_fault(
     tid: ThreadId,
     fault_addr: u64,

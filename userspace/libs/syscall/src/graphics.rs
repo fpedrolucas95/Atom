@@ -2,6 +2,10 @@
 
 use crate::error::{ESUCCESS, EPERM, EINVAL, ENOMEM, EBUSY, ENOTSUP, SyscallError, SyscallResult};
 use crate::raw::{syscall0, syscall1, syscall2, syscall3, numbers::*};
+use atom_abi::{
+    has_suspicious_user_high_bits, is_canonical, is_user_mmap_addr, is_valid_user_va,
+    UserVirtAddr,
+};
 
 /// Maximum number of video modes reported by the kernel (mirrors `atom_abi::VIDEO_MAX_MODES`).
 /// Use this to size mode buffers in userspace; the value is guaranteed to match the kernel.
@@ -15,7 +19,7 @@ pub use atom_abi::VIDEO_MAX_MODES;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FramebufferInfo {
-    pub address: usize,
+    pub address: UserVirtAddr,
     pub width: u32,
     pub height: u32,
     pub stride: u32,
@@ -34,8 +38,35 @@ impl FramebufferInfo {
     #[inline]
     pub fn pixel_ptr(&self, x: u32, y: u32) -> *mut u32 {
         let offset = self.pixel_offset(x, y);
-        (self.address + offset) as *mut u32
+        ((self.address as usize) + offset) as *mut u32
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReturnedAddrKind {
+    AnyUserVa,
+    MmapWindow,
+}
+
+#[inline]
+fn validate_returned_user_va(addr: UserVirtAddr, kind: ReturnedAddrKind) -> SyscallResult<UserVirtAddr> {
+    if !is_canonical(addr) {
+        return Err(SyscallError::Unknown(addr));
+    }
+
+    if !is_valid_user_va(addr) {
+        return Err(SyscallError::Unknown(addr));
+    }
+
+    if has_suspicious_user_high_bits(addr) {
+        return Err(SyscallError::Unknown(addr));
+    }
+
+    if kind == ReturnedAddrKind::MmapWindow && !is_user_mmap_addr(addr) {
+        return Err(SyscallError::Unknown(addr));
+    }
+
+    Ok(addr)
 }
 
 /// Get framebuffer information for direct graphics access
@@ -52,7 +83,7 @@ pub fn get_framebuffer() -> Option<FramebufferInfo> {
 
     if result == ESUCCESS {
         Some(FramebufferInfo {
-            address: info[0] as usize,
+            address: info[0],
             width: info[1] as u32,
             height: info[2] as u32,
             stride: info[3] as u32,
@@ -67,7 +98,7 @@ pub fn get_framebuffer() -> Option<FramebufferInfo> {
 /// Get framebuffer info as tuple (address, width, height, stride, bpp)
 ///
 /// Returns an error if framebuffer is not available
-pub fn get_framebuffer_info() -> crate::SyscallResult<(usize, u32, u32, u32, u32)> {
+pub fn get_framebuffer_info() -> crate::SyscallResult<(UserVirtAddr, u32, u32, u32, u32)> {
     match get_framebuffer() {
         Some(info) => Ok((info.address, info.width, info.height, info.stride, info.bytes_per_pixel)),
         None => Err(crate::error::SyscallError::PermissionDenied),
@@ -85,7 +116,7 @@ pub fn map_framebuffer() -> Option<FramebufferInfo> {
 
     if result == ESUCCESS {
         Some(FramebufferInfo {
-            address: info[0] as usize,
+            address: info[0],
             width: info[1] as u32,
             height: info[2] as u32,
             stride: info[3] as u32,
@@ -163,7 +194,7 @@ impl Framebuffer {
 
     /// Create a custom framebuffer pointing to a specific memory location.
     /// Includes validation to prevent common memory safety issues.
-    pub fn new_custom(address: usize, width: u32, height: u32, stride: u32, bpp: u32) -> Option<Self> {
+    pub fn new_custom(address: UserVirtAddr, width: u32, height: u32, stride: u32, bpp: u32) -> Option<Self> {
         if address == 0 || width == 0 || height == 0 || stride < width || (bpp != 4 && bpp != 3) {
             return None;
         }
@@ -209,7 +240,7 @@ impl Framebuffer {
 
     #[inline]
     pub fn address(&self) -> usize {
-        self.info.address
+        self.info.address as usize
     }
 
     #[inline]
@@ -863,9 +894,12 @@ pub fn shared_region_create(size: usize) -> SyscallResult<SharedRegionId> {
 ///
 /// If `virt_addr == 0`, the kernel automatically selects a free VA.
 /// Returns the virtual address where the region was actually mapped.
-pub fn shared_region_map(region_id: SharedRegionId, virt_addr: usize, flags: SharedMemFlags) -> SyscallResult<usize> {
+///
+/// Shared-memory mappings are only required to be valid canonical userspace
+/// VAs. They do not share the anonymous `mmap` window contract.
+pub fn shared_region_map(region_id: SharedRegionId, virt_addr: UserVirtAddr, flags: SharedMemFlags) -> SyscallResult<UserVirtAddr> {
     let result = unsafe {
-        syscall3(SYS_SHARED_REGION_MAP, region_id, virt_addr as u64, flags.to_raw())
+        syscall3(SYS_SHARED_REGION_MAP, region_id, virt_addr, flags.to_raw())
     };
 
     // Error codes live near u64::MAX; valid VA addresses are always below
@@ -878,7 +912,7 @@ pub fn shared_region_map(region_id: SharedRegionId, virt_addr: usize, flags: Sha
             _ => Err(SyscallError::Unknown(result)),
         }
     } else {
-        Ok(result as usize)
+        validate_returned_user_va(result, ReturnedAddrKind::AnyUserVa)
     }
 }
 
@@ -925,7 +959,7 @@ pub struct SharedSurface {
     /// Bytes per pixel (usually 4 for BGRA)
     bytes_per_pixel: u32,
     /// Mapped virtual address (if mapped)
-    mapped_addr: Option<usize>,
+    mapped_addr: Option<UserVirtAddr>,
     /// Whether this process owns the region
     owned: bool,
 }
@@ -1005,7 +1039,7 @@ impl SharedSurface {
     }
 
     /// Get the mapped address (if mapped)
-    pub fn address(&self) -> Option<usize> {
+    pub fn address(&self) -> Option<UserVirtAddr> {
         self.mapped_addr
     }
 
@@ -1020,7 +1054,7 @@ impl SharedSurface {
     fn pixel_ptr(&self, x: u32, y: u32) -> Option<*mut u32> {
         self.mapped_addr.map(|addr| {
             let offset = self.pixel_offset(x, y);
-            (addr + offset) as *mut u32
+            ((addr as usize) + offset) as *mut u32
         })
     }
 
@@ -1078,7 +1112,7 @@ impl SharedSurface {
         let row_count = (x_end - x) as usize;
 
         for py in y..y_end {
-            let row_ptr = (base + self.pixel_offset(x, py)) as *mut u32;
+            let row_ptr = ((base as usize) + self.pixel_offset(x, py)) as *mut u32;
             // SAFETY: bounds checked above; ptr is within the mapped shared region.
             unsafe { fill_row(row_ptr, row_count, pixel); }
         }
@@ -1316,7 +1350,7 @@ impl SharedSurface {
         let row_count = (x_end - x) as usize;
 
         for py in y..y_end {
-            let row_ptr = (base + self.pixel_offset(x, py)) as *mut u32;
+            let row_ptr = ((base as usize) + self.pixel_offset(x, py)) as *mut u32;
             // SAFETY: bounds checked above.
             unsafe { fill_row_alpha(row_ptr, row_count, pixel, alpha); }
         }
@@ -1371,7 +1405,7 @@ impl SharedSurface {
             let t     = ((dy * 255) / total) as u8;
             let color = lerp_color(color_start, color_end, t);
             let pixel = color.to_rgb32();
-            let row_ptr = (base + self.pixel_offset(x, y + dy)) as *mut u32;
+            let row_ptr = ((base as usize) + self.pixel_offset(x, y + dy)) as *mut u32;
             // SAFETY: bounds checked above.
             unsafe { fill_row(row_ptr, row_count, pixel); }
         }
@@ -1408,7 +1442,7 @@ impl SharedSurface {
             for dy in mid_start..mid_end {
                 let color = row_color(dy);
                 let pixel = color.to_rgb32();
-                let row_ptr = (base + self.pixel_offset(x, y + dy)) as *mut u32;
+                let row_ptr = ((base as usize) + self.pixel_offset(x, y + dy)) as *mut u32;
                 unsafe { fill_row(row_ptr, row_count, pixel); }
             }
         }
@@ -1510,7 +1544,7 @@ impl SharedSurface {
                 for sx in 0..self.width {
                     let dx = dest_x + sx;
                     if dx >= fb.width() { break; }
-                    let src_ptr = (src_addr + self.pixel_offset(sx, sy)) as *const u32;
+                    let src_ptr = ((src_addr as usize) + self.pixel_offset(sx, sy)) as *const u32;
                     let pixel = unsafe { src_ptr.read_volatile() };
                     let dst_ptr = fb.info.pixel_ptr(dx, dy);
                     unsafe { dst_ptr.write_volatile(pixel) };
@@ -1531,7 +1565,7 @@ impl SharedSurface {
             let src_offset = self.pixel_offset(0, sy);
             let dst_offset = (dy * fb_stride + dest_x) as usize * fb_bpp;
 
-            let src_ptr = (src_addr + src_offset) as *const u8;
+            let src_ptr = ((src_addr as usize) + src_offset) as *const u8;
             let dst_ptr = (fb_addr + dst_offset) as *mut u8;
 
             unsafe {

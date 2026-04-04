@@ -33,9 +33,8 @@ use crate::{graphics, log_error, log_info, log_panic};
 
 const LOG_ORIGIN: &str = "init";
 
-const USER_STACK_PAGES: usize = 16;  // 64KB stack for userspace processes
-const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
-const USER_STACK_TOP: usize = 0x0000_8000_0000;
+const USER_STACK_PAGES: usize = atom_abi::DEFAULT_USER_STACK_PAGES;
+const USER_STACK_TOP: usize = atom_abi::USER_STACK_TOP as usize;
 const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
 
 /// Result of launching the init process
@@ -228,7 +227,8 @@ fn create_init_process(
     let text_size = align_up(sections.text.len().max(1));
     let data_size = align_up(sections.data.len().max(1));
     let bss_size = align_up(sections.bss_size.max(1));
-    let user_stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    let stack_layout = thread::UserStackMetadata::default_for_top(USER_STACK_TOP);
+    let user_stack_base = stack_layout.usable_base as usize;
     let heap_start = atom_abi::USER_HEAP_START as usize;
     let bss_end = executable.bss_base + bss_size;
 
@@ -262,9 +262,7 @@ fn create_init_process(
         start: user_stack_base,
         end: USER_STACK_TOP,
         perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Stack {
-            max_size: USER_STACK_SIZE,
-        },
+        backing: VmaBacking::Anonymous,
         label: "stack",
     }).map_err(|_| InitError::MemoryAllocationFailed)?;
 
@@ -339,6 +337,7 @@ fn create_init_process(
         name: "init",
         capability_table: cap::create_capability_table(pid),
         is_userspace: true,
+        user_stack: Some(stack_layout),
     };
 
     thread::add_thread(thread);
@@ -523,7 +522,8 @@ fn load_executable(
 
 /// Allocate user stack for the init process (in the specified PML4)
 fn allocate_user_stack(pml4_phys: usize) -> Result<usize, InitError> {
-    let virt_base = USER_STACK_TOP - USER_STACK_SIZE;
+    let stack_layout = thread::UserStackMetadata::default_for_top(USER_STACK_TOP);
+    let virt_base = stack_layout.usable_base as usize;
     let phys_base = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
         .ok_or(InitError::MemoryAllocationFailed)?;
 
@@ -541,7 +541,9 @@ fn allocate_user_stack(pml4_phys: usize) -> Result<usize, InitError> {
 
     log_info!(
         LOG_ORIGIN,
-        "User stack allocated: 0x{:X}-0x{:X} ({} pages)",
+        "User stack allocated: guard=0x{:X}-0x{:X}, usable=0x{:X}-0x{:X} ({} mapped pages)",
+        stack_layout.guard_base,
+        stack_layout.usable_base,
         virt_base,
         USER_STACK_TOP,
         USER_STACK_PAGES

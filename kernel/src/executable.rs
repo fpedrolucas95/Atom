@@ -367,13 +367,15 @@ fn map_segment(
     let size = pmm::align_up(data.len());
     let pages = size / pmm::PAGE_SIZE;
     let phys_base = pmm::alloc_pages_zeroed(pages).ok_or(ExecError::OutOfMemory)?;
+    let user_range = atom_abi::validate_user_range(virt_start, size)
+        .map_err(|_| ExecError::NonCanonicalLayout)?;
 
     // Use higher-half address to avoid broken identity mapping in user address spaces
     unsafe {
         ptr::copy_nonoverlapping(data.as_ptr(), vm::phys_to_virt_ptr(phys_base) as *mut u8, data.len());
     }
 
-    match addrspace::map_region(address_space, owner, virt_start, phys_base, size, flags) {
+    match addrspace::map_region(address_space, owner, user_range, phys_base, flags) {
         Ok(()) => {
             Ok(Some((virt_start, phys_base, size)))
         }
@@ -398,8 +400,10 @@ fn map_zeroed_segment(
     let aligned_size = pmm::align_up(size);
     let pages = aligned_size / pmm::PAGE_SIZE;
     let phys_base = pmm::alloc_pages_zeroed(pages).ok_or(ExecError::OutOfMemory)?;
+    let user_range = atom_abi::validate_user_range(virt_start, aligned_size)
+        .map_err(|_| ExecError::NonCanonicalLayout)?;
 
-    match addrspace::map_region(address_space, owner, virt_start, phys_base, aligned_size, flags) {
+    match addrspace::map_region(address_space, owner, user_range, phys_base, flags) {
         Ok(()) => {
             Ok(Some((virt_start, phys_base, aligned_size)))
         }
@@ -420,7 +424,9 @@ impl Drop for RollbackGuard {
 
         for &(virt, phys, size) in self.mapped.iter().rev() {
             let pages = size / pmm::PAGE_SIZE;
-            let _ = addrspace::unmap_region(self.address_space, self.owner, virt, size);
+            if let Ok(user_range) = atom_abi::validate_user_range(virt, size) {
+                let _ = addrspace::unmap_region(self.address_space, self.owner, user_range);
+            }
             let _ = pmm::free_pages(phys, pages);
         }
     }

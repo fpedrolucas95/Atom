@@ -47,7 +47,12 @@
 #define SYS_IPC_TRY_RECV    24ULL
 
 #define KERN_ERR_THRESHOLD 0xFFFFFFFFFFFFFF00ULL
+#define ATOM_USER_SPACE_MIN 0x0000000000001000ULL
+#define ATOM_USER_CANONICAL_MAX 0x00007FFFFFFFFFFFULL
 static inline bool is_err(uint64_t v) { return v >= KERN_ERR_THRESHOLD; }
+static inline bool is_valid_user_va(uint64_t v) {
+    return v >= ATOM_USER_SPACE_MIN && v <= ATOM_USER_CANONICAL_MAX;
+}
 
 static inline uint64_t sc0(uint64_t n)
 {
@@ -113,10 +118,10 @@ static int ipc_recv_timeout(uint64_t port, void *buf, uint32_t len, uint64_t tim
                      (uint64_t)(uintptr_t)buf, (uint64_t)len, timeout_ms);
     return is_err(r) ? -1 : (int)r;
 }
-static uintptr_t shared_map(uint64_t region_id)
+static uint64_t shared_map(uint64_t region_id)
 {
     uint64_t r = sc3(SYS_SHARED_REGION_MAP, region_id, 0ULL, 3ULL);
-    return is_err(r) ? 0 : (uintptr_t)r;
+    return (!is_err(r) && is_valid_user_va(r)) ? r : 0;
 }
 
 /* ==========================================================================
