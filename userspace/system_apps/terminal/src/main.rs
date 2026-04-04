@@ -35,6 +35,7 @@ use core::panic::PanicInfo;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::boxed::Box;
 
 // ============================================================================
 // Simple Bump Allocator for Userspace
@@ -904,13 +905,15 @@ fn main() -> ! {
     };
 
     log("Terminal: Shared surface mapped successfully");
+    log("Terminal: Constructing terminal state");
 
-    let mut terminal = Terminal::new(
+    let mut terminal = Box::new(Terminal::new(
         surface_info.window_id,
         surface_info.compositor_port,
         local_port,
         surface,
-    );
+    ));
+    log("Terminal: Terminal state constructed");
     terminal.init();
     terminal.run();
 

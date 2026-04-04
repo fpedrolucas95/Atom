@@ -206,8 +206,8 @@ impl Scheduler {
             });
         }
 
-        for i in 0..wake_count {
-            self.mark_ready(to_wake[i]);
+        for thread_id in to_wake.iter().take(wake_count) {
+            self.mark_ready(*thread_id);
         }
     }
 

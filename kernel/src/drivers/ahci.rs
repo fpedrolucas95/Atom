@@ -151,13 +151,12 @@ pub fn init() -> bool {
             crate::log_debug!("ahci", "Ports implemented: 0x{:X}", pi);
 
             for port in 0..32 {
-                if (pi >> port) & 1 != 0 {
-                    if init_port(port) {
+                if (pi >> port) & 1 != 0
+                    && init_port(port) {
                         ACTIVE_PORT = Some(port);
                         crate::log_info!("ahci", "Initialized port {}", port);
                         return true;
                     }
-                }
             }
         }
     }
@@ -412,7 +411,7 @@ pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
             None => return false,
         };
 
-        if data.is_empty() || data.len() % 512 != 0 {
+        if data.is_empty() || !data.len().is_multiple_of(512) {
             return false;
         }
 

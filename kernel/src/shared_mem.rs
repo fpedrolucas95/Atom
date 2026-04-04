@@ -148,7 +148,7 @@ impl RegionFlags {
         }
     }
 
-    pub fn to_page_flags(&self) -> vm::PageFlags {
+    pub fn page_flags(self) -> vm::PageFlags {
         let mut flags = vm::PageFlags::PRESENT;
 
         if self.write {
@@ -192,7 +192,7 @@ impl RegionFlags {
         Self { read, write, execute }
     }
 
-    pub fn to_raw(&self) -> u64 {
+    pub fn raw_bits(self) -> u64 {
         let mut raw = 0u64;
 
         if self.read {
@@ -245,7 +245,7 @@ impl SharedRegion {
                 Some(phys) => physical_pages.push(phys),
                 None => {
                     for &page in &physical_pages {
-                        pmm::free_page(page);
+                        let _ = pmm::free_page(page);
                     }
                     return Err(SharedMemError::OutOfMemory);
                 }
@@ -283,20 +283,8 @@ impl SharedRegion {
         }
 
         debug_assert_process_pml4_alignment(process_id, pml4_phys);
-
-        if !pmm::is_page_aligned(virt_addr) {
-            return Err(SharedMemError::Unaligned);
-        }
-
-        // Validate that virt_addr + region size does not overflow.
-        let _mapping_end = virt_addr.checked_add(self.size).ok_or_else(|| {
-            log_debug!(
-                LOG_ORIGIN,
-                "map: VA overflow for region {} at 0x{:X} + 0x{:X}",
-                self.id, virt_addr, self.size
-            );
-            SharedMemError::MappingFailed
-        })?;
+        crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
+        crate::mm::validate_user_space_bounds(virt_addr, self.size).map_err(map_validation_error)?;
 
         // Duplicate check: a process may map a region only once.
         let already_mapped = self.mappings.iter().any(|m| m.process_id == process_id);
@@ -304,7 +292,7 @@ impl SharedRegion {
             return Err(SharedMemError::AlreadyMapped);
         }
 
-        let page_flags = flags.to_page_flags();
+        let page_flags = flags.page_flags();
         for (i, &phys_page) in self.physical_pages.iter().enumerate() {
             let virt = virt_addr + (i * pmm::PAGE_SIZE);
 
@@ -422,7 +410,7 @@ impl SharedRegion {
         debug_assert_eq!(self.ref_count, 0);
 
         for &phys_page in &self.physical_pages {
-            pmm::free_page(phys_page);
+            let _ = pmm::free_page(phys_page);
         }
         self.physical_pages.clear();
 
@@ -767,12 +755,6 @@ impl SharedMemManager {
     /// This guard therefore never sees 0, but it defends against any future
     /// refactor that accidentally removes that early-out.
     fn validate_explicit_va(virt_addr: usize, region_size: usize) -> Result<(), SharedMemError> {
-        let user_canonical_max = atom_abi::USER_CANONICAL_MAX as usize;
-
-        if !pmm::is_page_aligned(virt_addr) {
-            return Err(SharedMemError::Unaligned);
-        }
-
         // Guard the null page and the entire first-page range.  Mapping
         // shared memory over VA 0x0 would cause null-pointer calls to land
         // on live data (potentially executed if NX is not set), hiding
@@ -785,25 +767,9 @@ impl SharedMemManager {
             );
             return Err(SharedMemError::Unaligned);
         }
-        if virt_addr > user_canonical_max {
-            log_debug!(
-                LOG_ORIGIN,
-                "validate_explicit_va: 0x{:X} exceeds USER_CANONICAL_MAX 0x{:X}",
-                virt_addr, user_canonical_max
-            );
-            return Err(SharedMemError::MappingFailed);
-        }
-        match virt_addr.checked_add(region_size) {
-            Some(end) if end <= user_canonical_max + 1 => Ok(()),
-            _ => {
-                log_debug!(
-                    LOG_ORIGIN,
-                    "validate_explicit_va: 0x{:X} + 0x{:X} overflows user VA",
-                    virt_addr, region_size
-                );
-                Err(SharedMemError::MappingFailed)
-            }
-        }
+
+        crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
+        crate::mm::validate_user_space_bounds(virt_addr, region_size).map_err(map_validation_error)
     }
 
     /// Unmap a region from the given process.
@@ -918,6 +884,16 @@ pub enum SharedMemError {
     AddressInUse,
     /// No free VA range available in the shared memory region.
     NoFreeVirtualAddress,
+}
+
+fn map_validation_error(err: crate::mm::ValidationError) -> SharedMemError {
+    match err {
+        crate::mm::ValidationError::Unaligned { .. } => SharedMemError::Unaligned,
+        crate::mm::ValidationError::OutOfBounds { .. } => SharedMemError::MappingFailed,
+        crate::mm::ValidationError::ProtectedResource { .. } => SharedMemError::PermissionDenied,
+        crate::mm::ValidationError::NotInitialized => SharedMemError::MappingFailed,
+        crate::mm::ValidationError::InvalidSize { .. } => SharedMemError::InvalidSize,
+    }
 }
 
 impl core::fmt::Display for SharedMemError {

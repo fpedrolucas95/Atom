@@ -63,15 +63,15 @@ impl SerialPort {
         unsafe {
             outb(self.base + 1, 0x00);
             outb(self.base + 3, 0x80);
-            outb(self.base + 0, 0x03);
+            outb(self.base, 0x03);
             outb(self.base + 1, 0x00);
             outb(self.base + 3, 0x03);
             outb(self.base + 2, 0xC7);
             outb(self.base + 4, 0x0B);
             outb(self.base + 4, 0x1E);
-            outb(self.base + 0, 0xAE);
+            outb(self.base, 0xAE);
 
-            if inb(self.base + 0) != 0xAE {
+            if inb(self.base) != 0xAE {
                 return;
             }
             

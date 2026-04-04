@@ -145,7 +145,7 @@ impl VmaMap {
     /// Insert a new VMA. Returns error if it overlaps with existing VMAs.
     pub fn insert(&mut self, vma: Vma) -> Result<(), VmaError> {
         // Validate alignment
-        if vma.start % PAGE_SIZE != 0 || vma.end % PAGE_SIZE != 0 {
+        if !vma.start.is_multiple_of(PAGE_SIZE) || !vma.end.is_multiple_of(PAGE_SIZE) {
             return Err(VmaError::Unaligned);
         }
         if vma.start >= vma.end {
@@ -199,13 +199,10 @@ impl VmaMap {
     pub fn find(&self, addr: usize) -> Option<&Vma> {
         // Use range to efficiently find the VMA that could contain addr
         // The VMA with the largest start <= addr is the candidate
-        for (_, vma) in self.regions.range(..=addr).rev() {
+        if let Some((_, vma)) = self.regions.range(..=addr).next_back() {
             if vma.contains_addr(addr) {
                 return Some(vma);
             }
-            // Since VMAs don't overlap, if this one doesn't contain addr,
-            // no earlier one will either
-            break;
         }
         None
     }
@@ -348,7 +345,7 @@ impl VmaMap {
     /// and `VmaError::InvalidRange` if `start`/`end` are not page-aligned or
     /// form an empty interval.
     pub fn set_permissions(&mut self, start: usize, end: usize, perms: VmaPermissions) -> Result<(), VmaError> {
-        if start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 || start >= end {
+        if !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) || start >= end {
             return Err(VmaError::InvalidRange);
         }
 
@@ -777,6 +774,39 @@ fn resolve_anon_fault(
         return true; // already mapped — nothing to do
     }
 
+    // ── Check per-process memory limits before allocation (Req 7.2, 7.3) ──
+    if let Some(process_id) = crate::process::process_id_for_pml4(pml4_phys as u64) {
+        if let Some(usage) = crate::process::get_process_memory_usage(process_id) {
+            // Check hard limit (0 = unlimited)
+            if usage.limit_pages > 0 && usage.resident_pages >= usage.limit_pages {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Process {} memory hard limit exceeded: {} >= {} pages, denying allocation at 0x{:X}",
+                    process_id,
+                    usage.resident_pages,
+                    usage.limit_pages,
+                    page_addr
+                );
+                return false;
+            }
+
+            // Check soft limit (80% of hard limit) - warn but allow
+            if usage.limit_pages > 0 {
+                let soft_limit = (usage.limit_pages * 80) / 100;
+                if usage.resident_pages >= soft_limit && usage.resident_pages < usage.limit_pages {
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "Process {} memory soft limit exceeded: {} >= {} pages (hard limit: {})",
+                        process_id,
+                        usage.resident_pages,
+                        soft_limit,
+                        usage.limit_pages
+                    );
+                }
+            }
+        }
+    }
+
     // Allocate a zeroed physical page (no VMA lock held)
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,
@@ -816,7 +846,7 @@ fn resolve_anon_fault(
         }
         Err(e) => {
             // Failed to map — free the page we just allocated
-            pmm::free_page(phys);
+            let _ = pmm::free_page(phys);
             log_warn!(
                 LOG_ORIGIN,
                 "Failed to map demand page at 0x{:X}: {:?}",

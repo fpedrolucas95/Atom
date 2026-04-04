@@ -13,7 +13,7 @@ use crate::cap::{
     CapabilityTable,
     ResourceType,
 };
-use crate::log_warn;
+use crate::{log_info, log_warn};
 use crate::thread::ThreadId;
 
 const LOG_ORIGIN: &str = "process";
@@ -55,6 +55,8 @@ pub struct Process {
     pub threads: Vec<ThreadId>,
     pub capability_table: CapabilityTable,
     pub cleaned: bool,
+    /// Memory limit in pages (0 = unlimited)
+    pub memory_limit_pages: usize,
 }
 
 pub static PROCESS_REGISTRY: Mutex<BTreeMap<ProcessId, Process>> = Mutex::new(BTreeMap::new());
@@ -116,6 +118,7 @@ pub fn register_process(process_id: ProcessId, pml4_phys: u64, primary_thread: T
             threads: vec![primary_thread],
             capability_table: crate::cap::create_process_capability_table(process_id),
             cleaned: false,
+            memory_limit_pages: 0, // 0 = unlimited
         },
     );
 }
@@ -143,6 +146,7 @@ pub fn attach_thread_to_process(process_id: ProcessId, thread_id: ThreadId, pml4
             threads: vec![thread_id],
             capability_table: crate::cap::create_process_capability_table(process_id),
             cleaned: false,
+            memory_limit_pages: 0, // 0 = unlimited
         })
     };
 
@@ -359,6 +363,14 @@ pub fn get_process_capability(
     process.capability_table.get(cap_handle).cloned()
 }
 
+/// Get the number of capabilities in a process's capability table.
+/// Returns None if the process does not exist.
+pub fn get_process_capability_count(process_id: ProcessId) -> Option<usize> {
+    let registry = PROCESS_REGISTRY.lock();
+    let process = registry.get(&process_id)?;
+    Some(process.capability_table.count())
+}
+
 pub fn process_has_capability(process_id: ProcessId, cap_handle: CapHandle) -> bool {
     let registry = PROCESS_REGISTRY.lock();
     let Some(process) = registry.get(&process_id) else {
@@ -445,4 +457,69 @@ where
     }
 
     false
+}
+
+/// Memory usage information for a process
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryUsage {
+    /// Current resident pages (physically mapped)
+    pub resident_pages: usize,
+    /// Memory limit in pages (0 = unlimited)
+    pub limit_pages: usize,
+    /// Reserved virtual memory in bytes
+    pub reserved_bytes: usize,
+}
+
+/// Set the memory limit for a process in pages.
+///
+/// # Arguments
+/// * `process_id` - The process to set the limit for
+/// * `limit_pages` - The memory limit in pages (0 = unlimited)
+///
+/// # Returns
+/// * `Ok(())` - Limit was set successfully
+/// * `Err(())` - Process not found
+///
+/// # Requirements
+/// Implements Req 7.1, Req 7.5
+pub fn set_process_memory_limit(process_id: ProcessId, limit_pages: usize) -> Result<(), ()> {
+    let mut registry = PROCESS_REGISTRY.lock();
+    let process = registry.get_mut(&process_id).ok_or(())?;
+    
+    process.memory_limit_pages = limit_pages;
+    
+    log_info!(
+        LOG_ORIGIN,
+        "Set memory limit for process {} to {} pages ({} KB)",
+        process_id,
+        limit_pages,
+        limit_pages * 4 // 4KB pages
+    );
+    
+    Ok(())
+}
+
+/// Get the current memory usage for a process.
+///
+/// # Arguments
+/// * `process_id` - The process to query
+///
+/// # Returns
+/// * `Some(MemoryUsage)` - Memory usage information
+/// * `None` - Process not found or no memory statistics available
+///
+/// # Requirements
+/// Implements Req 7.1, Req 7.5
+pub fn get_process_memory_usage(process_id: ProcessId) -> Option<MemoryUsage> {
+    let registry = PROCESS_REGISTRY.lock();
+    let process = registry.get(&process_id)?;
+    
+    // Get VMA stats for the process
+    let vma_stats = crate::mm::vma::get_process_stats(process_id)?;
+    
+    Some(MemoryUsage {
+        resident_pages: vma_stats.resident_pages,
+        limit_pages: process.memory_limit_pages,
+        reserved_bytes: vma_stats.reserved_bytes,
+    })
 }

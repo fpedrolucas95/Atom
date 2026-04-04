@@ -258,7 +258,7 @@ pub use atom_abi::{
     ESUCCESS, EINVAL, ENOSYS, ENOMEM, EPERM, EBUSY,
     EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
     // Filesystem error codes
-    ENOENT, EISDIR, ENOTDIR, EBADF, EROFS, ENAMETOOLONG, EIO,
+    ENOENT, EISDIR, ENOTDIR, EBADF, ENAMETOOLONG, EIO,
     EMFILE, EEXIST, EACCES, EXDEV, ENOTEMPTY,
     ENOTSUP,
     ENODEV,
@@ -928,7 +928,7 @@ extern "win64" fn rust_syscall_dispatcher(
 }
 
 fn sys_mouse_poll(out_ptr: *mut u8) -> u64 {
-    if !validate_user_write_range(out_ptr as u64, 1) {
+    if !validate_user_range(out_ptr as u64, 1) {
         return EINVAL;
     }
 
@@ -1014,7 +1014,7 @@ fn sys_io_port_write(port: u16, value: u8) -> u64 {
 
 /// Poll keyboard buffer for input (raw scancode)
 fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
-    if !validate_user_write_range(out_ptr as u64, 1) {
+    if !validate_user_range(out_ptr as u64, 1) {
         return EINVAL;
     }
 
@@ -1029,7 +1029,7 @@ fn sys_keyboard_poll(out_ptr: *mut u8) -> u64 {
 
 /// Get framebuffer information for userspace graphics
 fn sys_get_framebuffer(info_ptr: *mut u64) -> u64 {
-    if !validate_user_write_range(info_ptr as u64, 5 * core::mem::size_of::<u64>()) {
+    if !validate_user_range(info_ptr as u64, 5 * core::mem::size_of::<u64>()) {
         return EINVAL;
     }
     
@@ -1060,7 +1060,7 @@ fn sys_debug_log(msg_ptr: *const u8, len: usize) -> u64 {
         return ESUCCESS;
     }
 
-    if len > 256 || !validate_user_read_range(msg_ptr as u64, len) {
+    if len > 256 || !validate_user_range(msg_ptr as u64, len) {
         return EINVAL;
     }
 
@@ -1147,7 +1147,7 @@ fn sys_thread_sleep(milliseconds: u64) -> u64 {
     };
 
     // Calculate wake-up tick (assuming 100Hz timer = 10ms per tick)
-    let ticks_to_sleep = (milliseconds + 9) / 10; // Round up
+    let ticks_to_sleep = milliseconds.div_ceil(10); // Round up
     let wake_tick = crate::interrupts::get_ticks() + ticks_to_sleep;
 
     // Register in the sleep queue.  This sets the thread to Blocked and
@@ -1427,7 +1427,7 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
 
     match crate::cap::create_root_capability(ipc_resource, owner, permissions) {
         Ok(cap) => {
-            if let Err(_) = crate::thread::add_thread_capability(owner, cap) {
+            if crate::thread::add_thread_capability(owner, cap).is_err() {
                 log_warn!(
                     LOG_ORIGIN,
                     "ipc_create_port_with_id: failed to attach capability to thread {}",
@@ -1666,7 +1666,7 @@ fn sys_ipc_recv(
     let deadline = if timeout_ms == u64::MAX {
         None
     } else {
-        let ticks = (timeout_ms + 9) / 10;
+        let ticks = timeout_ms.div_ceil(10);
         Some(crate::interrupts::get_ticks() + ticks)
     };
 
@@ -1675,7 +1675,7 @@ fn sys_ipc_recv(
             core::cmp::min(msg.payload.len(), buffer_size as usize);
 
         if buffer_ptr != 0 && bytes_to_copy > 0 {
-            if !validate_user_write_range(buffer_ptr, bytes_to_copy) {
+            if !validate_user_range(buffer_ptr, bytes_to_copy) {
                 return EINVAL;
             }
             unsafe {
@@ -1700,7 +1700,7 @@ fn sys_ipc_recv(
 
     match crate::ipc::try_receive_message(port_id, caller) {
         Ok(Some(msg)) => {
-            return copy_message(msg);
+            copy_message(msg)
         }
 
         Ok(None) => {
@@ -1864,7 +1864,7 @@ fn sys_ipc_send_async(
 
     let mut payload = alloc::vec::Vec::new();
     if payload_len > 0 && payload_ptr != 0 {
-        if !validate_user_read_range(payload_ptr, payload_len as usize) {
+        if !validate_user_range(payload_ptr, payload_len as usize) {
             return EINVAL;
         }
         payload.resize(payload_len as usize, 0);
@@ -1964,7 +1964,7 @@ fn sys_ipc_try_recv(
                 core::cmp::min(msg.payload.len(), buffer_size as usize);
 
             if buffer_ptr != 0 && bytes_to_copy > 0 {
-                if !validate_user_write_range(buffer_ptr, bytes_to_copy) {
+                if !validate_user_range(buffer_ptr, bytes_to_copy) {
                     return EINVAL;
                 }
                 unsafe {
@@ -2058,7 +2058,7 @@ fn sys_ipc_trace_read(buffer_ptr: u64, max_events: u64) -> u64 {
             Some(v) => v,
             None => return EINVAL,
         };
-        if !validate_user_write_range(buffer_ptr, write_bytes) {
+        if !validate_user_range(buffer_ptr, write_bytes) {
             return EINVAL;
         }
         unsafe {
@@ -2119,7 +2119,7 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
             );
 
             if stats_ptr != 0 {
-                if !validate_user_write_range(stats_ptr, core::mem::size_of::<RawIpcPortStats>()) {
+                if !validate_user_range(stats_ptr, core::mem::size_of::<RawIpcPortStats>()) {
                     return EINVAL;
                 }
                 unsafe {
@@ -2842,8 +2842,8 @@ fn sys_cap_query_children(handle_raw: u64, buffer_ptr: u64, buffer_size: u64) ->
                 let to_copy = core::cmp::min(count, buffer_size as usize);
                 unsafe {
                     let buffer = buffer_ptr as *mut u64;
-                    for i in 0..to_copy {
-                        *buffer.add(i) = children[i].raw();
+                    for (i, child) in children.iter().enumerate().take(to_copy) {
+                        *buffer.add(i) = child.raw();
                     }
                 }
                 log_debug!(
@@ -2930,37 +2930,6 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         virt_addr,
         flags_raw
     );
-
-    // ----------------------------------------------------------------
-    // Address validation.
-    //
-    // virt_addr == 0  →  auto-assign (kernel picks a safe VA from the
-    //                    shared-memory window starting at 0x20000000+).
-    //                    This is the normal path and is safe.
-    //
-    // virt_addr in (0, PAGE_SIZE)  →  reject.  This range includes any
-    //                    byte offset into the null page.  No legitimate
-    //                    mapping should ever live here.
-    //
-    // virt_addr uncanonical  →  reject.  SYSRET / IRETQ would explode.
-    // ----------------------------------------------------------------
-    const PAGE_SIZE: u64 = 4096;
-    if virt_addr != 0 && virt_addr < PAGE_SIZE {
-        log_warn!(
-            "syscall",
-            "shared_region_map: rejected virt={:#x} — falls inside null-page guard [0, PAGE_SIZE)",
-            virt_addr
-        );
-        return EINVAL;
-    }
-    if virt_addr != 0 && virt_addr > atom_abi::USER_CANONICAL_MAX {
-        log_warn!(
-            "syscall",
-            "shared_region_map: rejected virt={:#x} — exceeds USER_CANONICAL_MAX",
-            virt_addr
-        );
-        return EINVAL;
-    }
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
@@ -3645,7 +3614,7 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
 
     // Write info to user buffer if provided
     if user_buffer != 0 {
-        if !validate_user_write_range(user_buffer, 6 * core::mem::size_of::<u64>()) {
+        if !validate_user_range(user_buffer, 6 * core::mem::size_of::<u64>()) {
             return EINVAL;
         }
 
@@ -3735,7 +3704,7 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         Some(v) => v,
         None => return EINVAL,
     };
-    if !validate_user_read_range(ports_ptr, read_bytes) {
+    if !validate_user_range(ports_ptr, read_bytes) {
         return EINVAL;
     }
 
@@ -3754,7 +3723,7 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
     } else if timeout_ms == 0 {
         Some(crate::interrupts::get_ticks()) // Immediate check only
     } else {
-        let ticks = (timeout_ms + 9) / 10;
+        let ticks = timeout_ms.div_ceil(10);
         Some(crate::interrupts::get_ticks() + ticks)
     };
 
@@ -3854,7 +3823,7 @@ fn sys_spawn_process(name_ptr: *const u8, name_len: usize) -> u64 {
     log_info!(LOG_ORIGIN, "spawn_process(name_ptr={:p}, name_len={})", name_ptr, name_len);
 
     // Validate arguments
-    if name_len == 0 || name_len > 64 || !validate_user_read_range(name_ptr as u64, name_len) {
+    if name_len == 0 || name_len > 64 || !validate_user_range(name_ptr as u64, name_len) {
         log_warn!(LOG_ORIGIN, "spawn_process: invalid arguments");
         return EINVAL;
     }
@@ -4040,6 +4009,9 @@ fn spawn_process_internal(
 
     // Clone kernel mappings to the new address space
     vm::clone_kernel_mappings(new_pml4_phys).map_err(|_| ENOMEM)?;
+
+    // Register the PML4 as protected (Req 2.4)
+    pmm::register_active_pml4(new_pml4_phys).map_err(|_| ENOMEM)?;
 
     // Create VMA map for this address space
     vma::create_bootstrap_process_vma_map(process_id, new_pml4_phys);
@@ -4555,7 +4527,7 @@ fn sys_spawn_from_path(path_ptr: *const u8, path_len: usize) -> u64 {
 /// * ESUCCESS if successful
 /// * EINVAL if pointer is invalid
 fn sys_get_memory_info(info_ptr: *mut u64) -> u64 {
-    if !validate_user_write_range(info_ptr as u64, 2 * core::mem::size_of::<u64>()) {
+    if !validate_user_range(info_ptr as u64, 2 * core::mem::size_of::<u64>()) {
         return EINVAL;
     }
 
@@ -4596,7 +4568,7 @@ fn sys_list_processes(buffer: *mut crate::thread::ProcessInfo, max_count: usize)
         Some(v) => v,
         None => return EINVAL,
     };
-    if !validate_user_write_range(buffer as u64, write_bytes) {
+    if !validate_user_range(buffer as u64, write_bytes) {
         return EINVAL;
     }
 
@@ -4604,8 +4576,8 @@ fn sys_list_processes(buffer: *mut crate::thread::ProcessInfo, max_count: usize)
 
     // Copy to userspace buffer
     unsafe {
-        for i in 0..count {
-            *buffer.add(i) = temp_buffer[i];
+        for (i, item) in temp_buffer.iter().enumerate().take(count) {
+            *buffer.add(i) = *item;
         }
     }
 
@@ -4626,7 +4598,7 @@ fn sys_get_process_count() -> u64 {
 /// # Returns
 /// * Number of bytes written, or EINVAL if buffer is null
 fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
-    if max_len == 0 || !validate_user_write_range(buffer as u64, max_len) {
+    if max_len == 0 || !validate_user_range(buffer as u64, max_len) {
         return EINVAL;
     }
 
@@ -4649,7 +4621,7 @@ fn sys_read_klog(buffer: *mut u8, max_len: usize) -> u64 {
 /// # Returns
 /// * Number of bytes written, or EINVAL if buffer is null
 fn sys_get_cpu_brand(buffer: *mut u8, max_len: usize) -> u64 {
-    if max_len == 0 || !validate_user_write_range(buffer as u64, max_len) {
+    if max_len == 0 || !validate_user_range(buffer as u64, max_len) {
         return EINVAL;
     }
 
@@ -4752,14 +4724,20 @@ fn sys_mmap(addr_hint: u64, length: u64, prot: u64, flags: u64) -> u64 {
     // Determine the virtual address
     let virt_addr = if fixed {
         let addr = addr_hint as usize;
-        if addr % PAGE_SIZE != 0 {
+        let end = match addr.checked_add(length) {
+            Some(end) => end,
+            None => return EINVAL,
+        };
+        if crate::mm::validate_page_range(addr, end).is_err() {
             return EINVAL;
         }
-        if addr + length > atom_abi::USER_MMAP_END as usize {
+        if crate::mm::validate_user_space_bounds(addr, length).is_err()
+            || end > atom_abi::USER_MMAP_END as usize
+        {
             return EINVAL;
         }
         // Remove any existing mappings in this range
-        let removed = match vma::remove_process_vma_range(process_id, addr, addr + length) {
+        let removed = match vma::remove_process_vma_range(process_id, addr, end) {
             Ok(removed) => removed,
             Err(_) => return EINVAL,
         };
@@ -4808,18 +4786,25 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
     let addr = addr as usize;
     let length = length as usize;
 
-    if addr % PAGE_SIZE != 0 || length == 0 {
+    if length == 0 {
         return EINVAL;
     }
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let end = match addr.checked_add(length) {
+        Some(end) => end,
+        None => return EINVAL,
+    };
+    if crate::mm::validate_page_range(addr, end).is_err() {
+        return EINVAL;
+    }
 
     let (_tid, process_id, pml4) = match current_process_vma_context() {
         Some(ctx) => ctx,
         None => return EPERM,
     };
 
-    let removed = match vma::remove_process_vma_range(process_id, addr, addr + length) {
+    let removed = match vma::remove_process_vma_range(process_id, addr, end) {
         Ok(removed) => removed,
         Err(_) => return EINVAL,
     };
@@ -4847,11 +4832,18 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     let addr = addr as usize;
     let length = length as usize;
 
-    if addr % PAGE_SIZE != 0 || length == 0 {
+    if length == 0 {
         return EINVAL;
     }
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let end = match addr.checked_add(length) {
+        Some(end) => end,
+        None => return EINVAL,
+    };
+    if crate::mm::validate_page_range(addr, end).is_err() {
+        return EINVAL;
+    }
 
     let (_tid, process_id, pml4) = match current_process_vma_context() {
         Some(ctx) => ctx,
@@ -4869,7 +4861,7 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
         perms = perms.union(VmaPermissions::EXEC);
     }
 
-    if let Err(_) = vma::set_process_permissions(process_id, addr, addr + length, perms) {
+    if vma::set_process_permissions(process_id, addr, end, perms).is_err() {
         return EINVAL;
     }
 
@@ -4966,7 +4958,7 @@ fn sys_brk(new_brk: u64) -> u64 {
         for page in (shrunk_start..shrunk_end).step_by(PAGE_SIZE) {
             if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
                 if crate::mm::vm::unmap_page_in_pml4(pml4, page).is_ok() {
-                    crate::mm::pmm::free_page(phys);
+                    let _ = crate::mm::pmm::free_page(phys);
                     let _ = vma::account_process_unmap(process_id);
                 }
             }
@@ -5002,7 +4994,9 @@ fn unmap_vma_pages(
             // Free the physical page (only for non-device mappings)
             match vma.backing {
                 crate::mm::vma::VmaBacking::Device { .. } => {},
-                _ => crate::mm::pmm::free_page(phys),
+                _ => {
+                    let _ = crate::mm::pmm::free_page(phys);
+                }
             }
             let _ = crate::mm::vma::account_process_unmap(process_id);
         }
@@ -5017,41 +5011,11 @@ use alloc::vec::Vec;
 
 // Helper: validate userspace pointer is in canonical range
 #[inline]
-fn validate_user_pointer(ptr: u64) -> bool {
-    ptr <= atom_abi::USER_CANONICAL_MAX
-}
-
-/// Validate that a memory range [`ptr`, `ptr + size - 1`] stays within user
-/// canonical space.  Uses `checked_add` so that overflow returns `false`
-/// instead of silently wrapping.
-#[inline]
 fn validate_user_range(ptr: u64, size: usize) -> bool {
     if size == 0 {
         return true;
     }
-    if ptr == 0 {
-        return false;
-    }
-    if !validate_user_pointer(ptr) {
-        return false;
-    }
-    let end = match ptr.checked_add(size as u64 - 1) {
-        Some(v) => v,
-        None => return false,
-    };
-    validate_user_pointer(end)
-}
-
-/// Semantic alias — validate a user-space write target of `size` bytes.
-#[inline]
-fn validate_user_write_range(ptr: u64, size: usize) -> bool {
-    validate_user_range(ptr, size)
-}
-
-/// Semantic alias — validate a user-space read source of `size` bytes.
-#[inline]
-fn validate_user_read_range(ptr: u64, size: usize) -> bool {
-    validate_user_range(ptr, size)
+    ptr != 0 && crate::mm::validate_user_space_bounds(ptr as usize, size).is_ok()
 }
 
 // Helper: safely copy string from userspace
@@ -5130,7 +5094,7 @@ fn sys_kern_fs_read_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: 
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    if buf_len == 0 || !validate_user_pointer(buf_ptr) {
+    if buf_len == 0 || !validate_user_range(buf_ptr, 1) {
         return EINVAL;
     }
 
@@ -5164,7 +5128,7 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    if buf_len == 0 || !validate_user_pointer(buf_ptr) {
+    if buf_len == 0 || !validate_user_range(buf_ptr, 1) {
         return EINVAL;
     }
 
@@ -5176,9 +5140,7 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
     match crate::drivers::fat32::list_directory(list_path) {
         Some(entries) => {
             let mut pos = 0usize;
-            let mut ino_counter: u32 = 1;
-
-            for entry_name in &entries {
+            for (ino_counter, entry_name) in (1_u32..).zip(entries.iter()) {
                 // Parse name and type from the "name/" format
                 let (name, ftype) = if entry_name.ends_with('/') {
                     (&entry_name[..entry_name.len() - 1], 2u8) // directory
@@ -5209,7 +5171,6 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
                 }
 
                 pos += rec_len;
-                ino_counter += 1;
             }
 
             pos as u64
@@ -5232,7 +5193,7 @@ fn sys_kern_fs_stat_path(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    if !validate_user_pointer(stat_ptr) {
+    if !validate_user_range(stat_ptr, 1) {
         return EINVAL;
     }
 
@@ -5412,7 +5373,7 @@ fn copy_path_from_user(ptr: u64, len: usize) -> Result<([u8; MAX_PATH_BUF], usiz
     if len == 0 || len > MAX_PATH_BUF {
         return Err(ENAMETOOLONG);
     }
-    if !validate_user_pointer(ptr) {
+    if !validate_user_range(ptr, 1) {
         return Err(EINVAL);
     }
     let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
@@ -5659,12 +5620,11 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
         } else {
             path.trim_start_matches('/')
         };
-        if path != "/" && !path.is_empty() {
-            if crate::drivers::fat32::list_directory(list_path).is_none() {
+        if path != "/" && !path.is_empty()
+            && crate::drivers::fat32::list_directory(list_path).is_none() {
                 log_debug!(LOG_ORIGIN, "directory not found: \"{}\"", path);
                 return ENOENT;
             }
-        }
     } else if crate::drivers::fat32::stat_path(path).is_none() {
         if (flags & o_creat) == 0 {
             log_debug!(LOG_ORIGIN, "file not found: \"{}\"", path);
@@ -5760,14 +5720,14 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return 0; // POSIX: read(count=0) returns 0, not EINVAL
     }
 
-    if !validate_user_pointer(buf_ptr) {
+    if !validate_user_range(buf_ptr, 1) {
         log_warn!(LOG_ORIGIN, "sys_fs_read: buf_ptr={:#X} fails validate_user_pointer", buf_ptr);
         return EINVAL;
     }
 
     // Validate that the ENTIRE destination range lies in userspace
     let buf_end = buf_ptr.saturating_add(count as u64).saturating_sub(1);
-    if !validate_user_pointer(buf_end) {
+    if !validate_user_range(buf_end, 1) {
         log_warn!(LOG_ORIGIN, "sys_fs_read: buf range [{:#X}..{:#X}] exceeds user canonical max",
             buf_ptr, buf_end);
         return EINVAL;
@@ -5903,11 +5863,11 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     if count == 0 {
         return 0;
     }
-    if !validate_user_pointer(buf_ptr) {
+    if !validate_user_range(buf_ptr, 1) {
         return EINVAL;
     }
     let buf_end = buf_ptr.saturating_add(count as u64).saturating_sub(1);
-    if !validate_user_pointer(buf_end) {
+    if !validate_user_range(buf_end, 1) {
         return EINVAL;
     }
 
@@ -5962,7 +5922,7 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
     log_debug!(LOG_ORIGIN, "sys_fs_readdir(dirfd={}, count={})", dirfd, count);
 
-    if count == 0 || !validate_user_pointer(dirent_ptr) {
+    if count == 0 || !validate_user_range(dirent_ptr, 1) {
         return EINVAL;
     }
 
@@ -6233,7 +6193,7 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
 
 /// Get file status by descriptor
 fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
-    if !validate_user_pointer(stat_ptr) {
+    if !validate_user_range(stat_ptr, 1) {
         return EINVAL;
     }
 
@@ -6449,13 +6409,12 @@ fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
         Some(v) => v,
         None => return EINVAL,
     };
-    if !validate_user_write_range(buf_ptr as u64, write_bytes) {
+    if !validate_user_range(buf_ptr as u64, write_bytes) {
         return EINVAL;
     }
 
     unsafe {
-        for i in 0..count {
-            let m = &kernel_modes[i];
+        for (i, m) in kernel_modes.iter().enumerate().take(count) {
             let base = buf_ptr.add(i * 5);
             base.add(0).write_volatile(m.width  as u32);
             base.add(1).write_volatile(m.height as u32);
@@ -6483,7 +6442,7 @@ fn sys_get_video_modes(buf_ptr: *mut u32, max_modes: usize) -> u64 {
 ///
 /// Returns ESUCCESS, or EINVAL if buf_ptr is null.
 fn sys_get_current_video_mode(buf_ptr: *mut u64) -> u64 {
-    if !validate_user_write_range(buf_ptr as u64, 4 * core::mem::size_of::<u64>()) {
+    if !validate_user_range(buf_ptr as u64, 4 * core::mem::size_of::<u64>()) {
         return EINVAL;
     }
 

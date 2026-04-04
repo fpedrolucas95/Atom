@@ -210,6 +210,9 @@ fn create_init_process(
     vm::clone_kernel_mappings(init_pml4_phys)
         .map_err(|_| InitError::MemoryAllocationFailed)?;
 
+    // Register the PML4 as protected (Req 2.4)
+    let _ = pmm::register_active_pml4(init_pml4_phys);
+
     log_info!(
         LOG_ORIGIN,
         "Cloned kernel mappings to init's PML4"
@@ -622,7 +625,7 @@ fn grant_init_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<(), In
             }
         } else {
             let fb_resource = ResourceType::Framebuffer {
-                address: fb.address as u64,
+                address: fb.address,
                 width: fb.width,
                 height: fb.height,
                 stride: fb.pixels_per_scan_line,

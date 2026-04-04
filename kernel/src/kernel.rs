@@ -44,9 +44,8 @@
 
 #![no_std]
 #![no_main]
-#![feature(alloc_error_handler)]
-#![feature(abi_x86_interrupt)]
-
+#![deny(dead_code)]
+#![deny(unused_imports)]
 extern crate alloc;
 
 mod arch;
@@ -98,6 +97,10 @@ const LOG_INIT_PROC: &str = "init";
 static ALLOCATOR: mm::heap::KernelAllocator = mm::heap::KernelAllocator;
 
 #[no_mangle]
+/// # Safety
+///
+/// `boot_info` must be a valid, bootloader-provided pointer that remains
+/// accessible for the full duration of kernel initialization.
 pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     unsafe {
         let port: u16 = 0x3F8;

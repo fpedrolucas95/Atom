@@ -316,6 +316,7 @@ impl IpcTraceBuffer {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct IpcPortMetrics {
     messages_sent: u64,
     messages_received: u64,
@@ -328,21 +329,6 @@ struct IpcPortMetrics {
     last_message_timestamp_ms: Option<u64>,
 }
 
-impl Default for IpcPortMetrics {
-    fn default() -> Self {
-        Self {
-            messages_sent: 0,
-            messages_received: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            min_latency_ms: None,
-            max_latency_ms: None,
-            total_latency_ms: 0,
-            first_message_timestamp_ms: None,
-            last_message_timestamp_ms: None,
-        }
-    }
-}
 
 impl IpcPortMetrics {
     fn record_send(&mut self, size: usize, timestamp_ms: u64) {

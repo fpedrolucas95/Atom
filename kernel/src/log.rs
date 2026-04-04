@@ -198,21 +198,21 @@ pub fn _log(level: LogLevel, origin: &str, args: fmt::Arguments, file: &str, lin
     let is_debug = level == LogLevel::Debug;
 
     let level_str = level.as_str();
-    let args_for_vga = args.clone();
+    let args_for_vga = args;
 
     // Write to ring buffer for userspace access (no allocation needed)
     {
         let mut buffer = LOG_BUFFER.lock();
         if is_debug {
-            let _ = write!(
+            let _ = writeln!(
                 buffer,
-                "[{}.{:03}] {} [{}] {} ({}:{})\n",
+                "[{}.{:03}] {} [{}] {} ({}:{})",
                 seconds, milliseconds, level_str, origin, args, file, line
             );
         } else {
-            let _ = write!(
+            let _ = writeln!(
                 buffer,
-                "[{}.{:03}] {} [{}] {}\n",
+                "[{}.{:03}] {} [{}] {}",
                 seconds, milliseconds, level_str, origin, args
             );
         }

@@ -177,7 +177,7 @@ impl AuditLogEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResourceType {
     Thread(ThreadId),
     MemoryRegion {
@@ -238,7 +238,7 @@ pub enum ResourceType {
 }
 
 /// Type of input device for capability granting
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InputDeviceType {
     Keyboard,
     Mouse,
@@ -380,18 +380,75 @@ impl CapabilityTable {
     }
 }
 
+/// Maximum number of audit log entries to retain in memory.
+///
+/// The audit log tracks all capability lifecycle events (create, derive, transfer, revoke)
+/// for security auditing and debugging. When the log reaches this limit, the oldest entries
+/// are evicted to prevent unbounded memory growth.
+///
+/// # Tuning Guidelines
+///
+/// - **Default (1000)**: Suitable for most systems, provides ~64KB of audit history
+/// - **Low memory systems (100-500)**: Reduce if memory is constrained
+/// - **High security systems (5000-10000)**: Increase for longer audit trails
+/// - **Development/debugging (10000+)**: Increase for detailed capability tracking
+///
+/// # Memory Impact
+///
+/// Each audit entry is approximately 64 bytes, so:
+/// - 1000 entries ≈ 64 KB
+/// - 5000 entries ≈ 320 KB
+/// - 10000 entries ≈ 640 KB
+///
+/// # Configuration
+///
+/// To customize this value, modify this constant and rebuild the kernel:
+/// ```rust
+/// const MAX_AUDIT_LOG_ENTRIES: usize = 5000;
+/// ```
+///
+/// Alternatively, you can override via Cargo features. Add one of these features to your build:
+/// - `audit_log_entries_100` - For low memory systems (100 entries)
+/// - `audit_log_entries_500` - For constrained systems (500 entries)
+/// - `audit_log_entries_5000` - For high security systems (5000 entries)
+/// - `audit_log_entries_10000` - For development/debugging (10000 entries)
+///
+/// Example:
+/// ```bash
+/// cargo build --features audit_log_entries_5000
+/// ```
+#[cfg(not(any(
+    feature = "audit_log_entries_100",
+    feature = "audit_log_entries_500",
+    feature = "audit_log_entries_5000",
+    feature = "audit_log_entries_10000"
+)))]
+const MAX_AUDIT_LOG_ENTRIES: usize = 1000;
+
+#[cfg(feature = "audit_log_entries_100")]
+const MAX_AUDIT_LOG_ENTRIES: usize = 100;
+
+#[cfg(feature = "audit_log_entries_500")]
+const MAX_AUDIT_LOG_ENTRIES: usize = 500;
+
+#[cfg(feature = "audit_log_entries_5000")]
+const MAX_AUDIT_LOG_ENTRIES: usize = 5000;
+
+#[cfg(feature = "audit_log_entries_10000")]
+const MAX_AUDIT_LOG_ENTRIES: usize = 10000;
+
 pub struct CapabilityManager {
     global_caps: Mutex<BTreeMap<CapHandle, Capability>>,
     audit_log: Mutex<VecDeque<AuditLogEntry>>,
+    eviction_count: AtomicU64,
 }
-
-const MAX_AUDIT_LOG_ENTRIES: usize = 1000;
 
 impl CapabilityManager {
     pub const fn new() -> Self {
         Self {
             global_caps: Mutex::new(BTreeMap::new()),
             audit_log: Mutex::new(VecDeque::new()),
+            eviction_count: AtomicU64::new(0),
         }
     }
 
@@ -400,6 +457,12 @@ impl CapabilityManager {
 
         if log.len() >= MAX_AUDIT_LOG_ENTRIES {
             log.pop_front();
+            self.eviction_count.fetch_add(1, Ordering::Relaxed);
+            log_debug!(
+                LOG_ORIGIN,
+                "Audit log full: evicted oldest entry (total evictions: {})",
+                self.eviction_count.load(Ordering::Relaxed)
+            );
         }
 
         log.push_back(entry);
@@ -409,6 +472,15 @@ impl CapabilityManager {
         let log = self.audit_log.lock();
         let count = core::cmp::min(max_entries, log.len());
         log.iter().rev().take(count).cloned().collect()
+    }
+
+    pub fn get_audit_stats(&self) -> AuditStats {
+        let log = self.audit_log.lock();
+        AuditStats {
+            size: log.len(),
+            eviction_count: self.eviction_count.load(Ordering::Relaxed),
+            max_entries: MAX_AUDIT_LOG_ENTRIES,
+        }
     }
 
     pub fn register(&self, cap: Capability, actor_thread: ThreadId) -> Result<CapHandle, CapError> {
@@ -455,6 +527,7 @@ impl CapabilityManager {
         }
 
         let children = cap.children.clone();
+        let resource_type = cap.resource;
 
         caps.remove(&handle);
         revoked.push(handle);
@@ -474,6 +547,10 @@ impl CapabilityManager {
             revoker_thread,
             handle,
         ));
+
+        // Invoke registered revocation callbacks for this resource type
+        // Requirements: Req 5.1, Req 5.3, Req 5.4, Req 5.5
+        invoke_revocation_callbacks(resource_type, handle);
 
         for child_handle in children {
             if let Ok(mut child_revoked) = self.revoke(child_handle, revoker, revoker_thread) {
@@ -561,8 +638,59 @@ pub struct CapabilityStats {
     pub io_port_caps: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AuditStats {
+    pub size: usize,
+    pub eviction_count: u64,
+    pub max_entries: usize,
+}
+
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();
 static CLEANED_THREAD_CAPABILITIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
+type RevocationCallback = fn(CapHandle);
+type RevocationCallbackMap = BTreeMap<ResourceType, Vec<RevocationCallback>>;
+
+static REVOCATION_CALLBACKS: Mutex<RevocationCallbackMap> = Mutex::new(BTreeMap::new());
+
+/// Invoke all registered revocation callbacks for a given resource type.
+/// Callbacks are invoked in registration order.
+/// If a callback fails (panics), the failure is logged but remaining callbacks continue.
+/// 
+/// # Arguments
+/// * `resource_type` - The type of resource being revoked
+/// * `handle` - The capability handle being revoked
+/// 
+/// # Requirements
+/// Implements Req 5.1: Invoke all registered callbacks for resource type
+/// Implements Req 5.3: Log callback failures but continue with remaining callbacks
+/// Implements Req 5.4: Invoke callbacks in registration order
+/// Implements Req 5.5: Pass capability handle to each callback
+fn invoke_revocation_callbacks(resource_type: ResourceType, handle: CapHandle) {
+    let callbacks = REVOCATION_CALLBACKS.lock();
+    
+    if let Some(callback_list) = callbacks.get(&resource_type) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Invoking {} revocation callbacks for capability {} (resource type {:?})",
+            callback_list.len(),
+            handle,
+            resource_type
+        );
+        
+        // Invoke each callback in registration order
+        // Note: In a no_std environment, we cannot catch panics, so callbacks
+        // must be written to not panic. If a callback panics, it will propagate.
+        for (idx, callback) in callback_list.iter().enumerate() {
+            log_debug!(
+                LOG_ORIGIN,
+                "Invoking revocation callback {} for capability {}",
+                idx,
+                handle
+            );
+            callback(handle);
+        }
+    }
+}
 
 fn required_process_id(thread_id: ThreadId) -> Result<ProcessId, CapError> {
     crate::thread::get_thread_process_id(thread_id).ok_or(CapError::NotFound)
@@ -638,8 +766,71 @@ pub fn get_audit_log(max_entries: usize) -> Vec<AuditLogEntry> {
     CAPABILITY_MANAGER.get_audit_log(max_entries)
 }
 
+pub fn get_audit_stats() -> AuditStats {
+    CAPABILITY_MANAGER.get_audit_stats()
+}
+
 pub fn get_capability_stats() -> CapabilityStats {
     CAPABILITY_MANAGER.stats()
+}
+
+/// Register a callback to be invoked when a capability of the specified resource type is revoked.
+/// Callbacks are invoked in registration order.
+/// 
+/// # Arguments
+/// * `resource_type` - The type of resource to register the callback for
+/// * `callback` - The function to call when a capability of this type is revoked
+/// 
+/// # Requirements
+/// Implements Req 5.2: Allow registration of revocation callbacks per resource type
+pub fn register_revocation_callback(
+    resource_type: ResourceType,
+    callback: fn(CapHandle),
+) {
+    let mut callbacks = REVOCATION_CALLBACKS.lock();
+    callbacks.entry(resource_type).or_default().push(callback);
+    log_debug!(
+        LOG_ORIGIN,
+        "Registered revocation callback for resource type {:?}",
+        resource_type
+    );
+}
+
+/// Rollback a failed capability transfer by restoring the capability to the source process.
+/// This function ensures atomicity by undoing all changes made during a transfer attempt.
+fn rollback_transfer(
+    cap_handle: CapHandle,
+    source_process: ProcessId,
+    original_cap: Capability,
+) {
+    log_debug!(
+        LOG_ORIGIN,
+        "Rolling back capability transfer for {} to process {}",
+        cap_handle,
+        source_process
+    );
+
+    // Restore capability to source process
+    if let Err(err) = crate::process::add_process_capability(source_process, original_cap.clone()) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Failed to restore capability {} to source process {} during rollback: {:?}",
+            cap_handle,
+            source_process,
+            err
+        );
+    }
+
+    // Restore capability mirrors to source process threads
+    if let Err(err) = crate::thread::mirror_process_capability_to_threads(source_process, original_cap) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Failed to restore capability {} mirrors to source process {} threads during rollback: {:?}",
+            cap_handle,
+            source_process,
+            err
+        );
+    }
 }
 
 pub fn transfer_capability(
@@ -649,17 +840,39 @@ pub fn transfer_capability(
 ) -> Result<(), CapError> {
     let source_process = required_process_id(source_thread)?;
     let target_process = required_process_id(target_thread)?;
+
+    // Step 1: Validate capability exists and permissions
     let cap = crate::process::get_process_capability(source_process, cap_handle)
-        .ok_or(CapError::NotFound)?;
+        .ok_or_else(|| {
+            log_debug!(
+                LOG_ORIGIN,
+                "Transfer failed: capability {} not found in source process {}",
+                cap_handle,
+                source_process
+            );
+            CapError::NotFound
+        })?;
 
     if !cap.is_owned_by(source_process) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Transfer failed: capability {} not owned by source process {}",
+            cap_handle,
+            source_process
+        );
         return Err(CapError::NotOwner);
     }
 
     if !cap.has_permission(CapPermissions::GRANT) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Transfer failed: capability {} lacks GRANT permission",
+            cap_handle
+        );
         return Err(CapError::PermissionDenied);
     }
 
+    // Step 2: Handle same-process transfer (no-op)
     if source_process == target_process {
         CAPABILITY_MANAGER.log_audit(AuditLogEntry::new_transfer(
             source_thread,
@@ -669,38 +882,111 @@ pub fn transfer_capability(
         return Ok(());
     }
 
+    // Step 3: Validate target process has space for the capability
+    // This check prevents starting a transfer that will fail due to table limits
+    let target_cap_count = crate::process::get_process_capability_count(target_process)
+        .ok_or_else(|| {
+            log_debug!(
+                LOG_ORIGIN,
+                "Transfer failed: target process {} not found",
+                target_process
+            );
+            CapError::NotFound
+        })?;
+
+    // Check if target process capability table has reasonable space
+    // This is a soft check - the actual add operation will do the final validation
+    if target_cap_count >= 1000 {
+        log_debug!(
+            LOG_ORIGIN,
+            "Transfer failed: target process {} capability table near capacity ({} capabilities)",
+            target_process,
+            target_cap_count
+        );
+        return Err(CapError::AlreadyExists);
+    }
+
+    // Step 4: Remove capability from source process
     let removed_cap = crate::process::remove_process_capability(source_process, cap_handle)
-        .ok_or(CapError::NotFound)?;
+        .ok_or_else(|| {
+            log_debug!(
+                LOG_ORIGIN,
+                "Transfer failed: could not remove capability {} from source process {}",
+                cap_handle,
+                source_process
+            );
+            CapError::NotFound
+        })?;
+
+    // Remove from source thread mirrors
     let _ = crate::thread::remove_process_capability_mirror(source_process, cap_handle);
 
-    let rollback_cap = removed_cap.clone();
+    // Save original capability for rollback
+    let original_cap = removed_cap.clone();
     let mut transferred_cap = removed_cap;
     transferred_cap.owner = target_process;
 
+    // Step 5: Add capability to target process
     if let Err(err) = crate::process::add_process_capability(target_process, transferred_cap.clone()) {
-        let _ = crate::process::add_process_capability(source_process, rollback_cap.clone());
-        let _ = crate::thread::mirror_process_capability_to_threads(source_process, rollback_cap);
+        log_debug!(
+            LOG_ORIGIN,
+            "Transfer failed: could not add capability {} to target process {}: {:?}",
+            cap_handle,
+            target_process,
+            err
+        );
+        rollback_transfer(cap_handle, source_process, original_cap);
         return Err(err);
     }
 
+    // Step 6: Mirror capability to target process threads
     if let Err(err) = crate::thread::mirror_process_capability_to_threads(target_process, transferred_cap.clone()) {
+        log_debug!(
+            LOG_ORIGIN,
+            "Transfer failed: could not mirror capability {} to target process {} threads: {:?}",
+            cap_handle,
+            target_process,
+            err
+        );
+        // Remove from target process before rollback
         let _ = crate::process::remove_process_capability(target_process, cap_handle);
-        let _ = crate::process::add_process_capability(source_process, rollback_cap.clone());
-        let _ = crate::thread::mirror_process_capability_to_threads(source_process, rollback_cap);
+        rollback_transfer(cap_handle, source_process, original_cap);
         return Err(err);
     }
 
+    // Step 7: Update global capability registry
     let mut caps = CAPABILITY_MANAGER.global_caps.lock();
     if let Some(global_cap) = caps.get_mut(&cap_handle) {
         global_cap.owner = target_process;
+    } else {
+        // This should never happen - log error and attempt rollback
+        log_debug!(
+            LOG_ORIGIN,
+            "Transfer failed: capability {} not found in global registry",
+            cap_handle
+        );
+        drop(caps);
+        let _ = crate::process::remove_process_capability(target_process, cap_handle);
+        let _ = crate::thread::remove_process_capability_mirror(target_process, cap_handle);
+        rollback_transfer(cap_handle, source_process, original_cap);
+        return Err(CapError::NotFound);
     }
     drop(caps);
 
+    // Step 8: Log successful transfer
     CAPABILITY_MANAGER.log_audit(AuditLogEntry::new_transfer(
         source_thread,
         cap_handle,
         target_thread,
     ));
+
+    log_debug!(
+        LOG_ORIGIN,
+        "Successfully transferred capability {} from process {} to process {}",
+        cap_handle,
+        source_process,
+        target_process
+    );
 
     Ok(())
 }

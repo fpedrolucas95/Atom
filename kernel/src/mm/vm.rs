@@ -60,6 +60,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::mm::pmm;
+use crate::mm::ValidationError;
 use crate::boot::{EfiMemoryDescriptor, MemoryMap};
 
 use crate::{log_debug, log_info, log_warn, log_error};
@@ -107,7 +108,39 @@ static IDENTITY_MAP_CEILING: AtomicUsize = AtomicUsize::new(0);
 /// that user processes may have partially overwritten with their own pages.
 static HIGHER_HALF_READY: AtomicBool = AtomicBool::new(false);
 
+/// Convert a physical address to a virtual address suitable for kernel access (safe version).
+///
+/// This is the safe wrapper that validates the higher-half mirror is ready before
+/// performing the translation. It returns an error if called before `vm::init()`
+/// completes, preventing undefined behavior from accessing unmapped addresses.
+///
+/// Before `vm::init()` completes, returns the identity-mapped address (phys == virt)
+/// because the UEFI page tables are still active.  After init, returns the
+/// higher-half mirror address (`HIGHER_HALF_BASE + phys`), which is guaranteed
+/// to be valid in every address space since higher-half PML4 entries are shared.
+///
+/// # Arguments
+/// * `phys` - Physical address to convert
+///
+/// # Returns
+/// * `Ok(virt)` - Virtual address corresponding to the physical address
+/// * `Err(ValidationError::NotInitialized)` - If called before higher-half initialization
+///
+/// # Examples
+/// ```
+/// // After vm::init() completes
+/// let virt = phys_to_virt_ptr_safe(0x1000)?;
+/// assert_eq!(virt, HIGHER_HALF_BASE + 0x1000);
+/// ```
+pub fn phys_to_virt_ptr_safe(phys: usize) -> Result<usize, ValidationError> {
+    crate::mm::validate_initialized(HIGHER_HALF_READY.load(Ordering::Relaxed))?;
+    Ok(HIGHER_HALF_BASE + phys)
+}
+
 /// Convert a physical address to a virtual address suitable for kernel access.
+///
+/// This is the unsafe convenience wrapper that panics if called incorrectly.
+/// Prefer using `phys_to_virt_ptr_safe()` for operations that need error handling.
 ///
 /// Before `vm::init()` completes, returns the identity-mapped address (phys == virt)
 /// because the UEFI page tables are still active.  After init, returns the
@@ -120,7 +153,7 @@ static HIGHER_HALF_READY: AtomicBool = AtomicBool::new(false);
 #[inline]
 pub fn phys_to_virt_ptr(phys: usize) -> usize {
     if HIGHER_HALF_READY.load(Ordering::Relaxed) {
-        HIGHER_HALF_BASE + phys
+        phys_to_virt_ptr_safe(phys).expect("higher-half VM access requires initialized mirror")
     } else {
         phys
     }
@@ -147,11 +180,16 @@ const LOG_ORIGIN: &str = "vmm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmError {
-    NotInitialized,
-    Unaligned,
+    Validation(ValidationError),
     AlreadyMapped,
     NotMapped,
     OutOfMemory,
+}
+
+impl From<ValidationError> for VmError {
+    fn from(value: ValidationError) -> Self {
+        Self::Validation(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +425,9 @@ pub fn init(memory_map: &MemoryMap) {
     // can start above all identity-mapped pages.
     IDENTITY_MAP_CEILING.store(max_physical_addr, Ordering::Relaxed);
 
+    // Register the kernel PML4 as protected (Req 2.4)
+    let _ = pmm::register_active_pml4(pml4_phys);
+
     log_info!(
         LOG_ORIGIN,
         "New address space active (PML4=0x{:X}, mapped ~{} MiB)",
@@ -510,25 +551,23 @@ pub fn ensure_current_stack_mapped(pages: usize) -> bool {
 }
 
 pub fn map_page(virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(phys) {
-        return Err(VmError::Unaligned);
-    }
-
     let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_page_alignment(phys)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
     map_page_internal(pml4_phys, virt, phys, flags)
 }
 
 pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(phys) {
-        return Err(VmError::Unaligned);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_page_alignment(phys)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
+    // Validate user-space bounds if this is a user-space mapping
+    let is_user_mapping = (flags.bits() & PageFlags::USER.bits()) != 0;
+    if is_user_mapping {
+        crate::mm::validate_user_space_bounds(virt, pmm::PAGE_SIZE)?;
     }
 
     map_page_internal(pml4_phys, virt, phys, flags)
@@ -553,13 +592,9 @@ pub fn is_page_present_in_pml4(pml4_phys: usize, virt: usize) -> bool {
 /// This is used when creating new processes that may share page table structures
 /// with the kernel but need their own mappings in user space regions.
 pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(phys) {
-        return Err(VmError::Unaligned);
-    }
-
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_page_alignment(phys)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
     // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
     let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;
@@ -578,14 +613,9 @@ pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: Pag
 }
 
 pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(dst_pml4_phys) {
-        return Err(VmError::Unaligned);
-    }
-
     let src_pml4 = ACTIVE_PML4.load(Ordering::Relaxed);
-    if src_pml4 == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_page_alignment(dst_pml4_phys)?;
+    crate::mm::validate_initialized(src_pml4 != 0)?;
 
     let src = unsafe { &*(phys_to_virt_ptr(src_pml4) as *const PageTable) };
     let dst = unsafe { &mut *(phys_to_virt_ptr(dst_pml4_phys) as *mut PageTable) };
@@ -862,9 +892,7 @@ fn repair_leaf_pte(pml4_phys: usize, virt: usize, raw_pte: u64) {
 }
 
 pub fn unmap_page(virt: usize) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) {
-        return Err(VmError::Unaligned);
-    }
+    crate::mm::validate_page_alignment(virt)?;
 
     let (entry, _) = walk_to_entry(virt, false)?;
     let was_present = entry.is_present();
@@ -880,13 +908,8 @@ pub fn unmap_page(virt: usize) -> Result<(), VmError> {
 }
 
 pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) {
-        return Err(VmError::Unaligned);
-    }
-
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
     let (entry, _) = walk_to_entry_with_root_user(pml4_phys, virt, false, false)?;
     if !entry.is_present() {
@@ -902,14 +925,9 @@ pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> 
 /// This adds the USER bit to ALL levels of the page table hierarchy
 #[allow(dead_code)]
 pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) {
-        return Err(VmError::Unaligned);
-    }
-
     let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
     // Get indices for all levels
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
@@ -951,9 +969,7 @@ pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
 /// Remap an existing page to add specific flags
 #[allow(dead_code)]
 pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) {
-        return Err(VmError::Unaligned);
-    }
+    crate::mm::validate_page_alignment(virt)?;
 
     let (entry, _) = walk_to_entry(virt, false)?;
     if !entry.is_present() {
@@ -974,13 +990,8 @@ pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), 
 }
 
 pub fn query_mapping_in_pml4(pml4_phys: usize, virt: usize) -> Result<(usize, PageFlags), VmError> {
-    if !pmm::is_page_aligned(virt) {
-        return Err(VmError::Unaligned);
-    }
-
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
     let (entry, _) = walk_to_entry_with_root_user(pml4_phys, virt, false, false)?;
     if !entry.is_present() {
@@ -995,9 +1006,8 @@ pub fn query_mapping_in_pml4(pml4_phys: usize, virt: usize) -> Result<(usize, Pa
 
 #[allow(dead_code)]
 pub fn remap_page(virt: usize, new_phys: usize, flags: PageFlags) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(new_phys) {
-        return Err(VmError::Unaligned);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_page_alignment(new_phys)?;
 
     let (entry, _) = walk_to_entry(virt, false)?;
     if !entry.is_present() {
@@ -1024,9 +1034,8 @@ fn map_page_internal(
     phys: usize,
     flags: PageFlags,
 ) -> Result<(), VmError> {
-    if !pmm::is_page_aligned(virt) || !pmm::is_page_aligned(phys) {
-        return Err(VmError::Unaligned);
-    }
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_page_alignment(phys)?;
 
     // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
     let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;
@@ -1049,12 +1058,36 @@ fn map_page_internal(
 
 fn walk_to_entry(virt: usize, create: bool) -> Result<(&'static mut PageTableEntry, bool), VmError> {
     let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
-    if pml4_phys == 0 {
-        return Err(VmError::NotInitialized);
-    }
+    crate::mm::validate_initialized(pml4_phys != 0)?;
 
     // para query/translate/unmap não precisa user
     walk_to_entry_with_root_user(pml4_phys, virt, create, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{phys_to_virt_ptr_safe, HIGHER_HALF_READY, HIGHER_HALF_BASE};
+    use crate::mm::ValidationError;
+    use core::sync::atomic::Ordering;
+
+    #[test]
+    fn phys_to_virt_ptr_safe_requires_initialization() {
+        HIGHER_HALF_READY.store(false, Ordering::Relaxed);
+        assert_eq!(
+            phys_to_virt_ptr_safe(0x1000),
+            Err(ValidationError::NotInitialized)
+        );
+    }
+
+    #[test]
+    fn phys_to_virt_ptr_safe_uses_higher_half_after_initialization() {
+        HIGHER_HALF_READY.store(true, Ordering::Relaxed);
+        assert_eq!(
+            phys_to_virt_ptr_safe(0x2000),
+            Ok(HIGHER_HALF_BASE + 0x2000)
+        );
+        HIGHER_HALF_READY.store(false, Ordering::Relaxed);
+    }
 }
 
 #[allow(dead_code)]

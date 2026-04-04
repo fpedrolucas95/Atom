@@ -275,12 +275,11 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
         if is_user_addr || from_userspace {
             if let Some(tid) = sched::current_thread() {
                 if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
-                    if pml4 != 0 {
-                        if mm::vma::handle_page_fault(pml4 as usize, cr2 as usize, error_code) {
+                    if pml4 != 0
+                        && mm::vma::handle_page_fault(pml4 as usize, cr2 as usize, error_code) {
                             // Resolved — POP_ALL + iretq will retry the instruction.
                             return;
                         }
-                    }
                 }
             }
         }
@@ -649,7 +648,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                     let stack_ptr = frame.rsp as *const u64;
                     for i in 0..10 {
                         let addr = stack_ptr.offset(i as isize);
-                        if let Some(val) = (addr as *const u64).as_ref() {
+                        if let Some(val) = addr.as_ref() {
                             log_panic!(
                                 LOG_ORIGIN,
                                 "  [RSP+{:#04X}] = {:#016X}{}",

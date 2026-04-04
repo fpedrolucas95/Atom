@@ -131,9 +131,13 @@ impl AddressSpace {
             );
             AddressSpaceError::KernelMappingSetupFailed
         }) {
-            pmm::free_page(pml4_phys);
+            let _ = pmm::free_page(pml4_phys);
             return Err(err);
         }
+
+        // Register the PML4 as protected (Req 2.4)
+        pmm::register_active_pml4(pml4_phys)
+            .map_err(|_| AddressSpaceError::KernelMappingSetupFailed)?;
 
         log_info!(
             LOG_ORIGIN,
@@ -203,7 +207,10 @@ impl Drop for AddressSpace {
             self.id,
             self.pml4_phys
         );
-        pmm::free_page(self.pml4_phys);
+        
+        // Unregister the PML4 before freeing (Req 2.5)
+        let _ = pmm::unregister_active_pml4(self.pml4_phys);
+        let _ = pmm::free_page(self.pml4_phys);
     }
 }
 
@@ -219,6 +226,16 @@ pub enum AddressSpaceError {
     AlreadyMapped,
     NotMapped,
     KernelMappingSetupFailed,
+}
+
+fn map_validation_error(err: crate::mm::ValidationError) -> AddressSpaceError {
+    match err {
+        crate::mm::ValidationError::Unaligned { .. } => AddressSpaceError::InvalidAddress,
+        crate::mm::ValidationError::OutOfBounds { .. } => AddressSpaceError::KernelSpaceViolation,
+        crate::mm::ValidationError::ProtectedResource { .. } => AddressSpaceError::PermissionDenied,
+        crate::mm::ValidationError::NotInitialized => AddressSpaceError::KernelMappingSetupFailed,
+        crate::mm::ValidationError::InvalidSize { .. } => AddressSpaceError::InvalidSize,
+    }
 }
 
 pub struct AddressSpaceManager {
@@ -287,64 +304,10 @@ impl AddressSpaceManager {
         size: usize,
         flags: PageFlags,
     ) -> Result<(), AddressSpaceError> {
-        if !pmm::is_page_aligned(virt_addr) || !pmm::is_page_aligned(phys_addr) {
-            return Err(AddressSpaceError::InvalidAddress);
-        }
-
-        if size == 0 {
-            return Err(AddressSpaceError::InvalidSize);
-        }
-
-        if size > MAX_REGION_SIZE {
-            log_warn!(
-                LOG_ORIGIN,
-                "Region too large: {} bytes (max: {})",
-                size,
-                MAX_REGION_SIZE
-            );
-            return Err(AddressSpaceError::InvalidSize);
-        }
-
-        if virt_addr > USER_CANONICAL_MAX {
-            log_warn!(
-                LOG_ORIGIN,
-                "Non-canonical user virtual address: 0x{:X} (max 0x{:X})",
-                virt_addr,
-                USER_CANONICAL_MAX
-            );
-            return Err(AddressSpaceError::InvalidAddress);
-        }
-
-        if virt_addr >= KERNEL_BASE {
-            log_warn!(
-                LOG_ORIGIN,
-                "Kernel space violation: virt_addr 0x{:X} >= KERNEL_BASE 0x{:X}",
-                virt_addr,
-                KERNEL_BASE
-            );
-            return Err(AddressSpaceError::KernelSpaceViolation);
-        }
-
-        let region_end = virt_addr.saturating_add(size);
-        if region_end > USER_CANONICAL_MAX {
-            log_warn!(
-                LOG_ORIGIN,
-                "Region would overflow canonical user space: 0x{:X}-0x{:X} (max 0x{:X})",
-                virt_addr,
-                region_end,
-                USER_CANONICAL_MAX
-            );
-            return Err(AddressSpaceError::InvalidSize);
-        }
-        if region_end > KERNEL_BASE {
-            log_warn!(
-                LOG_ORIGIN,
-                "Region would overlap kernel space: 0x{:X}-0x{:X}",
-                virt_addr,
-                region_end
-            );
-            return Err(AddressSpaceError::KernelSpaceViolation);
-        }
+        crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
+        crate::mm::validate_page_alignment(phys_addr).map_err(map_validation_error)?;
+        crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
+        crate::mm::validate_user_space_bounds(virt_addr, size).map_err(map_validation_error)?;
 
         let mut spaces = self.spaces.lock();
         let addrspace = spaces.get_mut(&id).ok_or(AddressSpaceError::NotFound)?;
@@ -435,54 +398,9 @@ impl AddressSpaceManager {
         virt_addr: usize,
         size: usize,
     ) -> Result<(), AddressSpaceError> {
-        if !pmm::is_page_aligned(virt_addr) {
-            return Err(AddressSpaceError::InvalidAddress);
-        }
-
-        if virt_addr > USER_CANONICAL_MAX {
-            log_warn!(
-                LOG_ORIGIN,
-                "Non-canonical unmap request: virt_addr 0x{:X} exceeds user limit 0x{:X}",
-                virt_addr,
-                USER_CANONICAL_MAX
-            );
-            return Err(AddressSpaceError::InvalidAddress);
-        }
-
-        if size == 0 {
-            return Err(AddressSpaceError::InvalidSize);
-        }
-
-        if virt_addr >= KERNEL_BASE {
-            log_warn!(
-                LOG_ORIGIN,
-                "Kernel space violation on unmap: virt_addr 0x{:X} >= KERNEL_BASE 0x{:X}",
-                virt_addr,
-                KERNEL_BASE
-            );
-            return Err(AddressSpaceError::KernelSpaceViolation);
-        }
-
-        let region_end = virt_addr.saturating_add(size);
-        if region_end > USER_CANONICAL_MAX {
-            log_warn!(
-                LOG_ORIGIN,
-                "Unmap would overflow canonical user space: 0x{:X}-0x{:X} (max 0x{:X})",
-                virt_addr,
-                region_end,
-                USER_CANONICAL_MAX
-            );
-            return Err(AddressSpaceError::InvalidSize);
-        }
-        if region_end > KERNEL_BASE {
-            log_warn!(
-                LOG_ORIGIN,
-                "Unmap region would cross kernel space: 0x{:X}-0x{:X}",
-                virt_addr,
-                region_end
-            );
-            return Err(AddressSpaceError::KernelSpaceViolation);
-        }
+        crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
+        crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
+        crate::mm::validate_user_space_bounds(virt_addr, size).map_err(map_validation_error)?;
 
         let mut spaces = self.spaces.lock();
         let addrspace = spaces.get_mut(&id).ok_or(AddressSpaceError::NotFound)?;
@@ -543,17 +461,11 @@ impl AddressSpaceManager {
         new_virt: usize,
         size: usize,
     ) -> Result<(), AddressSpaceError> {
-        if !pmm::is_page_aligned(old_virt) || !pmm::is_page_aligned(new_virt) {
-            return Err(AddressSpaceError::InvalidAddress);
-        }
-
-        if size == 0 {
-            return Err(AddressSpaceError::InvalidSize);
-        }
-
-        if new_virt >= KERNEL_BASE || new_virt.saturating_add(size) > KERNEL_BASE {
-            return Err(AddressSpaceError::KernelSpaceViolation);
-        }
+        crate::mm::validate_page_alignment(old_virt).map_err(map_validation_error)?;
+        crate::mm::validate_page_alignment(new_virt).map_err(map_validation_error)?;
+        crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
+        crate::mm::validate_user_space_bounds(old_virt, size).map_err(map_validation_error)?;
+        crate::mm::validate_user_space_bounds(new_virt, size).map_err(map_validation_error)?;
 
         let spaces = self.spaces.lock();
         let addrspace = spaces.get(&id).ok_or(AddressSpaceError::NotFound)?;
@@ -607,9 +519,8 @@ impl AddressSpaceManager {
             }
         }
         
-        for i in 0..num_pages {
+        for (i, &(phys, flags)) in mappings.iter().enumerate().take(num_pages) {
             let new_virt_page = new_virt + (i * pmm::PAGE_SIZE);
-            let (phys, flags) = mappings[i];
 
             if let Err(e) = self.map_page_in_pml4(pml4_phys, new_virt_page, phys, flags) {
                 log_error!(

@@ -160,18 +160,15 @@ pub enum ThreadState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default)]
 pub enum ThreadPriority {
     Idle = 0,
     Low = 1,
+    #[default]
     Normal = 2,
     High = 3,
 }
 
-impl Default for ThreadPriority {
-    fn default() -> Self {
-        ThreadPriority::Normal
-    }
-}
 
 const LOG_ORIGIN: &str = "thread";
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -471,11 +468,7 @@ impl ThreadList {
 
     pub fn remove(&self, id: ThreadId) -> Option<Thread> {
         let mut threads = self.threads.lock();
-        let removed = if let Some(pos) = threads.iter().position(|t| t.id == id) {
-            Some(threads.remove(pos))
-        } else {
-            None
-        };
+        let removed = threads.iter().position(|t| t.id == id).map(|pos| threads.remove(pos));
         drop(threads);
 
         if let Some(thread) = &removed {
@@ -529,9 +522,10 @@ impl ThreadList {
 
     pub fn get_stats(&self) -> ThreadStats {
         let threads = self.threads.lock();
-        let mut stats = ThreadStats::default();
-
-        stats.total = threads.len();
+        let mut stats = ThreadStats {
+            total: threads.len(),
+            ..ThreadStats::default()
+        };
         for thread in threads.iter() {
             match thread.state {
                 ThreadState::Running => stats.running += 1,
@@ -1578,7 +1572,7 @@ fn free_user_space_pages(pml4_phys: usize) -> usize {
                                             // Avoid freeing the framebuffer range even if mapped to userspace
                                             // as it's a shared hardware resource.
                                             if phys_frame < 0xC0000000 {
-                                                crate::mm::pmm::free_page(phys_frame);
+                                                let _ = crate::mm::pmm::free_page(phys_frame);
                                                 pages_freed += 1;
                                             }
                                         }
@@ -1587,27 +1581,27 @@ fn free_user_space_pages(pml4_phys: usize) -> usize {
                             }
 
                             // Free the PT itself
-                            crate::mm::pmm::free_page(pt_phys as usize);
+                            let _ = crate::mm::pmm::free_page(pt_phys as usize);
                         }
                     }
 
                     // Free the PD
-                    crate::mm::pmm::free_page(pd_phys as usize);
+                    let _ = crate::mm::pmm::free_page(pd_phys as usize);
                 }
             }
 
             // Free the PDPT
-            crate::mm::pmm::free_page(pdpt_phys as usize);
+            let _ = crate::mm::pmm::free_page(pdpt_phys as usize);
         }
     }
 
     pages_freed
 }
 
-/// Helper function to convert physical address to virtual (higher half mapping)
+/// Thin checked wrapper for page-table reads during teardown.
 #[inline]
-fn phys_to_virt(phys: usize) -> usize {
-    crate::mm::vm::HIGHER_HALF_BASE + phys
+fn phys_to_virt_checked(phys: usize) -> Result<usize, ()> {
+    crate::mm::vm::phys_to_virt_ptr_safe(phys).map_err(|_| ())
 }
 
 /// Helper function to read a PML4 entry
@@ -1616,7 +1610,7 @@ fn get_pml4_entry(pml4_phys: usize, index: usize) -> Result<u64, ()> {
         return Err(());
     }
 
-    let pml4_virt = phys_to_virt(pml4_phys);
+    let pml4_virt = phys_to_virt_checked(pml4_phys)?;
     let entry_ptr = (pml4_virt + index * 8) as *const u64;
 
     unsafe { Ok(*entry_ptr) }
@@ -1628,7 +1622,7 @@ fn get_pdpt_entry(pdpt_phys: usize, index: usize) -> Result<u64, ()> {
         return Err(());
     }
 
-    let pdpt_virt = phys_to_virt(pdpt_phys);
+    let pdpt_virt = phys_to_virt_checked(pdpt_phys)?;
     let entry_ptr = (pdpt_virt + index * 8) as *const u64;
 
     unsafe { Ok(*entry_ptr) }
@@ -1640,7 +1634,7 @@ fn get_pd_entry(pd_phys: usize, index: usize) -> Result<u64, ()> {
         return Err(());
     }
 
-    let pd_virt = phys_to_virt(pd_phys);
+    let pd_virt = phys_to_virt_checked(pd_phys)?;
     let entry_ptr = (pd_virt + index * 8) as *const u64;
 
     unsafe { Ok(*entry_ptr) }
@@ -1652,7 +1646,7 @@ fn get_pt_entry(pt_phys: usize, index: usize) -> Result<u64, ()> {
         return Err(());
     }
 
-    let pt_virt = phys_to_virt(pt_phys);
+    let pt_virt = phys_to_virt_checked(pt_phys)?;
     let entry_ptr = (pt_virt + index * 8) as *const u64;
 
     unsafe { Ok(*entry_ptr) }
@@ -1875,8 +1869,11 @@ fn perform_final_cleanup(
             let user_pages = free_user_space_pages(primary_address_space_cr3 as usize);
             log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, primary_address_space_cr3);
 
+            // Unregister the PML4 before freeing (Req 2.5)
+            let _ = crate::mm::pmm::unregister_active_pml4(primary_address_space_cr3 as usize);
+
             // Free the PML4 itself
-            crate::mm::pmm::free_page(primary_address_space_cr3 as usize);
+            let _ = crate::mm::pmm::free_page(primary_address_space_cr3 as usize);
             log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", primary_address_space_cr3);
 
             user_pages
@@ -1899,7 +1896,7 @@ fn perform_final_cleanup(
         let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
 
         if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
-            crate::mm::pmm::free_page(phys_addr);
+            let _ = crate::mm::pmm::free_page(phys_addr);
             stack_pages_freed += 1;
         }
     }

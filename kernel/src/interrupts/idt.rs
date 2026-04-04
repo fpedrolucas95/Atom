@@ -231,39 +231,12 @@ pub fn init() {
     // message identifying the offending constant, its actual value, and the
     // architectural reference.  This is the correct behaviour: a kernel with
     // an aliased IRQ vector is unsound and must not proceed to load the IDT.
-    assert!(
-        TIMER_INTERRUPT_VECTOR >= 0x20,
-        "IDT init aborted: TIMER_INTERRUPT_VECTOR ({:#04X}) falls inside the \
-         CPU-reserved exception range 0x00-0x1F. A hardware IRQ at this vector \
-         aliases a CPU exception handler, causing non-deterministic faults. \
-         Fix the assignment in kernel/build.rs. \
-         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
-        TIMER_INTERRUPT_VECTOR,
-    );
-    assert!(
-        KEYBOARD_INTERRUPT_VECTOR >= 0x20,
-        "IDT init aborted: KEYBOARD_INTERRUPT_VECTOR ({:#04X}) falls inside the \
-         CPU-reserved exception range 0x00-0x1F. \
-         Fix the assignment in kernel/build.rs. \
-         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
-        KEYBOARD_INTERRUPT_VECTOR,
-    );
-    assert!(
-        MOUSE_INTERRUPT_VECTOR >= 0x20,
-        "IDT init aborted: MOUSE_INTERRUPT_VECTOR ({:#04X}) falls inside the \
-         CPU-reserved exception range 0x00-0x1F. \
-         Fix the assignment in kernel/build.rs. \
-         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
-        MOUSE_INTERRUPT_VECTOR,
-    );
-    assert!(
-        USER_TRAP_INTERRUPT_VECTOR >= 0x20,
-        "IDT init aborted: USER_TRAP_INTERRUPT_VECTOR ({:#04X}) falls inside the \
-         CPU-reserved exception range 0x00-0x1F. \
-         Fix the assignment in kernel/build.rs. \
-         Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
-        USER_TRAP_INTERRUPT_VECTOR,
-    );
+    const {
+        assert!(TIMER_INTERRUPT_VECTOR >= 0x20);
+        assert!(KEYBOARD_INTERRUPT_VECTOR >= 0x20);
+        assert!(MOUSE_INTERRUPT_VECTOR >= 0x20);
+        assert!(USER_TRAP_INTERRUPT_VECTOR >= 0x20);
+    };
 
     unsafe {
         let idt_addr = core::ptr::addr_of!(IDT) as usize;

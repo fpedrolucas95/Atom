@@ -71,11 +71,10 @@ impl SlabCache {
 
     /// Allocate a block from this cache. If empty, request a new page.
     fn alloc(&mut self) -> *mut u8 {
-        if self.free_list.is_null() {
-            if !self.grow() {
+        if self.free_list.is_null()
+            && !self.grow() {
                 return null_mut();
             }
-        }
 
         let block = self.free_list;
         unsafe {
@@ -213,7 +212,7 @@ impl SlabAllocator {
         let header_offset = (LARGE_HEADER_SIZE + align - 1) & !(align - 1);
 
         let total_size = header_offset + layout.size();
-        let pages = (total_size + pmm::PAGE_SIZE - 1) / pmm::PAGE_SIZE;
+        let pages = total_size.div_ceil(pmm::PAGE_SIZE);
 
         let phys = match pmm::alloc_pages_zeroed(pages) {
             Some(p) => p,
@@ -259,7 +258,7 @@ impl SlabAllocator {
             let virt_base = ptr as usize - header_offset;
             let phys = vm::virt_to_phys(virt_base);
 
-            pmm::free_pages(phys, pages);
+            let _ = pmm::free_pages(phys, pages);
             self.large_dealloc_count += 1;
         }
     }

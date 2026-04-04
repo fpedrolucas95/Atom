@@ -17,6 +17,12 @@ doctest = false
 [features]
 default = []
 syscall-frame-debug = []
+# Audit log size configuration features
+# These features allow compile-time configuration of the capability audit log size
+audit_log_entries_100 = []    # Low memory systems (100 entries ≈ 6.4 KB)
+audit_log_entries_500 = []    # Constrained systems (500 entries ≈ 32 KB)
+audit_log_entries_5000 = []   # High security systems (5000 entries ≈ 320 KB)
+audit_log_entries_10000 = []  # Development/debugging (10000 entries ≈ 640 KB)
 
 [dependencies]
 spin = "0.9"

@@ -204,7 +204,7 @@ pub fn parse_image<'a>(image: &'a [u8]) -> Result<ExecutableSections<'a>, ExecEr
         return Err(ExecError::Truncated);
     }
 
-    if raw.text_offset as usize % pmm::PAGE_SIZE != 0 || raw.data_offset as usize % pmm::PAGE_SIZE != 0 {
+    if !(raw.text_offset as usize).is_multiple_of(pmm::PAGE_SIZE) || !(raw.data_offset as usize).is_multiple_of(pmm::PAGE_SIZE) {
         return Err(ExecError::MisalignedSection);
     }
 
@@ -378,7 +378,7 @@ fn map_segment(
             Ok(Some((virt_start, phys_base, size)))
         }
         Err(err) => {
-            pmm::free_pages(phys_base, pages);
+            let _ = pmm::free_pages(phys_base, pages);
             Err(ExecError::AddressSpace(err))
         }
     }
@@ -404,7 +404,7 @@ fn map_zeroed_segment(
             Ok(Some((virt_start, phys_base, aligned_size)))
         }
         Err(err) => {
-            pmm::free_pages(phys_base, pages);
+            let _ = pmm::free_pages(phys_base, pages);
             Err(ExecError::AddressSpace(err))
         }
     }
@@ -421,7 +421,7 @@ impl Drop for RollbackGuard {
         for &(virt, phys, size) in self.mapped.iter().rev() {
             let pages = size / pmm::PAGE_SIZE;
             let _ = addrspace::unmap_region(self.address_space, self.owner, virt, size);
-            pmm::free_pages(phys, pages);
+            let _ = pmm::free_pages(phys, pages);
         }
     }
 }

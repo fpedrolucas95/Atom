@@ -664,12 +664,10 @@ fn load_driver_file(
 
     // Extract driver name from filename (remove .atxf extension)
     let mut name = [0u8; MAX_DRIVER_NAME_LEN];
-    let mut name_idx = 0;
-    for &c in filename.iter() {
+    for (idx, &c) in filename.iter().enumerate() {
         if c == 0 || c == b'.' as u16 { break; }
-        if name_idx >= MAX_DRIVER_NAME_LEN - 1 { break; }
-        name[name_idx] = c as u8;
-        name_idx += 1;
+        if idx >= MAX_DRIVER_NAME_LEN - 1 { break; }
+        name[idx] = c as u8;
     }
 
     Some((
@@ -754,9 +752,9 @@ fn load_atxf_from_dir(
         // Read filename (UTF-16, null-terminated)
         let filename_ptr = unsafe { entry_buf.as_ptr().add(80) as *const u16 };
         let mut filename = [0u16; 64];
-        for i in 0..63 {
+        for (i, slot) in filename.iter_mut().enumerate().take(63) {
             let c = unsafe { *filename_ptr.add(i) };
-            filename[i] = c;
+            *slot = c;
             if c == 0 { break; }
         }
 

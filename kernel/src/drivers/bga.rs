@@ -217,7 +217,7 @@ impl VideoMode {
     /// Bytes per pixel (bpp / 8)
     #[inline]
     pub fn bytes_per_pixel(&self) -> u32 {
-        (self.bpp as u32 + 7) / 8
+        (self.bpp as u32).div_ceil(8)
     }
 
     /// Pitch in bytes (bytes_per_scanline). BGA aligns to pixels; no additional padding.
@@ -674,13 +674,13 @@ fn validate_mode(width: u16, height: u16, bpp: u8, lfb_size: usize) -> Result<()
     if width == 0 || height == 0 {
         return Err(BgaError::InvalidResolution);
     }
-    if width % 8 != 0 {
+    if !width.is_multiple_of(8) {
         return Err(BgaError::WidthMisaligned);
     }
     if bpp != 32 {
         return Err(BgaError::UnsupportedBpp);
     }
-    let required = (width as usize) * (height as usize) * ((bpp as usize + 7) / 8);
+    let required = (width as usize) * (height as usize) * (bpp as usize).div_ceil(8);
     if required > lfb_size {
         return Err(BgaError::ExceedsLfbSize);
     }
@@ -775,7 +775,7 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
 /// since the new resolution may differ from the old one.
 pub fn update_resolution(new_width: u16, new_height: u16) -> Result<(), BgaError> {
     // Validate alignment first
-    if new_width % 8 != 0 {
+    if !new_width.is_multiple_of(8) {
         return Err(BgaError::WidthMisaligned);
     }
     // Preserve VRAM content (no clear) since the compositor will repaint.
@@ -849,11 +849,7 @@ pub fn find_best_mode(target_width: u16, target_height: u16, target_bpp: u8) -> 
     let target_pixels = (target_width as u64) * (target_height as u64);
     SUPPORTED_MODES.iter().min_by_key(|m| {
         let mode_pixels = (m.width as u64) * (m.height as u64);
-        if mode_pixels > target_pixels {
-            mode_pixels - target_pixels
-        } else {
-            target_pixels - mode_pixels
-        }
+        mode_pixels.abs_diff(target_pixels)
     })
 }
 

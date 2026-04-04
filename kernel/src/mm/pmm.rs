@@ -97,6 +97,65 @@ static BITMAP_OVERHEAD_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// The inner value is unused (unit type) — the lock itself provides exclusion.
 static BITMAP_LOCK: Mutex<()> = Mutex::new(());
 
+// ---------------------------------------------------------------------------
+// PML4 Protection Registry
+// ---------------------------------------------------------------------------
+
+/// Registry of active PML4 page tables that must not be freed.
+/// Tracks physical addresses of PML4 pages currently in use by address spaces.
+/// This prevents premature freeing of active page tables which would corrupt
+/// address space structures.
+const MAX_PROTECTED_PML4S: usize = 1024;
+
+#[derive(Clone, Copy)]
+struct ProtectedPml4Registry {
+    entries: [usize; MAX_PROTECTED_PML4S],
+    len: usize,
+}
+
+impl ProtectedPml4Registry {
+    const fn new() -> Self {
+        Self {
+            entries: [0; MAX_PROTECTED_PML4S],
+            len: 0,
+        }
+    }
+
+    fn insert(&mut self, pml4_phys: usize) {
+        if self.contains(pml4_phys) {
+            return;
+        }
+
+        assert!(
+            self.len < self.entries.len(),
+            "protected PML4 registry exhausted"
+        );
+        self.entries[self.len] = pml4_phys;
+        self.len += 1;
+    }
+
+    fn remove(&mut self, pml4_phys: usize) -> bool {
+        if let Some(index) = self.entries[..self.len]
+            .iter()
+            .position(|&entry| entry == pml4_phys)
+        {
+            self.len -= 1;
+            self.entries[index] = self.entries[self.len];
+            self.entries[self.len] = 0;
+            return true;
+        }
+
+        false
+    }
+
+    fn contains(&self, pml4_phys: usize) -> bool {
+        self.entries[..self.len].contains(&pml4_phys)
+    }
+}
+
+static PROTECTED_PML4S: Mutex<ProtectedPml4Registry> =
+    Mutex::new(ProtectedPml4Registry::new());
+
 #[cfg(debug_assertions)]
 #[allow(dead_code)]
 static ALLOC_TRACE: AtomicBool = AtomicBool::new(false);
@@ -290,7 +349,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     // -----------------------------------------------------------------------
     // Phase selection: static bitmap or dynamic bitmap?
     // -----------------------------------------------------------------------
-    let bitmap_bytes_needed = (tracked_pages + 7) / 8;
+    let bitmap_bytes_needed = tracked_pages.div_ceil(8);
 
     // effective_tracked_pages: the page count actually supported by the
     // chosen bitmap.  Set exactly once and stored into TOTAL_PAGES once.
@@ -431,9 +490,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         for page in bitmap_start_page..(bitmap_start_page + bitmap_pages) {
             if is_page_free(page) {
                 set_page_allocated(page);
-                if free_pages > 0 {
-                    free_pages -= 1;
-                }
+                free_pages = free_pages.saturating_sub(1);
             }
         }
 
@@ -453,9 +510,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     // -----------------------------------------------------------------------
     if is_page_free(0) {
         set_page_allocated(0);
-        if free_pages > 0 {
-            free_pages -= 1;
-        }
+        free_pages = free_pages.saturating_sub(1);
     }
 
     FREE_PAGES.store(free_pages, Ordering::Relaxed);
@@ -506,7 +561,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
 
         // Validate that the bitmap slice is actually accessible
         let bm = bitmap_slice();
-        let required_bytes = (effective_tracked_pages + 7) / 8;
+        let required_bytes = effective_tracked_pages.div_ceil(8);
         if bm.len() < required_bytes {
             log_warn!(
                 "[pmm]",
@@ -633,7 +688,7 @@ unsafe fn find_free_page(start_page: usize, end_page: usize) -> Option<usize> {
     let mut page = start_page;
 
     // Align to byte boundary first (check individual bits)
-    while page < end_page && (page % 8) != 0 {
+    while page < end_page && !page.is_multiple_of(8) {
         let byte_idx = page / 8;
         if byte_idx >= bm_len {
             return None;
@@ -681,16 +736,21 @@ unsafe fn find_free_page(start_page: usize, end_page: usize) -> Option<usize> {
 }
 
 /// Free a single physical page.
-pub fn free_page(addr: usize) {
-    if addr % PAGE_SIZE != 0 {
-        return;
-    }
+pub fn free_page(addr: usize) -> Result<(), crate::mm::ValidationError> {
+    crate::mm::validate_page_alignment(addr)?;
 
     let page = addr / PAGE_SIZE;
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    if page >= total || page <= 1 { // CRITICAL: Protect page 1 (Kernel PML4)
-        return;
+    if page >= total || page <= 1 {
+        return Err(crate::mm::ValidationError::OutOfBounds {
+            addr,
+            min: 2 * PAGE_SIZE,
+            max: total.saturating_sub(1) * PAGE_SIZE,
+        });
     }
+
+    #[cfg(not(test))]
+    crate::mm::validate_unprotected_resource(addr as u64, is_pml4_protected(addr))?;
 
     let _lock = BITMAP_LOCK.lock();
 
@@ -706,6 +766,8 @@ pub fn free_page(addr: usize) {
             }
         }
     }
+
+    Ok(())
 }
 
 /// Allocate `count` contiguous physical pages. Returns the base physical address.
@@ -762,7 +824,7 @@ unsafe fn find_contiguous_run(from: usize, max_start: usize, count: usize) -> Op
         // use byte-level skip for faster scanning
         let byte_idx = start / 8;
         let bm = bitmap_slice();
-        if byte_idx < bm.len() && (start % 8) == 0 && bm[byte_idx] == 0xFF {
+        if byte_idx < bm.len() && start.is_multiple_of(8) && bm[byte_idx] == 0xFF {
             // All 8 pages in this byte are allocated, skip them
             start += 8;
             continue;
@@ -804,10 +866,9 @@ unsafe fn mark_range_allocated(start: usize, count: usize) {
 
 /// Free `count` contiguous physical pages starting at `addr`.
 #[allow(dead_code)]
-pub fn free_pages(addr: usize, count: usize) {
-    if addr % PAGE_SIZE != 0 || count == 0 {
-        return;
-    }
+pub fn free_pages(addr: usize, count: usize) -> Result<(), crate::mm::ValidationError> {
+    crate::mm::validate_page_alignment(addr)?;
+    crate::mm::validate_size(count, TOTAL_PAGES.load(Ordering::Relaxed))?;
 
     let base_page = addr / PAGE_SIZE;
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
@@ -817,9 +878,14 @@ pub fn free_pages(addr: usize, count: usize) {
     let mut freed = 0usize;
     for i in 0..count {
         let page = base_page + i;
-        if page >= total || page <= 1 { // CRITICAL: Protect page 1 (Kernel PML4)
+        if page >= total || page <= 1 {
             continue;
         }
+
+        let page_addr = page * PAGE_SIZE;
+        
+        #[cfg(not(test))]
+        crate::mm::validate_unprotected_resource(page_addr as u64, is_pml4_protected(page_addr))?;
 
         unsafe {
             if !is_page_free(page) {
@@ -838,6 +904,8 @@ pub fn free_pages(addr: usize, count: usize) {
             NEXT_FREE_HINT.store(base_page, Ordering::Relaxed);
         }
     }
+
+    Ok(())
 }
 
 /// Allocate a single zeroed page.
@@ -870,11 +938,78 @@ pub fn alloc_pages_zeroed(count: usize) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// PML4 Protection Registry Functions
+// ---------------------------------------------------------------------------
+
+/// Register a PML4 page table as active and protected from freeing.
+/// This should be called when a PML4 is created or becomes active in an address space.
+///
+/// # Arguments
+/// * `pml4_phys` - Physical address of the PML4 page table
+///
+/// # Requirements
+/// Implements Req 2.2, Req 2.4
+pub fn register_active_pml4(pml4_phys: usize) -> Result<(), crate::mm::ValidationError> {
+    crate::mm::validate_page_alignment(pml4_phys)?;
+
+    let mut guard = PROTECTED_PML4S.lock();
+
+    let was_present = guard.contains(pml4_phys);
+    guard.insert(pml4_phys);
+
+    if !was_present {
+        log_debug!("[pmm]", "Registered protected PML4 at phys 0x{:X}", pml4_phys);
+    }
+
+    Ok(())
+}
+
+/// Unregister a PML4 page table, allowing it to be freed.
+/// This should be called when an address space is destroyed and its PML4 is no longer needed.
+///
+/// # Arguments
+/// * `pml4_phys` - Physical address of the PML4 page table
+///
+/// # Requirements
+/// Implements Req 2.5
+pub fn unregister_active_pml4(pml4_phys: usize) -> Result<(), crate::mm::ValidationError> {
+    crate::mm::validate_page_alignment(pml4_phys)?;
+
+    let mut guard = PROTECTED_PML4S.lock();
+
+    if guard.remove(pml4_phys) {
+        log_debug!("[pmm]", "Unregistered protected PML4 at phys 0x{:X}", pml4_phys);
+    }
+
+    Ok(())
+}
+
+/// Check if a physical page is a protected PML4 page table.
+/// Returns true if the page is registered as an active PML4 and must not be freed.
+///
+/// # Arguments
+/// * `pml4_phys` - Physical address to check
+///
+/// # Returns
+/// `true` if the page is a protected PML4, `false` otherwise
+///
+/// # Requirements
+/// Implements Req 2.1, Req 2.3
+pub fn is_pml4_protected(pml4_phys: usize) -> bool {
+    if !pml4_phys.is_multiple_of(PAGE_SIZE) {
+        return false;
+    }
+
+    let guard = PROTECTED_PML4S.lock();
+    guard.contains(pml4_phys)
+}
+
+// ---------------------------------------------------------------------------
 // Alignment helpers
 // ---------------------------------------------------------------------------
 
 pub fn is_page_aligned(addr: usize) -> bool {
-    addr % PAGE_SIZE == 0
+    addr.is_multiple_of(PAGE_SIZE)
 }
 
 pub fn align_down(addr: usize) -> usize {

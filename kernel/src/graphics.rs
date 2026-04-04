@@ -438,11 +438,7 @@ where
 {
     if !is_initialized() { return None; }
     let mut fb_lock = FRAMEBUFFER.lock();
-    if let Some(ref mut fb) = *fb_lock {
-        Some(f(fb))
-    } else {
-        None
-    }
+    (*fb_lock).as_mut().map(f)
 }
 
 // ============================================================================

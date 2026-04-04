@@ -728,7 +728,7 @@ pub fn write_file(path: &str, data: &[u8]) -> bool {
     let needed_clusters = if data.is_empty() {
         0
     } else {
-        (data.len() + cluster_size() - 1) / cluster_size()
+        data.len().div_ceil(cluster_size())
     };
 
     let new_chain = match allocate_chain(needed_clusters) {
