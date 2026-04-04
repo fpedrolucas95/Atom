@@ -207,15 +207,30 @@ Responsibilities:
 
 1. Capability graph integrity and revoke semantics.
 2. Callback dispatch isolation.
+3. Revoke executes as `discovery -> execution -> callback` with explicit report output.
 
 Must not:
 
 1. Hide revoke failures in transitive operations.
 2. Execute callbacks under structural callback registry lock.
+3. Mutate graph structure during revoke discovery.
 
 Primary invariants:
 
 - `INV-CB-001`, `INV-LOCK-001`, `INV-ERR-001`
+
+### 12.1 Revoke model (normative)
+
+Selected semantic model: **Model B — Partial Explicit**.
+
+Normative rules:
+
+1. Revoke discovery builds a closed immutable `RevokePlan` before mutation.
+2. Revoke execution consumes the plan in deterministic DFS post-order.
+3. Execution continues on per-node failure and records every failure in `RevokeReport.failed`.
+4. Missing nodes are surfaced in `RevokeReport.missing`; no silent discard is allowed.
+5. Callback execution is a distinct phase after mutation and outside structural locks.
+6. Revoke result visibility is mandatory: each operation returns a `RevokeReport` with status `Complete`, `Partial`, or `Failed`.
 
 ## 13. Syscall section
 

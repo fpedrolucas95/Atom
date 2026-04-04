@@ -89,19 +89,39 @@ impl VirtAddr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressSpaceId(usize);
+
+impl AddressSpaceId {
+    pub const fn new(address_space: usize) -> Self {
+        Self(address_space)
+    }
+
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaultContext {
-    pub addr: VirtAddr,
-    pub access: AccessType,
+    pub pid: ProcessId,
+    pub address_space_id: AddressSpaceId,
+    pub fault_addr: VirtAddr,
+    pub access_type: AccessType,
     pub is_user: bool,
 }
 
 impl FaultContext {
-    pub fn from_x86_error(addr: usize, error_code: u64) -> Self {
+    pub fn from_x86_error(
+        pid: ProcessId,
+        address_space_id: AddressSpaceId,
+        fault_addr: usize,
+        error_code: u64,
+    ) -> Self {
         // x86 page-fault decode:
         // bit 1 = write access
         // bit 2 = user access
         // bit 4 = instruction fetch
-        let access = if (error_code & 0x10) != 0 {
+        let access_type = if (error_code & 0x10) != 0 {
             AccessType::Execute
         } else if (error_code & 0x2) != 0 {
             AccessType::Write
@@ -110,8 +130,10 @@ impl FaultContext {
         };
 
         Self {
-            addr: VirtAddr::new(addr),
-            access,
+            pid,
+            address_space_id,
+            fault_addr: VirtAddr::new(fault_addr),
+            access_type,
             is_user: (error_code & 0x4) != 0,
         }
     }
@@ -1454,12 +1476,13 @@ fn align_up(val: usize, align: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 fn classify_fault(
-    pml4_phys: usize,
     ctx: &FaultContext,
     error_code: u64,
     vma: Option<&Vma>,
 ) -> ClassifiedFault {
     use crate::mm::vm::{self, PageFlags};
+
+    let address_space_id = ctx.address_space_id.as_usize();
 
     // x86 PF error bit 3: reserved-bit violation
     if (error_code & 0x8) != 0 {
@@ -1470,16 +1493,16 @@ fn classify_fault(
         return ClassifiedFault::InvalidAddress;
     };
 
-    if !vma.permits(ctx.access) {
+    if !vma.permits(ctx.access_type) {
         return ClassifiedFault::AccessDenied;
     }
 
     let present_fault = (error_code & 0x1) != 0;
-    let write_fault = matches!(ctx.access, AccessType::Write);
+    let write_fault = matches!(ctx.access_type, AccessType::Write);
 
     if present_fault && write_fault {
-        let page_addr = ctx.addr.page_base();
-        if let Ok((_phys, flags)) = vm::query_mapping_in_pml4(pml4_phys, page_addr) {
+        let page_addr = ctx.fault_addr.page_base();
+        if let Ok((_phys, flags)) = vm::query_mapping_in_pml4(address_space_id, page_addr) {
             if vm::is_cow(flags) && !flags.contains(PageFlags::WRITABLE) {
                 return ClassifiedFault::CowWrite;
             }
@@ -1511,12 +1534,12 @@ fn admit_fault(
         ClassifiedFault::AccessDenied => Err(FaultResult::ProtectionViolation),
         ClassifiedFault::NotHandled => Err(FaultResult::NotHandled),
         ClassifiedFault::NotPresentAnon => {
-            if vma.permits(ctx.access) {
+            if vma.permits(ctx.access_type) {
                 log_debug!(
                     LOG_ORIGIN,
                     "[PF] admit=ok addr=0x{:X} access={:?} perms=0x{:X} label={}",
-                    ctx.addr.as_usize(),
-                    ctx.access,
+                    ctx.fault_addr.as_usize(),
+                    ctx.access_type,
                     vma.perms.bits(),
                     vma.label
                 );
@@ -1530,8 +1553,8 @@ fn admit_fault(
                 log_debug!(
                     LOG_ORIGIN,
                     "[PF] admit=ok addr=0x{:X} access={:?} perms=0x{:X} label={}",
-                    ctx.addr.as_usize(),
-                    ctx.access,
+                    ctx.fault_addr.as_usize(),
+                    ctx.access_type,
                     vma.perms.bits(),
                     vma.label
                 );
@@ -1543,8 +1566,79 @@ fn admit_fault(
     }
 }
 
+fn classify_fault_type_for_admission(classified: ClassifiedFault) -> crate::mm::admission::FaultType {
+    match classified {
+        ClassifiedFault::NotPresentAnon => crate::mm::admission::FaultType::NotPresentAnonymous,
+        ClassifiedFault::CowWrite => crate::mm::admission::FaultType::CowWrite,
+        ClassifiedFault::InvalidAddress
+        | ClassifiedFault::AccessDenied
+        | ClassifiedFault::NotHandled => crate::mm::admission::FaultType::Invalid,
+    }
+}
+
+fn evaluate_memory_admission(
+    ctx: &FaultContext,
+    classified: ClassifiedFault,
+) -> Result<(), FaultResult> {
+    use crate::mm::admission::{AdmissionDecision, MemoryAdmission, MemoryAdmissionContext};
+
+    let admission_ctx = MemoryAdmissionContext {
+        pid: ctx.pid,
+        requested_pages: 1,
+        fault_type: classify_fault_type_for_admission(classified),
+    };
+
+    let decision = MemoryAdmission::evaluate(admission_ctx);
+    match decision {
+        AdmissionDecision::Allow => {
+            log_debug!(
+                LOG_ORIGIN,
+                "[PF] admission=allow pid={} addr=0x{:X} access={:?} decision={:?}",
+                ctx.pid,
+                ctx.fault_addr.as_usize(),
+                ctx.access_type,
+                decision
+            );
+            Ok(())
+        }
+        AdmissionDecision::DenyProcessLimit | AdmissionDecision::DenyGlobalPressure => {
+            log_warn!(
+                LOG_ORIGIN,
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} decision={:?} action=fatal",
+                ctx.pid,
+                ctx.fault_addr.as_usize(),
+                ctx.access_type,
+                decision
+            );
+            Err(FaultResult::OutOfMemory)
+        }
+        AdmissionDecision::TriggerOOM => {
+            log_warn!(
+                LOG_ORIGIN,
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} decision={:?} action=trigger_oom_then_fatal",
+                ctx.pid,
+                ctx.fault_addr.as_usize(),
+                ctx.access_type,
+                decision
+            );
+            MemoryAdmission::trigger_oom(&admission_ctx);
+            Err(FaultResult::OutOfMemory)
+        }
+        AdmissionDecision::InvalidPolicy => {
+            log_warn!(
+                LOG_ORIGIN,
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} decision={:?} action=fatal_invalid",
+                ctx.pid,
+                ctx.fault_addr.as_usize(),
+                ctx.access_type,
+                decision
+            );
+            Err(FaultResult::InvalidAddress)
+        }
+    }
+}
+
 fn materialize_fault(
-    pml4_phys: usize,
     ctx: &FaultContext,
     classified: ClassifiedFault,
     vma: &Vma,
@@ -1553,21 +1647,21 @@ fn materialize_fault(
         ClassifiedFault::InvalidAddress => FaultResult::InvalidAddress,
         ClassifiedFault::AccessDenied => FaultResult::ProtectionViolation,
         ClassifiedFault::NotHandled => FaultResult::NotHandled,
-        ClassifiedFault::NotPresentAnon => materialize_anon(pml4_phys, ctx, vma),
-        ClassifiedFault::CowWrite => materialize_cow(pml4_phys, ctx, vma),
+        ClassifiedFault::NotPresentAnon => materialize_anon(ctx, vma),
+        ClassifiedFault::CowWrite => materialize_cow(ctx, vma),
     }
 }
 
 fn materialize_anon(
-    pml4_phys: usize,
     ctx: &FaultContext,
     vma: &Vma,
 ) -> FaultResult {
     use crate::mm::pmm;
     use crate::mm::vm::{self, PageFlags, VmError};
 
-    let page_addr = ctx.addr.page_base();
-    let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+    let pml4_phys = ctx.address_space_id.as_usize();
+    let page_addr = ctx.fault_addr.page_base();
+    let owner_process = Some(ctx.pid);
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,
         None => {
@@ -1646,7 +1740,7 @@ fn materialize_anon(
                     pml4_phys,
                     page_addr,
                     phys,
-                    ctx.access,
+                    ctx.access_type,
                     ctx.is_user,
                     vma.label
                 );
@@ -1676,14 +1770,14 @@ fn materialize_anon(
 }
 
 fn materialize_cow(
-    pml4_phys: usize,
     ctx: &FaultContext,
     vma: &Vma,
 ) -> FaultResult {
     use crate::mm::pmm;
     use crate::mm::vm::{self, PageFlags};
 
-    let page_addr = ctx.addr.page_base();
+    let pml4_phys = ctx.address_space_id.as_usize();
+    let page_addr = ctx.fault_addr.page_base();
     const MAX_COW_RETRIES: usize = 3;
 
     for _attempt in 0..MAX_COW_RETRIES {
@@ -1773,7 +1867,7 @@ fn materialize_cow(
                     return CowCommitResult::NotHandled;
                 }
 
-                let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+                let owner_process = Some(ctx.pid);
                 let account = PageAccount {
                     owner_process,
                     owner_address_space: pml4_phys,
@@ -1815,7 +1909,7 @@ fn materialize_cow(
 
             let _ = pmm::phys_ref_dec(old_paddr);
 
-            let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+            let owner_process = Some(ctx.pid);
             let account = PageAccount {
                 owner_process,
                 owner_address_space: pml4_phys,
@@ -1862,21 +1956,11 @@ fn materialize_cow(
 /// Attempt to resolve a page fault with a deterministic pipeline:
 /// classify -> admit -> materialize.
 pub fn handle_page_fault(
-    pml4_phys: usize,
     ctx: FaultContext,
     error_code: u64,
 ) -> FaultResult {
-    let page_addr = ctx.addr.page_base();
-    if !crate::process::pml4_allows_memory_operations(pml4_phys as u64) {
-        log_warn!(
-            LOG_ORIGIN,
-            "[PF] admit=deny addr=0x{:X} access={:?} result=NotHandled reason=process_terminating pml4=0x{:X}",
-            ctx.addr.as_usize(),
-            ctx.access,
-            pml4_phys
-        );
-        return FaultResult::NotHandled;
-    }
+    let pml4_phys = ctx.address_space_id.as_usize();
+    let page_addr = ctx.fault_addr.page_base();
 
     let vma = {
         let registry = VMA_REGISTRY.lock();
@@ -1886,7 +1970,7 @@ pub fn handle_page_fault(
                 log_warn!(
                     LOG_ORIGIN,
                     "[PF] vma_hit=false addr=0x{:X} page=0x{:X} pml4=0x{:X} reason=no_registry",
-                    ctx.addr.as_usize(),
+                    ctx.fault_addr.as_usize(),
                     page_addr,
                     pml4_phys
                 );
@@ -1899,7 +1983,7 @@ pub fn handle_page_fault(
                 log_debug!(
                     LOG_ORIGIN,
                     "[PF] vma_hit=true addr=0x{:X} page=0x{:X} start=0x{:X} end=0x{:X} perms=0x{:X} backing={:?} label={}",
-                    ctx.addr.as_usize(),
+                    ctx.fault_addr.as_usize(),
                     page_addr,
                     vma.start,
                     vma.end,
@@ -1913,7 +1997,7 @@ pub fn handle_page_fault(
                 log_warn!(
                     LOG_ORIGIN,
                     "[PF] vma_hit=false addr=0x{:X} page=0x{:X} pml4=0x{:X} reason=miss vma_count={}",
-                    ctx.addr.as_usize(),
+                    ctx.fault_addr.as_usize(),
                     page_addr,
                     pml4_phys,
                     map.len()
@@ -1923,13 +2007,13 @@ pub fn handle_page_fault(
         }
     };
 
-    let classified = classify_fault(pml4_phys, &ctx, error_code, vma.as_ref());
+    let classified = classify_fault(&ctx, error_code, vma.as_ref());
     log_debug!(
         LOG_ORIGIN,
         "[PF] classify={:?} addr=0x{:X} access={:?} user={} err={:#X} pml4=0x{:X}",
         classified,
-        ctx.addr.as_usize(),
-        ctx.access,
+        ctx.fault_addr.as_usize(),
+        ctx.access_type,
         ctx.is_user,
         error_code,
         pml4_phys
@@ -1939,10 +2023,22 @@ pub fn handle_page_fault(
         log_warn!(
             LOG_ORIGIN,
             "[PF] admit=deny addr=0x{:X} access={:?} result={:?} label={}",
-            ctx.addr.as_usize(),
-            ctx.access,
+            ctx.fault_addr.as_usize(),
+            ctx.access_type,
             result,
             vma.map(|v| v.label).unwrap_or("none")
+        );
+        return result;
+    }
+
+    if let Err(result) = evaluate_memory_admission(&ctx, classified) {
+        log_warn!(
+            LOG_ORIGIN,
+            "[PF] admission=deny pid={} addr=0x{:X} access={:?} result={:?}",
+            ctx.pid,
+            ctx.fault_addr.as_usize(),
+            ctx.access_type,
+            result
         );
         return result;
     }
@@ -1950,14 +2046,14 @@ pub fn handle_page_fault(
     let Some(vma) = vma else {
         return FaultResult::InvalidAddress;
     };
-    let result = materialize_fault(pml4_phys, &ctx, classified, &vma);
+    let result = materialize_fault(&ctx, classified, &vma);
     log_debug!(
         LOG_ORIGIN,
         "[PF] result={:?} addr=0x{:X} page=0x{:X} access={:?} user={} label={}",
         result,
-        ctx.addr.as_usize(),
+        ctx.fault_addr.as_usize(),
         page_addr,
-        ctx.access,
+        ctx.access_type,
         ctx.is_user,
         vma.label
     );

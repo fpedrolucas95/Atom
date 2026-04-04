@@ -43,8 +43,8 @@
 
 #![allow(dead_code)]
 
-use crate::log_info;
 use crate::log_debug;
+use crate::log_info;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -52,8 +52,12 @@ use spin::Mutex;
 
 use crate::process::ProcessId;
 use crate::thread::ThreadId;
+use crate::log_warn;
 
 const LOG_ORIGIN: &str = "cap";
+
+pub mod revoke_plan;
+use revoke_plan::build_revoke_plan_from_snapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CapHandle(u64);
@@ -308,6 +312,57 @@ pub enum CapError {
     NotOwner,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeError {
+    NotFound,
+    NotOwner,
+    DiscoveryInconsistent,
+    ProcessMutationFailed,
+    ThreadMirrorMutationFailed,
+    ParentLinkUpdateFailed,
+    CallbackFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeStatus {
+    Complete,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct RevokeReport {
+    pub root: CapHandle,
+    pub revoked: Vec<CapHandle>,
+    pub missing: Vec<CapHandle>,
+    pub failed: Vec<(CapHandle, RevokeError)>,
+    pub callbacks_executed: usize,
+    pub status: RevokeStatus,
+}
+
+impl RevokeReport {
+    fn new(root: CapHandle) -> Self {
+        Self {
+            root,
+            revoked: Vec::new(),
+            missing: Vec::new(),
+            failed: Vec::new(),
+            callbacks_executed: 0,
+            status: RevokeStatus::Failed,
+        }
+    }
+
+    fn finalize_status(&mut self) {
+        self.status = if self.failed.is_empty() && self.missing.is_empty() {
+            RevokeStatus::Complete
+        } else if !self.revoked.is_empty() {
+            RevokeStatus::Partial
+        } else {
+            RevokeStatus::Failed
+        };
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CapabilityTable {
     capabilities: BTreeMap<CapHandle, Capability>,
@@ -510,55 +565,103 @@ impl CapabilityManager {
         handle: CapHandle,
         revoker: ProcessId,
         revoker_thread: ThreadId,
-    ) -> Result<Vec<CapHandle>, CapError> {
-        let mut caps = self.global_caps.lock();
-        let mut revoked = Vec::new();
+    ) -> Result<RevokeReport, RevokeError> {
+        let snapshot = {
+            let caps = self.global_caps.lock();
+            let Some(root_capability) = caps.get(&handle) else {
+                let mut report = RevokeReport::new(handle);
+                report.missing.push(handle);
+                report.finalize_status();
+                return Ok(report);
+            };
+            if root_capability.owner != revoker {
+                return Err(RevokeError::NotOwner);
+            }
+            caps.clone()
+        };
 
-        // All of: lookup, ownership check, children collection, and remove happen
-        // under the same lock to prevent TOCTOU between concurrent revoke calls.
-        let cap = caps.get(&handle).ok_or(CapError::NotFound)?;
-        let owner = cap.owner;
+        let plan = build_revoke_plan_from_snapshot(handle, &snapshot)?;
+        let mut report = RevokeReport::new(handle);
+        report.missing.extend(plan.missing.iter().copied());
+        report.missing.sort();
+        report.missing.dedup();
+        let mut callback_queue = Vec::new();
 
-        // Only the capability owner may revoke it.
-        // Transitive revocation of children (lines below) is authorised because
-        // the owner of the root initiated the operation.
-        if owner != revoker {
-            return Err(CapError::NotOwner);
+        for current in plan.order.iter().copied() {
+            let removed_capability = {
+                let mut caps = self.global_caps.lock();
+                caps.remove(&current)
+            };
+
+            let Some(removed_capability) = removed_capability else {
+                report.missing.push(current);
+                continue;
+            };
+
+            if crate::process::remove_process_capability(removed_capability.owner, current).is_none() {
+                report.failed.push((current, RevokeError::ProcessMutationFailed));
+            }
+
+            if crate::thread::remove_process_capability_mirror(removed_capability.owner, current).is_none() {
+                report.failed.push((current, RevokeError::ThreadMirrorMutationFailed));
+            }
+
+            if let Some(parent_handle) = removed_capability.parent {
+                let parent_owner = snapshot
+                    .get(&parent_handle)
+                    .map(|parent| parent.owner);
+                let Some(parent_owner) = parent_owner else {
+                    report.failed.push((current, RevokeError::ParentLinkUpdateFailed));
+                    continue;
+                };
+
+                if crate::process::remove_process_capability_child(parent_owner, parent_handle, current).is_err() {
+                    report.failed.push((current, RevokeError::ParentLinkUpdateFailed));
+                }
+
+                if crate::thread::remove_process_capability_child_mirror(parent_owner, parent_handle, current).is_err() {
+                    report.failed.push((current, RevokeError::ParentLinkUpdateFailed));
+                }
+            }
+
+            self.log_audit(AuditLogEntry::new(
+                AuditEventType::Revoke,
+                revoker_thread,
+                current,
+            ));
+            callback_queue.push((removed_capability.resource, current));
+            report.revoked.push(current);
         }
 
-        let children = cap.children.clone();
-        let resource_type = cap.resource;
+        self.execute_revocation_callbacks(&callback_queue, &mut report);
+        report.missing.sort();
+        report.missing.dedup();
+        report.finalize_status();
+        Ok(report)
+    }
 
-        caps.remove(&handle);
-        revoked.push(handle);
-        drop(caps);
+    fn execute_revocation_callbacks(
+        &self,
+        callback_queue: &[(ResourceType, CapHandle)],
+        report: &mut RevokeReport,
+    ) {
+        let callback_snapshot = {
+            let callbacks = REVOCATION_CALLBACKS.lock();
+            callbacks.clone()
+        };
 
-        let removed_from_process = crate::process::remove_process_capability(owner, handle);
-        debug_assert!(
-            removed_from_process.is_some(),
-            "Capability {} missing from authoritative process {} table during revoke",
-            handle,
-            owner
-        );
-        let _ = crate::thread::remove_process_capability_mirror(owner, handle);
+        for (resource_type, handle) in callback_queue.iter().copied() {
+            let Some(callbacks) = callback_snapshot.get(&resource_type) else {
+                continue;
+            };
 
-        self.log_audit(AuditLogEntry::new(
-            AuditEventType::Revoke,
-            revoker_thread,
-            handle,
-        ));
-
-        // Invoke registered revocation callbacks for this resource type
-        // Requirements: Req 5.1, Req 5.3, Req 5.4, Req 5.5
-        invoke_revocation_callbacks(resource_type, handle);
-
-        for child_handle in children {
-            if let Ok(mut child_revoked) = self.revoke(child_handle, revoker, revoker_thread) {
-                revoked.append(&mut child_revoked);
+            for callback in callbacks {
+                report.callbacks_executed = report.callbacks_executed.saturating_add(1);
+                if matches!(callback(handle), CallbackResult::Failed) {
+                    report.failed.push((handle, RevokeError::CallbackFailed));
+                }
             }
         }
-
-        Ok(revoked)
     }
     
     pub fn query_parent(&self, handle: CapHandle) -> Result<Option<CapHandle>, CapError> {
@@ -647,50 +750,17 @@ pub struct AuditStats {
 
 static CAPABILITY_MANAGER: CapabilityManager = CapabilityManager::new();
 static CLEANED_THREAD_CAPABILITIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
-type RevocationCallback = fn(CapHandle);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackResult {
+    Completed,
+    Failed,
+}
+
+type RevocationCallback = fn(CapHandle) -> CallbackResult;
 type RevocationCallbackMap = BTreeMap<ResourceType, Vec<RevocationCallback>>;
 
 static REVOCATION_CALLBACKS: Mutex<RevocationCallbackMap> = Mutex::new(BTreeMap::new());
-
-/// Invoke all registered revocation callbacks for a given resource type.
-/// Callbacks are invoked in registration order.
-/// If a callback fails (panics), the failure is logged but remaining callbacks continue.
-/// 
-/// # Arguments
-/// * `resource_type` - The type of resource being revoked
-/// * `handle` - The capability handle being revoked
-/// 
-/// # Requirements
-/// Implements Req 5.1: Invoke all registered callbacks for resource type
-/// Implements Req 5.3: Log callback failures but continue with remaining callbacks
-/// Implements Req 5.4: Invoke callbacks in registration order
-/// Implements Req 5.5: Pass capability handle to each callback
-fn invoke_revocation_callbacks(resource_type: ResourceType, handle: CapHandle) {
-    let callbacks = REVOCATION_CALLBACKS.lock();
-    
-    if let Some(callback_list) = callbacks.get(&resource_type) {
-        log_debug!(
-            LOG_ORIGIN,
-            "Invoking {} revocation callbacks for capability {} (resource type {:?})",
-            callback_list.len(),
-            handle,
-            resource_type
-        );
-        
-        // Invoke each callback in registration order
-        // Note: In a no_std environment, we cannot catch panics, so callbacks
-        // must be written to not panic. If a callback panics, it will propagate.
-        for (idx, callback) in callback_list.iter().enumerate() {
-            log_debug!(
-                LOG_ORIGIN,
-                "Invoking revocation callback {} for capability {}",
-                idx,
-                handle
-            );
-            callback(handle);
-        }
-    }
-}
 
 fn required_process_id(thread_id: ThreadId) -> Result<ProcessId, CapError> {
     crate::thread::get_thread_process_id(thread_id).ok_or(CapError::NotFound)
@@ -750,8 +820,9 @@ pub fn create_root_capability(
     Ok(cap)
 }
 
-pub fn revoke_capability(handle: CapHandle, revoker: ThreadId) -> Result<Vec<CapHandle>, CapError> {
-    CAPABILITY_MANAGER.revoke(handle, required_process_id(revoker)?, revoker)
+pub fn revoke_capability(handle: CapHandle, revoker: ThreadId) -> Result<RevokeReport, RevokeError> {
+    let revoker_process = required_process_id(revoker).map_err(|_| RevokeError::NotFound)?;
+    CAPABILITY_MANAGER.revoke(handle, revoker_process, revoker)
 }
 
 pub fn query_parent(handle: CapHandle) -> Result<Option<CapHandle>, CapError> {
@@ -785,7 +856,7 @@ pub fn get_capability_stats() -> CapabilityStats {
 /// Implements Req 5.2: Allow registration of revocation callbacks per resource type
 pub fn register_revocation_callback(
     resource_type: ResourceType,
-    callback: fn(CapHandle),
+    callback: fn(CapHandle) -> CallbackResult,
 ) {
     let mut callbacks = REVOCATION_CALLBACKS.lock();
     callbacks.entry(resource_type).or_default().push(callback);
@@ -1079,14 +1150,15 @@ pub fn lookup_capability(handle: CapHandle) -> Option<Capability> {
     CAPABILITY_MANAGER.lookup(handle)
 }
 
-pub fn revoke_all_process_capabilities(process_id: crate::process::ProcessId) {
+pub fn revoke_all_process_capabilities(process_id: crate::process::ProcessId) -> Vec<RevokeReport> {
+    let mut reports = Vec::new();
     let Some(process) = crate::process::get_process(process_id) else {
         log_debug!(
             LOG_ORIGIN,
             "Capability cleanup requested for unknown process {} - skipping revoke_all_process_capabilities",
             process_id
         );
-        return;
+        return reports;
     };
 
     let owned_caps = process.capability_table.list();
@@ -1098,45 +1170,43 @@ pub fn revoke_all_process_capabilities(process_id: crate::process::ProcessId) {
         process_id
     );
 
-    let mut caps = CAPABILITY_MANAGER.global_caps.lock();
-
     for handle in owned_caps {
-        if let Some(_cap) = caps.remove(&handle) {
-            log_debug!(
-                LOG_ORIGIN,
-                "Revoked capability {} from process {}",
-                handle,
-                process_id
-            );
+        match CAPABILITY_MANAGER.revoke(handle, process_id, process.primary_thread) {
+            Ok(report) => reports.push(report),
+            Err(err) => {
+                let mut report = RevokeReport::new(handle);
+                report.failed.push((handle, err));
+                report.finalize_status();
+                reports.push(report);
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Failed to revoke capability {} during process {} cleanup: {:?}",
+                    handle,
+                    process_id,
+                    err
+                );
+            }
         }
-
-        drop(caps);
-        let _ = crate::process::remove_process_capability(process_id, handle);
-        let _ = crate::thread::remove_process_capability_mirror(process_id, handle);
-        CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
-            AuditEventType::Revoke,
-            process.primary_thread,
-            handle,
-        ));
-        caps = CAPABILITY_MANAGER.global_caps.lock();
     }
+
+    reports
 }
 
 /// Revoke all capabilities owned by a thread
 /// This should be called when a thread terminates to clean up all its capabilities
-pub fn revoke_all_thread_capabilities(thread_id: ThreadId) {
+pub fn revoke_all_thread_capabilities(thread_id: ThreadId) -> Vec<RevokeReport> {
+    let mut reports = Vec::new();
     if !begin_thread_capability_cleanup(thread_id) {
         log_debug!(
             LOG_ORIGIN,
             "Capability cleanup already ran for thread {} - skipping duplicate revoke_all_thread_capabilities",
             thread_id
         );
-        return;
+        return reports;
     }
 
     let owned_caps = crate::thread::list_thread_local_capabilities(thread_id);
-
-    let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+    let revoker_process = crate::thread::get_thread_process_id(thread_id);
 
     log_info!(
         LOG_ORIGIN,
@@ -1151,23 +1221,296 @@ pub fn revoke_all_thread_capabilities(thread_id: ThreadId) {
     // dangling parent references after this, but that's acceptable
     // since the parent capability is gone.
     for handle in owned_caps {
-        if let Some(_cap) = caps.remove(&handle) {
-            log_debug!(
-                LOG_ORIGIN,
-                "Revoked capability {} from thread {}",
-                handle,
-                thread_id
-            );
-
-            // Log audit entry for revocation
-            drop(caps);
-            let _ = crate::thread::remove_thread_capability(thread_id, handle);
-            CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
-                AuditEventType::Revoke,
-                thread_id,
-                handle,
-            ));
-            caps = CAPABILITY_MANAGER.global_caps.lock();
+        if let Some(process_id) = revoker_process {
+            match CAPABILITY_MANAGER.revoke(handle, process_id, thread_id) {
+                Ok(report) => reports.push(report),
+                Err(err) => {
+                    let mut report = RevokeReport::new(handle);
+                    report.failed.push((handle, err));
+                    report.finalize_status();
+                    reports.push(report);
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "Failed to revoke capability {} during thread {} cleanup: {:?}",
+                        handle,
+                        thread_id,
+                        err
+                    );
+                }
+            }
+            continue;
         }
+
+        let mut report = RevokeReport::new(handle);
+        let removed_capability = {
+            let mut caps = CAPABILITY_MANAGER.global_caps.lock();
+            caps.remove(&handle)
+        };
+        let Some(removed_capability) = removed_capability else {
+            report.missing.push(handle);
+            report.finalize_status();
+            reports.push(report);
+            continue;
+        };
+
+        if crate::thread::remove_thread_capability(thread_id, handle).is_none() {
+            report.failed.push((handle, RevokeError::ThreadMirrorMutationFailed));
+        }
+
+        CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
+            AuditEventType::Revoke,
+            thread_id,
+            handle,
+        ));
+        CAPABILITY_MANAGER.execute_revocation_callbacks(&[(removed_capability.resource, handle)], &mut report);
+        report.revoked.push(handle);
+        report.finalize_status();
+        reports.push(report);
+    }
+
+    reports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spin::Mutex;
+
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    #[derive(Debug, Clone, Copy)]
+    struct TestFixture {
+        pid: ProcessId,
+        tid: ThreadId,
+        pml4: u64,
+    }
+
+    fn setup_fixture(seed: u64) -> TestFixture {
+        let fixture = TestFixture {
+            pid: ProcessId::from_raw(seed),
+            tid: ThreadId::from_raw(seed),
+            pml4: 0xC000_0000 + (seed << 12),
+        };
+        cleanup_fixture(fixture);
+
+        let thread = crate::thread::Thread {
+            id: fixture.tid,
+            process_id: Some(fixture.pid),
+            state: crate::thread::ThreadState::Ready,
+            context: crate::thread::CpuContext::zero(),
+            kernel_stack: 0,
+            kernel_stack_size: 0,
+            address_space: fixture.pml4,
+            priority: crate::thread::ThreadPriority::Normal,
+            name: "cap-test",
+            capability_table: create_capability_table(fixture.tid),
+            is_userspace: true,
+            user_stack: None,
+        };
+        crate::thread::add_thread(thread);
+
+        fixture
+    }
+
+    fn cleanup_fixture(fixture: TestFixture) {
+        let owned_handles = {
+            let caps = CAPABILITY_MANAGER.global_caps.lock();
+            caps.iter()
+                .filter_map(|(handle, cap)| (cap.owner == fixture.pid).then_some(*handle))
+                .collect::<Vec<_>>()
+        };
+        for handle in owned_handles {
+            CAPABILITY_MANAGER.global_caps.lock().remove(&handle);
+        }
+
+        {
+            let mut registry = crate::process::PROCESS_REGISTRY.lock();
+            if let Some(process) = registry.get_mut(&fixture.pid) {
+                process.cleaned = true;
+                process.terminating = false;
+                process.terminated = true;
+            }
+        }
+
+        let _ = crate::thread::remove_thread(fixture.tid);
+        crate::process::PROCESS_REGISTRY.lock().remove(&fixture.pid);
+        crate::process::PML4_TO_PROCESS.lock().remove(&fixture.pml4);
+        CLEANED_THREAD_CAPABILITIES.lock().remove(&fixture.tid);
+        REVOCATION_CALLBACKS.lock().clear();
+    }
+
+    fn install_capability(fixture: TestFixture, capability: Capability) {
+        CAPABILITY_MANAGER
+            .register(capability.clone(), fixture.tid)
+            .expect("capability registration must succeed in test fixture");
+        crate::thread::add_thread_capability(fixture.tid, capability)
+            .expect("process/thread capability mirror update must succeed");
+    }
+
+    fn install_simple_tree(
+        fixture: TestFixture,
+        resource_base: u64,
+    ) -> (Capability, Capability, Capability) {
+        let root_perms = CapPermissions::READ
+            .union(CapPermissions::REVOKE)
+            .union(CapPermissions::GRANT);
+        let mut root = Capability::new_root(
+            ResourceType::IpcPort {
+                port_id: resource_base,
+            },
+            fixture.pid,
+            root_perms,
+        );
+        let child_a = root
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("child a derivation must succeed");
+        let child_b = root
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("child b derivation must succeed");
+
+        install_capability(fixture, root.clone());
+        install_capability(fixture, child_a.clone());
+        install_capability(fixture, child_b.clone());
+        (root, child_a, child_b)
+    }
+
+    fn install_deep_tree(fixture: TestFixture, resource_base: u64) -> Capability {
+        let root_perms = CapPermissions::READ
+            .union(CapPermissions::REVOKE)
+            .union(CapPermissions::GRANT);
+
+        let mut root = Capability::new_root(
+            ResourceType::IpcPort {
+                port_id: resource_base,
+            },
+            fixture.pid,
+            root_perms,
+        );
+
+        let mut level1 = root
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("level1 derivation must succeed");
+        let sibling = root
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("sibling derivation must succeed");
+        let mut level2 = level1
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("level2 derivation must succeed");
+        let mut level3 = level2
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("level3 derivation must succeed");
+        let level4 = level3
+            .derive(fixture.pid, CapPermissions::READ)
+            .expect("level4 derivation must succeed");
+
+        install_capability(fixture, root.clone());
+        install_capability(fixture, level1.clone());
+        install_capability(fixture, sibling);
+        install_capability(fixture, level2.clone());
+        install_capability(fixture, level3.clone());
+        install_capability(fixture, level4);
+
+        root
+    }
+
+    #[test]
+    fn revoke_simple_tree_reports_complete_and_post_order() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_001);
+
+        let (root, _, _) = install_simple_tree(fixture, 95_001);
+        let plan = revoke_plan::build_revoke_plan(root.handle).expect("plan must build");
+        let report =
+            revoke_capability(root.handle, fixture.tid).expect("revoke must return a report");
+
+        assert_eq!(report.status, RevokeStatus::Complete);
+        assert_eq!(report.revoked, plan.order);
+        assert!(report.missing.is_empty());
+        assert!(report.failed.is_empty());
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_deep_tree_uses_stable_execution_order() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_002);
+
+        let root = install_deep_tree(fixture, 95_002);
+        let plan_a = revoke_plan::build_revoke_plan(root.handle).expect("first plan must build");
+        let plan_b = revoke_plan::build_revoke_plan(root.handle).expect("second plan must build");
+        assert_eq!(plan_a.order, plan_b.order);
+        assert!(
+            plan_a.order.len() >= 6,
+            "deep tree must include at least six capabilities in post-order"
+        );
+
+        let report =
+            revoke_capability(root.handle, fixture.tid).expect("revoke must return a report");
+        assert_eq!(report.revoked, plan_a.order);
+        assert!(report.failed.is_empty());
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_descendant_mutation_failure_is_reported() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_003);
+
+        let (root, child_a, _) = install_simple_tree(fixture, 95_003);
+        let removed = crate::process::remove_process_capability(fixture.pid, child_a.handle);
+        assert!(
+            removed.is_some(),
+            "test setup must remove child from process table to force mutation failure"
+        );
+
+        let report =
+            revoke_capability(root.handle, fixture.tid).expect("revoke must return a report");
+
+        assert_eq!(report.status, RevokeStatus::Partial);
+        assert!(report.revoked.contains(&child_a.handle));
+        assert!(report.failed.iter().any(|(handle, err)| {
+            *handle == child_a.handle && *err == RevokeError::ProcessMutationFailed
+        }));
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_missing_root_is_classified_as_missing() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_004);
+
+        let missing = CapHandle::from_raw(9_500_400);
+        let report =
+            revoke_capability(missing, fixture.tid).expect("missing root must still return report");
+
+        assert_eq!(report.status, RevokeStatus::Failed);
+        assert_eq!(report.missing, vec![missing]);
+        assert!(report.revoked.is_empty());
+        assert!(report.failed.is_empty());
+
+        cleanup_fixture(fixture);
+    }
+
+    #[test]
+    fn revoke_is_idempotent_on_second_execution() {
+        let _serial = TEST_SERIAL.lock();
+        let fixture = setup_fixture(95_005);
+
+        let (root, _, _) = install_simple_tree(fixture, 95_005);
+        let first =
+            revoke_capability(root.handle, fixture.tid).expect("first revoke must return report");
+        assert_eq!(first.status, RevokeStatus::Complete);
+
+        let second = revoke_capability(root.handle, fixture.tid)
+            .expect("second revoke must still return report");
+        assert_eq!(second.status, RevokeStatus::Failed);
+        assert!(second.revoked.is_empty());
+        assert!(second.missing.contains(&root.handle));
+        assert!(lookup_capability(root.handle).is_none());
+
+        cleanup_fixture(fixture);
     }
 }

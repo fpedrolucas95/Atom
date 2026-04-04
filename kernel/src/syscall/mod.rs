@@ -2887,13 +2887,21 @@ fn sys_cap_revoke(handle_raw: u64) -> u64 {
     let handle = crate::cap::CapHandle::from_raw(handle_raw);
 
     match crate::cap::revoke_capability(handle, caller) {
-        Ok(revoked) => {
-            let count = revoked.len();
+        Ok(report) => {
+            let count = report.revoked.len();
             log_debug!(
                 "syscall",
-                "cap_revoke: revoked {} capabilities (cascading)",
-                count
+                "cap_revoke: status={:?} root={} revoked={} missing={} failed={} callbacks={}",
+                report.status,
+                report.root,
+                report.revoked.len(),
+                report.missing.len(),
+                report.failed.len(),
+                report.callbacks_executed
             );
+            if matches!(report.status, crate::cap::RevokeStatus::Failed) {
+                return EINVAL;
+            }
             count as u64
         }
         Err(err) => {
@@ -6575,14 +6583,12 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         let mut page = start_page;
         while page <= end_page {
             let ctx = crate::mm::vma::FaultContext::from_x86_error(
+                caller.process_id,
+                crate::mm::vma::AddressSpaceId::new(caller.address_space_pml4 as usize),
                 page,
                 0x6, // write|user|not-present
             );
-            let result = crate::mm::vma::handle_page_fault(
-                caller.address_space_pml4 as usize,
-                ctx,
-                0x6,
-            );
+            let result = crate::mm::vma::handle_page_fault(ctx, 0x6);
             match result {
                 crate::mm::vma::FaultResult::Resolved => {}
                 crate::mm::vma::FaultResult::OutOfMemory => return ENOMEM,

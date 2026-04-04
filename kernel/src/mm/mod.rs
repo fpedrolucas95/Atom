@@ -35,6 +35,7 @@ pub mod heap;
 pub mod vm;
 pub mod addrspace;
 pub mod policy;
+pub mod admission;
 #[allow(dead_code)]
 pub mod vma;
 #[allow(dead_code)]
@@ -216,6 +217,7 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     heap::init();
     addrspace::init();
     policy::init();
+    admission::init();
     vma::init();
     oom::init();
 }

@@ -276,13 +276,20 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
         if let Some(tid) = sched::current_thread() {
             if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
                 if pml4 != 0 {
-                    let ctx = mm::vma::FaultContext::from_x86_error(cr2 as usize, error_code);
-                    if matches!(
-                        mm::vma::handle_page_fault(pml4 as usize, ctx, error_code),
-                        mm::vma::FaultResult::Resolved
-                    ) {
-                        // Resolved — POP_ALL + iretq will retry the instruction.
-                        return;
+                    if let Some(pid) = crate::thread::get_thread_process_id(tid) {
+                        let ctx = mm::vma::FaultContext::from_x86_error(
+                            pid,
+                            mm::vma::AddressSpaceId::new(pml4 as usize),
+                            cr2 as usize,
+                            error_code,
+                        );
+                        if matches!(
+                            mm::vma::handle_page_fault(ctx, error_code),
+                            mm::vma::FaultResult::Resolved
+                        ) {
+                            // Resolved — POP_ALL + iretq will retry the instruction.
+                            return;
+                        }
                     }
                 }
             }
@@ -771,6 +778,22 @@ fn terminate_faulting_userspace_thread(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultOutcome {
+    Resolved,
+    Fatal(mm::vma::FaultResult),
+}
+
+fn classify_fault_outcome(result: mm::vma::FaultResult) -> FaultOutcome {
+    match result {
+        mm::vma::FaultResult::Resolved => FaultOutcome::Resolved,
+        mm::vma::FaultResult::InvalidAddress
+        | mm::vma::FaultResult::ProtectionViolation
+        | mm::vma::FaultResult::OutOfMemory
+        | mm::vma::FaultResult::NotHandled => FaultOutcome::Fatal(result),
+    }
+}
+
 fn handle_userspace_page_fault(
     tid: crate::thread::ThreadId,
     frame: &InterruptFrame,
@@ -788,33 +811,55 @@ fn handle_userspace_page_fault(
         );
     }
 
-    let ctx = mm::vma::FaultContext::from_x86_error(cr2 as usize, error_code);
-    let result = mm::vma::handle_page_fault(current_cr3 as usize, ctx, error_code);
+    let pid = match crate::thread::get_thread_process_id(tid) {
+        Some(pid) => pid,
+        None => {
+            terminate_faulting_userspace_thread(
+                tid,
+                frame,
+                cr2,
+                error_code,
+                mm::vma::FaultResult::InvalidAddress
+            );
+        }
+    };
 
-    if matches!(result, mm::vma::FaultResult::Resolved) {
-        log_debug!(
-            LOG_ORIGIN,
-            "[PF] cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?}",
-            current_cr3,
-            cr2,
-            frame.rip,
-            error_code,
-            result
-        );
-        return true;
-    }
-
-    log_warn!(
-        LOG_ORIGIN,
-        "[PF] cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?}",
-        current_cr3,
-        cr2,
-        frame.rip,
+    let ctx = mm::vma::FaultContext::from_x86_error(
+        pid,
+        mm::vma::AddressSpaceId::new(current_cr3 as usize),
+        cr2 as usize,
         error_code,
-        result
     );
+    let result = mm::vma::handle_page_fault(ctx, error_code);
 
-    terminate_faulting_userspace_thread(tid, frame, cr2, error_code, result);
+    match classify_fault_outcome(result) {
+        FaultOutcome::Resolved => {
+            log_debug!(
+                LOG_ORIGIN,
+                "[PF] pid={} cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?} action=resume",
+                pid,
+                current_cr3,
+                cr2,
+                frame.rip,
+                error_code,
+                result
+            );
+            true
+        }
+        FaultOutcome::Fatal(fatal_result) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "[PF] pid={} cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?} action=terminate",
+                pid,
+                current_cr3,
+                cr2,
+                frame.rip,
+                error_code,
+                fatal_result
+            );
+            terminate_faulting_userspace_thread(tid, frame, cr2, error_code, fatal_result);
+        }
+    }
 }
 
 #[no_mangle]
