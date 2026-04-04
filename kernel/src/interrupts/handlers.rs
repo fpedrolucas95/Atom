@@ -791,6 +791,19 @@ fn handle_userspace_page_fault(
     let ctx = mm::vma::FaultContext::from_x86_error(cr2 as usize, error_code);
     let result = mm::vma::handle_page_fault(current_cr3 as usize, ctx, error_code);
 
+    if matches!(result, mm::vma::FaultResult::Resolved) {
+        log_debug!(
+            LOG_ORIGIN,
+            "[PF] cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?}",
+            current_cr3,
+            cr2,
+            frame.rip,
+            error_code,
+            result
+        );
+        return true;
+    }
+
     log_warn!(
         LOG_ORIGIN,
         "[PF] cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?}",
@@ -800,10 +813,6 @@ fn handle_userspace_page_fault(
         error_code,
         result
     );
-
-    if matches!(result, mm::vma::FaultResult::Resolved) {
-        return true;
-    }
 
     terminate_faulting_userspace_thread(tid, frame, cr2, error_code, result);
 }

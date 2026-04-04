@@ -57,7 +57,8 @@
 // - No copy-on-write or demand paging yet
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use spin::Mutex;
 
 use crate::mm::pmm;
 use crate::mm::ValidationError;
@@ -95,6 +96,15 @@ const HIGHER_HALF_MIRROR_SIZE: usize = 16usize * 1024 * 1024 * 1024;
 static ACTIVE_PML4: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_PAGES: AtomicUsize = AtomicUsize::new(0);
 static PAGE_TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
+const DEFERRED_TLB_FLUSH_SLOTS: usize = 64;
+static DEFERRED_TLB_FLUSH_MASK: AtomicU64 = AtomicU64::new(0);
+/// Global page-table serialization lock.
+///
+/// Current kernel targets UP semantics but can still interleave memory
+/// operations via preemption/interrupt paths. This lock guarantees that
+/// PTE decisions and updates are performed atomically from the MM layer
+/// perspective, and establishes a strict lock hierarchy for COW/fork paths.
+static PAGE_TABLE_LOCK: Mutex<()> = Mutex::new(());
 /// Highest physical address that was identity-mapped during init.
 /// Shared memory VA allocation uses this to start above all identity-mapped
 /// regions, avoiding costly page-table probing and collision avoidance.
@@ -227,6 +237,9 @@ impl PageFlags {
     pub const WRITE_THROUGH: Self = Self(1 << 3);
     pub const CACHE_DISABLE: Self = Self(1 << 4);
     pub const GLOBAL: Self = Self(1 << 8);
+    /// Software-only COW marker in the leaf PTE.
+    /// Uses AVL bit 9 (ignored by x86 hardware for translation).
+    pub const SOFT_COW: Self = Self(1 << 9);
     pub const NO_EXECUTE: Self = Self(1u64 << 63);
 
     pub const fn kernel_rw() -> Self {
@@ -242,8 +255,16 @@ impl PageFlags {
         Self(self.bits() | Self::NO_EXECUTE.bits())
     }
 
+    pub const fn with(self, other: PageFlags) -> Self {
+        Self(self.bits() | other.bits())
+    }
+
     pub const fn without(self, other: PageFlags) -> Self {
         Self(self.bits() & !other.bits())
+    }
+
+    pub const fn contains(self, other: PageFlags) -> bool {
+        (self.bits() & other.bits()) == other.bits()
     }
 
     pub const fn bits(self) -> u64 {
@@ -579,8 +600,12 @@ pub fn map_page(virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmErro
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(phys)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
-
-    map_page_internal(pml4_phys, virt, phys, flags)
+    let _lock = PAGE_TABLE_LOCK.lock();
+    let result = map_page_internal(pml4_phys, virt, phys, flags);
+    if result.is_ok() {
+        invalidate_tlb_for_pml4_page(pml4_phys, virt);
+    }
+    result
 }
 
 pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
@@ -594,8 +619,12 @@ pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageF
         atom_abi::validate_user_range(virt, pmm::PAGE_SIZE)
             .map_err(|err| VmError::Validation(map_user_address_validation_error(virt, err)))?;
     }
-
-    map_page_internal(pml4_phys, virt, phys, flags)
+    let _lock = PAGE_TABLE_LOCK.lock();
+    let result = map_page_internal(pml4_phys, virt, phys, flags);
+    if result.is_ok() {
+        invalidate_tlb_for_pml4_page(pml4_phys, virt);
+    }
+    result
 }
 
 /// Check whether a page is already present (mapped) in a specific PML4.
@@ -607,6 +636,7 @@ pub fn is_page_present_in_pml4(pml4_phys: usize, virt: usize) -> bool {
     if pml4_phys == 0 || !pmm::is_page_aligned(virt) {
         return false;
     }
+    let _lock = PAGE_TABLE_LOCK.lock();
     match walk_to_entry_with_root_user(pml4_phys, virt, false, true) {
         Ok((entry, _)) => entry.is_present(),
         Err(_) => false,
@@ -624,6 +654,7 @@ pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: Pag
     // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
     let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;
 
+    let _lock = PAGE_TABLE_LOCK.lock();
     let (entry, _created_table) = walk_to_entry_with_root_user(pml4_phys, virt, true, user_access)?;
 
     // Overwrite existing entry if present (unlike map_page_internal which fails)
@@ -632,9 +663,39 @@ pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: Pag
     }
 
     entry.set(phys, flags);
-    invalidate_page(virt);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
 
     Ok(())
+}
+
+/// Update only the flags of an existing mapping in a specific PML4.
+pub fn remap_page_flags_in_pml4(
+    pml4_phys: usize,
+    virt: usize,
+    new_flags: PageFlags,
+) -> Result<(), VmError> {
+    crate::mm::validate_page_alignment(virt)?;
+    crate::mm::validate_initialized(pml4_phys != 0)?;
+    let _lock = PAGE_TABLE_LOCK.lock();
+    let (entry, _created_table) = walk_to_entry_with_root_user(pml4_phys, virt, false, false)?;
+    if !entry.is_present() {
+        return Err(VmError::NotMapped);
+    }
+    let phys = entry.addr();
+    entry.set(phys, new_flags);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
+    Ok(())
+}
+
+/// Copy one physical page into another.
+pub fn copy_phys_page(dst_phys: usize, src_phys: usize) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            phys_to_virt_ptr(src_phys) as *const u8,
+            phys_to_virt_ptr(dst_phys) as *mut u8,
+            pmm::PAGE_SIZE,
+        );
+    }
 }
 
 pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
@@ -829,6 +890,21 @@ pub fn read_pte_in_pml4(pml4_phys: usize, virt: usize) -> Option<u64> {
     Some(e.0)
 }
 
+#[inline]
+pub fn is_cow(flags: PageFlags) -> bool {
+    flags.contains(PageFlags::SOFT_COW)
+}
+
+#[inline]
+pub fn set_cow(flags: PageFlags) -> PageFlags {
+    flags.with(PageFlags::SOFT_COW).without(PageFlags::WRITABLE)
+}
+
+#[inline]
+pub fn clear_cow(flags: PageFlags) -> PageFlags {
+    flags.without(PageFlags::SOFT_COW)
+}
+
 /// Verify several critical kernel-code pages in `dst` against `src`.
 /// For every page that is mapped in `src` but missing in `dst`, walk
 /// the hierarchy and repair at the deepest missing level.
@@ -871,7 +947,7 @@ fn verify_and_repair_clone(src_pml4: usize, dst_pml4: usize) {
                     dst_pml4
                 );
                 let phys = (s & ADDR_MASK) as usize;
-                let flags = PageFlags::from_bits(s);
+                let flags = PageFlags::from_bits(s & !ADDR_MASK);
                 let _ = map_page_internal(dst_pml4, virt_page, phys, flags);
             }
             (Some(s), Some(d)) => {
@@ -918,7 +994,8 @@ fn repair_leaf_pte(pml4_phys: usize, virt: usize, raw_pte: u64) {
 
 pub fn unmap_page(virt: usize) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
-
+    let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
+    let _lock = PAGE_TABLE_LOCK.lock();
     let (entry, _) = walk_to_entry(virt, false)?;
     let was_present = entry.is_present();
 
@@ -928,14 +1005,14 @@ pub fn unmap_page(virt: usize) -> Result<(), VmError> {
 
     entry.clear();
     MAPPED_PAGES.fetch_sub(1, Ordering::Relaxed);
-    invalidate_page(virt);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
     Ok(())
 }
 
 pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
-
+    let _lock = PAGE_TABLE_LOCK.lock();
     let (entry, _) = walk_to_entry_with_root_user(pml4_phys, virt, false, false)?;
     if !entry.is_present() {
         return Err(VmError::NotMapped);
@@ -943,6 +1020,7 @@ pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> 
 
     entry.clear();
     MAPPED_PAGES.fetch_sub(1, Ordering::Relaxed);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
     Ok(())
 }
 
@@ -953,6 +1031,7 @@ pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
     let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
+    let _lock = PAGE_TABLE_LOCK.lock();
 
     // Get indices for all levels
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
@@ -986,7 +1065,7 @@ pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
     }
     pte.0 |= PageFlags::USER.bits();
 
-    invalidate_page(virt);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
 
     Ok(())
 }
@@ -995,6 +1074,8 @@ pub fn remap_page_user(virt: usize) -> Result<(), VmError> {
 #[allow(dead_code)]
 pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
+    let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
+    let _lock = PAGE_TABLE_LOCK.lock();
 
     let (entry, _) = walk_to_entry(virt, false)?;
     if !entry.is_present() {
@@ -1009,7 +1090,7 @@ pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), 
     let new_flags = PageFlags(current_flags.bits() | additional_flags.bits());
 
     entry.set(phys, new_flags);
-    invalidate_page(virt);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
 
     Ok(())
 }
@@ -1017,14 +1098,14 @@ pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), 
 pub fn query_mapping_in_pml4(pml4_phys: usize, virt: usize) -> Result<(usize, PageFlags), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
-
+    let _lock = PAGE_TABLE_LOCK.lock();
     let (entry, _) = walk_to_entry_with_root_user(pml4_phys, virt, false, false)?;
     if !entry.is_present() {
         return Err(VmError::NotMapped);
     }
 
     let phys = entry.addr();
-    let flags = PageFlags::from_bits(entry.0);
+    let flags = PageFlags::from_bits(entry.0 & !ADDR_MASK);
 
     Ok((phys, flags))
 }
@@ -1033,6 +1114,8 @@ pub fn query_mapping_in_pml4(pml4_phys: usize, virt: usize) -> Result<(usize, Pa
 pub fn remap_page(virt: usize, new_phys: usize, flags: PageFlags) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(new_phys)?;
+    let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
+    let _lock = PAGE_TABLE_LOCK.lock();
 
     let (entry, _) = walk_to_entry(virt, false)?;
     if !entry.is_present() {
@@ -1040,11 +1123,12 @@ pub fn remap_page(virt: usize, new_phys: usize, flags: PageFlags) -> Result<(), 
     }
 
     entry.set(new_phys, flags);
-    invalidate_page(virt);
+    invalidate_tlb_for_pml4_page(pml4_phys, virt);
     Ok(())
 }
 
 pub fn translate(virt: usize) -> Option<usize> {
+    let _lock = PAGE_TABLE_LOCK.lock();
     let (entry, _) = walk_to_entry(virt, false).ok()?;
     if !entry.is_present() {
         return None;
@@ -1073,10 +1157,7 @@ fn map_page_internal(
 
     entry.set(phys, flags);
     MAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
-
-    if created_table {
-        invalidate_page(virt);
-    }
+    let _ = created_table;
 
     Ok(())
 }
@@ -1268,6 +1349,70 @@ fn split_indices(virt: usize) -> (usize, usize, usize, usize) {
     let pd = (virt >> 21) & 0x1FF;
     let pt = (virt >> 12) & 0x1FF;
     (pml4, pdpt, pd, pt)
+}
+
+#[inline(always)]
+fn current_cr3_pml4() -> usize {
+    let cr3: u64;
+    unsafe {
+        asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
+    }
+    (cr3 & ADDR_MASK) as usize
+}
+
+#[inline(always)]
+fn deferred_tlb_flush_slot(pml4_phys: usize) -> u32 {
+    (((pml4_phys >> 12) as u64) & ((DEFERRED_TLB_FLUSH_SLOTS as u64) - 1)) as u32
+}
+
+#[inline(always)]
+fn mark_deferred_tlb_flush(pml4_phys: usize) {
+    let bit = 1u64 << deferred_tlb_flush_slot(pml4_phys);
+    DEFERRED_TLB_FLUSH_MASK.fetch_or(bit, Ordering::Release);
+}
+
+#[inline(always)]
+pub fn maybe_flush_deferred_tlb_for_pml4(target_pml4_phys: usize) {
+    if target_pml4_phys == 0 {
+        return;
+    }
+
+    let bit = 1u64 << deferred_tlb_flush_slot(target_pml4_phys);
+    let was_pending = (DEFERRED_TLB_FLUSH_MASK.fetch_and(!bit, Ordering::AcqRel) & bit) != 0;
+    if !was_pending {
+        return;
+    }
+
+    // If we are already running in this CR3, force a full local TLB flush.
+    // If we're about to switch to this CR3, switch_context's CR3 load will
+    // flush non-global entries and complete the deferred invalidation.
+    if current_cr3_pml4() == target_pml4_phys {
+        unsafe {
+            load_cr3(target_pml4_phys as u64);
+        }
+    }
+}
+
+/// Invalidate stale translations for a page that had its PTE updated.
+///
+/// Current implementation guarantees correctness for the local CPU and
+/// establishes the single call site for future SMP shootdown integration.
+/// Remote-shootdown wiring (IPI to CPUs running the same address space) must
+/// hook here when AP scheduling lands.
+#[inline(always)]
+fn invalidate_tlb_for_pml4_page(target_pml4_phys: usize, addr: usize) {
+    // Ensure PTE writes are globally visible before any invalidate/shootdown.
+    fence(Ordering::Release);
+
+    if current_cr3_pml4() == target_pml4_phys {
+        invalidate_page(addr);
+        fence(Ordering::SeqCst);
+    } else {
+        // On UP this becomes relevant when an inactive address-space is updated
+        // and then rescheduled. On future SMP this bit tracks pending remote
+        // shootdown work for this address-space bucket.
+        mark_deferred_tlb_flush(target_pml4_phys);
+    }
 }
 
 #[inline(always)]

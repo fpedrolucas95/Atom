@@ -33,6 +33,7 @@
 // - Zeroed variants for page tables and heap init
 // - get_stats / get_detailed_stats / get_memory_stats — diagnostics
 
+use alloc::collections::BTreeMap;
 use crate::boot::{MemoryMap, EFI_CONVENTIONAL_MEMORY, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 #[allow(unused_imports)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -96,6 +97,13 @@ static BITMAP_OVERHEAD_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// Spinlock protecting all bitmap mutations.
 /// The inner value is unused (unit type) — the lock itself provides exclusion.
 static BITMAP_LOCK: Mutex<()> = Mutex::new(());
+
+/// Per-physical-page shared reference counters used by COW.
+///
+/// Representation:
+/// - missing entry => implicit refcount 1 (exclusive mapping)
+/// - entry N>0     => explicit shared refcount
+static PHYS_REFCOUNTS: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // PML4 Protection Registry
@@ -631,6 +639,84 @@ fn align_up_val(val: usize, align: usize) -> usize {
     (val + align - 1) & !(align - 1)
 }
 
+#[inline]
+fn validate_page_addr_for_refcount(addr: usize) -> Result<(), crate::mm::ValidationError> {
+    crate::mm::validate_page_alignment(addr)?;
+
+    let page = addr / PAGE_SIZE;
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total || page <= 1 {
+        return Err(crate::mm::ValidationError::OutOfBounds {
+            addr,
+            min: 2 * PAGE_SIZE,
+            max: total.saturating_sub(1) * PAGE_SIZE,
+        });
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn inc_ref_locked(refs: &mut BTreeMap<usize, usize>, addr: usize) -> usize {
+    match refs.get_mut(&addr) {
+        Some(counter) => {
+            *counter = counter.saturating_add(1);
+            *counter
+        }
+        None => {
+            // Missing entry means implicit refcount=1. First share promotes to 2.
+            refs.insert(addr, 2);
+            2
+        }
+    }
+}
+
+#[inline]
+fn dec_ref_locked(refs: &mut BTreeMap<usize, usize>, addr: usize) -> usize {
+    match refs.get_mut(&addr) {
+        Some(counter) => {
+            if *counter > 1 {
+                *counter -= 1;
+                *counter
+            } else {
+                refs.remove(&addr);
+                0
+            }
+        }
+        None => {
+            // Missing entry means exclusive refcount=1.
+            0
+        }
+    }
+}
+
+/// Increase physical-page reference count for shared (COW) ownership.
+/// Returns the new refcount.
+pub fn phys_ref_inc(addr: usize) -> Result<usize, crate::mm::ValidationError> {
+    validate_page_addr_for_refcount(addr)?;
+    let mut refs = PHYS_REFCOUNTS.lock();
+    Ok(inc_ref_locked(&mut refs, addr))
+}
+
+/// Decrease physical-page reference count.
+/// Returns the remaining refcount after decrement.
+pub fn phys_ref_dec(addr: usize) -> Result<usize, crate::mm::ValidationError> {
+    validate_page_addr_for_refcount(addr)?;
+    let mut refs = PHYS_REFCOUNTS.lock();
+    Ok(dec_ref_locked(&mut refs, addr))
+}
+
+/// Get current physical-page reference count.
+///
+/// Missing entries mean implicit refcount=1 (exclusive ownership).
+pub fn phys_ref_get(addr: usize) -> usize {
+    if validate_page_addr_for_refcount(addr).is_err() {
+        return 0;
+    }
+    let refs = PHYS_REFCOUNTS.lock();
+    refs.get(&addr).copied().unwrap_or(1)
+}
+
 // ---------------------------------------------------------------------------
 // Allocation / deallocation
 // ---------------------------------------------------------------------------
@@ -659,6 +745,7 @@ pub fn alloc_page() -> Option<usize> {
             set_page_allocated(page);
             FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
             NEXT_FREE_HINT.store(page + 1, Ordering::Relaxed);
+            PHYS_REFCOUNTS.lock().remove(&(page * PAGE_SIZE));
             return Some(page * PAGE_SIZE);
         }
 
@@ -668,6 +755,7 @@ pub fn alloc_page() -> Option<usize> {
                 set_page_allocated(page);
                 FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
                 NEXT_FREE_HINT.store(page + 1, Ordering::Relaxed);
+                PHYS_REFCOUNTS.lock().remove(&(page * PAGE_SIZE));
                 return Some(page * PAGE_SIZE);
             }
         }
@@ -737,23 +825,25 @@ unsafe fn find_free_page(start_page: usize, end_page: usize) -> Option<usize> {
 
 /// Free a single physical page.
 pub fn free_page(addr: usize) -> Result<(), crate::mm::ValidationError> {
-    crate::mm::validate_page_alignment(addr)?;
+    validate_page_addr_for_refcount(addr)?;
 
-    let page = addr / PAGE_SIZE;
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
-    if page >= total || page <= 1 {
-        return Err(crate::mm::ValidationError::OutOfBounds {
-            addr,
-            min: 2 * PAGE_SIZE,
-            max: total.saturating_sub(1) * PAGE_SIZE,
-        });
+    // Keep lock order consistent with alloc path: BITMAP -> REFCOUNTS.
+    let _lock = BITMAP_LOCK.lock();
+
+    let remaining_refs = {
+        let mut refs = PHYS_REFCOUNTS.lock();
+        dec_ref_locked(&mut refs, addr)
+    };
+
+    // Still shared elsewhere: physical frame remains allocated.
+    if remaining_refs > 0 {
+        return Ok(());
     }
 
     #[cfg(not(test))]
     crate::mm::validate_unprotected_resource(addr as u64, is_pml4_protected(addr))?;
 
-    let _lock = BITMAP_LOCK.lock();
-
+    let page = addr / PAGE_SIZE;
     unsafe {
         if !is_page_free(page) {
             set_page_free(page);
@@ -797,6 +887,10 @@ pub fn alloc_pages(count: usize) -> Option<usize> {
             mark_range_allocated(start, count);
             FREE_PAGES.fetch_sub(count, Ordering::Relaxed);
             NEXT_FREE_HINT.store(start + count, Ordering::Relaxed);
+            let mut refs = PHYS_REFCOUNTS.lock();
+            for i in 0..count {
+                refs.remove(&((start + i) * PAGE_SIZE));
+            }
             return Some(start * PAGE_SIZE);
         }
 
@@ -806,6 +900,10 @@ pub fn alloc_pages(count: usize) -> Option<usize> {
                 mark_range_allocated(start, count);
                 FREE_PAGES.fetch_sub(count, Ordering::Relaxed);
                 NEXT_FREE_HINT.store(start + count, Ordering::Relaxed);
+                let mut refs = PHYS_REFCOUNTS.lock();
+                for i in 0..count {
+                    refs.remove(&((start + i) * PAGE_SIZE));
+                }
                 return Some(start * PAGE_SIZE);
             }
         }
@@ -870,39 +968,16 @@ pub fn free_pages(addr: usize, count: usize) -> Result<(), crate::mm::Validation
     crate::mm::validate_page_alignment(addr)?;
     crate::mm::validate_size(count, TOTAL_PAGES.load(Ordering::Relaxed))?;
 
-    let base_page = addr / PAGE_SIZE;
-    let total = TOTAL_PAGES.load(Ordering::Relaxed);
-
-    let _lock = BITMAP_LOCK.lock();
-
-    let mut freed = 0usize;
     for i in 0..count {
-        let page = base_page + i;
+        let page_addr = addr + i * PAGE_SIZE;
+        // Ignore out-of-range slots in partially valid ranges, preserving
+        // historical free_pages behaviour.
+        let page = page_addr / PAGE_SIZE;
+        let total = TOTAL_PAGES.load(Ordering::Relaxed);
         if page >= total || page <= 1 {
             continue;
         }
-
-        let page_addr = page * PAGE_SIZE;
-        
-        #[cfg(not(test))]
-        crate::mm::validate_unprotected_resource(page_addr as u64, is_pml4_protected(page_addr))?;
-
-        unsafe {
-            if !is_page_free(page) {
-                set_page_free(page);
-                freed += 1;
-            }
-        }
-    }
-
-    if freed > 0 {
-        FREE_PAGES.fetch_add(freed, Ordering::Relaxed);
-
-        // Update hint
-        let hint = NEXT_FREE_HINT.load(Ordering::Relaxed);
-        if base_page < hint {
-            NEXT_FREE_HINT.store(base_page, Ordering::Relaxed);
-        }
+        free_page(page_addr)?;
     }
 
     Ok(())

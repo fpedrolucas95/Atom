@@ -107,9 +107,37 @@ pub enum FaultResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSource {
+    Anonymous,
+    FileBacked,
+    Shared,
+    Cow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageShareState {
+    Exclusive,
+    CowShared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageAccount {
+    pub owner_process: Option<ProcessId>,
+    pub owner_address_space: usize,
+    pub vaddr: VirtAddr,
+    pub paddr: usize,
+    pub source: PageSource,
+    pub share_state: PageShareState,
+    pub vma_start: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClassifiedFault {
-    NonPresent,
-    Protection,
+    InvalidAddress,
+    AccessDenied,
+    NotPresentAnon,
+    CowWrite,
+    NotHandled,
 }
 
 /// Protection flags for a VMA region
@@ -199,6 +227,8 @@ impl Vma {
 pub struct VmaMap {
     /// VMAs indexed by start address
     regions: BTreeMap<usize, Vma>,
+    /// Materialized (resident) pages keyed by virtual page base
+    materialized_pages: BTreeMap<usize, PageAccount>,
     /// Total virtual bytes reserved (sum of all VMA sizes)
     reserved_bytes: usize,
     /// Total physical pages currently resident (mapped)
@@ -211,10 +241,49 @@ impl VmaMap {
     pub const fn new() -> Self {
         Self {
             regions: BTreeMap::new(),
+            materialized_pages: BTreeMap::new(),
             reserved_bytes: 0,
             resident_pages: 0,
             resident_limit: 0,
         }
+    }
+
+    fn assert_no_overlap(&self, start: usize, end: usize) -> Result<(), VmaError> {
+        if let Some((_, existing)) = self.regions.range(..=start).next_back() {
+            if existing.overlaps(start, end) {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "[VMA_ERROR] overlap detected: new=0x{:X}-0x{:X} existing=0x{:X}-0x{:X} label={}",
+                    start,
+                    end,
+                    existing.start,
+                    existing.end,
+                    existing.label
+                );
+                return Err(VmaError::Overlap);
+            }
+        }
+
+        if let Some((_, existing)) = self.regions.range(start..).next() {
+            if existing.overlaps(start, end) {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "[VMA_ERROR] overlap detected: new=0x{:X}-0x{:X} existing=0x{:X}-0x{:X} label={}",
+                    start,
+                    end,
+                    existing.start,
+                    existing.end,
+                    existing.label
+                );
+                return Err(VmaError::Overlap);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn overlaps_existing(&self, start: usize, end: usize) -> bool {
+        self.assert_no_overlap(start, end).is_err()
     }
 
     /// Insert a new VMA. Returns error if it overlaps with existing VMAs.
@@ -227,12 +296,7 @@ impl VmaMap {
             return Err(VmaError::InvalidRange);
         }
 
-        // Check for overlaps
-        for (_, existing) in self.regions.iter() {
-            if existing.overlaps(vma.start, vma.end) {
-                return Err(VmaError::Overlap);
-            }
-        }
+        self.assert_no_overlap(vma.start, vma.end)?;
 
         let size = vma.size();
         self.regions.insert(vma.start, vma);
@@ -379,6 +443,98 @@ impl VmaMap {
         self.resident_pages = self.resident_pages.saturating_sub(1);
     }
 
+    fn track_page(
+        &mut self,
+        pml4_phys: usize,
+        vma: &Vma,
+        vaddr: usize,
+        paddr: usize,
+        source: PageSource,
+    ) -> Result<(), VmaError> {
+        if !vaddr.is_multiple_of(PAGE_SIZE) || !paddr.is_multiple_of(PAGE_SIZE) {
+            return Err(VmaError::Unaligned);
+        }
+        if !vma.contains_addr(vaddr) {
+            return Err(VmaError::InvalidRange);
+        }
+        if self.materialized_pages.contains_key(&vaddr) {
+            return Err(VmaError::Overlap);
+        }
+
+        let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+        let account = PageAccount {
+            owner_process,
+            owner_address_space: pml4_phys,
+            vaddr: VirtAddr::new(vaddr),
+            paddr,
+            source,
+            share_state: PageShareState::Exclusive,
+            vma_start: vma.start,
+        };
+
+        self.materialized_pages.insert(vaddr, account);
+        self.account_map();
+
+        log_debug!(
+            LOG_ORIGIN,
+            "[PAGE_ALLOC] pid={:?} asid=0x{:X} vaddr=0x{:X} paddr=0x{:X} source={:?}",
+            owner_process,
+            pml4_phys,
+            vaddr,
+            paddr,
+            source
+        );
+
+        Ok(())
+    }
+
+    fn untrack_page(&mut self, vaddr: usize) -> Option<PageAccount> {
+        let account = self.materialized_pages.remove(&vaddr);
+        if account.is_some() {
+            self.account_unmap();
+        }
+        account
+    }
+
+    fn drain_materialized_pages(&mut self) -> alloc::vec::Vec<PageAccount> {
+        let keys: alloc::vec::Vec<usize> = self.materialized_pages.keys().copied().collect();
+        let mut pages = alloc::vec::Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(account) = self.materialized_pages.remove(&key) {
+                self.account_unmap();
+                pages.push(account);
+            }
+        }
+        pages
+    }
+
+    fn get_page_account(&self, vaddr: usize) -> Option<PageAccount> {
+        self.materialized_pages.get(&vaddr).copied()
+    }
+
+    fn upsert_page_account(&mut self, account: PageAccount) -> Result<(), VmaError> {
+        let vaddr = account.vaddr.as_usize();
+        if !vaddr.is_multiple_of(PAGE_SIZE) || !account.paddr.is_multiple_of(PAGE_SIZE) {
+            return Err(VmaError::Unaligned);
+        }
+        let Some(vma) = self.find(vaddr) else {
+            return Err(VmaError::NotFound);
+        };
+        if vma.start != account.vma_start {
+            return Err(VmaError::InvalidRange);
+        }
+
+        if self.materialized_pages.insert(vaddr, account).is_none() {
+            self.account_map();
+        }
+
+        Ok(())
+    }
+
+    fn list_vmas(&self) -> alloc::vec::Vec<Vma> {
+        self.regions.values().cloned().collect()
+    }
+
     /// Get memory statistics
     pub fn stats(&self) -> VmaStats {
         VmaStats {
@@ -515,6 +671,27 @@ pub enum VmaError {
 
 /// Global registry: maps PML4 physical address -> VmaMap
 static VMA_REGISTRY: Mutex<BTreeMap<usize, VmaMap>> = Mutex::new(BTreeMap::new());
+/// Coarse-grained address-space operation lock buckets.
+///
+/// This serializes fault materialization, fork COW marking and teardown-facing
+/// VMA/PTE transitions while the kernel has no per-ASID lock table yet.
+/// Lock hierarchy:
+///   address-space op lock -> VM page-table lock -> PMM/refcount lock.
+const ADDRESS_SPACE_LOCK_SLOTS: usize = 64;
+static ADDRESS_SPACE_OP_LOCKS: [Mutex<()>; ADDRESS_SPACE_LOCK_SLOTS] =
+    [const { Mutex::new(()) }; ADDRESS_SPACE_LOCK_SLOTS];
+
+#[inline]
+fn address_space_lock_slot(pml4_phys: usize) -> usize {
+    // Lock striping by address-space root. Collisions serialize unrelated
+    // spaces but preserve correctness and deterministic ordering.
+    (pml4_phys >> 12) & (ADDRESS_SPACE_LOCK_SLOTS - 1)
+}
+
+pub fn with_address_space_ops_lock<R>(pml4_phys: usize, f: impl FnOnce() -> R) -> R {
+    let _guard = ADDRESS_SPACE_OP_LOCKS[address_space_lock_slot(pml4_phys)].lock();
+    f()
+}
 
 fn registered_process_pml4(process_id: ProcessId) -> Result<usize, VmaError> {
     let pml4_phys = crate::process::get_process_pml4(process_id).ok_or(VmaError::NotFound)?;
@@ -598,6 +775,15 @@ pub fn find_process_free_region(
 ) -> Result<Option<usize>, VmaError> {
     let pml4_phys = registered_process_pml4(process_id)?;
     Ok(find_free_region(pml4_phys, low, high, size))
+}
+
+pub fn process_range_overlaps(
+    process_id: ProcessId,
+    start: usize,
+    end: usize,
+) -> Result<bool, VmaError> {
+    let pml4_phys = registered_process_pml4(process_id)?;
+    range_overlaps_existing(pml4_phys, start, end)
 }
 
 pub fn set_process_permissions(
@@ -735,11 +921,25 @@ pub fn find_vma(pml4_phys: usize, addr: usize) -> Option<Vma> {
     result
 }
 
+pub fn list_vmas(pml4_phys: usize) -> alloc::vec::Vec<Vma> {
+    let registry = VMA_REGISTRY.lock();
+    match registry.get(&pml4_phys) {
+        Some(map) => map.list_vmas(),
+        None => alloc::vec::Vec::new(),
+    }
+}
+
 /// Find a free virtual region in an address space
 pub fn find_free_region(pml4_phys: usize, low: usize, high: usize, size: usize) -> Option<usize> {
     let registry = VMA_REGISTRY.lock();
     let map = registry.get(&pml4_phys)?;
     map.find_free_region(low, high, size, PAGE_SIZE)
+}
+
+pub fn range_overlaps_existing(pml4_phys: usize, start: usize, end: usize) -> Result<bool, VmaError> {
+    let registry = VMA_REGISTRY.lock();
+    let map = registry.get(&pml4_phys).ok_or(VmaError::NotFound)?;
+    Ok(map.overlaps_existing(start, end))
 }
 
 /// Grow a stack VMA downward
@@ -763,6 +963,243 @@ pub fn account_unmap(pml4_phys: usize) {
     if let Some(map) = registry.get_mut(&pml4_phys) {
         map.account_unmap();
     }
+}
+
+pub fn take_materialized_page(pml4_phys: usize, vaddr: usize) -> Option<PageAccount> {
+    let mut registry = VMA_REGISTRY.lock();
+    let map = registry.get_mut(&pml4_phys)?;
+    map.untrack_page(vaddr)
+}
+
+pub fn get_materialized_page(pml4_phys: usize, vaddr: usize) -> Option<PageAccount> {
+    let registry = VMA_REGISTRY.lock();
+    let map = registry.get(&pml4_phys)?;
+    map.get_page_account(vaddr)
+}
+
+pub fn upsert_materialized_page(
+    pml4_phys: usize,
+    account: PageAccount,
+) -> Result<(), VmaError> {
+    let mut registry = VMA_REGISTRY.lock();
+    let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
+    map.upsert_page_account(account)
+}
+
+pub fn clone_vmas_for_fork(
+    parent_pml4_phys: usize,
+    child_pml4_phys: usize,
+    parent_pid: ProcessId,
+    child_pid: ProcessId,
+) -> Result<usize, VmaError> {
+    let mut registry = VMA_REGISTRY.lock();
+    let parent_map = registry.get(&parent_pml4_phys).ok_or(VmaError::NotFound)?;
+    let parent_regions = parent_map.list_vmas();
+    let child_map = registry
+        .get_mut(&child_pml4_phys)
+        .ok_or(VmaError::NotFound)?;
+
+    for region in parent_regions.iter().cloned() {
+        child_map.insert(region)?;
+    }
+
+    log_info!(
+        LOG_ORIGIN,
+        "[FORK] parent_pid={} child_pid={} parent_cr3=0x{:X} child_cr3=0x{:X}",
+        parent_pid,
+        child_pid,
+        parent_pml4_phys,
+        child_pml4_phys
+    );
+
+    for vma in &parent_regions {
+        log_debug!(
+            LOG_ORIGIN,
+            "[FORK_VMA] child_pid={} start=0x{:X} end=0x{:X} prot=0x{:X} label={}",
+            child_pid,
+            vma.start,
+            vma.end,
+            vma.perms.bits(),
+            vma.label
+        );
+    }
+
+    Ok(parent_regions.len())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ForkCloneStats {
+    pub scanned_pages: usize,
+    pub shared_pages: usize,
+    pub cow_pages: usize,
+    pub readonly_shared_pages: usize,
+}
+
+#[inline]
+fn map_vm_error(err: crate::mm::vm::VmError) -> VmaError {
+    match err {
+        crate::mm::vm::VmError::OutOfMemory => VmaError::OutOfMemory,
+        _ => VmaError::InvalidRange,
+    }
+}
+
+#[inline]
+fn is_private_cow_eligible_vma(vma: &Vma) -> bool {
+    matches!(vma.backing, VmaBacking::Anonymous | VmaBacking::Stack { .. })
+}
+
+pub fn clone_cow_private_mappings_for_fork(
+    parent_pml4_phys: usize,
+    child_pml4_phys: usize,
+    parent_pid: ProcessId,
+    child_pid: ProcessId,
+) -> Result<ForkCloneStats, VmaError> {
+    use crate::mm::pmm;
+    use crate::mm::vm::{self, PageFlags, VmError};
+
+    let parent_vmas = list_vmas(parent_pml4_phys);
+    let mut stats = ForkCloneStats::default();
+
+    for vma in parent_vmas {
+        if !is_private_cow_eligible_vma(&vma) {
+            continue;
+        }
+
+        let mut page = vma.start;
+        while page < vma.end {
+            stats.scanned_pages += 1;
+
+            let (paddr, flags) = match vm::query_mapping_in_pml4(parent_pml4_phys, page) {
+                Ok(v) => v,
+                Err(VmError::NotMapped) => {
+                    page = page.saturating_add(PAGE_SIZE);
+                    continue;
+                }
+                Err(err) => return Err(map_vm_error(err)),
+            };
+
+            if !flags.contains(PageFlags::USER) {
+                page = page.saturating_add(PAGE_SIZE);
+                continue;
+            }
+
+            let logical_writable = vma.perms.contains(VmaPermissions::WRITE);
+            let (parent_new_flags, child_flags, source) = if logical_writable {
+                let cow_flags = vm::set_cow(flags);
+                (cow_flags, cow_flags, PageSource::Cow)
+            } else {
+                let ro_flags = vm::clear_cow(flags).without(PageFlags::WRITABLE);
+                (ro_flags, ro_flags, PageSource::Shared)
+            };
+
+            pmm::phys_ref_inc(paddr).map_err(|_| VmaError::InvalidRange)?;
+
+            if let Err(err) = vm::remap_page_in_pml4(child_pml4_phys, page, paddr, child_flags) {
+                let _ = pmm::phys_ref_dec(paddr);
+                return Err(map_vm_error(err));
+            }
+
+            if parent_new_flags.bits() != flags.bits() {
+                if let Err(err) =
+                    vm::remap_page_flags_in_pml4(parent_pml4_phys, page, parent_new_flags)
+                {
+                    let _ = vm::unmap_page_in_pml4(child_pml4_phys, page);
+                    let _ = pmm::phys_ref_dec(paddr);
+                    return Err(map_vm_error(err));
+                }
+            }
+
+            let current_ref = pmm::phys_ref_get(paddr);
+            stats.shared_pages += 1;
+            if logical_writable {
+                stats.cow_pages += 1;
+            } else {
+                stats.readonly_shared_pages += 1;
+            }
+
+            let parent_account = PageAccount {
+                owner_process: Some(parent_pid),
+                owner_address_space: parent_pml4_phys,
+                vaddr: VirtAddr::new(page),
+                paddr,
+                source,
+                share_state: PageShareState::CowShared,
+                vma_start: vma.start,
+            };
+            upsert_materialized_page(parent_pml4_phys, parent_account)?;
+
+            let child_account = PageAccount {
+                owner_process: Some(child_pid),
+                owner_address_space: child_pml4_phys,
+                vaddr: VirtAddr::new(page),
+                paddr,
+                source,
+                share_state: PageShareState::CowShared,
+                vma_start: vma.start,
+            };
+            upsert_materialized_page(child_pml4_phys, child_account)?;
+
+            log_info!(
+                LOG_ORIGIN,
+                "[FORK_COW] parent_pid={} child_pid={} vaddr=0x{:X} paddr=0x{:X} refcount={}",
+                parent_pid,
+                child_pid,
+                page,
+                paddr,
+                current_ref
+            );
+            log_debug!(
+                LOG_ORIGIN,
+                "[PAGE_SHARE] parent_pid={} child_pid={} parent_asid=0x{:X} child_asid=0x{:X} vaddr=0x{:X} paddr=0x{:X} source={:?} share={:?}",
+                parent_pid,
+                child_pid,
+                parent_pml4_phys,
+                child_pml4_phys,
+                page,
+                paddr,
+                source,
+                PageShareState::CowShared
+            );
+
+            page = page.saturating_add(PAGE_SIZE);
+        }
+    }
+
+    Ok(stats)
+}
+
+pub fn drain_materialized_pages(pml4_phys: usize) -> alloc::vec::Vec<PageAccount> {
+    let mut registry = VMA_REGISTRY.lock();
+    match registry.get_mut(&pml4_phys) {
+        Some(map) => map.drain_materialized_pages(),
+        None => alloc::vec::Vec::new(),
+    }
+}
+
+pub fn free_page_account(account: PageAccount) -> bool {
+    let should_free = matches!(
+        account.source,
+        PageSource::Anonymous | PageSource::Cow | PageSource::Shared
+    );
+    let mut freed = false;
+    if should_free {
+        freed = crate::mm::pmm::free_page(account.paddr).is_ok();
+        if freed {
+            crate::thread::record_physical_pages_freed(1);
+        } else {
+            log_warn!(
+                LOG_ORIGIN,
+                "[PAGE_FREE_FAIL] pid={:?} asid=0x{:X} vaddr=0x{:X} paddr=0x{:X} source={:?}",
+                account.owner_process,
+                account.owner_address_space,
+                account.vaddr.as_usize(),
+                account.paddr,
+                account.source
+            );
+        }
+    }
+
+    freed
 }
 
 /// Get memory stats for an address space
@@ -796,20 +1233,93 @@ fn align_up(val: usize, align: usize) -> usize {
 // Demand paging: page fault resolution
 // ---------------------------------------------------------------------------
 
-fn classify_fault(error_code: u64) -> ClassifiedFault {
-    // x86 PF error bit 0: 0 = non-present, 1 = protection violation.
-    if (error_code & 0x1) != 0 {
-        ClassifiedFault::Protection
+fn classify_fault(
+    pml4_phys: usize,
+    ctx: &FaultContext,
+    error_code: u64,
+    vma: Option<&Vma>,
+) -> ClassifiedFault {
+    use crate::mm::vm::{self, PageFlags};
+
+    // x86 PF error bit 3: reserved-bit violation
+    if (error_code & 0x8) != 0 {
+        return ClassifiedFault::NotHandled;
+    }
+
+    let Some(vma) = vma else {
+        return ClassifiedFault::InvalidAddress;
+    };
+
+    if !vma.permits(ctx.access) {
+        return ClassifiedFault::AccessDenied;
+    }
+
+    let present_fault = (error_code & 0x1) != 0;
+    let write_fault = matches!(ctx.access, AccessType::Write);
+
+    if present_fault && write_fault {
+        let page_addr = ctx.addr.page_base();
+        if let Ok((_phys, flags)) = vm::query_mapping_in_pml4(pml4_phys, page_addr) {
+            if vm::is_cow(flags) && !flags.contains(PageFlags::WRITABLE) {
+                return ClassifiedFault::CowWrite;
+            }
+        }
+        return ClassifiedFault::AccessDenied;
+    }
+
+    if !present_fault {
+        match vma.backing {
+            VmaBacking::Anonymous | VmaBacking::Stack { .. } => ClassifiedFault::NotPresentAnon,
+            _ => ClassifiedFault::NotHandled,
+        }
     } else {
-        ClassifiedFault::NonPresent
+        ClassifiedFault::AccessDenied
     }
 }
 
-fn admit_fault(ctx: &FaultContext, vma: &Vma) -> Result<(), FaultResult> {
-    if vma.permits(ctx.access) {
-        Ok(())
-    } else {
-        Err(FaultResult::ProtectionViolation)
+fn admit_fault(
+    ctx: &FaultContext,
+    vma: Option<&Vma>,
+    classified: ClassifiedFault,
+) -> Result<(), FaultResult> {
+    let Some(vma) = vma else {
+        return Err(FaultResult::InvalidAddress);
+    };
+
+    match classified {
+        ClassifiedFault::InvalidAddress => Err(FaultResult::InvalidAddress),
+        ClassifiedFault::AccessDenied => Err(FaultResult::ProtectionViolation),
+        ClassifiedFault::NotHandled => Err(FaultResult::NotHandled),
+        ClassifiedFault::NotPresentAnon => {
+            if vma.permits(ctx.access) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[PF] admit=ok addr=0x{:X} access={:?} perms=0x{:X} label={}",
+                    ctx.addr.as_usize(),
+                    ctx.access,
+                    vma.perms.bits(),
+                    vma.label
+                );
+                Ok(())
+            } else {
+                Err(FaultResult::ProtectionViolation)
+            }
+        }
+        ClassifiedFault::CowWrite => {
+            if vma.perms.contains(VmaPermissions::WRITE) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[PF] admit=ok addr=0x{:X} access={:?} perms=0x{:X} label={}",
+                    ctx.addr.as_usize(),
+                    ctx.access,
+                    vma.perms.bits(),
+                    vma.label
+                );
+                Ok(())
+            } else {
+                Err(FaultResult::ProtectionViolation)
+            }
+        }
     }
 }
 
@@ -820,11 +1330,11 @@ fn materialize_fault(
     vma: &Vma,
 ) -> FaultResult {
     match classified {
-        ClassifiedFault::Protection => FaultResult::ProtectionViolation,
-        ClassifiedFault::NonPresent => match vma.backing {
-            VmaBacking::Anonymous | VmaBacking::Stack { .. } => materialize_anon(pml4_phys, ctx, vma),
-            _ => FaultResult::NotHandled,
-        },
+        ClassifiedFault::InvalidAddress => FaultResult::InvalidAddress,
+        ClassifiedFault::AccessDenied => FaultResult::ProtectionViolation,
+        ClassifiedFault::NotHandled => FaultResult::NotHandled,
+        ClassifiedFault::NotPresentAnon => materialize_anon(pml4_phys, ctx, vma),
+        ClassifiedFault::CowWrite => materialize_cow(pml4_phys, ctx, vma),
     }
 }
 
@@ -837,18 +1347,6 @@ fn materialize_anon(
     use crate::mm::vm::{self, PageFlags, VmError};
 
     let page_addr = ctx.addr.page_base();
-
-    if vm::is_page_present_in_pml4(pml4_phys, page_addr) {
-        log_debug!(
-            LOG_ORIGIN,
-            "[PF] materialize=anon pml4=0x{:X} page=0x{:X} result=already_present label={}",
-            pml4_phys,
-            page_addr,
-            vma.label
-        );
-        return FaultResult::Resolved;
-    }
-
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,
         None => {
@@ -863,55 +1361,276 @@ fn materialize_anon(
         }
     };
 
-    let mut flags = PageFlags::PRESENT | PageFlags::USER;
-    if vma.perms.contains(VmaPermissions::WRITE) {
-        flags |= PageFlags::WRITABLE;
-    }
-    if !vma.perms.contains(VmaPermissions::EXEC) {
-        flags |= PageFlags::NO_EXECUTE;
-    }
-
-    match vm::remap_page_in_pml4(pml4_phys, page_addr, phys, flags) {
-        Ok(()) => {
-            {
-                let mut registry = VMA_REGISTRY.lock();
-                if let Some(map) = registry.get_mut(&pml4_phys) {
-                    map.account_map();
-                }
-            }
-
+    with_address_space_ops_lock(pml4_phys, || {
+        if vm::is_page_present_in_pml4(pml4_phys, page_addr) {
+            let _ = pmm::free_page(phys);
             log_debug!(
                 LOG_ORIGIN,
-                "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} access={:?} user={} label={} result=mapped",
+                "[PF] materialize=anon pml4=0x{:X} page=0x{:X} result=already_present label={}",
                 pml4_phys,
                 page_addr,
-                phys,
-                ctx.access,
-                ctx.is_user,
                 vma.label
             );
-            FaultResult::Resolved
+            return FaultResult::Resolved;
         }
-        Err(err) => {
-            let _ = pmm::free_page(phys);
-            let result = if matches!(err, VmError::OutOfMemory) {
-                FaultResult::OutOfMemory
-            } else {
-                FaultResult::NotHandled
-            };
+
+        let mut flags = PageFlags::PRESENT | PageFlags::USER;
+        if vma.perms.contains(VmaPermissions::WRITE) {
+            flags |= PageFlags::WRITABLE;
+        }
+        if !vma.perms.contains(VmaPermissions::EXEC) {
+            flags |= PageFlags::NO_EXECUTE;
+        }
+
+        match vm::remap_page_in_pml4(pml4_phys, page_addr, phys, flags) {
+            Ok(()) => {
+                let tracked = {
+                    let mut registry = VMA_REGISTRY.lock();
+                    if let Some(map) = registry.get_mut(&pml4_phys) {
+                        map.track_page(
+                            pml4_phys,
+                            vma,
+                            page_addr,
+                            phys,
+                            PageSource::Anonymous,
+                        )
+                    } else {
+                        Err(VmaError::NotFound)
+                    }
+                };
+
+                if let Err(track_err) = tracked {
+                    let _ = vm::unmap_page_in_pml4(pml4_phys, page_addr);
+                    let _ = pmm::free_page(phys);
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} result=not_handled reason=track_failed err={:?} label={}",
+                        pml4_phys,
+                        page_addr,
+                        phys,
+                        track_err,
+                        vma.label
+                    );
+                    return FaultResult::NotHandled;
+                }
+
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} access={:?} user={} label={} result=mapped",
+                    pml4_phys,
+                    page_addr,
+                    phys,
+                    ctx.access,
+                    ctx.is_user,
+                    vma.label
+                );
+                FaultResult::Resolved
+            }
+            Err(err) => {
+                let _ = pmm::free_page(phys);
+                let result = if matches!(err, VmError::OutOfMemory) {
+                    FaultResult::OutOfMemory
+                } else {
+                    FaultResult::NotHandled
+                };
+                log_warn!(
+                    LOG_ORIGIN,
+                    "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} result={:?} err={:?} label={}",
+                    pml4_phys,
+                    page_addr,
+                    phys,
+                    result,
+                    err,
+                    vma.label
+                );
+                result
+            }
+        }
+    })
+}
+
+fn materialize_cow(
+    pml4_phys: usize,
+    ctx: &FaultContext,
+    vma: &Vma,
+) -> FaultResult {
+    use crate::mm::pmm;
+    use crate::mm::vm::{self, PageFlags};
+
+    let page_addr = ctx.addr.page_base();
+    const MAX_COW_RETRIES: usize = 3;
+
+    for _attempt in 0..MAX_COW_RETRIES {
+        let (snapshot_paddr, snapshot_flags) = match vm::query_mapping_in_pml4(pml4_phys, page_addr) {
+            Ok(mapping) => mapping,
+            Err(err) => {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "[PF] materialize=cow pml4=0x{:X} page=0x{:X} result=not_handled err={:?} label={}",
+                    pml4_phys,
+                    page_addr,
+                    err,
+                    vma.label
+                );
+                return FaultResult::NotHandled;
+            }
+        };
+
+        if !vm::is_cow(snapshot_flags) || snapshot_flags.contains(PageFlags::WRITABLE) {
+            // Another CPU may have already completed the COW break.
+            if snapshot_flags.contains(PageFlags::WRITABLE) && !vm::is_cow(snapshot_flags) {
+                return FaultResult::Resolved;
+            }
             log_warn!(
                 LOG_ORIGIN,
-                "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} result={:?} err={:?} label={}",
+                "[PF] materialize=cow pml4=0x{:X} page=0x{:X} result=not_handled reason=invalid_flags flags=0x{:X} label={}",
                 pml4_phys,
                 page_addr,
-                phys,
-                result,
-                err,
+                snapshot_flags.bits(),
                 vma.label
             );
-            result
+            return FaultResult::NotHandled;
+        }
+
+        let snapshot_ref = pmm::phys_ref_get(snapshot_paddr);
+        let mut staged_new_paddr = if snapshot_ref > 1 {
+            match pmm::alloc_page_zeroed() {
+                Some(new_paddr) => {
+                    vm::copy_phys_page(new_paddr, snapshot_paddr);
+                    Some(new_paddr)
+                }
+                None => return FaultResult::OutOfMemory,
+            }
+        } else {
+            None
+        };
+
+        enum CowCommitResult {
+            Resolved,
+            Retry,
+            OutOfMemory,
+            NotHandled,
+        }
+
+        let commit = with_address_space_ops_lock(pml4_phys, || {
+            let (old_paddr, old_flags) = match vm::query_mapping_in_pml4(pml4_phys, page_addr) {
+                Ok(mapping) => mapping,
+                Err(_) => {
+                    if let Some(staged) = staged_new_paddr.take() {
+                        let _ = pmm::free_page(staged);
+                    }
+                    return CowCommitResult::Retry;
+                }
+            };
+
+            if old_paddr != snapshot_paddr
+                || !vm::is_cow(old_flags)
+                || old_flags.contains(PageFlags::WRITABLE)
+            {
+                if let Some(staged) = staged_new_paddr.take() {
+                    let _ = pmm::free_page(staged);
+                }
+                if old_flags.contains(PageFlags::WRITABLE) && !vm::is_cow(old_flags) {
+                    return CowCommitResult::Resolved;
+                }
+                return CowCommitResult::Retry;
+            }
+
+            let old_ref = pmm::phys_ref_get(old_paddr);
+            if old_ref <= 1 {
+                if let Some(staged) = staged_new_paddr.take() {
+                    let _ = pmm::free_page(staged);
+                }
+
+                let new_flags = vm::clear_cow(old_flags).with(PageFlags::WRITABLE);
+                if vm::remap_page_in_pml4(pml4_phys, page_addr, old_paddr, new_flags).is_err() {
+                    return CowCommitResult::NotHandled;
+                }
+
+                let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+                let account = PageAccount {
+                    owner_process,
+                    owner_address_space: pml4_phys,
+                    vaddr: VirtAddr::new(page_addr),
+                    paddr: old_paddr,
+                    source: PageSource::Anonymous,
+                    share_state: PageShareState::Exclusive,
+                    vma_start: vma.start,
+                };
+                let _ = upsert_materialized_page(pml4_phys, account);
+
+                log_info!(
+                    LOG_ORIGIN,
+                    "[COW] promote_unique pid={:?} asid=0x{:X} vaddr=0x{:X} paddr=0x{:X}",
+                    owner_process,
+                    pml4_phys,
+                    page_addr,
+                    old_paddr
+                );
+                return CowCommitResult::Resolved;
+            }
+
+            let new_paddr = match staged_new_paddr.take() {
+                Some(p) => p,
+                None => match pmm::alloc_page_zeroed() {
+                    Some(p) => {
+                        vm::copy_phys_page(p, old_paddr);
+                        p
+                    }
+                    None => return CowCommitResult::OutOfMemory,
+                },
+            };
+
+            let new_flags = vm::clear_cow(old_flags).with(PageFlags::WRITABLE);
+            if vm::remap_page_in_pml4(pml4_phys, page_addr, new_paddr, new_flags).is_err() {
+                let _ = pmm::free_page(new_paddr);
+                return CowCommitResult::NotHandled;
+            }
+
+            let _ = pmm::phys_ref_dec(old_paddr);
+
+            let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+            let account = PageAccount {
+                owner_process,
+                owner_address_space: pml4_phys,
+                vaddr: VirtAddr::new(page_addr),
+                paddr: new_paddr,
+                source: PageSource::Anonymous,
+                share_state: PageShareState::Exclusive,
+                vma_start: vma.start,
+            };
+            let _ = upsert_materialized_page(pml4_phys, account);
+
+            log_info!(
+                LOG_ORIGIN,
+                "[COW] break pid={:?} asid=0x{:X} vaddr=0x{:X} old_paddr=0x{:X} new_paddr=0x{:X} old_ref={}",
+                owner_process,
+                pml4_phys,
+                page_addr,
+                old_paddr,
+                new_paddr,
+                old_ref
+            );
+            CowCommitResult::Resolved
+        });
+
+        match commit {
+            CowCommitResult::Resolved => return FaultResult::Resolved,
+            CowCommitResult::Retry => continue,
+            CowCommitResult::OutOfMemory => return FaultResult::OutOfMemory,
+            CowCommitResult::NotHandled => return FaultResult::NotHandled,
         }
     }
+
+    log_warn!(
+        LOG_ORIGIN,
+        "[PF] materialize=cow pml4=0x{:X} page=0x{:X} result=not_handled reason=retry_exhausted attempts={} label={}",
+        pml4_phys,
+        page_addr,
+        MAX_COW_RETRIES,
+        vma.label
+    );
+    FaultResult::NotHandled
 }
 
 /// Attempt to resolve a page fault with a deterministic pipeline:
@@ -921,32 +1640,7 @@ pub fn handle_page_fault(
     ctx: FaultContext,
     error_code: u64,
 ) -> FaultResult {
-    let classified = classify_fault(error_code);
     let page_addr = ctx.addr.page_base();
-
-    log_debug!(
-        LOG_ORIGIN,
-        "[PF] classify={:?} addr=0x{:X} access={:?} user={} err={:#X} pml4=0x{:X}",
-        classified,
-        ctx.addr.as_usize(),
-        ctx.access,
-        ctx.is_user,
-        error_code,
-        pml4_phys
-    );
-
-    // Bit 3 indicates reserved-bit violation in x86 page-fault errors.
-    if (error_code & 0x8) != 0 {
-        log_warn!(
-            LOG_ORIGIN,
-            "[PF] classify={:?} addr=0x{:X} result=not_handled reason=reserved_bit pml4=0x{:X}",
-            classified,
-            ctx.addr.as_usize(),
-            pml4_phys
-        );
-        return FaultResult::NotHandled;
-    }
-
     let vma = {
         let registry = VMA_REGISTRY.lock();
         let map = match registry.get(&pml4_phys) {
@@ -976,7 +1670,7 @@ pub fn handle_page_fault(
                     vma.backing,
                     vma.label
                 );
-                vma.clone()
+                Some(vma.clone())
             }
             None => {
                 log_warn!(
@@ -987,24 +1681,38 @@ pub fn handle_page_fault(
                     pml4_phys,
                     map.len()
                 );
-                return FaultResult::InvalidAddress;
+                None
             }
         }
     };
 
-    if let Err(result) = admit_fault(&ctx, &vma) {
+    let classified = classify_fault(pml4_phys, &ctx, error_code, vma.as_ref());
+    log_debug!(
+        LOG_ORIGIN,
+        "[PF] classify={:?} addr=0x{:X} access={:?} user={} err={:#X} pml4=0x{:X}",
+        classified,
+        ctx.addr.as_usize(),
+        ctx.access,
+        ctx.is_user,
+        error_code,
+        pml4_phys
+    );
+
+    if let Err(result) = admit_fault(&ctx, vma.as_ref(), classified) {
         log_warn!(
             LOG_ORIGIN,
-            "[PF] admit=deny addr=0x{:X} access={:?} perms=0x{:X} result={:?} label={}",
+            "[PF] admit=deny addr=0x{:X} access={:?} result={:?} label={}",
             ctx.addr.as_usize(),
             ctx.access,
-            vma.perms.bits(),
             result,
-            vma.label
+            vma.map(|v| v.label).unwrap_or("none")
         );
         return result;
     }
 
+    let Some(vma) = vma else {
+        return FaultResult::InvalidAddress;
+    };
     let result = materialize_fault(pml4_phys, &ctx, classified, &vma);
     log_debug!(
         LOG_ORIGIN,
@@ -1020,5 +1728,588 @@ pub fn handle_page_fault(
 }
 
 pub fn init() {
+    run_fault_pipeline_self_tests();
+    run_cow_fork_self_tests();
     log_info!(LOG_ORIGIN, "VMA subsystem initialized — demand paging ready");
+}
+
+fn run_fault_pipeline_self_tests() {
+    struct FaultPipelineSim {
+        vmas: VmaMap,
+        present_pages: BTreeMap<usize, usize>,
+        next_phys: usize,
+        faults: usize,
+        allocs: usize,
+        maps: usize,
+    }
+
+    impl FaultPipelineSim {
+        fn new(vmas: alloc::vec::Vec<Vma>) -> Self {
+            let mut map = VmaMap::new();
+            for vma in vmas {
+                map.insert(vma).expect("self-test must build valid VMA map");
+            }
+            Self {
+                vmas: map,
+                present_pages: BTreeMap::new(),
+                next_phys: 0x1000_0000,
+                faults: 0,
+                allocs: 0,
+                maps: 0,
+            }
+        }
+
+        fn write_byte(&mut self, addr: usize) -> FaultResult {
+            let page = addr & !(PAGE_SIZE - 1);
+            let Some(vma) = self.vmas.find(page) else {
+                self.faults += 1;
+                return FaultResult::InvalidAddress;
+            };
+
+            if !vma.permits(AccessType::Write) {
+                self.faults += 1;
+                return FaultResult::ProtectionViolation;
+            }
+
+            if self.present_pages.contains_key(&page) {
+                return FaultResult::Resolved;
+            }
+
+            self.faults += 1;
+            let phys = self.next_phys;
+            self.next_phys += PAGE_SIZE;
+            self.allocs += 1;
+            self.maps += 1;
+            self.present_pages.insert(page, phys);
+            FaultResult::Resolved
+        }
+    }
+
+    // Teste 1: Single Page
+    {
+        let base = 0x2000_0000;
+        let mut sim = FaultPipelineSim::new(alloc::vec![
+            Vma {
+                start: base,
+                end: base + PAGE_SIZE,
+                perms: VmaPermissions::read_write(),
+                backing: VmaBacking::Anonymous,
+                label: "pf_test_single",
+            },
+        ]);
+
+        assert_eq!(sim.write_byte(base), FaultResult::Resolved);
+        assert_eq!(sim.write_byte(base), FaultResult::Resolved);
+        assert_eq!(sim.faults, 1);
+        assert_eq!(sim.allocs, 1);
+        assert_eq!(sim.maps, 1);
+    }
+
+    // Teste 2: Multi Page
+    {
+        let base = 0x3000_0000;
+        const PAGES: usize = 8;
+        let mut sim = FaultPipelineSim::new(alloc::vec![
+            Vma {
+                start: base,
+                end: base + (PAGES * PAGE_SIZE),
+                perms: VmaPermissions::read_write(),
+                backing: VmaBacking::Anonymous,
+                label: "pf_test_multi",
+            },
+        ]);
+
+        for i in 0..PAGES {
+            assert_eq!(
+                sim.write_byte(base + i * PAGE_SIZE),
+                FaultResult::Resolved
+            );
+        }
+        assert_eq!(sim.faults, PAGES);
+        assert_eq!(sim.allocs, PAGES);
+        assert_eq!(sim.maps, PAGES);
+    }
+
+    // Teste 3: Re-access
+    {
+        let base = 0x4000_0000;
+        let mut sim = FaultPipelineSim::new(alloc::vec![
+            Vma {
+                start: base,
+                end: base + PAGE_SIZE,
+                perms: VmaPermissions::read_write(),
+                backing: VmaBacking::Anonymous,
+                label: "pf_test_reaccess",
+            },
+        ]);
+
+        for _ in 0..100 {
+            assert_eq!(sim.write_byte(base), FaultResult::Resolved);
+        }
+        assert_eq!(sim.faults, 1);
+        assert_eq!(sim.allocs, 1);
+    }
+
+    // Teste 4: Invalid Access
+    {
+        let base = 0x5000_0000;
+        let mut sim = FaultPipelineSim::new(alloc::vec![
+            Vma {
+                start: base,
+                end: base + PAGE_SIZE,
+                perms: VmaPermissions::read_write(),
+                backing: VmaBacking::Anonymous,
+                label: "pf_test_invalid",
+            },
+        ]);
+
+        assert_eq!(
+            sim.write_byte(base + PAGE_SIZE * 2),
+            FaultResult::InvalidAddress
+        );
+        assert_eq!(sim.faults, 1);
+        assert_eq!(sim.allocs, 0);
+    }
+
+    // Teste 5: Protection Fault
+    {
+        let base = 0x6000_0000;
+        let mut sim = FaultPipelineSim::new(alloc::vec![
+            Vma {
+                start: base,
+                end: base + PAGE_SIZE,
+                perms: VmaPermissions::READ,
+                backing: VmaBacking::Anonymous,
+                label: "pf_test_prot",
+            },
+        ]);
+
+        assert_eq!(sim.write_byte(base), FaultResult::ProtectionViolation);
+        assert_eq!(sim.faults, 1);
+        assert_eq!(sim.allocs, 0);
+    }
+
+    log_info!(LOG_ORIGIN, "[PF_TEST] all 5 fault pipeline tests passed");
+}
+
+fn run_cow_fork_self_tests() {
+    #[derive(Clone, Copy)]
+    enum SimProc {
+        Parent,
+        Child,
+    }
+
+    #[derive(Clone, Copy)]
+    struct SimPte {
+        paddr: usize,
+        writable: bool,
+        cow: bool,
+    }
+
+    struct SimAddressSpace {
+        vmas: VmaMap,
+        pages: BTreeMap<usize, SimPte>,
+    }
+
+    impl SimAddressSpace {
+        fn new(vmas: alloc::vec::Vec<Vma>) -> Self {
+            let mut map = VmaMap::new();
+            for vma in vmas {
+                map.insert(vma).expect("self-test must build valid VMA map");
+            }
+            Self {
+                vmas: map,
+                pages: BTreeMap::new(),
+            }
+        }
+    }
+
+    struct CowForkSim {
+        parent: SimAddressSpace,
+        child: Option<SimAddressSpace>,
+        next_phys: usize,
+        refcounts: BTreeMap<usize, usize>,
+        page_data: BTreeMap<usize, alloc::vec::Vec<u8>>,
+        faults: usize,
+        allocs: usize,
+        copies: usize,
+        shares: usize,
+    }
+
+    impl CowForkSim {
+        fn new(vmas: alloc::vec::Vec<Vma>) -> Self {
+            Self {
+                parent: SimAddressSpace::new(vmas),
+                child: None,
+                next_phys: 0x2000_0000,
+                refcounts: BTreeMap::new(),
+                page_data: BTreeMap::new(),
+                faults: 0,
+                allocs: 0,
+                copies: 0,
+                shares: 0,
+            }
+        }
+
+        fn aspace(&self, who: SimProc) -> &SimAddressSpace {
+            match who {
+                SimProc::Parent => &self.parent,
+                SimProc::Child => self.child.as_ref().expect("child must exist"),
+            }
+        }
+
+        fn aspace_mut(&mut self, who: SimProc) -> &mut SimAddressSpace {
+            match who {
+                SimProc::Parent => &mut self.parent,
+                SimProc::Child => self.child.as_mut().expect("child must exist"),
+            }
+        }
+
+        fn alloc_phys_page(&mut self) -> usize {
+            let paddr = self.next_phys;
+            self.next_phys += PAGE_SIZE;
+            self.allocs += 1;
+            self.refcounts.insert(paddr, 1);
+            self.page_data.insert(paddr, alloc::vec![0; PAGE_SIZE]);
+            paddr
+        }
+
+        fn ref_get(&self, paddr: usize) -> usize {
+            self.refcounts.get(&paddr).copied().unwrap_or(0)
+        }
+
+        fn inc_ref(&mut self, paddr: usize) {
+            let counter = self.refcounts.entry(paddr).or_insert(0);
+            *counter += 1;
+        }
+
+        fn dec_ref(&mut self, paddr: usize) {
+            if let Some(counter) = self.refcounts.get_mut(&paddr) {
+                if *counter > 1 {
+                    *counter -= 1;
+                } else {
+                    self.refcounts.remove(&paddr);
+                    self.page_data.remove(&paddr);
+                }
+            }
+        }
+
+        fn ensure_mapping_for_access(
+            &mut self,
+            who: SimProc,
+            addr: usize,
+            access: AccessType,
+        ) -> Result<(), FaultResult> {
+            let page = addr & !(PAGE_SIZE - 1);
+            let Some(vma) = self.aspace(who).vmas.find(page).cloned() else {
+                self.faults += 1;
+                return Err(FaultResult::InvalidAddress);
+            };
+
+            if !vma.permits(access) {
+                self.faults += 1;
+                return Err(FaultResult::ProtectionViolation);
+            }
+
+            if !self.aspace(who).pages.contains_key(&page) {
+                self.faults += 1;
+                let phys = self.alloc_phys_page();
+                let pte = SimPte {
+                    paddr: phys,
+                    writable: vma.permits(AccessType::Write),
+                    cow: false,
+                };
+                self.aspace_mut(who).pages.insert(page, pte);
+                return Ok(());
+            }
+
+            if matches!(access, AccessType::Write) {
+                let pte = self.aspace(who).pages.get(&page).copied().expect("mapped page");
+                if pte.writable {
+                    return Ok(());
+                }
+
+                self.faults += 1;
+                if !pte.cow {
+                    return Err(FaultResult::ProtectionViolation);
+                }
+
+                let old_ref = self.ref_get(pte.paddr);
+                if old_ref <= 1 {
+                    let mut promoted = pte;
+                    promoted.writable = true;
+                    promoted.cow = false;
+                    self.aspace_mut(who).pages.insert(page, promoted);
+                    return Ok(());
+                }
+
+                let new_phys = self.alloc_phys_page();
+                let old_data = self
+                    .page_data
+                    .get(&pte.paddr)
+                    .cloned()
+                    .unwrap_or_else(|| alloc::vec![0; PAGE_SIZE]);
+                self.page_data.insert(new_phys, old_data);
+                self.copies += 1;
+                self.dec_ref(pte.paddr);
+
+                self.aspace_mut(who).pages.insert(
+                    page,
+                    SimPte {
+                        paddr: new_phys,
+                        writable: true,
+                        cow: false,
+                    },
+                );
+            }
+
+            Ok(())
+        }
+
+        fn write_byte(&mut self, who: SimProc, addr: usize, value: u8) -> FaultResult {
+            if let Err(err) = self.ensure_mapping_for_access(who, addr, AccessType::Write) {
+                return err;
+            }
+
+            let page = addr & !(PAGE_SIZE - 1);
+            let offset = addr & (PAGE_SIZE - 1);
+            let pte = self
+                .aspace(who)
+                .pages
+                .get(&page)
+                .copied()
+                .expect("write mapping must exist");
+            let data = self
+                .page_data
+                .entry(pte.paddr)
+                .or_insert_with(|| alloc::vec![0; PAGE_SIZE]);
+            data[offset] = value;
+            FaultResult::Resolved
+        }
+
+        fn read_byte(&mut self, who: SimProc, addr: usize) -> Result<u8, FaultResult> {
+            self.ensure_mapping_for_access(who, addr, AccessType::Read)?;
+
+            let page = addr & !(PAGE_SIZE - 1);
+            let offset = addr & (PAGE_SIZE - 1);
+            let pte = self
+                .aspace(who)
+                .pages
+                .get(&page)
+                .copied()
+                .expect("read mapping must exist");
+            let value = self
+                .page_data
+                .get(&pte.paddr)
+                .and_then(|buf| buf.get(offset).copied())
+                .unwrap_or(0);
+            Ok(value)
+        }
+
+        fn fork(&mut self) {
+            let child_vmas = self.parent.vmas.list_vmas();
+            let parent_snapshot: alloc::vec::Vec<(usize, SimPte, bool)> = self
+                .parent
+                .pages
+                .iter()
+                .filter_map(|(&vaddr, &pte)| {
+                    let vma = self.parent.vmas.find(vaddr)?;
+                    Some((vaddr, pte, vma.perms.contains(VmaPermissions::WRITE)))
+                })
+                .collect();
+
+            let mut child = SimAddressSpace::new(child_vmas);
+            for (vaddr, pte, writable_vma) in parent_snapshot {
+                let mut parent_pte = pte;
+                let mut child_pte = pte;
+
+                if writable_vma {
+                    parent_pte.writable = false;
+                    parent_pte.cow = true;
+                    child_pte.writable = false;
+                    child_pte.cow = true;
+                } else {
+                    parent_pte.writable = false;
+                    parent_pte.cow = false;
+                    child_pte.writable = false;
+                    child_pte.cow = false;
+                }
+
+                self.parent.pages.insert(vaddr, parent_pte);
+                child.pages.insert(vaddr, child_pte);
+                self.inc_ref(pte.paddr);
+                self.shares += 1;
+            }
+
+            self.child = Some(child);
+        }
+
+        fn page_paddr(&self, who: SimProc, addr: usize) -> Option<usize> {
+            let page = addr & !(PAGE_SIZE - 1);
+            self.aspace(who).pages.get(&page).map(|pte| pte.paddr)
+        }
+
+        fn exit_proc(&mut self, who: SimProc) {
+            let pages: alloc::vec::Vec<usize> = self
+                .aspace(who)
+                .pages
+                .values()
+                .map(|pte| pte.paddr)
+                .collect();
+            for paddr in pages {
+                self.dec_ref(paddr);
+            }
+            self.aspace_mut(who).pages.clear();
+            if matches!(who, SimProc::Child) {
+                self.child = None;
+            }
+        }
+    }
+
+    // Teste 1: fork de página única materializada.
+    {
+        let base = 0x7000_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_single",
+        }]);
+        assert_eq!(sim.write_byte(SimProc::Parent, base, 0xAA), FaultResult::Resolved);
+        sim.fork();
+        assert_eq!(sim.read_byte(SimProc::Child, base), Ok(0xAA));
+        assert_eq!(sim.write_byte(SimProc::Child, base, 0xBB), FaultResult::Resolved);
+        assert_eq!(sim.read_byte(SimProc::Parent, base), Ok(0xAA));
+        assert_eq!(sim.read_byte(SimProc::Child, base), Ok(0xBB));
+        assert_eq!(sim.copies, 1);
+    }
+
+    // Teste 2: lazy page survives fork (sem clone eager).
+    {
+        let base = 0x7100_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + 2 * PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_lazy",
+        }]);
+        sim.fork();
+        assert_eq!(sim.allocs, 0);
+        assert_eq!(sim.shares, 0);
+        assert_eq!(sim.write_byte(SimProc::Child, base, 0x5A), FaultResult::Resolved);
+        assert_eq!(sim.allocs, 1);
+        assert_eq!(sim.copies, 0);
+    }
+
+    // Teste 3: read-only sharing does not copy.
+    {
+        let base = 0x7200_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_readonly",
+        }]);
+        assert_eq!(sim.write_byte(SimProc::Parent, base, 0x11), FaultResult::Resolved);
+        sim.fork();
+        let allocs_before = sim.allocs;
+        for _ in 0..32 {
+            assert_eq!(sim.read_byte(SimProc::Parent, base), Ok(0x11));
+            assert_eq!(sim.read_byte(SimProc::Child, base), Ok(0x11));
+        }
+        assert_eq!(sim.copies, 0);
+        assert_eq!(sim.allocs, allocs_before);
+    }
+
+    // Teste 4: copy only dirty page.
+    {
+        let base = 0x7300_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + 4 * PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_dirty_only",
+        }]);
+        for i in 0..4 {
+            let addr = base + i * PAGE_SIZE;
+            assert_eq!(
+                sim.write_byte(SimProc::Parent, addr, (0x20 + i as u8) as u8),
+                FaultResult::Resolved
+            );
+        }
+        sim.fork();
+
+        let dirty_addr = base + 2 * PAGE_SIZE;
+        let old_shared = sim.page_paddr(SimProc::Parent, dirty_addr).unwrap();
+        assert_eq!(sim.write_byte(SimProc::Child, dirty_addr, 0xEE), FaultResult::Resolved);
+        assert_eq!(sim.copies, 1);
+        let child_dirty = sim.page_paddr(SimProc::Child, dirty_addr).unwrap();
+        assert_ne!(child_dirty, old_shared);
+
+        let untouched = base + PAGE_SIZE;
+        let p_parent = sim.page_paddr(SimProc::Parent, untouched).unwrap();
+        let p_child = sim.page_paddr(SimProc::Child, untouched).unwrap();
+        assert_eq!(p_parent, p_child);
+    }
+
+    // Teste 5: child exit does not free parent page.
+    {
+        let base = 0x7400_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_child_exit",
+        }]);
+        assert_eq!(sim.write_byte(SimProc::Parent, base, 0x44), FaultResult::Resolved);
+        sim.fork();
+        let parent_page = sim.page_paddr(SimProc::Parent, base).unwrap();
+        sim.exit_proc(SimProc::Child);
+        assert_eq!(sim.read_byte(SimProc::Parent, base), Ok(0x44));
+        assert_eq!(sim.ref_get(parent_page), 1);
+    }
+
+    // Teste 6: parent exit does not kill child page.
+    {
+        let base = 0x7500_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_parent_exit",
+        }]);
+        assert_eq!(sim.write_byte(SimProc::Parent, base, 0x77), FaultResult::Resolved);
+        sim.fork();
+        sim.exit_proc(SimProc::Parent);
+        assert_eq!(sim.read_byte(SimProc::Child, base), Ok(0x77));
+        let child_page = sim.page_paddr(SimProc::Child, base).unwrap();
+        assert_eq!(sim.ref_get(child_page), 1);
+    }
+
+    // Teste 7: write denied on non-writable VMA.
+    {
+        let base = 0x7600_0000;
+        let mut sim = CowForkSim::new(alloc::vec![Vma {
+            start: base,
+            end: base + PAGE_SIZE,
+            perms: VmaPermissions::READ,
+            backing: VmaBacking::Anonymous,
+            label: "cow_test_prot",
+        }]);
+        assert_eq!(sim.read_byte(SimProc::Parent, base), Ok(0));
+        sim.fork();
+        assert_eq!(
+            sim.write_byte(SimProc::Child, base, 0xAB),
+            FaultResult::ProtectionViolation
+        );
+        assert_eq!(sim.copies, 0);
+    }
+
+    log_info!(LOG_ORIGIN, "[COW_TEST] all 7 fork/cow tests passed");
 }

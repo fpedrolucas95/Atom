@@ -105,6 +105,16 @@ impl ResourceCounters {
 
 pub static RESOURCE_COUNTERS: ResourceCounters = ResourceCounters::new();
 
+#[inline]
+pub fn record_physical_pages_freed(count: usize) {
+    if count == 0 {
+        return;
+    }
+    RESOURCE_COUNTERS
+        .physical_pages_freed_on_termination
+        .fetch_add(count, Ordering::Relaxed);
+}
+
 /// Reason for thread/process termination
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminationReason {
@@ -1571,10 +1581,14 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
             log_user_entry_once(to_id, &threads[to_idx].context);
         }
 
-        (from_ptr, to_ptr, to_kernel_stack)
+        (from_ptr, to_ptr, to_kernel_stack, to_cr3)
     }; // Lock released
 
-    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack) = switch_info;
+    let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_cr3) = switch_info;
+
+    // If this address-space received deferred invalidations while inactive,
+    // flush before (or as part of) switching into it.
+    crate::mm::vm::maybe_flush_deferred_tlb_for_pml4(to_cr3 as usize);
 
     // Update TSS.RSP0 and CURRENT_THREAD_KSTACK for the new thread
     // This ensures interrupt/syscall frames from usermode go to the correct kernel stack
@@ -1903,7 +1917,7 @@ fn perform_final_cleanup(
         false
     };
 
-    let pages_freed = if should_cleanup_address_space {
+    let _pages_freed = if should_cleanup_address_space {
         let threads = THREAD_LIST.threads.lock();
         if other_threads_share_teardown_group_locked(thread_id, primary_address_space_cr3, &threads) {
             log_error!(
@@ -1924,39 +1938,61 @@ fn perform_final_cleanup(
                 );
             }
 
-            // Destroy VMA map for this address space (must happen before freeing pages)
-            if let Some(process_id) = process_id {
-                if let Err(err) = crate::mm::vma::destroy_process_vma_map(process_id) {
-                    log_panic!(
-                        LOG_ORIGIN,
-                        "Primary userspace address-space teardown must be Process-owned: failed to destroy VMA map for process {} on PML4 0x{:X}: {:?}",
-                        process_id,
-                        primary_address_space_cr3,
-                        err
+            crate::mm::vma::with_address_space_ops_lock(primary_address_space_cr3 as usize, || {
+                // Free all tracked materialized pages first (VMA-authoritative accounting).
+                let tracked_pages =
+                    crate::mm::vma::drain_materialized_pages(primary_address_space_cr3 as usize);
+                let mut tracked_pages_freed = 0usize;
+                for account in tracked_pages {
+                    let _ = crate::mm::vm::unmap_page_in_pml4(
+                        primary_address_space_cr3 as usize,
+                        account.vaddr.as_usize(),
                     );
+                    if crate::mm::vma::free_page_account(account) {
+                        tracked_pages_freed += 1;
+                    }
                 }
-            } else {
-                crate::mm::vma::destroy_vma_map(primary_address_space_cr3 as usize);
-            }
 
-            // Thread has its own PML4 (userspace thread)
-            let user_pages = free_user_space_pages(primary_address_space_cr3 as usize);
-            log_debug!(LOG_ORIGIN, "Freed {} user-space physical pages from PML4 0x{:X}", user_pages, primary_address_space_cr3);
+                // Thread has its own PML4 (userspace thread)
+                let user_pages = free_user_space_pages(primary_address_space_cr3 as usize);
+                record_physical_pages_freed(user_pages);
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Freed {} tracked pages + {} user-space pages from PML4 0x{:X}",
+                    tracked_pages_freed,
+                    user_pages,
+                    primary_address_space_cr3
+                );
 
-            // Unregister the PML4 before freeing (Req 2.5)
-            let _ = crate::mm::pmm::unregister_active_pml4(primary_address_space_cr3 as usize);
+                // Destroy VMA map after tearing down tracked and mapped pages.
+                if let Some(process_id) = process_id {
+                    if let Err(err) = crate::mm::vma::destroy_process_vma_map(process_id) {
+                        log_panic!(
+                            LOG_ORIGIN,
+                            "Primary userspace address-space teardown must be Process-owned: failed to destroy VMA map for process {} on PML4 0x{:X}: {:?}",
+                            process_id,
+                            primary_address_space_cr3,
+                            err
+                        );
+                    }
+                } else {
+                    crate::mm::vma::destroy_vma_map(primary_address_space_cr3 as usize);
+                }
 
-            // Free the PML4 itself
-            let _ = crate::mm::pmm::free_page(primary_address_space_cr3 as usize);
-            log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", primary_address_space_cr3);
+                // Unregister the PML4 before freeing (Req 2.5)
+                let _ =
+                    crate::mm::pmm::unregister_active_pml4(primary_address_space_cr3 as usize);
 
-            user_pages
+                // Free the PML4 itself
+                let _ = crate::mm::pmm::free_page(primary_address_space_cr3 as usize);
+                log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", primary_address_space_cr3);
+
+                tracked_pages_freed + user_pages
+            })
         }
     } else {
         0
     };
-
-    RESOURCE_COUNTERS.physical_pages_freed_on_termination.fetch_add(pages_freed, Ordering::Relaxed);
 
     // Step 7: Free kernel stack
     log_debug!(LOG_ORIGIN, "Final Step: Freeing kernel stack for TID {}", thread_id);
@@ -2002,6 +2038,7 @@ pub fn reap_zombies() {
         }
 
         RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+        RESOURCE_COUNTERS.log_stats();
     }
 
     CLEANED_ADDRESS_SPACES.lock().clear();
@@ -2136,7 +2173,15 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         );
     }
 
-    RESOURCE_COUNTERS.log_stats();
+    if !is_current {
+        RESOURCE_COUNTERS.log_stats();
+    } else {
+        log_debug!(
+            LOG_ORIGIN,
+            "Resource stats deferred until zombie reaping for TID {}",
+            thread_id
+        );
+    }
 }
 
 /// Legacy function - redirects to terminate_entity

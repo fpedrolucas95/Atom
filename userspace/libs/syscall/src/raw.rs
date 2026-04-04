@@ -115,6 +115,7 @@ pub mod numbers {
     pub const SYS_MUNMAP:    u64 = 101;
     pub const SYS_MPROTECT:  u64 = 102;
     pub const SYS_BRK:       u64 = 103;
+    pub const SYS_FORK:      u64 = 104;
 }
 
 /// Raw syscall with no arguments

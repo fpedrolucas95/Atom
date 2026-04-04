@@ -54,6 +54,15 @@ impl ProcessInfo {
     }
 }
 
+/// fork() -> child_pid (parent) | 0 (child)
+pub fn fork() -> SyscallResult<ProcessId> {
+    let result = unsafe { syscall0(SYS_FORK) };
+    if crate::error::is_syscall_error(result) {
+        return Err(SyscallError::from_raw(result));
+    }
+    Ok(result)
+}
+
 /// Spawn a new process from a registered driver
 ///
 /// This function requests the kernel to spawn a new process by loading

@@ -175,6 +175,8 @@ pub const SYS_MUNMAP: u64 = 101;
 pub const SYS_MPROTECT: u64 = 102;
 /// brk(new_brk) -> current_brk | errno
 pub const SYS_BRK: u64 = 103;
+/// fork() -> child_pid in parent, 0 in child, errno on failure
+pub const SYS_FORK: u64 = 104;
 
 // ---------------------------------------------------------------------------
 // Kernel FS backend syscalls — used exclusively by fsd to access the
@@ -558,7 +560,7 @@ fn syscall_policy(num: u64) -> SysPolicy {
         | SYS_ADDRSPACE_CREATE | SYS_ADDRSPACE_DESTROY
         | SYS_MAP_REGION | SYS_UNMAP_REGION | SYS_REMAP_REGION
         | SYS_REGISTER_FAULT_HANDLER
-        | SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK
+        | SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | SYS_FORK
             => ExplicitlyUnrestricted,
 
         // ── Input devices ─────────────────────────────────────────────────
@@ -827,6 +829,7 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_MUNMAP => sys_munmap(arg0, arg1),
         SYS_MPROTECT => sys_mprotect(arg0, arg1, arg2),
         SYS_BRK => sys_brk(arg0),
+        SYS_FORK => sys_fork(frame),
 
         // Kernel FS backend syscalls (for fsd only)
         SYS_KERN_FS_READ_FILE  => sys_kern_fs_read_file(arg0, arg1 as usize, arg2, arg3 as usize),
@@ -1384,6 +1387,186 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
     );
 
     tid.raw()
+}
+
+fn cleanup_failed_fork_child_address_space(child_pml4: usize) {
+    crate::mm::vma::with_address_space_ops_lock(child_pml4, || {
+        for account in crate::mm::vma::drain_materialized_pages(child_pml4) {
+            let _ = crate::mm::vm::unmap_page_in_pml4(child_pml4, account.vaddr.as_usize());
+            let _ = crate::mm::vma::free_page_account(account);
+        }
+        crate::mm::vma::destroy_vma_map(child_pml4);
+        let _ = crate::mm::pmm::unregister_active_pml4(child_pml4);
+        let _ = crate::mm::pmm::free_page(child_pml4);
+    });
+}
+
+fn build_fork_child_context(frame: &SyscallSavedFrame, child_pml4: u64) -> crate::thread::CpuContext {
+    let mut context = crate::thread::CpuContext::new_user(frame.user_rip, frame.user_rsp, child_pml4);
+    context.rax = 0;
+    context.rbx = frame.user_rbx;
+    context.rcx = 0;
+    context.rdx = frame.user_rdx;
+    context.rsi = frame.user_rsi;
+    context.rdi = frame.user_rdi;
+    context.rbp = frame.user_rbp;
+    context.rsp = frame.user_rsp;
+    context.r8 = frame.user_r8;
+    context.r9 = frame.user_r9;
+    context.r10 = frame.user_r10;
+    context.r11 = 0;
+    context.r12 = frame.user_r12;
+    context.r13 = frame.user_r13;
+    context.r14 = frame.user_r14;
+    context.r15 = frame.user_r15;
+    context.rip = frame.user_rip;
+    context.rflags = frame.user_rflags | 0x200;
+    context.cs = frame.user_cs as u16;
+    context.ss = frame.user_ss as u16;
+    context.ds = crate::arch::gdt::USER_DATA_SELECTOR;
+    context.es = crate::arch::gdt::USER_DATA_SELECTOR;
+    context.fs = crate::arch::gdt::USER_DATA_SELECTOR;
+    context.gs = crate::arch::gdt::USER_DATA_SELECTOR;
+    context.cr3 = child_pml4;
+    context
+}
+
+fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
+    const LOG_ORIGIN: &str = "syscall:fork";
+    use crate::mm::{pmm, vm, vma};
+    use crate::thread::{Thread, ThreadId, ThreadState};
+
+    let parent_tid = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    if !crate::thread::is_userspace_thread(parent_tid) {
+        log_warn!(LOG_ORIGIN, "fork rejected: caller {} is not userspace", parent_tid);
+        return EINVAL;
+    }
+
+    let parent_pid = match crate::thread::get_thread_process_id(parent_tid) {
+        Some(pid) => pid,
+        None => return EINVAL,
+    };
+    let parent_pml4 = match crate::process::get_process_pml4(parent_pid) {
+        Some(pml4) => pml4 as usize,
+        None => return EINVAL,
+    };
+
+    let child_pml4 = match pmm::alloc_page_zeroed() {
+        Some(p) => p,
+        None => return ENOMEM,
+    };
+
+    if vm::clone_kernel_mappings(child_pml4).is_err() {
+        let _ = pmm::free_page(child_pml4);
+        return ENOMEM;
+    }
+
+    if pmm::register_active_pml4(child_pml4).is_err() {
+        let _ = pmm::free_page(child_pml4);
+        return ENOMEM;
+    }
+
+    vma::create_vma_map(child_pml4);
+
+    let child_tid = ThreadId::new();
+    let child_pid = crate::process::ProcessId::from(child_tid);
+
+    let cow_stats = match vma::with_address_space_ops_lock(parent_pml4, || {
+        vma::clone_vmas_for_fork(parent_pml4, child_pml4, parent_pid, child_pid)?;
+        vma::clone_cow_private_mappings_for_fork(parent_pml4, child_pml4, parent_pid, child_pid)
+    }) {
+        Ok(stats) => stats,
+        Err(err) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "fork failed during COW clone: parent_pid={} child_pid={} err={:?}",
+                parent_pid,
+                child_pid,
+                err
+            );
+            cleanup_failed_fork_child_address_space(child_pml4);
+            return if matches!(err, vma::VmaError::OutOfMemory) {
+                ENOMEM
+            } else {
+                EINVAL
+            };
+        }
+    };
+
+    const KERNEL_STACK_SIZE: usize = 64 * 1024;
+    let stack_pages = KERNEL_STACK_SIZE / pmm::PAGE_SIZE;
+    let child_kernel_stack_phys = match pmm::alloc_pages(stack_pages) {
+        Some(p) => p,
+        None => {
+            cleanup_failed_fork_child_address_space(child_pml4);
+            return ENOMEM;
+        }
+    };
+    let child_kernel_stack_top =
+        (vm::HIGHER_HALF_BASE + child_kernel_stack_phys + KERNEL_STACK_SIZE) as u64;
+
+    unsafe {
+        const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let bottom = child_kernel_stack_top - KERNEL_STACK_SIZE as u64;
+        core::ptr::write_volatile(bottom as *mut u64, STACK_CANARY);
+    }
+
+    let child_context = build_fork_child_context(frame, child_pml4 as u64);
+    let parent_priority = crate::sched::get_thread_priority(parent_tid);
+    let parent_stack_layout = crate::thread::get_thread_user_stack(parent_tid);
+
+    let child_thread = Thread {
+        id: child_tid,
+        process_id: Some(child_pid),
+        state: ThreadState::Ready,
+        context: child_context,
+        kernel_stack: child_kernel_stack_top,
+        kernel_stack_size: KERNEL_STACK_SIZE,
+        address_space: child_pml4 as u64,
+        priority: parent_priority,
+        name: "fork_child",
+        capability_table: crate::cap::create_capability_table(child_tid),
+        is_userspace: true,
+        user_stack: parent_stack_layout,
+    };
+
+    crate::thread::add_thread(child_thread);
+
+    if let Some(parent_process) = crate::process::get_process(parent_pid) {
+        let _ = crate::process::set_process_memory_limit(child_pid, parent_process.memory_limit_pages);
+
+        for cap_handle in parent_process.capability_table.list() {
+            let Some(mut cloned_cap) = parent_process.capability_table.get(cap_handle).cloned() else {
+                continue;
+            };
+            cloned_cap.owner = child_pid;
+            if crate::process::add_process_capability(child_pid, cloned_cap.clone()).is_ok() {
+                let _ = crate::thread::mirror_process_capability_to_threads(child_pid, cloned_cap);
+            }
+        }
+    }
+
+    crate::sched::mark_thread_ready(child_tid);
+
+    log_info!(
+        LOG_ORIGIN,
+        "fork success: parent_pid={} child_pid={} parent_tid={} child_tid={} parent_cr3=0x{:X} child_cr3=0x{:X} shared_pages={} cow_pages={} readonly_shared={}",
+        parent_pid,
+        child_pid,
+        parent_tid,
+        child_tid,
+        parent_pml4,
+        child_pml4,
+        cow_stats.shared_pages,
+        cow_stats.cow_pages,
+        cow_stats.readonly_shared_pages
+    );
+
+    child_pid.raw()
 }
 
 fn sys_ipc_create_port() -> u64 {
@@ -4953,24 +5136,30 @@ fn sys_mmap(
             );
             return EINVAL;
         }
-        // Remove any existing mappings in this range
-        let removed = match vma::remove_process_vma_range(process_id, addr, end) {
-            Ok(removed) => removed,
-            Err(_) => {
-                log_error!(
-                    "syscall",
-                    "[MMAP_ERROR] reason=remove_range_failed addr={:#X} size={} hint={:#X} flags={:#X}",
-                    addr_hint,
-                    length,
-                    addr_hint,
-                    flags
-                );
-                return EINVAL;
+        let cleanup_res = vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
+            // Remove any existing mappings in this range
+            let removed = match vma::remove_process_vma_range(process_id, addr, end) {
+                Ok(removed) => removed,
+                Err(_) => {
+                    return Err(EINVAL);
+                }
+            };
+            // Unmap the physical pages for removed VMAs
+            for old_vma in &removed {
+                unmap_vma_pages(process_id, pml4, old_vma);
             }
-        };
-        // Unmap the physical pages for removed VMAs
-        for old_vma in &removed {
-            unmap_vma_pages(process_id, pml4, old_vma);
+            Ok(())
+        });
+        if cleanup_res.is_err() {
+            log_error!(
+                "syscall",
+                "[MMAP_ERROR] reason=remove_range_failed addr={:#X} size={} hint={:#X} flags={:#X}",
+                addr_hint,
+                length,
+                addr_hint,
+                flags
+            );
+            return EINVAL;
         }
         log_info!(
             "syscall",
@@ -4990,7 +5179,14 @@ fn sys_mmap(
             atom_abi::USER_MMAP_START as usize
         };
 
-        match vma::find_process_free_region(process_id, hint_start, atom_abi::USER_MMAP_END as usize, length) {
+        match vma::with_address_space_ops_lock(pml4, || {
+            vma::find_process_free_region(
+                process_id,
+                hint_start,
+                atom_abi::USER_MMAP_END as usize,
+                length,
+            )
+        }) {
             Ok(Some(addr)) => {
                 let next = match addr.checked_add(length) {
                     Some(next) => next,
@@ -5063,6 +5259,32 @@ fn sys_mmap(
         atom_abi::USER_MMAP_END
     );
 
+    let overlap = match vma::with_address_space_ops_lock(pml4, || {
+        vma::process_range_overlaps(process_id, virt_addr, virt_end)
+    }) {
+        Ok(found) => found,
+        Err(_) => return EPERM,
+    };
+    log_debug!(
+        "syscall",
+        "[MMAP_ALLOC_VALIDATE] base=0x{:X} size={} end=0x{:X} overlap={}",
+        virt_addr,
+        length,
+        virt_end,
+        overlap
+    );
+    if overlap {
+        log_error!(
+            "syscall",
+            "[MMAP_ERROR] reason=allocator_overlap base=0x{:X} size={} end=0x{:X} flags=0x{:X}",
+            virt_addr,
+            length,
+            virt_end,
+            flags
+        );
+        return ENOMEM;
+    }
+
     // Create the VMA (lazy: no physical pages allocated yet)
     let new_vma = Vma {
         start: virt_addr,
@@ -5072,9 +5294,9 @@ fn sys_mmap(
         label: "mmap",
     };
 
-    log_info!(
+    log_debug!(
         "syscall",
-        "[VMA_INSERT] pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} prot=0x{:X} flags=0x{:X} backing=Anonymous label=mmap",
+        "[VMA_INSERT_ATTEMPT] pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} prot=0x{:X} flags=0x{:X} backing=Anonymous label=mmap",
         process_id,
         pml4,
         new_vma.start,
@@ -5104,9 +5326,17 @@ fn sys_mmap(
         return EINVAL;
     }
 
-    match vma::insert_process_vma(process_id, new_vma) {
+    match vma::with_address_space_ops_lock(pml4, || vma::insert_process_vma(process_id, new_vma)) {
         Ok(()) => {
-            log_info!(
+            log_debug!(
+                "syscall",
+                "[VMA_INSERT] result=ok pid={} pml4=0x{:X} start=0x{:X} end=0x{:X}",
+                process_id,
+                pml4,
+                virt_addr,
+                virt_end
+            );
+            log_debug!(
                 "syscall",
                 "[ABI] return addr={:#x} pid={} syscall=mmap",
                 mapped_addr,
@@ -5123,7 +5353,18 @@ fn sys_mmap(
             );
             mapped_addr
         }
-        Err(_) => ENOMEM,
+        Err(err) => {
+            log_error!(
+                "syscall",
+                "[VMA_INSERT] result=err pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} err={:?}",
+                process_id,
+                pml4,
+                virt_addr,
+                virt_end,
+                err
+            );
+            ENOMEM
+        }
     }
 }
 
@@ -5157,21 +5398,22 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
         None => return EPERM,
     };
 
-    let removed = match vma::remove_process_vma_range(process_id, addr, end) {
-        Ok(removed) => removed,
-        Err(_) => return EINVAL,
-    };
+    match vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
+        let removed = vma::remove_process_vma_range(process_id, addr, end).map_err(|_| EINVAL)?;
+        if removed.is_empty() {
+            return Err(EINVAL);
+        }
 
-    if removed.is_empty() {
-        return EINVAL;
+        // Unmap physical pages
+        for old_vma in &removed {
+            unmap_vma_pages(process_id, pml4, old_vma);
+        }
+
+        Ok(())
+    }) {
+        Ok(()) => ESUCCESS,
+        Err(code) => code,
     }
-
-    // Unmap physical pages
-    for old_vma in &removed {
-        unmap_vma_pages(process_id, pml4, old_vma);
-    }
-
-    ESUCCESS
 }
 
 /// mprotect(addr, length, prot) -> 0 | errno
@@ -5215,28 +5457,31 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
         perms = perms.union(VmaPermissions::EXEC);
     }
 
-    if vma::set_process_permissions(process_id, addr, end, perms).is_err() {
-        return EINVAL;
-    }
+    match vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
+        vma::set_process_permissions(process_id, addr, end, perms).map_err(|_| EINVAL)?;
 
-    // Update PTEs for all already-resident pages in the affected range.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER;
-    if perms.contains(VmaPermissions::WRITE) {
-        page_flags |= PageFlags::WRITABLE;
-    }
-    if !perms.contains(VmaPermissions::EXEC) {
-        page_flags |= PageFlags::NO_EXECUTE;
-    }
-
-    let mut page_addr = addr;
-    while page_addr < addr + length {
-        if let Ok((phys, _old_flags)) = vm::query_mapping_in_pml4(pml4, page_addr) {
-            let _ = vm::remap_page_in_pml4(pml4, page_addr, phys, page_flags);
+        // Update PTEs for all already-resident pages in the affected range.
+        let mut page_flags = PageFlags::PRESENT | PageFlags::USER;
+        if perms.contains(VmaPermissions::WRITE) {
+            page_flags |= PageFlags::WRITABLE;
         }
-        page_addr += PAGE_SIZE;
-    }
+        if !perms.contains(VmaPermissions::EXEC) {
+            page_flags |= PageFlags::NO_EXECUTE;
+        }
 
-    ESUCCESS
+        let mut page_addr = addr;
+        while page_addr < addr + length {
+            if let Ok((phys, _old_flags)) = vm::query_mapping_in_pml4(pml4, page_addr) {
+                let _ = vm::remap_page_in_pml4(pml4, page_addr, phys, page_flags);
+            }
+            page_addr += PAGE_SIZE;
+        }
+
+        Ok(())
+    }) {
+        Ok(()) => ESUCCESS,
+        Err(code) => code,
+    }
 }
 
 /// brk(new_brk) -> current_brk | errno
@@ -5279,7 +5524,9 @@ fn sys_brk(new_brk: u64) -> u64 {
                 label: "heap",
             };
 
-            match vma::insert_process_vma(process_id, heap_vma) {
+            match vma::with_address_space_ops_lock(pml4, || {
+                vma::insert_process_vma(process_id, heap_vma)
+            }) {
                 Ok(()) => return new_brk_aligned as u64,
                 Err(_) => return ENOMEM,
             }
@@ -5300,25 +5547,6 @@ fn sys_brk(new_brk: u64) -> u64 {
         return current_brk as u64;
     }
 
-    // Remove old heap VMA and replace with resized one
-    if vma::remove_process_vma(process_id, heap_start).is_err() {
-        return ENOMEM;
-    }
-
-    if new_brk_aligned < current_brk {
-        // Shrinking: unmap pages in the released range
-        let shrunk_start = new_brk_aligned;
-        let shrunk_end = current_brk;
-        for page in (shrunk_start..shrunk_end).step_by(PAGE_SIZE) {
-            if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
-                if crate::mm::vm::unmap_page_in_pml4(pml4, page).is_ok() {
-                    let _ = crate::mm::pmm::free_page(phys);
-                    let _ = vma::account_process_unmap(process_id);
-                }
-            }
-        }
-    }
-
     let new_heap = Vma {
         start: heap_start,
         end: new_brk_aligned,
@@ -5327,7 +5555,31 @@ fn sys_brk(new_brk: u64) -> u64 {
         label: "heap",
     };
 
-    match vma::insert_process_vma(process_id, new_heap) {
+    match vma::with_address_space_ops_lock(pml4, || -> Result<(), ()> {
+        // Remove old heap VMA and replace with resized one
+        vma::remove_process_vma(process_id, heap_start).map_err(|_| ())?;
+
+        if new_brk_aligned < current_brk {
+            // Shrinking: unmap pages in the released range
+            let shrunk_start = new_brk_aligned;
+            let shrunk_end = current_brk;
+            for page in (shrunk_start..shrunk_end).step_by(PAGE_SIZE) {
+                if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
+                    if crate::mm::vm::unmap_page_in_pml4(pml4, page).is_ok() {
+                        if let Some(account) = vma::take_materialized_page(pml4, page) {
+                            let _ = vma::free_page_account(account);
+                        } else {
+                            let _ = crate::mm::pmm::free_page(phys);
+                            let _ = vma::account_process_unmap(process_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        vma::insert_process_vma(process_id, new_heap).map_err(|_| ())?;
+        Ok(())
+    }) {
         Ok(()) => new_brk_aligned as u64,
         Err(_) => ENOMEM,
     }
@@ -5344,15 +5596,20 @@ fn unmap_vma_pages(
     for page in (vma.start..vma.end).step_by(PAGE_SIZE) {
         // Query if the page is mapped
         if let Ok((phys, _)) = crate::mm::vm::query_mapping_in_pml4(pml4, page) {
-            let _ = crate::mm::vm::unmap_page_in_pml4(pml4, page);
-            // Free the physical page (only for non-device mappings)
-            match vma.backing {
-                crate::mm::vma::VmaBacking::Device { .. } => {},
-                _ => {
-                    let _ = crate::mm::pmm::free_page(phys);
+            if crate::mm::vm::unmap_page_in_pml4(pml4, page).is_ok() {
+                if let Some(account) = crate::mm::vma::take_materialized_page(pml4, page) {
+                    let _ = crate::mm::vma::free_page_account(account);
+                } else {
+                    // Fallback for legacy/non-accounted pages.
+                    match vma.backing {
+                        crate::mm::vma::VmaBacking::Device { .. } => {}
+                        _ => {
+                            let _ = crate::mm::pmm::free_page(phys);
+                        }
+                    }
+                    let _ = crate::mm::vma::account_process_unmap(process_id);
                 }
             }
-            let _ = crate::mm::vma::account_process_unmap(process_id);
         }
     }
 }
