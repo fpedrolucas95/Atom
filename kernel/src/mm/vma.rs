@@ -27,6 +27,26 @@ use crate::{log_info, log_debug, log_warn};
 
 const LOG_ORIGIN: &str = "vma";
 
+#[inline]
+fn page_account_counts_as_shared(account: &PageAccount) -> bool {
+    // Shared-accounting policy:
+    // - Explicit shared mappings are always charged as shared.
+    // - COW pages are shared while still in CowShared state.
+    matches!(account.source, PageSource::Shared)
+        || (matches!(account.source, PageSource::Cow)
+            && matches!(account.share_state, PageShareState::CowShared))
+}
+
+#[inline]
+fn page_account_charge(account: &PageAccount) -> Option<(ProcessId, usize, usize)> {
+    let process_id = account.owner_process?;
+    if page_account_counts_as_shared(account) {
+        Some((process_id, 0, 1))
+    } else {
+        Some((process_id, 1, 0))
+    }
+}
+
 /// How a VMA region is backed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -445,6 +465,7 @@ impl VmaMap {
 
     fn track_page(
         &mut self,
+        owner_process: Option<ProcessId>,
         pml4_phys: usize,
         vma: &Vma,
         vaddr: usize,
@@ -461,7 +482,6 @@ impl VmaMap {
             return Err(VmaError::Overlap);
         }
 
-        let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
         let account = PageAccount {
             owner_process,
             owner_address_space: pml4_phys,
@@ -512,7 +532,7 @@ impl VmaMap {
         self.materialized_pages.get(&vaddr).copied()
     }
 
-    fn upsert_page_account(&mut self, account: PageAccount) -> Result<(), VmaError> {
+    fn upsert_page_account(&mut self, account: PageAccount) -> Result<Option<PageAccount>, VmaError> {
         let vaddr = account.vaddr.as_usize();
         if !vaddr.is_multiple_of(PAGE_SIZE) || !account.paddr.is_multiple_of(PAGE_SIZE) {
             return Err(VmaError::Unaligned);
@@ -524,11 +544,12 @@ impl VmaMap {
             return Err(VmaError::InvalidRange);
         }
 
-        if self.materialized_pages.insert(vaddr, account).is_none() {
+        let previous = self.materialized_pages.insert(vaddr, account);
+        if previous.is_none() {
             self.account_map();
         }
 
-        Ok(())
+        Ok(previous)
     }
 
     fn list_vmas(&self) -> alloc::vec::Vec<Vma> {
@@ -652,6 +673,17 @@ pub struct VmaStats {
     pub resident_limit: usize,
 }
 
+/// Slow-path ground truth for process accounting, used by drift verification.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessVmaAccountingObservation {
+    pub map_present: bool,
+    pub resident_private_pages: usize,
+    pub resident_shared_pages: usize,
+    pub reserved_bytes: usize,
+    pub owner_mismatch_pages: usize,
+    pub owner_missing_pages: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaError {
     Unaligned,
@@ -731,6 +763,7 @@ pub fn create_process_vma_map(process_id: ProcessId) -> Result<(), VmaError> {
 pub fn destroy_process_vma_map(process_id: ProcessId) -> Result<(), VmaError> {
     let pml4_phys = registered_process_pml4(process_id)?;
     destroy_vma_map(pml4_phys);
+    crate::process::reset_process_memory_accounting(process_id);
     Ok(())
 }
 
@@ -799,12 +832,50 @@ pub fn set_process_permissions(
 pub fn account_process_unmap(process_id: ProcessId) -> Result<(), VmaError> {
     let pml4_phys = registered_process_pml4(process_id)?;
     account_unmap(pml4_phys);
+    crate::process::account_process_resident_pages_sub(process_id, 1, 0);
     Ok(())
 }
 
 pub fn get_process_stats(process_id: ProcessId) -> Option<VmaStats> {
     let pml4_phys = registered_process_pml4(process_id).ok()?;
     get_stats(pml4_phys)
+}
+
+/// Recalculate per-process accounting from VMA structures (slow-path verifier).
+pub fn recalculate_process_vma_accounting(
+    process_id: ProcessId,
+) -> ProcessVmaAccountingObservation {
+    let pml4_phys = match registered_process_pml4(process_id) {
+        Ok(pml4) => pml4,
+        Err(_) => return ProcessVmaAccountingObservation::default(),
+    };
+
+    let registry = VMA_REGISTRY.lock();
+    let Some(map) = registry.get(&pml4_phys) else {
+        return ProcessVmaAccountingObservation::default();
+    };
+
+    let mut observed = ProcessVmaAccountingObservation {
+        map_present: true,
+        reserved_bytes: map.reserved_bytes,
+        ..ProcessVmaAccountingObservation::default()
+    };
+
+    for account in map.materialized_pages.values() {
+        match account.owner_process {
+            Some(owner) if owner == process_id => {}
+            Some(_) => observed.owner_mismatch_pages = observed.owner_mismatch_pages.saturating_add(1),
+            None => observed.owner_missing_pages = observed.owner_missing_pages.saturating_add(1),
+        }
+
+        if page_account_counts_as_shared(account) {
+            observed.resident_shared_pages = observed.resident_shared_pages.saturating_add(1);
+        } else {
+            observed.resident_private_pages = observed.resident_private_pages.saturating_add(1);
+        }
+    }
+
+    observed
 }
 
 /// Create a new VmaMap for the given address space (PML4 phys addr)
@@ -832,54 +903,90 @@ pub fn destroy_vma_map(pml4_phys: usize) {
 
 /// Insert a VMA into an address space's map
 pub fn insert_vma(pml4_phys: usize, vma: Vma) -> Result<(), VmaError> {
-    let mut registry = VMA_REGISTRY.lock();
-    let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
-    log_debug!(
-        LOG_ORIGIN,
-        "[VMA_INSERT] pml4=0x{:X} start=0x{:X} end=0x{:X} perms=0x{:X} backing={:?} label={}",
-        pml4_phys,
-        vma.start,
-        vma.end,
-        vma.perms.bits(),
-        vma.backing,
-        vma.label
-    );
-    let result = map.insert(vma);
-    match &result {
-        Ok(()) => log_debug!(
+    let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+    let reserved_bytes = vma.size();
+    let result = {
+        let mut registry = VMA_REGISTRY.lock();
+        let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
+        log_debug!(
             LOG_ORIGIN,
-            "[VMA_INSERT] result=ok pml4=0x{:X} vma_count={}",
+            "[VMA_INSERT] pml4=0x{:X} start=0x{:X} end=0x{:X} perms=0x{:X} backing={:?} label={}",
             pml4_phys,
-            map.len()
-        ),
-        Err(err) => log_warn!(
-            LOG_ORIGIN,
-            "[VMA_FAIL] reason=insert_failed pml4=0x{:X} err={:?}",
-            pml4_phys,
-            err
-        ),
+            vma.start,
+            vma.end,
+            vma.perms.bits(),
+            vma.backing,
+            vma.label
+        );
+        let result = map.insert(vma);
+        match &result {
+            Ok(()) => log_debug!(
+                LOG_ORIGIN,
+                "[VMA_INSERT] result=ok pml4=0x{:X} vma_count={}",
+                pml4_phys,
+                map.len()
+            ),
+            Err(err) => log_warn!(
+                LOG_ORIGIN,
+                "[VMA_FAIL] reason=insert_failed pml4=0x{:X} err={:?}",
+                pml4_phys,
+                err
+            ),
+        }
+        result
+    };
+
+    if result.is_ok() {
+        if let Some(process_id) = owner_process {
+            crate::process::account_process_reserved_bytes_add(process_id, reserved_bytes);
+        }
     }
+
     result
 }
 
 /// Remove a VMA from an address space
 pub fn remove_vma(pml4_phys: usize, start: usize) -> Option<Vma> {
-    let mut registry = VMA_REGISTRY.lock();
-    if let Some(map) = registry.get_mut(&pml4_phys) {
-        map.remove(start)
-    } else {
-        None
+    let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+    let removed = {
+        let mut registry = VMA_REGISTRY.lock();
+        if let Some(map) = registry.get_mut(&pml4_phys) {
+            map.remove(start)
+        } else {
+            None
+        }
+    };
+
+    if let Some(vma) = &removed {
+        if let Some(process_id) = owner_process {
+            crate::process::account_process_reserved_bytes_sub(process_id, vma.size());
+        }
     }
+
+    removed
 }
 
 /// Remove all VMAs in a range
 pub fn remove_vma_range(pml4_phys: usize, start: usize, end: usize) -> alloc::vec::Vec<Vma> {
-    let mut registry = VMA_REGISTRY.lock();
-    if let Some(map) = registry.get_mut(&pml4_phys) {
-        map.remove_range(start, end)
-    } else {
-        alloc::vec::Vec::new()
+    let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+    let removed = {
+        let mut registry = VMA_REGISTRY.lock();
+        if let Some(map) = registry.get_mut(&pml4_phys) {
+            map.remove_range(start, end)
+        } else {
+            alloc::vec::Vec::new()
+        }
+    };
+
+    if let Some(process_id) = owner_process {
+        let mut removed_bytes = 0usize;
+        for vma in &removed {
+            removed_bytes = removed_bytes.saturating_add(vma.size());
+        }
+        crate::process::account_process_reserved_bytes_sub(process_id, removed_bytes);
     }
+
+    removed
 }
 
 /// Find the VMA containing a given address
@@ -944,9 +1051,20 @@ pub fn range_overlaps_existing(pml4_phys: usize, start: usize, end: usize) -> Re
 
 /// Grow a stack VMA downward
 pub fn grow_stack(pml4_phys: usize, vma_start: usize) -> Result<usize, VmaError> {
-    let mut registry = VMA_REGISTRY.lock();
-    let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
-    map.grow_stack(vma_start)
+    let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
+    let result = {
+        let mut registry = VMA_REGISTRY.lock();
+        let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
+        map.grow_stack(vma_start)
+    };
+
+    if result.is_ok() {
+        if let Some(process_id) = owner_process {
+            crate::process::account_process_reserved_bytes_add(process_id, PAGE_SIZE);
+        }
+    }
+
+    result
 }
 
 /// Account for mapping a page
@@ -966,9 +1084,24 @@ pub fn account_unmap(pml4_phys: usize) {
 }
 
 pub fn take_materialized_page(pml4_phys: usize, vaddr: usize) -> Option<PageAccount> {
-    let mut registry = VMA_REGISTRY.lock();
-    let map = registry.get_mut(&pml4_phys)?;
-    map.untrack_page(vaddr)
+    let removed = {
+        let mut registry = VMA_REGISTRY.lock();
+        let map = registry.get_mut(&pml4_phys)?;
+        map.untrack_page(vaddr)
+    };
+
+    if let Some(account) = removed {
+        if let Some((process_id, private_pages, shared_pages)) = page_account_charge(&account) {
+            crate::process::account_process_resident_pages_sub(
+                process_id,
+                private_pages,
+                shared_pages,
+            );
+        }
+        Some(account)
+    } else {
+        None
+    }
 }
 
 pub fn get_materialized_page(pml4_phys: usize, vaddr: usize) -> Option<PageAccount> {
@@ -981,9 +1114,64 @@ pub fn upsert_materialized_page(
     pml4_phys: usize,
     account: PageAccount,
 ) -> Result<(), VmaError> {
-    let mut registry = VMA_REGISTRY.lock();
-    let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
-    map.upsert_page_account(account)
+    let old_account = {
+        let mut registry = VMA_REGISTRY.lock();
+        let map = registry.get_mut(&pml4_phys).ok_or(VmaError::NotFound)?;
+        map.upsert_page_account(account)?
+    };
+
+    let old_charge = old_account.as_ref().and_then(page_account_charge);
+    let new_charge = page_account_charge(&account);
+
+    if let Some((process_id, private_pages, shared_pages)) = old_charge {
+        crate::process::account_process_resident_pages_sub(process_id, private_pages, shared_pages);
+    }
+    if let Some((process_id, private_pages, shared_pages)) = new_charge {
+        crate::process::account_process_resident_pages_add(process_id, private_pages, shared_pages);
+    }
+
+    Ok(())
+}
+
+/// Register a pre-mapped range as materialized pages for process accounting.
+///
+/// Intended for eager mappings (exec image/bootstrap stack) where pages are
+/// mapped before fault-driven tracking is engaged.
+pub fn account_pre_mapped_range(
+    process_id: ProcessId,
+    pml4_phys: usize,
+    start: usize,
+    end: usize,
+    source: PageSource,
+) -> Result<usize, VmaError> {
+    use crate::mm::vm;
+
+    if !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) || start >= end {
+        return Err(VmaError::InvalidRange);
+    }
+
+    let mut tracked_pages = 0usize;
+    let mut page = start;
+    while page < end {
+        let (paddr, _flags) = vm::query_mapping_in_pml4(pml4_phys, page)
+            .map_err(|_| VmaError::NotFound)?;
+
+        let account = PageAccount {
+            owner_process: Some(process_id),
+            owner_address_space: pml4_phys,
+            vaddr: VirtAddr::new(page),
+            paddr,
+            source,
+            share_state: PageShareState::Exclusive,
+            vma_start: start,
+        };
+        upsert_materialized_page(pml4_phys, account)?;
+
+        tracked_pages = tracked_pages.saturating_add(1);
+        page = page.saturating_add(PAGE_SIZE);
+    }
+
+    Ok(tracked_pages)
 }
 
 pub fn clone_vmas_for_fork(
@@ -992,15 +1180,25 @@ pub fn clone_vmas_for_fork(
     parent_pid: ProcessId,
     child_pid: ProcessId,
 ) -> Result<usize, VmaError> {
-    let mut registry = VMA_REGISTRY.lock();
-    let parent_map = registry.get(&parent_pml4_phys).ok_or(VmaError::NotFound)?;
-    let parent_regions = parent_map.list_vmas();
-    let child_map = registry
-        .get_mut(&child_pml4_phys)
-        .ok_or(VmaError::NotFound)?;
+    let (parent_regions, reserved_bytes_added) = {
+        let mut registry = VMA_REGISTRY.lock();
+        let parent_map = registry.get(&parent_pml4_phys).ok_or(VmaError::NotFound)?;
+        let parent_regions = parent_map.list_vmas();
+        let child_map = registry
+            .get_mut(&child_pml4_phys)
+            .ok_or(VmaError::NotFound)?;
 
-    for region in parent_regions.iter().cloned() {
-        child_map.insert(region)?;
+        let mut reserved_bytes_added = 0usize;
+        for region in parent_regions.iter().cloned() {
+            reserved_bytes_added = reserved_bytes_added.saturating_add(region.size());
+            child_map.insert(region)?;
+        }
+
+        (parent_regions, reserved_bytes_added)
+    };
+
+    if reserved_bytes_added > 0 {
+        crate::process::account_process_reserved_bytes_add(child_pid, reserved_bytes_added);
     }
 
     log_info!(
@@ -1169,11 +1367,33 @@ pub fn clone_cow_private_mappings_for_fork(
 }
 
 pub fn drain_materialized_pages(pml4_phys: usize) -> alloc::vec::Vec<PageAccount> {
-    let mut registry = VMA_REGISTRY.lock();
-    match registry.get_mut(&pml4_phys) {
-        Some(map) => map.drain_materialized_pages(),
-        None => alloc::vec::Vec::new(),
+    let mut resident_subtractions: BTreeMap<ProcessId, (usize, usize)> = BTreeMap::new();
+    let pages = {
+        let mut registry = VMA_REGISTRY.lock();
+        match registry.get_mut(&pml4_phys) {
+            Some(map) => map.drain_materialized_pages(),
+            None => alloc::vec::Vec::new(),
+        }
+    };
+
+    for account in &pages {
+        let Some((process_id, private_pages, shared_pages)) = page_account_charge(account) else {
+            continue;
+        };
+        let entry = resident_subtractions.entry(process_id).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(private_pages);
+        entry.1 = entry.1.saturating_add(shared_pages);
     }
+
+    for (process_id, (private_pages, shared_pages)) in resident_subtractions {
+        crate::process::account_process_resident_pages_sub(
+            process_id,
+            private_pages,
+            shared_pages,
+        );
+    }
+
+    pages
 }
 
 pub fn free_page_account(account: PageAccount) -> bool {
@@ -1347,6 +1567,7 @@ fn materialize_anon(
     use crate::mm::vm::{self, PageFlags, VmError};
 
     let page_addr = ctx.addr.page_base();
+    let owner_process = crate::process::process_id_for_pml4(pml4_phys as u64);
     let phys = match pmm::alloc_page_zeroed() {
         Some(p) => p,
         None => {
@@ -1388,6 +1609,7 @@ fn materialize_anon(
                     let mut registry = VMA_REGISTRY.lock();
                     if let Some(map) = registry.get_mut(&pml4_phys) {
                         map.track_page(
+                            owner_process,
                             pml4_phys,
                             vma,
                             page_addr,
@@ -1412,6 +1634,10 @@ fn materialize_anon(
                         vma.label
                     );
                     return FaultResult::NotHandled;
+                }
+
+                if let Some(process_id) = owner_process {
+                    crate::process::account_process_resident_pages_add(process_id, 1, 0);
                 }
 
                 log_debug!(
@@ -1641,6 +1867,17 @@ pub fn handle_page_fault(
     error_code: u64,
 ) -> FaultResult {
     let page_addr = ctx.addr.page_base();
+    if !crate::process::pml4_allows_memory_operations(pml4_phys as u64) {
+        log_warn!(
+            LOG_ORIGIN,
+            "[PF] admit=deny addr=0x{:X} access={:?} result=NotHandled reason=process_terminating pml4=0x{:X}",
+            ctx.addr.as_usize(),
+            ctx.access,
+            pml4_phys
+        );
+        return FaultResult::NotHandled;
+    }
+
     let vma = {
         let registry = VMA_REGISTRY.lock();
         let map = match registry.get(&pml4_phys) {

@@ -723,7 +723,13 @@ impl SharedMemManager {
         let effective_range = atom_abi::validate_user_range(effective_va, region_size)
             .map_err(map_user_address_error)?;
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
-        region.map(process_id, effective_range, flags, pml4_phys)
+        let mapped_va = region.map(process_id, effective_range, flags, pml4_phys)?;
+        let shared_pages = region_size / pmm::PAGE_SIZE;
+        drop(regions);
+
+        // Shared-memory accounting policy: charge mapped shared pages per process mapping.
+        crate::process::account_process_resident_pages_add(process_id, 0, shared_pages);
+        Ok(mapped_va)
     }
 
     fn map_region_in_pml4(
@@ -754,7 +760,12 @@ impl SharedMemManager {
         let effective_range = atom_abi::validate_user_range(effective_va, region_size)
             .map_err(map_user_address_error)?;
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
-        region.map(process_id, effective_range, flags, pml4_phys)
+        let mapped_va = region.map(process_id, effective_range, flags, pml4_phys)?;
+        let shared_pages = region_size / pmm::PAGE_SIZE;
+        drop(regions);
+
+        crate::process::account_process_resident_pages_add(process_id, 0, shared_pages);
+        Ok(mapped_va)
     }
 
     /// Validate that an explicit (user-provided) virtual address is sane:
@@ -773,6 +784,10 @@ impl SharedMemManager {
     /// Unmap a region from the given process.
     fn unmap_region(&self, region_id: RegionId, process_id: ProcessId, pml4_phys: usize) -> Result<(), SharedMemError> {
         let mut regions = self.regions.lock();
+        let shared_pages = {
+            let region = regions.get(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+            region.size / pmm::PAGE_SIZE
+        };
         {
             let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
             region.unmap(process_id, pml4_phys)?;
@@ -780,6 +795,9 @@ impl SharedMemManager {
 
         Self::finalize_deferred_destruction_if_ready(&mut regions, region_id);
         debug_assert_no_zombie_regions(&regions);
+        drop(regions);
+
+        crate::process::account_process_resident_pages_sub(process_id, 0, shared_pages);
 
         Ok(())
     }
@@ -1033,6 +1051,24 @@ pub fn region_size(region_id: RegionId) -> Option<usize> {
     mgr.get(&region_id).map(|r| r.size)
 }
 
+/// Count resident shared-memory pages mapped into a process.
+pub fn count_process_mapped_shared_pages(process_id: ProcessId) -> usize {
+    let regions = SHARED_MEM_MANAGER.regions.lock();
+    let mut total_pages = 0usize;
+
+    for region in regions.values() {
+        if region
+            .mappings
+            .iter()
+            .any(|mapping| mapping.process_id == process_id)
+        {
+            total_pages = total_pages.saturating_add(region.size / pmm::PAGE_SIZE);
+        }
+    }
+
+    total_pages
+}
+
 /// Cleanup all shared-memory state owned by or mapped into a process.
 ///
 /// This is the single authoritative cleanup path for shared memory. The
@@ -1107,8 +1143,10 @@ pub fn cleanup_process_shared_memory(process_id: ProcessId) {
         }
     }
 
+    let mut unmapped_shared_pages = 0usize;
     for region_id in regions_to_unmap {
         if let Some(region) = regions.get_mut(&region_id) {
+            let region_shared_pages = region.size / pmm::PAGE_SIZE;
             if let Err(e) = region.unmap_process_mapping(process_id, None) {
                 log_debug!(
                     LOG_ORIGIN,
@@ -1117,6 +1155,8 @@ pub fn cleanup_process_shared_memory(process_id: ProcessId) {
                     process_id,
                     e
                 );
+            } else {
+                unmapped_shared_pages = unmapped_shared_pages.saturating_add(region_shared_pages);
             }
         }
 
@@ -1164,6 +1204,12 @@ pub fn cleanup_process_shared_memory(process_id: ProcessId) {
         "shared_mem cleanup left owner process {} with regions that were not either destroyed or waiting on foreign mappings",
         process_id
     );
+
+    drop(regions);
+
+    if unmapped_shared_pages > 0 {
+        process::account_process_resident_pages_sub(process_id, 0, unmapped_shared_pages);
+    }
 }
 
 pub fn forget_process_shared_memory_cleanup(process_id: ProcessId) {

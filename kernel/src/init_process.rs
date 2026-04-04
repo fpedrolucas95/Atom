@@ -192,7 +192,7 @@ fn create_init_process(
     pid: ThreadId,
     sections: &executable::ExecutableSections,
 ) -> Result<InitProcess, InitError> {
-    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
+    use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
 
     // Create a new address space for init (no longer shares kernel_cr3)
     let init_pml4_phys = pmm::alloc_pages_zeroed(1)
@@ -239,6 +239,13 @@ fn create_init_process(
         backing: VmaBacking::Anonymous,
         label: "text",
     }).map_err(|_| InitError::MemoryAllocationFailed)?;
+    vma::account_pre_mapped_range(
+        process_id,
+        init_pml4_phys,
+        executable.text_base,
+        executable.text_base + text_size,
+        PageSource::Anonymous,
+    ).map_err(|_| InitError::MemoryAllocationFailed)?;
 
     if !sections.data.is_empty() {
         vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
@@ -248,6 +255,13 @@ fn create_init_process(
             backing: VmaBacking::Anonymous,
             label: "data",
         }).map_err(|_| InitError::MemoryAllocationFailed)?;
+        vma::account_pre_mapped_range(
+            process_id,
+            init_pml4_phys,
+            executable.data_base,
+            executable.data_base + data_size,
+            PageSource::Anonymous,
+        ).map_err(|_| InitError::MemoryAllocationFailed)?;
     }
 
     vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
@@ -257,6 +271,13 @@ fn create_init_process(
         backing: VmaBacking::Anonymous,
         label: "bss",
     }).map_err(|_| InitError::MemoryAllocationFailed)?;
+    vma::account_pre_mapped_range(
+        process_id,
+        init_pml4_phys,
+        executable.bss_base,
+        executable.bss_base + bss_size,
+        PageSource::Anonymous,
+    ).map_err(|_| InitError::MemoryAllocationFailed)?;
 
     vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
         start: user_stack_base,
@@ -265,6 +286,13 @@ fn create_init_process(
         backing: VmaBacking::Anonymous,
         label: "stack",
     }).map_err(|_| InitError::MemoryAllocationFailed)?;
+    vma::account_pre_mapped_range(
+        process_id,
+        init_pml4_phys,
+        user_stack_base,
+        USER_STACK_TOP,
+        PageSource::Anonymous,
+    ).map_err(|_| InitError::MemoryAllocationFailed)?;
 
     if bss_end > heap_start {
         log_error!(

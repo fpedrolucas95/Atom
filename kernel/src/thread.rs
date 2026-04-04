@@ -1686,6 +1686,65 @@ fn free_user_space_pages(pml4_phys: usize) -> usize {
     pages_freed
 }
 
+/// Count all user-accessible mapped pages in the lower half of an address space.
+///
+/// This is a slow page-table traversal used only for accounting verification.
+pub fn count_user_space_pages(pml4_phys: usize) -> usize {
+    let mut pages = 0usize;
+
+    for pml4_idx in 0..256 {
+        let Ok(pdpt_entry) = get_pml4_entry(pml4_phys, pml4_idx) else {
+            continue;
+        };
+        if pdpt_entry == 0 || (pdpt_entry & 0x1) == 0 {
+            continue;
+        }
+        let pdpt_phys = pdpt_entry & 0x000F_FFFF_FFFF_F000;
+
+        for pdpt_idx in 0..512 {
+            let Ok(pd_entry) = get_pdpt_entry(pdpt_phys as usize, pdpt_idx) else {
+                continue;
+            };
+            if pd_entry == 0 || (pd_entry & 0x1) == 0 {
+                continue;
+            }
+            let pd_phys = pd_entry & 0x000F_FFFF_FFFF_F000;
+
+            for pd_idx in 0..512 {
+                let Ok(pt_entry) = get_pd_entry(pd_phys as usize, pd_idx) else {
+                    continue;
+                };
+                if pt_entry == 0 || (pt_entry & 0x1) == 0 {
+                    continue;
+                }
+                let pt_phys = pt_entry & 0x000F_FFFF_FFFF_F000;
+
+                for pt_idx in 0..512 {
+                    let Ok(page_entry) = get_pt_entry(pt_phys as usize, pt_idx) else {
+                        continue;
+                    };
+                    if page_entry == 0 || (page_entry & 0x1) == 0 {
+                        continue;
+                    }
+                    // User mappings only.
+                    if (page_entry & 0x4) == 0 {
+                        continue;
+                    }
+
+                    // Keep traversal consistent with teardown semantics: exclude
+                    // high physical MMIO/framebuffer mappings.
+                    let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
+                    if phys_frame < 0xC0000000 {
+                        pages = pages.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    pages
+}
+
 /// Thin checked wrapper for page-table reads during teardown.
 #[inline]
 fn phys_to_virt_checked(phys: usize) -> Result<usize, ()> {
@@ -1993,6 +2052,15 @@ fn perform_final_cleanup(
     } else {
         0
     };
+
+    if should_cleanup_address_space {
+        if let Some(process_id) = process_id {
+            let _ = process::verify_process_accounting_fail_fast(
+                process_id,
+                "post_process_teardown",
+            );
+        }
+    }
 
     // Step 7: Free kernel stack
     log_debug!(LOG_ORIGIN, "Final Step: Freeing kernel stack for TID {}", thread_id);

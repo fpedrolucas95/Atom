@@ -14,9 +14,10 @@
 // - The system avoids killing the last remaining userspace process if possible
 
 use crate::mm::pmm;
-use crate::mm::vma;
-use crate::thread::ThreadId;
+use crate::process::{ProcessId, ProcessMemorySnapshot};
 use crate::{log_info, log_warn};
+#[cfg(debug_assertions)]
+use crate::log_debug;
 
 const LOG_ORIGIN: &str = "oom";
 
@@ -159,8 +160,8 @@ pub fn check_memory_pressure_detailed() -> MemoryPressureInfo {
 
 /// Count the number of processes that are exceeding their memory limits.
 ///
-/// This function iterates through all registered processes and checks if their
-/// current memory usage exceeds their configured memory limit.
+/// Uses an immutable process-memory snapshot and checks if each process
+/// exceeds its configured resident-page limit.
 ///
 /// # Returns
 /// Number of processes over their memory limit
@@ -168,26 +169,16 @@ pub fn check_memory_pressure_detailed() -> MemoryPressureInfo {
 /// # Requirements
 /// Implements Req 8.4, Req 8.5
 fn count_processes_over_limit() -> usize {
-    use crate::process::{get_process_memory_usage, PROCESS_REGISTRY};
-
-    let registry = PROCESS_REGISTRY.lock();
-    let mut count = 0;
-
-    for (process_id, process) in registry.iter() {
-        // Skip processes with no limit (0 = unlimited)
-        if process.memory_limit_pages == 0 {
-            continue;
-        }
-
-        // Get current memory usage
-        if let Some(usage) = get_process_memory_usage(*process_id) {
-            if usage.resident_pages > process.memory_limit_pages {
-                count += 1;
-            }
-        }
-    }
-
-    count
+    let snapshot = crate::process::collect_process_memory_snapshot();
+    snapshot
+        .iter()
+        .filter(|process| {
+            !process.terminating
+                && !process.terminated
+                && process.limit_pages != 0
+                && process.resident_pages > process.limit_pages
+        })
+        .count()
 }
 
 /// Reason why no OOM victim was found
@@ -238,9 +229,8 @@ pub enum OomError {
 #[derive(Debug)]
 pub enum OomResult {
     /// Successfully killed a process, freeing approximately this many pages
-    Killed { 
-        tid: ThreadId, 
-        name: &'static str,
+    Killed {
+        pid: ProcessId,
         pages_freed: usize,
     },
     /// No killable process found
@@ -255,12 +245,85 @@ pub enum OomResult {
     },
 }
 
-/// Select and terminate the largest memory consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VictimReason {
+    OverLimit,
+    GlobalPressure,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VictimCandidate {
+    pid: ProcessId,
+    resident_pages: usize,
+    limit_pages: usize,
+    over_limit_pages: usize,
+    reason: VictimReason,
+}
+
+fn select_victim(snapshot: &[ProcessMemorySnapshot]) -> Option<VictimCandidate> {
+    let current_process = crate::sched::current_thread()
+        .and_then(|tid| crate::thread::get_thread_process_id(tid));
+
+    let mut best: Option<VictimCandidate> = None;
+    for process in snapshot {
+        if process.terminating || process.terminated {
+            continue;
+        }
+        if process.resident_pages == 0 {
+            continue;
+        }
+        if current_process == Some(process.process_id) {
+            continue;
+        }
+
+        let over_limit_pages = if process.limit_pages == 0 {
+            0
+        } else {
+            process
+                .resident_pages
+                .saturating_sub(process.limit_pages)
+        };
+        let reason = if over_limit_pages > 0 {
+            VictimReason::OverLimit
+        } else {
+            VictimReason::GlobalPressure
+        };
+
+        let candidate = VictimCandidate {
+            pid: process.process_id,
+            resident_pages: process.resident_pages,
+            limit_pages: process.limit_pages,
+            over_limit_pages,
+            reason,
+        };
+
+        let replace = match best {
+            None => true,
+            Some(current) => {
+                candidate.resident_pages > current.resident_pages
+                    || (candidate.resident_pages == current.resident_pages
+                        && candidate.over_limit_pages > current.over_limit_pages)
+                    || (candidate.resident_pages == current.resident_pages
+                        && candidate.over_limit_pages == current.over_limit_pages
+                        && candidate.pid.raw() < current.pid.raw())
+            }
+        };
+
+        if replace {
+            best = Some(candidate);
+        }
+    }
+
+    best
+}
+
+/// Select and terminate the largest process memory consumer.
 ///
-/// Selection criteria:
-/// - Only userspace threads are candidates
-/// - The thread with the most resident pages is selected
-/// - Returns information about the killed thread
+/// Selection criteria (snapshot-only):
+/// - Candidates come from immutable process snapshot
+/// - Primary key: resident pages
+/// - Secondary key: over-limit pages
+/// - OOM action targets a full process (`pid`), never a thread (`tid`)
 ///
 /// # Requirements
 /// Implements Req 8.2, Req 8.3
@@ -315,62 +378,122 @@ pub fn oom_kill() -> OomResult {
         log_info!(LOG_ORIGIN, "All reclamation strategies exhausted, proceeding with victim selection");
     }
 
-    // Get list of all userspace threads and their memory usage
-    let threads = crate::thread::get_all_thread_info();
-    let mut best_victim: Option<(ThreadId, &'static str, usize)> = None;
+    let process_snapshot = crate::process::collect_process_memory_snapshot();
+    #[cfg(debug_assertions)]
+    crate::process::verify_process_accounting_sample(8, "oom_kill_sample");
 
-    for (tid, name, process_id, is_userspace) in &threads {
-        if !is_userspace {
-            continue;
-        }
+    match select_victim(&process_snapshot) {
+        Some(victim) => {
+            let reason_label = match victim.reason {
+                VictimReason::OverLimit => "over_limit",
+                VictimReason::GlobalPressure => "global_pressure",
+            };
+            let usage_kb = victim.resident_pages * pmm::PAGE_SIZE / 1024;
+            let limit_kb = victim.limit_pages * pmm::PAGE_SIZE / 1024;
 
-        let resident = process_id
-            .and_then(vma::get_process_stats)
-            .map(|s| s.resident_pages)
-            .unwrap_or(0);
-
-        match &best_victim {
-            Some((_, _, best_resident)) if resident > *best_resident => {
-                best_victim = Some((*tid, name, resident));
-            }
-            None => {
-                best_victim = Some((*tid, name, resident));
-            }
-            _ => {}
-        }
-    }
-
-    match best_victim {
-        Some((tid, name, resident)) => {
             log_warn!(
                 LOG_ORIGIN,
-                "Killing process '{}' (tid={}, resident={} pages, {} KB) — Pressure: {:?}, Free: {}/{} ({}%), Fragmentation: {:.2}",
-                name,
-                tid,
-                resident,
-                resident * pmm::PAGE_SIZE / 1024,
-                pressure.level,
-                pressure.free_pages,
-                pressure.total_pages,
-                pressure.free_percent,
-                pressure.fragmentation_score
+                "[oom] victim=pid:{} usage={}KB resident_pages={} limit_pages={} limit={}KB over_limit_pages={} reason={}",
+                victim.pid,
+                usage_kb,
+                victim.resident_pages,
+                victim.limit_pages,
+                limit_kb,
+                victim.over_limit_pages,
+                reason_label
             );
 
-            crate::thread::terminate_entity(
-                tid,
-                crate::thread::TerminationReason::OutOfMemory,
-            );
+            let free_before = pressure.free_pages;
+            let start_tick = crate::interrupts::get_ticks();
 
-            OomResult::Killed { 
-                tid, 
-                name,
-                pages_freed: resident,
+            match crate::process::terminate_process(
+                victim.pid,
+                crate::process::TerminationReason::OutOfMemory,
+            ) {
+                Ok(()) => {
+                    let (_, free_after) = pmm::get_stats();
+                    let freed_pages = free_after.saturating_sub(free_before);
+                    let teardown_ms =
+                        crate::interrupts::get_ticks().saturating_sub(start_tick).saturating_mul(10);
+
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "[oom] terminated pid:{} freed_pages={} freed={}KB teardown_ms={}",
+                        victim.pid,
+                        freed_pages,
+                        (freed_pages * pmm::PAGE_SIZE) / 1024,
+                        teardown_ms
+                    );
+
+                    #[cfg(debug_assertions)]
+                    {
+                        match crate::process::verify_process_accounting(victim.pid) {
+                            Ok(()) => {
+                                let remaining = crate::process::get_process_memory_usage(victim.pid)
+                                    .map(|usage| usage.resident_pages)
+                                    .unwrap_or(0);
+                                if remaining > 0 {
+                                    log_warn!(
+                                        LOG_ORIGIN,
+                                        "[oom] post_kill_accounting pid:{} remaining_resident_pages={}",
+                                        victim.pid,
+                                        remaining
+                                    );
+                                } else {
+                                    log_debug!(
+                                        LOG_ORIGIN,
+                                        "[oom] post_kill_accounting pid:{} resident_pages=0",
+                                        victim.pid
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                log_debug!(
+                                    LOG_ORIGIN,
+                                    "[oom] post_kill_accounting pid:{} state=absent_or_zero",
+                                    victim.pid
+                                );
+                            }
+                        }
+                    }
+
+                    OomResult::Killed {
+                        pid: victim.pid,
+                        pages_freed: freed_pages,
+                    }
+                }
+                Err(err) => {
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "[oom] terminate_process failed pid:{} err={:?}",
+                        victim.pid,
+                        err
+                    );
+
+                    OomResult::NoVictim {
+                        reason: NoVictimReason::AllProcessesBelowMinimum,
+                        fallback_action: FallbackAction::DenyAllocation,
+                    }
+                }
             }
         }
         None => {
             // No victim found - determine reason and fallback action
-            let reason = if threads.is_empty() {
+            let current_process = crate::sched::current_thread()
+                .and_then(|tid| crate::thread::get_thread_process_id(tid));
+            let has_active_process = process_snapshot
+                .iter()
+                .any(|process| !process.terminating && !process.terminated);
+            let has_non_current_active = process_snapshot.iter().any(|process| {
+                !process.terminating
+                    && !process.terminated
+                    && Some(process.process_id) != current_process
+            });
+
+            let reason = if !has_active_process {
                 NoVictimReason::NoUserProcesses
+            } else if !has_non_current_active {
+                NoVictimReason::SystemReserved
             } else {
                 NoVictimReason::AllProcessesBelowMinimum
             };
@@ -403,8 +526,8 @@ pub fn oom_kill() -> OomResult {
             );
             log_warn!(
                 LOG_ORIGIN,
-                "Userspace threads: {}, all below minimum killable size",
-                threads.iter().filter(|(_, _, _, is_userspace)| *is_userspace).count()
+                "Process snapshot entries: {}, all non-killable under current policy",
+                process_snapshot.len()
             );
 
             OomResult::NoVictim {
@@ -435,8 +558,13 @@ pub fn try_reclaim() -> bool {
         MemoryPressure::Oom => {
             log_warn!(LOG_ORIGIN, "OOM pressure — invoking OOM killer");
             match oom_kill() {
-                OomResult::Killed { tid, name, pages_freed } => {
-                    log_info!(LOG_ORIGIN, "OOM killed '{}' (tid={}, freed {} pages)", name, tid, pages_freed);
+                OomResult::Killed { pid, pages_freed } => {
+                    log_info!(
+                        LOG_ORIGIN,
+                        "OOM killed pid={} (freed {} pages)",
+                        pid,
+                        pages_freed
+                    );
                     true
                 }
                 OomResult::NoVictim { reason, fallback_action } => {

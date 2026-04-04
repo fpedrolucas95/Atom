@@ -4339,7 +4339,7 @@ fn spawn_process_internal(
     use crate::executable::USER_EXEC_LOAD_BASE;
     use crate::mm::pmm::{self, align_up, PAGE_SIZE};
     use crate::mm::vm::{self, PageFlags};
-    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
+    use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
     const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
@@ -4417,6 +4417,16 @@ fn spawn_process_internal(
         log_error!("spawn", "Failed to insert text VMA for '{}': {:?}", name, e);
         ENOMEM
     })?;
+    vma::account_pre_mapped_range(
+        process_id,
+        new_pml4_phys,
+        text_base,
+        text_base + text_size,
+        PageSource::Anonymous,
+    ).map_err(|e| {
+        log_error!("spawn", "Failed to account text pages for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
 
     // Allocate and map data section
     let data_base = align_up(text_base + text_size);
@@ -4458,6 +4468,16 @@ fn spawn_process_internal(
             log_error!("spawn", "Failed to insert data VMA for '{}': {:?}", name, e);
             ENOMEM
         })?;
+        vma::account_pre_mapped_range(
+            process_id,
+            new_pml4_phys,
+            data_base,
+            data_base + data_size,
+            PageSource::Anonymous,
+        ).map_err(|e| {
+            log_error!("spawn", "Failed to account data pages for '{}': {:?}", name, e);
+            ENOMEM
+        })?;
     }
 
     // Allocate and map BSS section
@@ -4490,6 +4510,16 @@ fn spawn_process_internal(
         log_error!("spawn", "Failed to insert bss VMA for '{}': {:?}", name, e);
         ENOMEM
     })?;
+    vma::account_pre_mapped_range(
+        process_id,
+        new_pml4_phys,
+        bss_base,
+        bss_base + align_up(bss_size),
+        PageSource::Anonymous,
+    ).map_err(|e| {
+        log_error!("spawn", "Failed to account bss pages for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
 
     // Allocate the full userspace stack while leaving the guard page unmapped.
     let stack_phys = pmm::alloc_pages_zeroed(atom_abi::DEFAULT_USER_STACK_PAGES)
@@ -4515,6 +4545,16 @@ fn spawn_process_internal(
         label: "stack",
     }).map_err(|e| {
         log_error!("spawn", "Failed to insert stack VMA for '{}': {:?}", name, e);
+        ENOMEM
+    })?;
+    vma::account_pre_mapped_range(
+        process_id,
+        new_pml4_phys,
+        user_stack_base,
+        user_stack_top,
+        PageSource::Anonymous,
+    ).map_err(|e| {
+        log_error!("spawn", "Failed to account stack pages for '{}': {:?}", name, e);
         ENOMEM
     })?;
 
@@ -5010,6 +5050,15 @@ fn sys_get_cpu_brand(buffer: u64, max_len: usize) -> u64 {
 fn current_process_vma_context() -> Option<(crate::thread::ThreadId, crate::process::ProcessId, usize)> {
     let tid = crate::sched::current_thread()?;
     let process_id = crate::thread::get_thread_process_id(tid)?;
+    if !crate::process::process_allows_memory_operations(process_id) {
+        log_warn!(
+            "syscall",
+            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
+            process_id,
+            tid
+        );
+        return None;
+    }
     let process_pml4 = crate::process::get_process_pml4(process_id)?;
     let cached_pml4 = crate::thread::get_thread_address_space(tid).unwrap_or(0);
 
