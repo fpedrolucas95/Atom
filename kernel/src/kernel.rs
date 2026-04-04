@@ -70,6 +70,7 @@ mod executable;
 mod init_process;
 mod driver_registry;
 mod drivers;
+mod architectural_invariants_selftests;
 // NOTE: service_manager and namesvc run as userspace processes.
 // They are spawned by the init process (PID 1), not by the kernel.
 // See userspace/services/ for their implementations.
@@ -164,6 +165,7 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     syscall::init();
     ipc::init();
     shared_mem::init();
+    architectural_invariants_selftests::run_architectural_invariants_self_tests();
 
     // Initialize driver registry with boot-loaded drivers
     driver_registry::init(&boot_info.drivers);

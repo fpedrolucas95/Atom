@@ -70,7 +70,15 @@ impl ReadyQueues {
     fn push(&mut self, id: ThreadId, priority: ThreadPriority) {
         let idx = priority as usize;
         if idx < PRIORITY_LEVELS {
-            self.queues[idx].push_back(id);
+            if !self.queues[idx].iter().any(|existing| *existing == id) {
+                self.queues[idx].push_back(id);
+            }
+        }
+    }
+
+    fn remove(&mut self, id: ThreadId) {
+        for queue in self.queues.iter_mut() {
+            queue.retain(|existing| *existing != id);
         }
     }
 
@@ -392,9 +400,28 @@ impl Scheduler {
     }
 
     fn mark_ready(&self, id: ThreadId) {
+        let state = thread::get_thread_state(id);
+        if state.is_none() || matches!(state, Some(ThreadState::Exited)) {
+            return;
+        }
+
         let priority = self.get_priority(id);
+        self.ready.lock().remove(id);
         thread::set_thread_state(id, ThreadState::Ready);
         self.ready.lock().push(id, priority);
+    }
+
+    fn deschedule_thread(&self, id: ThreadId) {
+        self.ready.lock().remove(id);
+        self.sleep_queue.lock().retain(|(thread_id, _)| *thread_id != id);
+
+        let mut current = self.current.lock();
+        if *current == Some(id) {
+            *current = None;
+        }
+
+        self.base_priorities.lock().remove(&id);
+        self.effective_priorities.lock().remove(&id);
     }
 
     fn current_thread(&self) -> Option<ThreadId> {
@@ -438,6 +465,14 @@ pub fn drive_cooperative_tick() {
 
 pub fn mark_thread_ready(id: ThreadId) {
     SCHEDULER.mark_ready(id);
+}
+
+/// Remove a thread from all scheduler-owned runnable/waiting queues.
+///
+/// This is the hard-stop primitive used by process teardown so that
+/// Exited threads cannot be reintroduced by stale wakeups.
+pub fn deschedule_thread(id: ThreadId) {
+    SCHEDULER.deschedule_thread(id);
 }
 
 /// Register a thread to sleep until the given tick count.

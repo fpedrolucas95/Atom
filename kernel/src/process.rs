@@ -468,10 +468,11 @@ pub fn terminate_process(
 
     for thread_id in &thread_ids {
         let _ = crate::thread::set_thread_state(*thread_id, crate::thread::ThreadState::Exited);
+        crate::sched::deschedule_thread(*thread_id);
     }
     log_debug!(
         LOG_ORIGIN,
-        "[terminate] step=3 pid={} scheduler_threads_marked_exited={}",
+        "[terminate] step=3 pid={} scheduler_threads_descheduled={}",
         process_id,
         thread_ids.len()
     );
