@@ -211,6 +211,10 @@ fn map_user_address_validation_error(
             size: 0,
             max_size: usize::MAX,
         },
+        atom_abi::UserAddressError::Unaligned => ValidationError::Unaligned {
+            addr,
+            required_alignment: atom_abi::USER_PAGE_SIZE,
+        },
         atom_abi::UserAddressError::Overflow => ValidationError::OutOfBounds {
             addr,
             min: atom_abi::USER_SPACE_MIN as usize,
@@ -616,7 +620,7 @@ pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageF
     // Validate user-space bounds if this is a user-space mapping
     let is_user_mapping = (flags.bits() & PageFlags::USER.bits()) != 0;
     if is_user_mapping {
-        atom_abi::validate_user_range(virt, pmm::PAGE_SIZE)
+        let _ = atom_abi::validate_user_page_aligned_range(virt, pmm::PAGE_SIZE)
             .map_err(|err| VmError::Validation(map_user_address_validation_error(virt, err)))?;
     }
     let _lock = PAGE_TABLE_LOCK.lock();

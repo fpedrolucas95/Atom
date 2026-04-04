@@ -13,7 +13,7 @@ use crate::cap::{
     CapabilityTable,
     ResourceType,
 };
-use crate::{log_debug, log_info, log_warn};
+use crate::{log_debug, log_error, log_info, log_warn};
 use crate::thread::ThreadId;
 
 const LOG_ORIGIN: &str = "process";
@@ -237,9 +237,10 @@ pub fn debug_assert_thread_process_alignment(
 ) {
     let registry = PROCESS_REGISTRY.lock();
     let Some(process) = registry.get(&process_id) else {
-        debug_assert!(
-            false,
-            "Thread {} references missing process {} during registration",
+        // Operational: thread references a process that no longer exists (may have been cleaned up).
+        log_warn!(
+            LOG_ORIGIN,
+            "Thread {} references missing process {} during alignment check",
             thread_id,
             process_id
         );
@@ -261,12 +262,15 @@ pub fn debug_assert_thread_process_alignment(
         process_id,
         process.pml4_phys
     );
-    debug_assert!(
-        process.threads.contains(&thread_id),
-        "Thread {} is missing from process {} membership list",
-        thread_id,
-        process_id
-    );
+    // AUDIT: Class B — operational condition, will be replaced with structured error
+    if !process.threads.contains(&thread_id) {
+        log_warn!(
+            LOG_ORIGIN,
+            "Thread {} is missing from process {} membership list",
+            thread_id,
+            process_id
+        );
+    }
 
     if process_id.raw() == thread_id.raw() {
         debug_assert_eq!(
@@ -300,11 +304,14 @@ pub fn detach_thread_from_process(process_id: ProcessId, thread_id: ThreadId) {
 
         process.threads.retain(|existing| *existing != thread_id);
         if process.threads.is_empty() {
-            debug_assert!(
-                process.cleaned,
-                "Process {} reached zero threads before final cleanup was claimed",
-                process_id
-            );
+            if !process.cleaned {
+                // Operational: process reached zero threads before cleanup was claimed.
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Process {} reached zero threads before final cleanup was claimed",
+                    process_id
+                );
+            }
         }
 
         if process.cleaned
@@ -518,8 +525,9 @@ pub fn claim_process_cleanup(
 ) -> bool {
     let mut registry = PROCESS_REGISTRY.lock();
     let Some(process) = registry.get_mut(&process_id) else {
-        debug_assert!(
-            false,
+        // Operational: process may have been removed before cleanup claim.
+        log_warn!(
+            LOG_ORIGIN,
             "Missing process {} while claiming final cleanup for thread {}",
             process_id,
             exiting_thread
@@ -536,12 +544,15 @@ pub fn claim_process_cleanup(
         exiting_thread,
         pml4_phys
     );
-    debug_assert!(
-        process.threads.contains(&exiting_thread),
-        "Process {} is missing exiting thread {} during cleanup claim",
-        process_id,
-        exiting_thread
-    );
+    // AUDIT: Class B — operational condition, will be replaced with structured error
+    if !process.threads.contains(&exiting_thread) {
+        log_warn!(
+            LOG_ORIGIN,
+            "Process {} is missing exiting thread {} during cleanup claim",
+            process_id,
+            exiting_thread
+        );
+    }
 
     if process.cleaned {
         return false;
@@ -943,16 +954,15 @@ pub fn verify_process_accounting_fail_fast(process_id: ProcessId, context: &'sta
         Ok(()) => true,
         Err(drift) => {
             log_accounting_drift(context, &drift);
-            #[cfg(debug_assertions)]
-            panic!(
-                "process accounting drift detected in {} for pid {}",
+            // Operational accounting drift — log structured error, do not panic.
+            // Callers must handle false return and take appropriate action.
+            log_error!(
+                LOG_ORIGIN,
+                "[ACCOUNTING_DRIFT] context={} pid={} — process accounting drift detected, returning false",
                 context,
                 process_id
             );
-            #[cfg(not(debug_assertions))]
-            {
-                false
-            }
+            false
         }
     }
 }

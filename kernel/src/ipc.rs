@@ -476,10 +476,16 @@ fn debug_assert_port_authority_metadata(port: &PortState) {
             );
         }
     } else {
-        debug_assert!(
-            authority_process.is_none(),
-            "userspace IPC ports must carry owner_process authority"
-        );
+        // Operational: kernel-thread-owned port should have no authority_process.
+        // If authority_process is Some, metadata has diverged — log and continue.
+        if authority_process.is_some() {
+            crate::log_warn!(
+                "ipc",
+                "IPC port {:?} metadata diverged: kernel-thread port has unexpected authority_process={:?}",
+                port.id,
+                authority_process
+            );
+        }
     }
 }
 
@@ -496,6 +502,9 @@ fn can_thread_exercise_port_authority(caller: ThreadId, port: &PortState) -> boo
     let has_process_authority = is_port_authority_process(caller, port);
     let allowed = has_process_authority && caller == port.authority_thread;
 
+    // INVARIANT: routing_thread must not grant IPC authority — structural, not operational.
+    // If `allowed` is true, then `caller == port.authority_thread` by construction above.
+    // Therefore `caller != port.authority_thread` is structurally impossible when `allowed` is true.
     debug_assert!(
         !(allowed && caller == port.routing_thread && caller != port.authority_thread),
         "routing_thread must not grant IPC authority"

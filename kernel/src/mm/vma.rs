@@ -1734,6 +1734,26 @@ fn materialize_anon(
                     crate::process::account_process_resident_pages_add(process_id, 1, 0);
                 }
 
+                // Post-materialization sanity check: verify the page is actually
+                // present in the page table before returning Resolved. If it is
+                // not present, the fault handler would re-execute the faulting
+                // instruction and loop. This catches bugs in remap_page_in_pml4
+                // or TLB coherence issues early.
+                if !vm::is_page_present_in_pml4(pml4_phys, page_addr) {
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} result=not_handled reason=post_map_verify_failed label={}",
+                        pml4_phys,
+                        page_addr,
+                        phys,
+                        vma.label
+                    );
+                    // Undo the mapping and free the page
+                    let _ = vm::unmap_page_in_pml4(pml4_phys, page_addr);
+                    let _ = pmm::free_page(phys);
+                    return FaultResult::NotHandled;
+                }
+
                 log_debug!(
                     LOG_ORIGIN,
                     "[PF] materialize=anon pml4=0x{:X} page=0x{:X} phys=0x{:X} access={:?} user={} label={} result=mapped",

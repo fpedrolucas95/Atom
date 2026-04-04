@@ -47,7 +47,7 @@ use core::ptr;
 
 use crate::boot::ExecutableImage;
 use crate::mm::{addrspace, pmm, vm};
-use crate::mm::addrspace::{AddressSpaceId, USER_CANONICAL_MAX};
+use crate::mm::addrspace::AddressSpaceId;
 use crate::mm::vm::PageFlags;
 use crate::thread::ThreadId;
 use crate::{log_error, log_info, log_warn};
@@ -283,13 +283,34 @@ fn do_load(
     let bss_base = pmm::align_up(data_base + data_size);
     let bss_size = pmm::align_up(sections.bss_size);
 
-    let highest_virt = bss_base.saturating_add(bss_size);
-    if highest_virt > USER_CANONICAL_MAX {
+    let highest_virt = match bss_base.checked_add(bss_size) {
+        Some(top) => top,
+        None => {
+            log_error!(LOG_ORIGIN, "Executable layout overflowed while computing top VA");
+            return Err(ExecError::NonCanonicalLayout);
+        }
+    };
+    let layout_size = match highest_virt.checked_sub(text_base) {
+        Some(size) => size,
+        None => {
+            log_error!(
+                LOG_ORIGIN,
+                "Executable layout underflow: text_base=0x{:X} highest_virt=0x{:X}",
+                text_base,
+                highest_virt
+            );
+            return Err(ExecError::NonCanonicalLayout);
+        }
+    };
+
+    if let Err(err) = atom_abi::validate_user_range(text_base, layout_size) {
         log_error!(
             LOG_ORIGIN,
-            "Executable layout exceeds canonical user range: top=0x{:X} limit=0x{:X}",
+            "Executable layout violates ABI userspace range: base=0x{:X} top=0x{:X} size={} err={:?}",
+            text_base,
             highest_virt,
-            USER_CANONICAL_MAX
+            layout_size,
+            err
         );
         return Err(ExecError::NonCanonicalLayout);
     }

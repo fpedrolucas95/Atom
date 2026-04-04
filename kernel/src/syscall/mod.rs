@@ -268,6 +268,205 @@ pub use atom_abi::{
     FS_MAX_PATH_LEN,
 };
 
+// ============================================================================
+// Syscall Error Taxonomy (Phase 6 — Syscall Hardening)
+// ============================================================================
+//
+// Two error enums cover all operational failures in the syscall path:
+//
+// SyscallError — operational errors from handlers; each maps to a POSIX errno.
+//   Never causes a kernel panic. Returned to userspace as an errno value.
+//
+// SyscallContextError — metadata drift errors detected before dispatch.
+//   When these occur, the process is isolated via contain_context_failure()
+//   and EINVAL is returned to userspace.
+
+/// Operational errors from the syscall path.
+/// Each variant maps to a POSIX-like errno via `to_errno()`.
+/// These errors are NEVER fatal to the kernel — they are contained locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallError {
+    /// Address space of the process diverged from the expected PML4.
+    AddressSpaceDrift,
+    /// Process metadata is corrupted or internally inconsistent.
+    ProcessMetadataCorrupted,
+    /// Thread references a different process than expected.
+    ThreadProcessMismatch,
+    /// Userspace return address is invalid or points into kernel space.
+    InvalidUserReturnAddress,
+    /// Operation denied by admission policy (quota, OOM pressure).
+    AdmissionDenied,
+    /// Capability revocation was partial — some children failed to revoke.
+    CapabilityRevokePartial,
+    /// Userspace pointer is invalid or outside permitted bounds.
+    InvalidPointer,
+    /// Insufficient capability permissions for the requested operation.
+    PermissionDenied,
+    /// Internal inconsistency detected — local containment applied.
+    InternalInconsistency(&'static str),
+}
+
+impl SyscallError {
+    /// Convert to a POSIX-like errno value for return to userspace.
+    /// Returns a non-zero value for every variant (zero = success).
+    pub fn to_errno(self) -> u64 {
+        match self {
+            SyscallError::AddressSpaceDrift          => EINVAL,
+            SyscallError::ProcessMetadataCorrupted   => EINVAL,
+            SyscallError::ThreadProcessMismatch      => EINVAL,
+            SyscallError::InvalidUserReturnAddress   => EINVAL,
+            SyscallError::AdmissionDenied            => ENOMEM,
+            SyscallError::CapabilityRevokePartial    => EBUSY,
+            SyscallError::InvalidPointer             => EINVAL,
+            SyscallError::PermissionDenied           => EPERM,
+            SyscallError::InternalInconsistency(_)   => EINVAL,
+        }
+    }
+}
+
+/// Context errors detected before syscall dispatch.
+/// When these occur, the process is isolated and EINVAL is returned.
+/// These indicate kernel metadata drift, not userspace bugs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallContextError {
+    /// Thread's PML4 does not match the registered process PML4.
+    ProcessContextMismatch,
+    /// Userspace return address is invalid or points into kernel space.
+    InvalidUserReturnAddress,
+    /// Address space is absent or not mapped for the process.
+    MissingAddressSpace,
+    /// Thread/process metadata has diverged (thread_id, process_id inconsistent).
+    ThreadMetadataDrift,
+}
+
+/// Validated syscall execution context.
+/// Produced by `validate_syscall_context` when all checks pass.
+#[derive(Debug, Clone, Copy)]
+pub struct SyscallContext {
+    pub thread_id: crate::thread::ThreadId,
+    pub process_id: crate::process::ProcessId,
+    pub pml4_phys: u64,
+}
+
+/// Validate the syscall execution context before dispatching.
+///
+/// Checks:
+/// 1. Thread exists and has an associated process
+/// 2. Process PML4 matches `expected_pml4`
+/// 3. Process is not in a terminal state (terminating or terminated)
+///
+/// Returns `Ok(SyscallContext)` if all checks pass.
+/// Returns `Err(SyscallContextError)` if any check fails.
+pub fn validate_syscall_context(
+    thread_id: crate::thread::ThreadId,
+    expected_pml4: u64,
+) -> Result<SyscallContext, SyscallContextError> {
+    // Check 1: thread has an associated process
+    let process_id = crate::thread::get_thread_process_id(thread_id)
+        .ok_or(SyscallContextError::ThreadMetadataDrift)?;
+
+    // Check 2: process PML4 matches expected
+    let process_pml4 = crate::process::get_process_pml4(process_id)
+        .ok_or(SyscallContextError::MissingAddressSpace)?;
+
+    if process_pml4 != expected_pml4 {
+        return Err(SyscallContextError::ProcessContextMismatch);
+    }
+
+    // Check 3: process is not in a terminal state
+    if crate::process::is_process_terminating(process_id)
+        || crate::process::is_process_terminated(process_id)
+    {
+        return Err(SyscallContextError::ThreadMetadataDrift);
+    }
+
+    Ok(SyscallContext {
+        thread_id,
+        process_id,
+        pml4_phys: expected_pml4,
+    })
+}
+
+/// Map a `SyscallContextError` to a numeric reason code for use in termination.
+fn context_error_code(error: SyscallContextError) -> u64 {
+    match error {
+        SyscallContextError::ProcessContextMismatch   => 1,
+        SyscallContextError::InvalidUserReturnAddress => 2,
+        SyscallContextError::MissingAddressSpace      => 3,
+        SyscallContextError::ThreadMetadataDrift      => 4,
+    }
+}
+
+/// Contain a syscall context failure by isolating the affected process/thread.
+///
+/// This function is called when `validate_syscall_context` returns an error,
+/// or when a context error is detected during syscall dispatch. It:
+/// 1. Emits a structured error log with all available context
+/// 2. Transitions the process to a dying state (if process_id is known)
+/// 3. Terminates the thread (if only thread_id is known)
+/// 4. Returns normally — the kernel continues running for other processes
+///
+/// This implements local containment: a single process's metadata drift
+/// cannot crash the entire kernel.
+pub fn contain_context_failure(
+    error: SyscallContextError,
+    thread_id: crate::thread::ThreadId,
+    process_id: Option<crate::process::ProcessId>,
+) {
+    log_error!(
+        "syscall",
+        "[CONTEXT_FAILURE] error={:?} tid={} pid={:?} — isolating process/thread",
+        error,
+        thread_id,
+        process_id
+    );
+
+    if let Some(pid) = process_id {
+        // Transition process to dying state — blocks new faults and memory ops.
+        // This is the preferred containment path when we know the process.
+        let result = crate::process::terminate_process(
+            pid,
+            crate::process::TerminationReason::KilledByKernel { reason_code: context_error_code(error) },
+        );
+        match result {
+            Ok(()) => {
+                log_error!(
+                    "syscall",
+                    "[CONTEXT_FAILURE] pid={} terminated due to context failure: {:?}",
+                    pid,
+                    error
+                );
+            }
+            Err(e) => {
+                log_error!(
+                    "syscall",
+                    "[CONTEXT_FAILURE] pid={} terminate_process failed: {:?} — falling back to thread termination",
+                    pid,
+                    e
+                );
+                // Fallback: terminate the thread directly
+                crate::thread::terminate_entity(
+                    thread_id,
+                    crate::thread::TerminationReason::KilledByKernel { reason_code: context_error_code(error) },
+                );
+            }
+        }
+    } else {
+        // No process context — terminate the thread directly.
+        log_error!(
+            "syscall",
+            "[CONTEXT_FAILURE] tid={} no process context, terminating thread: {:?}",
+            thread_id,
+            error
+        );
+        crate::thread::terminate_entity(
+            thread_id,
+            crate::thread::TerminationReason::KilledByKernel { reason_code: context_error_code(error) },
+        );
+    }
+    // Kernel continues — containment is local to this process/thread.
+}
+
 extern "C" {
     fn syscall_entry();
 }
@@ -389,6 +588,7 @@ pub fn register_privileged_process(pid: crate::thread::ThreadId) {
 /// capability lookup when process abstraction is available.
 #[inline]
 fn has_privilege() -> bool {
+
     let privileged = PRIVILEGED_PID.load(AtomicOrd::SeqCst);
     if privileged == 0 {
         return false; // init not yet registered
@@ -396,6 +596,19 @@ fn has_privilege() -> bool {
     crate::sched::current_thread()
         .map(|t| t.raw() == privileged)
         .unwrap_or(false)
+}
+
+/// Normalize a raw errno value to a SyscallError variant for observability.
+/// Returns None for non-error results or unclassified errors.
+/// Does NOT change the errno — only provides a structured classification.
+fn normalize_syscall_result(errno: u64) -> Option<SyscallError> {
+    match errno {
+        e if e == ENOMEM => Some(SyscallError::AdmissionDenied),
+        e if e == EPERM  => Some(SyscallError::PermissionDenied),
+        e if e == EBUSY  => Some(SyscallError::CapabilityRevokePartial),
+        e if e == EINVAL => Some(SyscallError::InvalidPointer),
+        _                => None,
+    }
 }
 
 #[repr(C)]
@@ -655,6 +868,8 @@ extern "win64" fn rust_syscall_dispatcher(
     const LOG_ORIGIN: &str = "syscall";
 
     if frame_ptr.is_null() {
+        // INVARIANT: frame_ptr is never null — structural, not operational.
+        // A null frame_ptr indicates a bug in the assembly syscall bridge, not a userspace error.
         log_panic!(LOG_ORIGIN, "SYSCALL bridge bug: null frame_ptr");
     }
 
@@ -882,6 +1097,35 @@ extern "win64" fn rust_syscall_dispatcher(
         }
     };
 
+    // ----------------------------------------------------------------
+    // Subsystem error normalization (Phase 6 — Syscall Hardening)
+    //
+    // Classify the result into a SyscallError variant for structured
+    // observability. This does NOT change the errno returned to userspace —
+    // it only adds a classification log when the result is an error.
+    //
+    // Mapping:
+    //   ENOMEM → SyscallError::AdmissionDenied (MM quota/OOM)
+    //   EPERM  → SyscallError::PermissionDenied (capability check)
+    //   EBUSY  → SyscallError::CapabilityRevokePartial (partial revoke)
+    //   EINVAL → SyscallError::InvalidPointer (invalid userspace pointer)
+    //   other  → no classification (pass through)
+    // ----------------------------------------------------------------
+    if result != ESUCCESS && result != ENOSYS && result != EWOULDBLOCK
+        && result != ETIMEDOUT && result != ENOTFOUND
+    {
+        let classified = normalize_syscall_result(result);
+        if let Some(err) = classified {
+            log_debug!(
+                LOG_ORIGIN,
+                "[SYSCALL_ERR] syscall={} tid={:?} errno={:#X} classified={:?}",
+                syscall_num,
+                crate::sched::current_thread(),
+                result,
+                err
+            );
+        }
+    }
 
     #[cfg(feature = "syscall-frame-debug")]
     {
@@ -1084,15 +1328,20 @@ fn sys_debug_log(msg_ptr: u64, len: usize) -> u64 {
         return ESUCCESS;
     }
 
-    let msg_ptr = match validate_user_addr(msg_ptr) {
+    let msg_ptr = match validate_user_ptr::<u8>(msg_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if len > 256 || validate_user_range(msg_ptr.as_u64(), len).is_err() {
+    if len > 256 {
         return EINVAL;
     }
+    let msg_range = match validate_user_byte_range(msg_ptr, len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
-    let msg = unsafe { core::slice::from_raw_parts(msg_ptr.as_ptr::<u8>(), len) };
+    // SAFETY: msg_range is ABI-validated and guaranteed canonical.
+    let msg = unsafe { core::slice::from_raw_parts(msg_range.base().as_ptr::<u8>(), msg_range.len()) };
 
     if let Ok(s) = core::str::from_utf8(msg) {
         log_info!("userspace", "{}", s);
@@ -1144,9 +1393,11 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
             }
         }
 
-        log_panic!(
+        // Operational: no threads available to switch to after thread_exit.
+        // Log the condition and return — the scheduler will handle the idle state.
+        log_error!(
             LOG_ORIGIN,
-            "thread_exit returned unexpectedly (tid={}) - no threads to switch to!",
+            "[THREAD_EXIT] tid={} — no threads to switch to after exit, returning to idle",
             tid
         );
     }
@@ -1910,6 +2161,14 @@ fn sys_ipc_recv(
     };
 
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+    let user_buffer_ptr = if buffer_ptr == 0 {
+        None
+    } else {
+        Some(match validate_user_ptr::<u8>(buffer_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        })
+    };
 
     log_debug!(
         LOG_ORIGIN,
@@ -1930,20 +2189,15 @@ fn sys_ipc_recv(
         let bytes_to_copy =
             core::cmp::min(msg.payload.len(), buffer_size as usize);
 
-        if buffer_ptr != 0 && bytes_to_copy > 0 {
-            let buffer_ptr = match validate_user_addr(buffer_ptr) {
-                Ok(ptr) => ptr,
-                Err(e) => return e,
-            };
-            if validate_user_range(buffer_ptr.as_u64(), bytes_to_copy).is_err() {
-                return EINVAL;
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    msg.payload.as_ptr(),
-                    buffer_ptr.as_mut_ptr::<u8>(),
-                    bytes_to_copy
-                );
+        if bytes_to_copy > 0 {
+            if let Some(user_buf_ptr) = user_buffer_ptr {
+                let user_buf_range = match validate_user_byte_range(user_buf_ptr, bytes_to_copy) {
+                    Ok(range) => range,
+                    Err(e) => return e,
+                };
+                if let Err(e) = write_buffer_to_user(user_buf_range, &msg.payload[..bytes_to_copy]) {
+                    return e;
+                }
             }
         }
 
@@ -2122,24 +2376,25 @@ fn sys_ipc_send_async(
         port_id
     );
 
-    let mut payload = alloc::vec::Vec::new();
-    if payload_len > 0 && payload_ptr != 0 {
-        let payload_ptr = match validate_user_addr(payload_ptr) {
+    let payload_range = if payload_len == 0 {
+        None
+    } else {
+        let payload_ptr = match validate_user_ptr::<u8>(payload_ptr) {
             Ok(ptr) => ptr,
             Err(e) => return e,
         };
-        if validate_user_range(payload_ptr.as_u64(), payload_len as usize).is_err() {
-            return EINVAL;
-        }
-        payload.resize(payload_len as usize, 0);
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                payload_ptr.as_ptr::<u8>(),
-                payload.as_mut_ptr(),
-                payload_len as usize
-            );
-        }
-    }
+        Some(match validate_user_byte_range(payload_ptr, payload_len as usize) {
+            Ok(range) => range,
+            Err(e) => return e,
+        })
+    };
+    let payload = match payload_range {
+        Some(range) => match copy_buffer_from_user(range, crate::ipc::MAX_MESSAGE_SIZE) {
+            Ok(buf) => buf,
+            Err(e) => return e,
+        },
+        None => alloc::vec::Vec::new(),
+    };
 
     let message = crate::ipc::Message::new(sender, msg_type as u32, payload);
 
@@ -2221,26 +2476,29 @@ fn sys_ipc_try_recv(
     };
 
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+    let user_buffer_ptr = if buffer_ptr == 0 {
+        None
+    } else {
+        Some(match validate_user_ptr::<u8>(buffer_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        })
+    };
 
     match crate::ipc::try_receive_message(port_id, caller) {
         Ok(Some(msg)) => {
             let bytes_to_copy =
                 core::cmp::min(msg.payload.len(), buffer_size as usize);
 
-            if buffer_ptr != 0 && bytes_to_copy > 0 {
-                let buffer_ptr = match validate_user_addr(buffer_ptr) {
-                    Ok(ptr) => ptr,
-                    Err(e) => return e,
-                };
-                if validate_user_range(buffer_ptr.as_u64(), bytes_to_copy).is_err() {
-                    return EINVAL;
-                }
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        msg.payload.as_ptr(),
-                        buffer_ptr.as_mut_ptr::<u8>(),
-                        bytes_to_copy
-                    );
+            if bytes_to_copy > 0 {
+                if let Some(buffer_ptr) = user_buffer_ptr {
+                    let buffer_range = match validate_user_byte_range(buffer_ptr, bytes_to_copy) {
+                        Ok(range) => range,
+                        Err(e) => return e,
+                    };
+                    if let Err(e) = write_buffer_to_user(buffer_range, &msg.payload[..bytes_to_copy]) {
+                        return e;
+                    }
                 }
             }
 
@@ -2317,24 +2575,29 @@ fn sys_ipc_trace_read(buffer_ptr: u64, max_events: u64) -> u64 {
         return 0;
     }
 
+    let user_buffer_ptr = if buffer_ptr == 0 {
+        None
+    } else {
+        Some(match validate_user_ptr::<RawIpcTraceEvent>(buffer_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        })
+    };
     let events = crate::ipc::read_trace(max_events as usize);
     let available = events.len();
 
-    if buffer_ptr != 0 {
-        let buffer_ptr = match validate_user_addr(buffer_ptr) {
-            Ok(ptr) => ptr,
-            Err(e) => return e,
-        };
+    if let Some(buffer_ptr) = user_buffer_ptr {
         let to_copy = core::cmp::min(available, max_events as usize);
         let write_bytes = match to_copy.checked_mul(core::mem::size_of::<RawIpcTraceEvent>()) {
             Some(v) => v,
             None => return EINVAL,
         };
-        if validate_user_range(buffer_ptr.as_u64(), write_bytes).is_err() {
-            return EINVAL;
-        }
+        let _buffer_range = match validate_user_byte_range(buffer_ptr.cast::<u8>(), write_bytes) {
+            Ok(range) => range,
+            Err(e) => return e,
+        };
         unsafe {
-            let buffer = buffer_ptr.as_mut_ptr::<RawIpcTraceEvent>();
+            let buffer = buffer_ptr.as_mut_ptr();
             for (idx, event) in events.iter().take(to_copy).enumerate() {
                 buffer.add(idx).write(RawIpcTraceEvent::from(event));
             }
@@ -2379,6 +2642,14 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
         stats_ptr
     );
 
+    let user_stats_ptr = if stats_ptr == 0 {
+        None
+    } else {
+        Some(match validate_user_ptr::<RawIpcPortStats>(stats_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        })
+    };
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
     match crate::ipc::get_port_stats(port_id) {
         Ok(stats) => {
@@ -2390,16 +2661,16 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
                 stats.avg_latency_ms
             );
 
-            if stats_ptr != 0 {
-                let stats_ptr = match validate_user_addr(stats_ptr) {
-                    Ok(ptr) => ptr,
+            if let Some(stats_ptr) = user_stats_ptr {
+                let _stats_range = match validate_user_byte_range(
+                    stats_ptr.cast::<u8>(),
+                    core::mem::size_of::<RawIpcPortStats>(),
+                ) {
+                    Ok(range) => range,
                     Err(e) => return e,
                 };
-                if validate_user_range(stats_ptr.as_u64(), core::mem::size_of::<RawIpcPortStats>()).is_err() {
-                    return EINVAL;
-                }
                 unsafe {
-                    stats_ptr.as_mut_ptr::<RawIpcPortStats>().write(stats.into());
+                    stats_ptr.as_mut_ptr().write(stats.into());
                 }
             }
 
@@ -2424,8 +2695,31 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
     }
 }
 
+fn ipc_send_batch_core(
+    port_id: crate::ipc::PortId,
+    sender: crate::thread::ThreadId,
+    _messages_ptr: atom_abi::UserPtr<u8>,
+    count: usize,
+) -> Result<usize, crate::ipc::IpcError> {
+    let mut messages = alloc::vec::Vec::with_capacity(count);
+    for i in 0..count {
+        messages.push(crate::ipc::Message::new(sender, i as u32, alloc::vec![i as u8]));
+    }
+    crate::ipc::send_batch(port_id, messages)
+}
+
+fn ipc_recv_batch_core(
+    port_id: crate::ipc::PortId,
+    caller: crate::thread::ThreadId,
+    _buffer_ptr: atom_abi::UserPtr<u8>,
+    max_count: usize,
+) -> Result<usize, crate::ipc::IpcError> {
+    crate::ipc::receive_batch(port_id, caller, max_count).map(|messages| messages.len())
+}
+
 fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
-    // TODO(#94): validate messages_ptr range when implementation reads from user memory
+    // messages_ptr is not decoded yet by this syscall implementation, but the
+    // boundary is ABI-validated and typed to prevent raw-pointer drift.
     log_info!(
         "syscall",
         "ipc_send_batch(port={}, messages={:#x}, count={})",
@@ -2438,17 +2732,6 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
         log_debug!("syscall", "ipc_send_batch: empty batch");
         return ESUCCESS;
     }
-    if messages_ptr == 0 {
-        return EINVAL;
-    }
-    let _messages_ptr = match validate_user_addr(messages_ptr) {
-        Ok(ptr) => ptr,
-        Err(e) => return e,
-    };
-    if validate_user_range(_messages_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
-
     if count > crate::ipc::MAX_BATCH_SIZE as u64 {
         log_warn!(
             "syscall",
@@ -2458,6 +2741,16 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
         );
         return EINVAL;
     }
+    let batch_count = count as usize;
+
+    let messages_ptr = match validate_user_ptr::<u8>(messages_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    let _messages_range = match validate_user_byte_range(messages_ptr, 1) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     let sender = match crate::sched::current_thread() {
         Some(tid) => tid,
@@ -2472,13 +2765,7 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
 
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
 
-    let mut messages = alloc::vec::Vec::new();
-    for i in 0..count {
-        let msg = crate::ipc::Message::new(sender, i as u32, alloc::vec![i as u8]);
-        messages.push(msg);
-    }
-
-    match crate::ipc::send_batch(port_id, messages) {
+    match ipc_send_batch_core(port_id, sender, messages_ptr, batch_count) {
         Ok(sent_count) => {
             log_debug!(
                 "syscall",
@@ -2512,7 +2799,8 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
 }
 
 fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 {
-    // TODO(#94): validate buffer_ptr range when implementation writes to user memory
+    // buffer_ptr is not decoded yet by this syscall implementation, but the
+    // boundary is ABI-validated and typed to prevent raw-pointer drift.
     log_info!(
         "syscall",
         "ipc_recv_batch(port={}, buffer={:#x}, max={})",
@@ -2525,17 +2813,6 @@ fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 
         log_debug!("syscall", "ipc_recv_batch: max_count = 0");
         return 0;
     }
-    if buffer_ptr == 0 {
-        return EINVAL;
-    }
-    let _buffer_ptr = match validate_user_addr(buffer_ptr) {
-        Ok(ptr) => ptr,
-        Err(e) => return e,
-    };
-    if validate_user_range(_buffer_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
-
     if max_count > crate::ipc::MAX_BATCH_SIZE as u64 {
         log_warn!(
             "syscall",
@@ -2545,6 +2822,16 @@ fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 
         );
         return EINVAL;
     }
+    let batch_max_count = max_count as usize;
+
+    let buffer_ptr = match validate_user_ptr::<u8>(buffer_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    let _buffer_range = match validate_user_byte_range(buffer_ptr, 1) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
@@ -2556,9 +2843,8 @@ fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 
 
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
 
-    match crate::ipc::receive_batch(port_id, caller, max_count as usize) {
-        Ok(messages) => {
-            let count = messages.len();
+    match ipc_recv_batch_core(port_id, caller, buffer_ptr, batch_max_count) {
+        Ok(count) => {
             log_debug!(
                 "syscall",
                 "ipc_recv_batch: received {} messages",
@@ -4060,18 +4346,19 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         Some(v) => v,
         None => return EINVAL,
     };
-    let ports_ptr = match validate_user_addr(ports_ptr) {
+    let ports_ptr = match validate_user_ptr::<u64>(ports_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(ports_ptr.as_u64(), read_bytes).is_err() {
-        return EINVAL;
-    }
+    let _ports_range = match validate_user_byte_range(ports_ptr.cast::<u8>(), read_bytes) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     // Read port IDs from userspace
     let mut ports = alloc::vec::Vec::with_capacity(count as usize);
     unsafe {
-        let ptr = ports_ptr.as_ptr::<u64>();
+        let ptr = ports_ptr.as_ptr();
         for i in 0..count as usize {
             ports.push(crate::ipc::PortId::from_raw(*ptr.add(i)));
         }
@@ -4192,17 +4479,25 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
         log_warn!(LOG_ORIGIN, "spawn_process: invalid arguments");
         return EINVAL;
     }
-    let name_ptr = match validate_user_addr(name_ptr) {
+    let name_ptr = match validate_user_ptr::<u8>(name_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(name_ptr.as_u64(), name_len).is_err() {
+    let name_range = match validate_user_byte_range(name_ptr, name_len) {
+        Ok(range) => range,
+        Err(_) => {
+            log_warn!(LOG_ORIGIN, "spawn_process: invalid userspace range");
+            return EINVAL;
+        }
+    };
+    if name_range.len() != name_len {
         log_warn!(LOG_ORIGIN, "spawn_process: invalid userspace range");
         return EINVAL;
     }
 
     // Copy name from userspace
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr.as_ptr::<u8>(), name_len) };
+    // SAFETY: name_range is ABI-validated and guaranteed canonical.
+    let name_bytes = unsafe { core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len()) };
     let name = match core::str::from_utf8(name_bytes) {
         Ok(s) => s.trim_end_matches('\0'),
         Err(_) => {
@@ -4784,13 +5079,14 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
         );
         return EINVAL;
     }
-    let path_ptr = match validate_user_addr(path_ptr) {
+    let path_ptr = match validate_user_ptr::<u8>(path_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(path_ptr.as_u64(), path_len).is_err() {
-        return EINVAL;
-    }
+    let path_range = match validate_user_byte_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     // ── 3. Copy path bytes from userspace into a kernel-owned buffer ───────
     //
@@ -4800,9 +5096,13 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     // a reference into user memory (which could be concurrently modified).
     let mut path_buf = [0u8; MAX_PATH];
     unsafe {
-        core::ptr::copy_nonoverlapping(path_ptr.as_ptr::<u8>(), path_buf.as_mut_ptr(), path_len);
+        core::ptr::copy_nonoverlapping(
+            path_range.base().as_ptr::<u8>(),
+            path_buf.as_mut_ptr(),
+            path_range.len(),
+        );
     }
-    let path_bytes = &path_buf[..path_len];
+    let path_bytes = &path_buf[..path_range.len()];
 
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s.trim_end_matches('\0'),
@@ -5152,15 +5452,14 @@ fn sys_mmap(
 
     let fixed = flags & atom_abi::MAP_FIXED != 0;
 
-    // Determine the virtual address
-    let virt_addr = if fixed {
+    let fixed_range = if fixed {
         let addr = addr_hint as usize;
-        let user_range = match atom_abi::validate_user_range(addr, length) {
+        let user_range = match atom_abi::validate_user_mmap_range(addr, length) {
             Ok(range) => range,
             Err(_) => {
                 log_error!(
                     "syscall",
-                    "[MMAP_ERROR] reason=invalid_user_range addr={:#X} size={} hint={:#X} flags={:#X}",
+                    "[MMAP_ERROR] reason=invalid_abi_mmap_range addr={:#X} size={} hint={:#X} flags={:#X}",
                     addr_hint,
                     length,
                     addr_hint,
@@ -5169,249 +5468,183 @@ fn sys_mmap(
                 return EINVAL;
             }
         };
-        let end = user_range.end_exclusive();
-        if crate::mm::validate_page_range(addr, end).is_err() {
-            log_error!(
-                "syscall",
-                "[MMAP_ERROR] reason=invalid_page_range addr={:#X} size={} hint={:#X} flags={:#X}",
-                addr_hint,
-                length,
-                addr_hint,
-                flags
-            );
-            return EINVAL;
+        Some((user_range.start(), user_range.end_exclusive()))
+    } else {
+        None
+    };
+
+    let hint_start = if addr_hint != 0 {
+        match atom_abi::validate_user_mmap_hint(addr_hint as usize) {
+            Ok(hint) => hint.as_usize(),
+            _ => atom_abi::USER_MMAP_START as usize,
         }
-        if addr < atom_abi::USER_MMAP_START as usize
-            || end > atom_abi::USER_MMAP_END as usize
-        {
-            log_error!(
-                "syscall",
-                "[MMAP_ERROR] reason=outside_mmap_window addr={:#X} size={} hint={:#X} flags={:#X}",
-                addr_hint,
-                length,
-                addr_hint,
-                flags
-            );
-            return EINVAL;
-        }
-        let cleanup_res = vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
-            // Remove any existing mappings in this range
+    } else {
+        atom_abi::USER_MMAP_START as usize
+    };
+
+    let mapped_addr = match vma::with_address_space_ops_lock(pml4, || -> Result<atom_abi::UserVirtAddr, u64> {
+        let (virt_addr, virt_end, alloc_mode) = if let Some((addr, end)) = fixed_range {
+            // MAP_FIXED: replace anything overlapping this range and then insert.
             let removed = match vma::remove_process_vma_range(process_id, addr, end) {
                 Ok(removed) => removed,
                 Err(_) => {
+                    log_error!(
+                        "syscall",
+                        "[MMAP_ERROR] reason=remove_range_failed addr={:#X} size={} hint={:#X} flags={:#X}",
+                        addr_hint,
+                        length,
+                        addr_hint,
+                        flags
+                    );
                     return Err(EINVAL);
                 }
             };
-            // Unmap the physical pages for removed VMAs
             for old_vma in &removed {
                 unmap_vma_pages(process_id, pml4, old_vma);
             }
-            Ok(())
-        });
-        if cleanup_res.is_err() {
-            log_error!(
-                "syscall",
-                "[MMAP_ERROR] reason=remove_range_failed addr={:#X} size={} hint={:#X} flags={:#X}",
-                addr_hint,
-                length,
-                addr_hint,
-                flags
-            );
-            return EINVAL;
-        }
-        log_info!(
-            "syscall",
-            "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode=fixed",
-            addr,
-            length,
-            end
-        );
-        addr
-    } else {
-        let hint_start = if addr_hint != 0 {
-            match atom_abi::validate_user_addr(addr_hint as usize) {
-                Ok(hint) if hint.as_usize() >= atom_abi::USER_MMAP_START as usize => hint.as_usize(),
-                _ => atom_abi::USER_MMAP_START as usize,
-            }
+            (addr, end, "fixed")
         } else {
-            atom_abi::USER_MMAP_START as usize
-        };
-
-        match vma::with_address_space_ops_lock(pml4, || {
-            vma::find_process_free_region(
+            let addr = match vma::find_process_free_region(
                 process_id,
                 hint_start,
                 atom_abi::USER_MMAP_END as usize,
                 length,
-            )
-        }) {
-            Ok(Some(addr)) => {
-                let next = match addr.checked_add(length) {
-                    Some(next) => next,
-                    None => {
-                        log_error!(
-                            "syscall",
-                            "[MMAP_ERROR] reason=overflow addr={:#X} size={} hint={:#X} flags={:#X}",
-                            addr,
-                            length,
-                            addr_hint,
-                            flags
-                        );
-                        return EINVAL;
-                    }
-                };
-                log_info!(
-                    "syscall",
-                    "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode=first_fit",
-                    addr,
-                    length,
-                    next
-                );
-                addr
-            }
-            Ok(None) => {
-                log_error!(
-                    "syscall",
-                    "[MMAP_ERROR] reason=no_free_region addr={:#X} size={} hint={:#X} flags={:#X}",
-                    hint_start,
-                    length,
-                    addr_hint,
-                    flags
-                );
-                return ENOMEM;
-            }
-            Err(_) => {
-                log_error!(
-                    "syscall",
-                    "[MMAP_ERROR] reason=find_free_region_failed addr={:#X} size={} hint={:#X} flags={:#X}",
-                    hint_start,
-                    length,
-                    addr_hint,
-                    flags
-                );
-                return EPERM;
-            }
-        }
-    };
+            ) {
+                Ok(Some(addr)) => addr,
+                Ok(None) => {
+                    log_error!(
+                        "syscall",
+                        "[MMAP_ERROR] reason=no_free_region addr={:#X} size={} hint={:#X} flags={:#X}",
+                        hint_start,
+                        length,
+                        addr_hint,
+                        flags
+                    );
+                    return Err(ENOMEM);
+                }
+                Err(_) => {
+                    log_error!(
+                        "syscall",
+                        "[MMAP_ERROR] reason=find_free_region_failed addr={:#X} size={} hint={:#X} flags={:#X}",
+                        hint_start,
+                        length,
+                        addr_hint,
+                        flags
+                    );
+                    return Err(EPERM);
+                }
+            };
+            let end = match addr.checked_add(length) {
+                Some(end) => end,
+                None => {
+                    log_error!(
+                        "syscall",
+                        "[MMAP_ERROR] reason=overflow addr={:#X} size={} hint={:#X} flags={:#X}",
+                        addr,
+                        length,
+                        addr_hint,
+                        flags
+                    );
+                    return Err(EINVAL);
+                }
+            };
+            (addr, end, "first_fit")
+        };
 
-    let virt_end = match virt_addr.checked_add(length) {
-        Some(end) => end,
-        None => {
-            log_error!(
-                "syscall",
-                "[MMAP_ERROR] reason=overflow addr={:#X} size={} hint={:#X} flags={:#X}",
-                virt_addr,
-                length,
-                addr_hint,
-                flags
-            );
-            return EINVAL;
-        }
-    };
+        // INVARIANT: mmap allocation must not escape the USER_MMAP_END window — structural, not operational.
+        // If this fires, the allocator has a bug, not a runtime condition.
+        debug_assert!(
+            virt_end <= atom_abi::USER_MMAP_END as usize,
+            "mmap allocation escaped window: start=0x{:X} end=0x{:X} limit=0x{:X}",
+            virt_addr,
+            virt_end,
+            atom_abi::USER_MMAP_END
+        );
 
-    debug_assert!(
-        virt_end <= atom_abi::USER_MMAP_END as usize,
-        "mmap allocation escaped window: start=0x{:X} end=0x{:X} limit=0x{:X}",
-        virt_addr,
-        virt_end,
-        atom_abi::USER_MMAP_END
-    );
-
-    let overlap = match vma::with_address_space_ops_lock(pml4, || {
-        vma::process_range_overlaps(process_id, virt_addr, virt_end)
-    }) {
-        Ok(found) => found,
-        Err(_) => return EPERM,
-    };
-    log_debug!(
-        "syscall",
-        "[MMAP_ALLOC_VALIDATE] base=0x{:X} size={} end=0x{:X} overlap={}",
-        virt_addr,
-        length,
-        virt_end,
-        overlap
-    );
-    if overlap {
-        log_error!(
+        log_info!(
             "syscall",
-            "[MMAP_ERROR] reason=allocator_overlap base=0x{:X} size={} end=0x{:X} flags=0x{:X}",
+            "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode={}",
             virt_addr,
             length,
             virt_end,
-            flags
+            alloc_mode
         );
-        return ENOMEM;
-    }
 
-    // Create the VMA (lazy: no physical pages allocated yet)
-    let new_vma = Vma {
-        start: virt_addr,
-        end: virt_end,
-        perms,
-        backing: VmaBacking::Anonymous,
-        label: "mmap",
-    };
-
-    log_debug!(
-        "syscall",
-        "[VMA_INSERT_ATTEMPT] pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} prot=0x{:X} flags=0x{:X} backing=Anonymous label=mmap",
-        process_id,
-        pml4,
-        new_vma.start,
-        new_vma.end,
-        prot,
-        flags
-    );
-
-    let mapped_addr = virt_addr as atom_abi::UserVirtAddr;
-    if !validate_mmap_return_addr(mapped_addr, length) {
-        log_error!(
+        let overlap = match vma::process_range_overlaps(process_id, virt_addr, virt_end) {
+            Ok(found) => found,
+            Err(_) => return Err(EPERM),
+        };
+        log_debug!(
             "syscall",
-            "[MMAP_ERROR] reason=invalid_return_addr addr={:#X} size={} hint={:#X} flags={:#X}",
-            mapped_addr,
+            "[MMAP_ALLOC_VALIDATE] base=0x{:X} size={} end=0x{:X} overlap={}",
+            virt_addr,
             length,
-            addr_hint,
-            flags
+            virt_end,
+            overlap
         );
-        log_error!(
-            "syscall",
-            "[ABI VIOLATION] [MMAP] pid={} invalid mmap VA selected: addr={:#X} size={} hint={:#X}",
-            process_id,
-            mapped_addr,
-            length,
-            addr_hint
-        );
-        return EINVAL;
-    }
-
-    match vma::with_address_space_ops_lock(pml4, || vma::insert_process_vma(process_id, new_vma)) {
-        Ok(()) => {
-            log_debug!(
+        if overlap {
+            log_error!(
                 "syscall",
-                "[VMA_INSERT] result=ok pid={} pml4=0x{:X} start=0x{:X} end=0x{:X}",
-                process_id,
-                pml4,
+                "[MMAP_ERROR] reason=allocator_overlap base=0x{:X} size={} end=0x{:X} flags=0x{:X}",
                 virt_addr,
-                virt_end
+                length,
+                virt_end,
+                flags
             );
-            log_debug!(
+            return Err(ENOMEM);
+        }
+
+        let mapped_addr = virt_addr as atom_abi::UserVirtAddr;
+        if validate_mmap_return_range(mapped_addr, length).is_err() {
+            log_error!(
                 "syscall",
-                "[ABI] return addr={:#x} pid={} syscall=mmap",
-                mapped_addr,
-                process_id
-            );
-            log_info!(
-                "syscall",
-                "[MMAP] pid={} addr={:#X} size={} hint={:#X} flags={:#X}",
-                process_id,
+                "[MMAP_ERROR] reason=invalid_return_addr addr={:#X} size={} hint={:#X} flags={:#X}",
                 mapped_addr,
                 length,
                 addr_hint,
                 flags
             );
-            mapped_addr
+            log_error!(
+                "syscall",
+                "[ABI VIOLATION] [MMAP] pid={} invalid mmap VA selected: addr={:#X} size={} hint={:#X}",
+                process_id,
+                mapped_addr,
+                length,
+                addr_hint
+            );
+            return Err(EINVAL);
         }
-        Err(err) => {
+
+        let new_vma = Vma {
+            start: virt_addr,
+            end: virt_end,
+            perms,
+            backing: VmaBacking::Anonymous,
+            label: "mmap",
+        };
+
+        log_debug!(
+            "syscall",
+            "[VMA_INSERT_ATTEMPT] pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} prot=0x{:X} flags=0x{:X} backing=Anonymous label=mmap",
+            process_id,
+            pml4,
+            new_vma.start,
+            new_vma.end,
+            prot,
+            flags
+        );
+
+        if let Err(err) = vma::insert_process_vma(process_id, new_vma) {
+            log_error!(
+                "syscall",
+                "[MMAP_BUG] insert failed after region selection: pid={} pml4=0x{:X} base=0x{:X} end=0x{:X} size={} err={:?}",
+                process_id,
+                pml4,
+                virt_addr,
+                virt_end,
+                length,
+                err
+            );
             log_error!(
                 "syscall",
                 "[VMA_INSERT] result=err pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} err={:?}",
@@ -5421,9 +5654,40 @@ fn sys_mmap(
                 virt_end,
                 err
             );
-            ENOMEM
+            return Err(ENOMEM);
         }
-    }
+
+        log_debug!(
+            "syscall",
+            "[VMA_INSERT] result=ok pid={} pml4=0x{:X} start=0x{:X} end=0x{:X}",
+            process_id,
+            pml4,
+            virt_addr,
+            virt_end
+        );
+
+        Ok(mapped_addr)
+    }) {
+        Ok(mapped_addr) => mapped_addr,
+        Err(errno) => return errno,
+    };
+
+    log_debug!(
+        "syscall",
+        "[ABI] return addr={:#x} pid={} syscall=mmap",
+        mapped_addr,
+        process_id
+    );
+    log_info!(
+        "syscall",
+        "[MMAP] pid={} addr={:#X} size={} hint={:#X} flags={:#X}",
+        process_id,
+        mapped_addr,
+        length,
+        addr_hint,
+        flags
+    );
+    mapped_addr
 }
 
 /// munmap(addr, length) -> 0 | errno
@@ -5685,18 +5949,31 @@ fn map_user_address_error(err: atom_abi::UserAddressError) -> u64 {
         | atom_abi::UserAddressError::BelowUserMin
         | atom_abi::UserAddressError::AboveUserMax
         | atom_abi::UserAddressError::Overflow
+        | atom_abi::UserAddressError::Unaligned
         | atom_abi::UserAddressError::EmptyRange => EINVAL,
     }
 }
 
 #[inline]
 fn validate_user_addr(addr: u64) -> Result<atom_abi::UserVAddr, u64> {
+    // Syscall boundary: raw userspace values are converted to ABI-typed values here.
     atom_abi::validate_user_addr(addr as usize).map_err(map_user_address_error)
 }
 
 #[inline]
+fn validate_user_ptr<T>(addr: u64) -> Result<atom_abi::UserPtr<T>, u64> {
+    atom_abi::validate_user_ptr::<T>(addr as usize).map_err(map_user_address_error)
+}
+
+#[inline]
 fn validate_user_range(ptr: u64, size: usize) -> Result<atom_abi::UserRange, u64> {
+    // Syscall boundary: raw userspace ranges are converted to ABI-typed values here.
     atom_abi::validate_user_range(ptr as usize, size).map_err(map_user_address_error)
+}
+
+#[inline]
+fn validate_user_byte_range(ptr: atom_abi::UserPtr<u8>, len: usize) -> Result<atom_abi::UserRange, u64> {
+    ptr.byte_range(len).map_err(map_user_address_error)
 }
 
 #[inline]
@@ -5705,67 +5982,45 @@ fn validate_user_return_addr(addr: atom_abi::UserVirtAddr) -> Result<atom_abi::U
 }
 
 #[inline]
-fn validate_mmap_return_addr(addr: atom_abi::UserVirtAddr, size: usize) -> bool {
-    let base = match validate_user_return_addr(addr) {
-        Ok(addr) => addr,
-        Err(_) => return false,
-    };
-
-    if atom_abi::validate_user_range(base.as_usize(), size).is_err() {
-        return false;
-    }
-
-    if !addr.is_multiple_of(crate::mm::pmm::PAGE_SIZE as u64) {
-        return false;
-    }
-
-    if !atom_abi::is_user_mmap_addr(addr) {
-        return false;
-    }
-
-    let end = match addr.checked_add(size as u64) {
-        Some(end) => end,
-        None => return false,
-    };
-
-    if end > atom_abi::USER_MMAP_END {
-        return false;
-    }
-
-    true
+fn validate_mmap_return_range(
+    addr: atom_abi::UserVirtAddr,
+    size: usize,
+) -> Result<atom_abi::UserRange, atom_abi::UserAddressError> {
+    atom_abi::validate_user_mmap_range(addr as usize, size)
 }
 
 // Helper: safely copy string from userspace
-fn copy_string_from_user(ptr: u64, len: usize) -> Result<alloc::string::String, u64> {
+fn copy_string_from_user(src_range: atom_abi::UserRange) -> Result<alloc::string::String, u64> {
+    let len = src_range.len();
     if len == 0 || len > FS_MAX_PATH_LEN {
         return Err(ENAMETOOLONG);
     }
 
-    let user_ptr = validate_user_addr(ptr)?;
-    validate_user_range(user_ptr.as_u64(), len)?;
-
-    match core::str::from_utf8(unsafe { core::slice::from_raw_parts(user_ptr.as_ptr::<u8>(), len) }) {
+    // SAFETY: src_range is ABI-validated and guaranteed canonical.
+    match core::str::from_utf8(unsafe { core::slice::from_raw_parts(src_range.base().as_ptr::<u8>(), len) }) {
         Ok(s) => Ok(alloc::string::String::from(s)),
         Err(_) => Err(EINVAL),
     }
 }
 
 // Helper: safely copy buffer from userspace
-fn copy_buffer_from_user(ptr: u64, len: usize, max_len: usize) -> Result<Vec<u8>, u64> {
+fn copy_buffer_from_user(src_range: atom_abi::UserRange, max_len: usize) -> Result<Vec<u8>, u64> {
+    let len = src_range.len();
     if len == 0 || len > max_len {
         return Err(EINVAL);
     }
 
-    let user_ptr = validate_user_addr(ptr)?;
-    validate_user_range(user_ptr.as_u64(), len)?;
-
-    Ok(unsafe { core::slice::from_raw_parts(user_ptr.as_ptr::<u8>(), len).to_vec() })
+    // SAFETY: src_range is ABI-validated and guaranteed canonical.
+    Ok(unsafe { core::slice::from_raw_parts(src_range.base().as_ptr::<u8>(), len).to_vec() })
 }
 
 // Helper: safely write buffer to userspace
-fn write_buffer_to_user(dst_ptr: atom_abi::UserVAddr, src: &[u8]) -> Result<(), u64> {
+fn write_buffer_to_user(dst_range: atom_abi::UserRange, src: &[u8]) -> Result<(), u64> {
     if src.is_empty() {
         return Ok(());
+    }
+    if dst_range.len() != src.len() {
+        return Err(EINVAL);
     }
 
     // Sanity cap: reject absurdly large copies (> 64 MB) that are almost
@@ -5778,9 +6033,10 @@ fn write_buffer_to_user(dst_ptr: atom_abi::UserVAddr, src: &[u8]) -> Result<(), 
         return Err(EINVAL);
     }
 
-    validate_user_range(dst_ptr.as_u64(), src.len())?;
-
-    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst_ptr.as_mut_ptr::<u8>(), src.len()) }
+    // SAFETY: dst_range is ABI-validated and guaranteed canonical.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_range.base().as_mut_ptr::<u8>(), src.len())
+    }
 
     Ok(())
 }
@@ -5795,7 +6051,11 @@ fn write_buffer_to_user(dst_ptr: atom_abi::UserVAddr, src: &[u8]) -> Result<(), 
 fn sys_kern_fs_read_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: usize) -> u64 {
     const LOG_ORIGIN: &str = "kern_fs";
 
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -5804,20 +6064,25 @@ fn sys_kern_fs_read_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: 
     if buf_len == 0 {
         return EINVAL;
     }
-    let buf_ptr = match validate_user_addr(buf_ptr) {
+    let buf_ptr = match validate_user_ptr::<u8>(buf_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
+    let _buf_range = match validate_user_byte_range(buf_ptr, buf_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     log_debug!(LOG_ORIGIN, "kern_fs_read_file(path=\"{}\")", path);
 
     match crate::drivers::fat32::open(path) {
         Some(data) => {
             let to_copy = core::cmp::min(data.len(), buf_len);
-            if let Err(e) = write_buffer_to_user(buf_ptr, &data[..to_copy]) {
+            let dst_range = match validate_user_byte_range(buf_ptr, to_copy) {
+                Ok(range) => range,
+                Err(e) => return e,
+            };
+            if let Err(e) = write_buffer_to_user(dst_range, &data[..to_copy]) {
                 return e;
             }
             to_copy as u64
@@ -5836,7 +6101,11 @@ fn sys_kern_fs_read_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: 
 fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: usize) -> u64 {
     const LOG_ORIGIN: &str = "kern_fs";
 
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -5845,13 +6114,14 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
     if buf_len == 0 {
         return EINVAL;
     }
-    let buf_ptr = match validate_user_addr(buf_ptr) {
+    let buf_ptr = match validate_user_ptr::<u8>(buf_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
+    let _buf_range = match validate_user_byte_range(buf_ptr, buf_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     log_debug!(LOG_ORIGIN, "kern_fs_list_dir(path=\"{}\")", path);
 
@@ -5887,11 +6157,15 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
                 rec[7] = ftype;
                 rec[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
 
-                let dst_ptr = match buf_ptr.checked_add(pos) {
+                let dst_ptr = match buf_ptr.checked_add_bytes(pos) {
                     Ok(ptr) => ptr,
                     Err(err) => return map_user_address_error(err),
                 };
-                if let Err(e) = write_buffer_to_user(dst_ptr, &rec[..rec_len]) {
+                let dst_range = match validate_user_byte_range(dst_ptr, rec_len) {
+                    Ok(range) => range,
+                    Err(e) => return e,
+                };
+                if let Err(e) = write_buffer_to_user(dst_range, &rec[..rec_len]) {
                     return e;
                 }
 
@@ -5912,30 +6186,38 @@ fn sys_kern_fs_list_dir(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: u
 fn sys_kern_fs_stat_path(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
     const LOG_ORIGIN: &str = "kern_fs";
 
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    let stat_ptr = match validate_user_addr(stat_ptr) {
+    let stat_ptr = match validate_user_ptr::<u8>(stat_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(stat_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
+    let stat_range = match validate_user_byte_range(stat_ptr, 80) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
 
     log_debug!(LOG_ORIGIN, "kern_fs_stat_path(path=\"{}\")", path);
 
     // Use stat_path to get metadata without reading file contents
-    fill_stat_to_user(path, stat_ptr)
+    fill_stat_to_user(path, stat_range)
 }
 
 /// Internal helper: stat a path and write the 80-byte result to userspace.
 /// Uses `fat32::stat_path()` so NO file data is read.
-fn fill_stat_to_user(path: &str, stat_ptr: atom_abi::UserVAddr) -> u64 {
+fn fill_stat_to_user(path: &str, stat_range: atom_abi::UserRange) -> u64 {
     let mut buf = [0u8; 80];
+    if stat_range.len() != buf.len() {
+        return EINVAL;
+    }
 
     // Root directory special case
     if path == "/" || path.is_empty() {
@@ -5944,7 +6226,7 @@ fn fill_stat_to_user(path: &str, stat_ptr: atom_abi::UserVAddr) -> u64 {
         buf[40..44].copy_from_slice(&mode.to_le_bytes());
         buf[48..52].copy_from_slice(&2u32.to_le_bytes()); // nlinks
         buf[56..60].copy_from_slice(&512u32.to_le_bytes()); // blksize
-        return match write_buffer_to_user(stat_ptr, &buf) {
+        return match write_buffer_to_user(stat_range, &buf) {
             Ok(_) => ESUCCESS,
             Err(e) => e,
         };
@@ -5960,7 +6242,7 @@ fn fill_stat_to_user(path: &str, stat_ptr: atom_abi::UserVAddr) -> u64 {
             let nlinks: u32 = if st.is_dir { 2 } else { 1 };
             buf[48..52].copy_from_slice(&nlinks.to_le_bytes());
             buf[56..60].copy_from_slice(&512u32.to_le_bytes()); // blksize
-            match write_buffer_to_user(stat_ptr, &buf) {
+            match write_buffer_to_user(stat_range, &buf) {
                 Ok(_) => ESUCCESS,
                 Err(e) => e,
             }
@@ -6096,15 +6378,25 @@ impl KernelFd {
 static KERNEL_FD_TABLE: spin::Mutex<[KernelFd; MAX_KERNEL_FDS]> =
     spin::Mutex::new([KernelFd::EMPTY; MAX_KERNEL_FDS]);
 
-/// Copy a path string from userspace into a stack-allocated fixed buffer.
-/// Returns (buffer, length) on success.  No heap allocation.
-fn copy_path_from_user(ptr: u64, len: usize) -> Result<([u8; MAX_PATH_BUF], usize), u64> {
+#[inline]
+fn validate_user_path_range(ptr: u64, len: usize) -> Result<atom_abi::UserRange, u64> {
     if len == 0 || len > MAX_PATH_BUF {
         return Err(ENAMETOOLONG);
     }
-    let ptr = validate_user_addr(ptr)?;
-    validate_user_range(ptr.as_u64(), len)?;
-    let src = unsafe { core::slice::from_raw_parts(ptr.as_ptr::<u8>(), len) };
+    validate_user_range(ptr, len)
+}
+
+/// Copy a path string from userspace into a stack-allocated fixed buffer.
+/// Returns (buffer, length) on success.  No heap allocation.
+fn copy_path_from_user(path_range: atom_abi::UserRange) -> Result<([u8; MAX_PATH_BUF], usize), u64> {
+    let len = path_range.len();
+    if len == 0 || len > MAX_PATH_BUF {
+        return Err(ENAMETOOLONG);
+    }
+
+    // SAFETY: path_range is ABI-validated and guaranteed canonical.
+    let src = unsafe { core::slice::from_raw_parts(path_range.base().as_ptr::<u8>(), len) };
+
     // Validate UTF-8
     if core::str::from_utf8(src).is_err() {
         return Err(EINVAL);
@@ -6113,6 +6405,28 @@ fn copy_path_from_user(ptr: u64, len: usize) -> Result<([u8; MAX_PATH_BUF], usiz
     buf[..len].copy_from_slice(src);
     Ok((buf, len))
 }
+
+// Compile-time architectural guard: these helpers must consume ABI-typed inputs.
+const _COPY_STRING_FROM_USER_TYPED: fn(atom_abi::UserRange) -> Result<alloc::string::String, u64> =
+    copy_string_from_user;
+const _COPY_BUFFER_FROM_USER_TYPED: fn(atom_abi::UserRange, usize) -> Result<Vec<u8>, u64> =
+    copy_buffer_from_user;
+const _COPY_PATH_FROM_USER_TYPED: fn(atom_abi::UserRange) -> Result<([u8; MAX_PATH_BUF], usize), u64> =
+    copy_path_from_user;
+const _WRITE_BUFFER_TO_USER_TYPED: fn(atom_abi::UserRange, &[u8]) -> Result<(), u64> =
+    write_buffer_to_user;
+const _IPC_SEND_BATCH_CORE_TYPED: fn(
+    crate::ipc::PortId,
+    crate::thread::ThreadId,
+    atom_abi::UserPtr<u8>,
+    usize,
+) -> Result<usize, crate::ipc::IpcError> = ipc_send_batch_core;
+const _IPC_RECV_BATCH_CORE_TYPED: fn(
+    crate::ipc::PortId,
+    crate::thread::ThreadId,
+    atom_abi::UserPtr<u8>,
+    usize,
+) -> Result<usize, crate::ipc::IpcError> = ipc_recv_batch_core;
 
 /// Get a &str from a (buf, len) pair returned by copy_path_from_user
 #[inline]
@@ -6327,7 +6641,11 @@ fn flush_fd_locked(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize) -> u64 {
 fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
 
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -6448,33 +6766,31 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return 0; // POSIX: read(count=0) returns 0, not EINVAL
     }
 
-    let buf_ptr = match validate_user_addr(buf_ptr) {
+    let buf_user_ptr = match validate_user_ptr::<u8>(buf_ptr) {
         Ok(ptr) => ptr,
         Err(_) => {
             log_warn!(LOG_ORIGIN, "sys_fs_read: invalid buf_ptr");
             return EINVAL;
         }
     };
-    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
-        log_warn!(
-            LOG_ORIGIN,
-            "sys_fs_read: buf_ptr={:#X} fails validate_user_pointer",
-            buf_ptr.as_u64()
-        );
-        return EINVAL;
-    }
-
-    // Validate that the ENTIRE destination range lies in userspace
-    let buf_end = match buf_ptr.checked_add(count.saturating_sub(1)) {
-        Ok(end) => end,
-        Err(_) => return EINVAL,
+    let buf_range = match validate_user_byte_range(buf_user_ptr, count) {
+        Ok(range) => range,
+        Err(_) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "sys_fs_read: buf range start={:#X} len={} rejected by ABI",
+                buf_ptr,
+                count
+            );
+            return EINVAL;
+        }
     };
-    if validate_user_range(buf_end.as_u64(), 1).is_err() {
+    if buf_range.len() != count {
         log_warn!(
             LOG_ORIGIN,
-            "sys_fs_read: buf range [{:#X}..{:#X}] exceeds user canonical max",
-            buf_ptr.as_u64(),
-            buf_end.as_u64()
+            "sys_fs_read: buf range start={:#X} len={} rejected by ABI",
+            buf_ptr,
+            count
         );
         return EINVAL;
     }
@@ -6574,8 +6890,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     // ── Pre-fault user pages ───────────────────────────────────────────
     {
         let page_size: usize = 4096;
-        let start_page = buf_ptr.as_usize() & !(page_size - 1);
-        let end_addr = buf_ptr.as_usize() + to_read;
+        let start_page = buf_range.start() & !(page_size - 1);
+        let end_addr = buf_range.start() + to_read;
         let end_page = if to_read > 0 {
             (end_addr - 1) & !(page_size - 1)
         } else {
@@ -6603,7 +6919,11 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
 
     // Copy data to user buffer
     let src_slice = &data[offset..offset + to_read];
-    if let Err(e) = write_buffer_to_user(buf_ptr, src_slice) {
+    let dst_range = match validate_user_byte_range(buf_user_ptr, src_slice.len()) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    if let Err(e) = write_buffer_to_user(dst_range, src_slice) {
         return e;
     }
 
@@ -6618,20 +6938,14 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     if count == 0 {
         return 0;
     }
-    let buf_ptr = match validate_user_addr(buf_ptr) {
+    let buf_ptr = match validate_user_ptr::<u8>(buf_ptr) {
         Ok(ptr) => ptr,
         Err(_) => return EINVAL,
     };
-    if validate_user_range(buf_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
-    let buf_end = match buf_ptr.checked_add(count.saturating_sub(1)) {
-        Ok(end) => end,
+    let src_range = match validate_user_byte_range(buf_ptr, count) {
+        Ok(range) => range,
         Err(_) => return EINVAL,
     };
-    if validate_user_range(buf_end.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
 
     let idx = fd as usize;
     let (mut table, idx) = match get_fd_entry(idx) {
@@ -6658,7 +6972,8 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     }
 
     if count > 0 {
-        let src = unsafe { core::slice::from_raw_parts(buf_ptr.as_ptr::<u8>(), count) };
+        // SAFETY: src_range is ABI-validated and guaranteed canonical.
+        let src = unsafe { core::slice::from_raw_parts(src_range.base().as_ptr::<u8>(), count) };
         let dst = unsafe {
             core::slice::from_raw_parts_mut(
                 (table[idx].cache_ptr + write_offset) as *mut u8,
@@ -6687,13 +7002,14 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     if count == 0 {
         return EINVAL;
     }
-    let dirent_ptr = match validate_user_addr(dirent_ptr) {
+    let dirent_ptr = match validate_user_ptr::<u8>(dirent_ptr) {
         Ok(ptr) => ptr,
         Err(_) => return EINVAL,
     };
-    if validate_user_range(dirent_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
+    let _dirent_range = match validate_user_byte_range(dirent_ptr, count) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
 
     let idx = dirfd as usize;
     if idx >= MAX_KERNEL_FDS {
@@ -6762,11 +7078,15 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
                 rec[7] = ftype;
                 rec[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
 
-                let dst_ptr = match dirent_ptr.checked_add(pos) {
+                let dst_ptr = match dirent_ptr.checked_add_bytes(pos) {
                     Ok(ptr) => ptr,
                     Err(err) => return map_user_address_error(err),
                 };
-                if let Err(e) = write_buffer_to_user(dst_ptr, &rec[..rec_len]) {
+                let dst_range = match validate_user_byte_range(dst_ptr, rec_len) {
+                    Ok(range) => range,
+                    Err(e) => return e,
+                };
+                if let Err(e) = write_buffer_to_user(dst_range, &rec[..rec_len]) {
                     return e;
                 }
 
@@ -6782,7 +7102,11 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
 }
 
 fn sys_fs_mkdir(path_ptr: u64, path_len: usize, _mode: u32) -> u64 {
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -6798,7 +7122,11 @@ fn sys_fs_mkdir(path_ptr: u64, path_len: usize, _mode: u32) -> u64 {
 }
 
 fn sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -6813,11 +7141,19 @@ fn sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
 }
 
 fn sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
-    let (old_buf, old_len) = match copy_path_from_user(old_path_ptr, old_path_len) {
+    let old_range = match validate_user_path_range(old_path_ptr, old_path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (old_buf, old_len) = match copy_path_from_user(old_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let (new_buf, new_len) = match copy_path_from_user(new_path_ptr, new_path_len) {
+    let new_range = match validate_user_path_range(new_path_ptr, new_path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (new_buf, new_len) = match copy_path_from_user(new_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -6966,13 +7302,14 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
 
 /// Get file status by descriptor
 fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
-    let stat_ptr = match validate_user_addr(stat_ptr) {
+    let stat_ptr = match validate_user_ptr::<u8>(stat_ptr) {
         Ok(ptr) => ptr,
         Err(_) => return EINVAL,
     };
-    if validate_user_range(stat_ptr.as_u64(), 1).is_err() {
-        return EINVAL;
-    }
+    let stat_range = match validate_user_byte_range(stat_ptr, 80) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
 
     let idx = fd as usize;
     if idx >= MAX_KERNEL_FDS {
@@ -6997,11 +7334,15 @@ fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
     let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
     let stat_path = if path.is_empty() { "/" } else { path };
 
-    fill_stat_to_user(stat_path, stat_ptr)
+    fill_stat_to_user(stat_path, stat_range)
 }
 
 fn sys_fs_rmdir(path_ptr: u64, path_len: usize) -> u64 {
-    let (path_buf, path_blen) = match copy_path_from_user(path_ptr, path_len) {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -7252,4 +7593,227 @@ fn sys_get_current_video_mode(buf_ptr: u64) -> u64 {
 /// SYS_VIDEO_MODE_COUNT: Return the total number of available video modes.
 fn sys_video_mode_count() -> u64 {
     crate::graphics::available_mode_count() as u64
+}
+
+// ============================================================================
+// Tests — Syscall Hardening (Phase 6)
+// ============================================================================
+
+#[cfg(test)]
+mod syscall_hardening_tests {
+    use super::*;
+
+    // ── Property: SyscallError::to_errno() is always non-zero ────────────────
+    // For any SyscallError variant, to_errno() must return a non-zero value.
+    // Zero means success (ESUCCESS), so returning zero for an error is a bug.
+
+    #[test]
+    fn syscall_error_to_errno_is_nonzero_for_all_variants() {
+        let variants = [
+            SyscallError::AddressSpaceDrift,
+            SyscallError::ProcessMetadataCorrupted,
+            SyscallError::ThreadProcessMismatch,
+            SyscallError::InvalidUserReturnAddress,
+            SyscallError::AdmissionDenied,
+            SyscallError::CapabilityRevokePartial,
+            SyscallError::InvalidPointer,
+            SyscallError::PermissionDenied,
+            SyscallError::InternalInconsistency("test"),
+        ];
+
+        for variant in &variants {
+            let errno = variant.to_errno();
+            assert_ne!(
+                errno, 0,
+                "SyscallError::{:?}.to_errno() returned 0 (ESUCCESS) — this is a bug",
+                variant
+            );
+        }
+    }
+
+    // ── Property: SyscallError::to_errno() never overflows u64 ───────────────
+    // All errno values must be small positive integers, not near u64::MAX.
+    // Values near u64::MAX are used as error sentinels in some syscall paths.
+
+    #[test]
+    fn syscall_error_to_errno_is_small_positive() {
+        let variants = [
+            SyscallError::AddressSpaceDrift,
+            SyscallError::ProcessMetadataCorrupted,
+            SyscallError::ThreadProcessMismatch,
+            SyscallError::InvalidUserReturnAddress,
+            SyscallError::AdmissionDenied,
+            SyscallError::CapabilityRevokePartial,
+            SyscallError::InvalidPointer,
+            SyscallError::PermissionDenied,
+            SyscallError::InternalInconsistency("test"),
+        ];
+
+        for variant in &variants {
+            let errno = variant.to_errno();
+            assert!(
+                errno < 1000,
+                "SyscallError::{:?}.to_errno() = {} is unexpectedly large (should be a small POSIX errno)",
+                variant,
+                errno
+            );
+        }
+    }
+
+    // ── Property: SyscallContextError variants are distinct ──────────────────
+    // Each SyscallContextError variant must be distinguishable from the others.
+
+    #[test]
+    fn syscall_context_error_variants_are_distinct() {
+        let variants = [
+            SyscallContextError::ProcessContextMismatch,
+            SyscallContextError::InvalidUserReturnAddress,
+            SyscallContextError::MissingAddressSpace,
+            SyscallContextError::ThreadMetadataDrift,
+        ];
+
+        // Check all pairs are distinct
+        for i in 0..variants.len() {
+            for j in 0..variants.len() {
+                if i != j {
+                    assert_ne!(
+                        variants[i], variants[j],
+                        "SyscallContextError variants at index {} and {} are equal — they must be distinct",
+                        i, j
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Property: normalize_syscall_result maps known errno values ────────────
+
+    #[test]
+    fn normalize_syscall_result_maps_enomem_to_admission_denied() {
+        let result = normalize_syscall_result(ENOMEM);
+        assert_eq!(
+            result,
+            Some(SyscallError::AdmissionDenied),
+            "ENOMEM should map to SyscallError::AdmissionDenied"
+        );
+    }
+
+    #[test]
+    fn normalize_syscall_result_maps_eperm_to_permission_denied() {
+        let result = normalize_syscall_result(EPERM);
+        assert_eq!(
+            result,
+            Some(SyscallError::PermissionDenied),
+            "EPERM should map to SyscallError::PermissionDenied"
+        );
+    }
+
+    #[test]
+    fn normalize_syscall_result_maps_ebusy_to_capability_revoke_partial() {
+        let result = normalize_syscall_result(EBUSY);
+        assert_eq!(
+            result,
+            Some(SyscallError::CapabilityRevokePartial),
+            "EBUSY should map to SyscallError::CapabilityRevokePartial"
+        );
+    }
+
+    #[test]
+    fn normalize_syscall_result_maps_einval_to_invalid_pointer() {
+        let result = normalize_syscall_result(EINVAL);
+        assert_eq!(
+            result,
+            Some(SyscallError::InvalidPointer),
+            "EINVAL should map to SyscallError::InvalidPointer"
+        );
+    }
+
+    #[test]
+    fn normalize_syscall_result_returns_none_for_success() {
+        let result = normalize_syscall_result(ESUCCESS);
+        assert_eq!(
+            result, None,
+            "ESUCCESS should not be classified as an error"
+        );
+    }
+
+    #[test]
+    fn normalize_syscall_result_returns_none_for_enosys() {
+        let result = normalize_syscall_result(ENOSYS);
+        assert_eq!(
+            result, None,
+            "ENOSYS should not be classified (unimplemented syscall is not a subsystem error)"
+        );
+    }
+
+    // ── Property: context_error_code returns distinct values ─────────────────
+
+    #[test]
+    fn context_error_code_returns_distinct_values() {
+        let codes = [
+            context_error_code(SyscallContextError::ProcessContextMismatch),
+            context_error_code(SyscallContextError::InvalidUserReturnAddress),
+            context_error_code(SyscallContextError::MissingAddressSpace),
+            context_error_code(SyscallContextError::ThreadMetadataDrift),
+        ];
+
+        // All codes must be non-zero
+        for &code in &codes {
+            assert_ne!(code, 0, "context_error_code must never return 0");
+        }
+
+        // All codes must be distinct
+        for i in 0..codes.len() {
+            for j in 0..codes.len() {
+                if i != j {
+                    assert_ne!(
+                        codes[i], codes[j],
+                        "context_error_code values at index {} and {} are equal — they must be distinct",
+                        i, j
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Example test: validate_syscall_context rejects unknown thread ─────────
+    // When a thread ID has no associated process, validate_syscall_context
+    // must return Err(SyscallContextError::ThreadMetadataDrift).
+
+    #[test]
+    fn validate_syscall_context_rejects_unknown_thread() {
+        // Use a thread ID that is very unlikely to exist in the registry
+        let nonexistent_tid = crate::thread::ThreadId::from_raw(u64::MAX - 42);
+        let result = validate_syscall_context(nonexistent_tid, 0xDEAD_BEEF_0000);
+        assert!(
+            result.is_err(),
+            "validate_syscall_context must return Err for a thread with no registered process"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            SyscallContextError::ThreadMetadataDrift,
+            "Unknown thread should produce ThreadMetadataDrift"
+        );
+    }
+
+    #[test]
+    fn abi_user_range_wrapper_rejects_non_canonical_pointers() {
+        let invalid_non_canonical = 0x0001_0000_0000_0000u64;
+        assert_eq!(validate_user_range(invalid_non_canonical, 8), Err(EINVAL));
+    }
+
+    #[test]
+    fn abi_mmap_return_validation_enforces_window_and_alignment() {
+        assert!(
+            validate_mmap_return_range(atom_abi::USER_MMAP_START, atom_abi::USER_PAGE_SIZE).is_ok()
+        );
+        assert_eq!(
+            validate_mmap_return_range(atom_abi::USER_MMAP_END, atom_abi::USER_PAGE_SIZE),
+            Err(atom_abi::UserAddressError::AboveUserMax)
+        );
+        assert_eq!(
+            validate_mmap_return_range(atom_abi::USER_MMAP_START + 1, atom_abi::USER_PAGE_SIZE),
+            Err(atom_abi::UserAddressError::Unaligned)
+        );
+    }
 }

@@ -720,7 +720,7 @@ impl SharedMemManager {
             Self::find_free_va(&regions, size, process_id, pml4_phys)?
         };
 
-        let effective_range = atom_abi::validate_user_range(effective_va, region_size)
+        let effective_range = atom_abi::validate_user_page_aligned_range(effective_va, region_size)
             .map_err(map_user_address_error)?;
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
         let mapped_va = region.map(process_id, effective_range, flags, pml4_phys)?;
@@ -757,7 +757,7 @@ impl SharedMemManager {
             Self::find_free_va(&regions, size, process_id, pml4_phys)?
         };
 
-        let effective_range = atom_abi::validate_user_range(effective_va, region_size)
+        let effective_range = atom_abi::validate_user_page_aligned_range(effective_va, region_size)
             .map_err(map_user_address_error)?;
         let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
         let mapped_va = region.map(process_id, effective_range, flags, pml4_phys)?;
@@ -776,8 +776,8 @@ impl SharedMemManager {
     /// sentinel; that case is intercepted *before* this function is called.
     fn validate_explicit_va(virt_addr: UserVAddr, region_size: usize) -> Result<usize, SharedMemError> {
         let base = virt_addr.as_usize();
-        crate::mm::validate_page_alignment(base).map_err(map_validation_error)?;
-        atom_abi::validate_user_range(base, region_size).map_err(map_user_address_error)?;
+        let _ = atom_abi::validate_user_page_aligned_range(base, region_size)
+            .map_err(map_user_address_error)?;
         Ok(base)
     }
 
@@ -909,6 +909,7 @@ fn map_validation_error(err: crate::mm::ValidationError) -> SharedMemError {
         crate::mm::ValidationError::ProtectedResource { .. } => SharedMemError::PermissionDenied,
         crate::mm::ValidationError::NotInitialized => SharedMemError::MappingFailed,
         crate::mm::ValidationError::InvalidSize { .. } => SharedMemError::InvalidSize,
+        crate::mm::ValidationError::RegistryExhausted { .. } => SharedMemError::OutOfMemory,
     }
 }
 
@@ -918,6 +919,7 @@ fn map_user_address_error(err: UserAddressError) -> SharedMemError {
         | UserAddressError::BelowUserMin
         | UserAddressError::AboveUserMax
         | UserAddressError::Overflow => SharedMemError::MappingFailed,
+        UserAddressError::Unaligned => SharedMemError::Unaligned,
         UserAddressError::EmptyRange => SharedMemError::InvalidSize,
     }
 }

@@ -12,6 +12,8 @@
 
 #![no_std]
 
+use core::marker::PhantomData;
+
 // ---------------------------------------------------------------------------
 // Userspace virtual-address ABI types
 // ---------------------------------------------------------------------------
@@ -25,6 +27,7 @@ pub type UserVirtAddr = u64;
 /// Typed userspace virtual address validated by the ABI contract.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use]
 pub struct UserVAddr(usize);
 
 impl UserVAddr {
@@ -73,8 +76,93 @@ impl TryFrom<UserVirtAddr> for UserVAddr {
     }
 }
 
+/// Typed userspace pointer validated by the ABI contract.
+///
+/// Guarantees:
+/// - Canonical userspace virtual address.
+/// - Inside [`USER_SPACE_MIN`, `USER_SPACE_MAX`).
+///
+/// Does NOT guarantee:
+/// - Present mapping.
+/// - Access permissions.
+/// - Residency (may still page-fault).
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use]
+pub struct UserPtr<T> {
+    addr: UserVAddr,
+    _marker: PhantomData<*const T>,
+}
+
+impl<T> Copy for UserPtr<T> {}
+
+impl<T> Clone for UserPtr<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> UserPtr<T> {
+    #[inline]
+    const fn as_usize(self) -> usize {
+        self.addr.as_usize()
+    }
+
+    #[inline]
+    pub const fn as_ptr(self) -> *const T {
+        self.addr.as_ptr::<T>()
+    }
+
+    #[inline]
+    pub const fn as_mut_ptr(self) -> *mut T {
+        self.addr.as_mut_ptr::<T>()
+    }
+
+    #[inline]
+    pub fn checked_add_bytes(self, offset: usize) -> Result<Self, UserAddressError> {
+        Ok(Self {
+            addr: self.addr.checked_add(offset)?,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Validate a byte range starting at this pointer.
+    #[inline]
+    pub fn byte_range(self, len: usize) -> Result<UserRange, UserAddressError> {
+        validate_user_range(self.as_usize(), len)
+    }
+
+    #[inline]
+    pub const fn cast<U>(self) -> UserPtr<U> {
+        UserPtr {
+            addr: self.addr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> TryFrom<usize> for UserPtr<T> {
+    type Error = UserAddressError;
+
+    #[inline]
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        validate_user_ptr(value)
+    }
+}
+
+impl<T> TryFrom<UserVirtAddr> for UserPtr<T> {
+    type Error = UserAddressError;
+
+    #[inline]
+    fn try_from(value: UserVirtAddr) -> Result<Self, Self::Error> {
+        validate_user_ptr(value as usize)
+    }
+}
+
 /// Typed userspace range validated by the ABI contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub struct UserRange {
     base: UserVAddr,
     len: usize,
@@ -108,6 +196,7 @@ pub enum UserAddressError {
     BelowUserMin,
     AboveUserMax,
     Overflow,
+    Unaligned,
     EmptyRange,
 }
 
@@ -142,6 +231,9 @@ pub const USER_SPACE_MAX: UserVirtAddr = 0x0000_8000_0000_0000;
 
 /// Bitmask used to flag suspiciously high bits in a userspace pointer.
 pub const USER_PTR_HIGH_BITS_MASK: UserVirtAddr = 0xFFFF_0000_0000_0000;
+
+/// ABI page size/alignment for userspace virtual-memory ranges.
+pub const USER_PAGE_SIZE: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Syscall error codes
@@ -259,6 +351,15 @@ pub fn validate_user_addr(addr: usize) -> Result<UserVAddr, UserAddressError> {
     Ok(UserVAddr(addr))
 }
 
+/// Validates and returns a typed userspace pointer.
+#[inline]
+pub fn validate_user_ptr<T>(ptr: usize) -> Result<UserPtr<T>, UserAddressError> {
+    Ok(UserPtr {
+        addr: validate_user_addr(ptr)?,
+        _marker: PhantomData,
+    })
+}
+
 /// Validates and returns a typed userspace virtual address range.
 #[inline]
 pub fn validate_user_range(base: usize, len: usize) -> Result<UserRange, UserAddressError> {
@@ -279,10 +380,66 @@ pub fn validate_user_range(base: usize, len: usize) -> Result<UserRange, UserAdd
     Ok(UserRange { base, len })
 }
 
+/// Validates a userspace range that must be page-aligned.
+#[inline]
+pub fn validate_user_page_aligned_range(base: usize, len: usize) -> Result<UserRange, UserAddressError> {
+    let range = validate_user_range(base, len)?;
+    if !range.start().is_multiple_of(USER_PAGE_SIZE) || !range.len().is_multiple_of(USER_PAGE_SIZE) {
+        return Err(UserAddressError::Unaligned);
+    }
+    Ok(range)
+}
+
 /// Validates a userspace return address produced by a syscall path.
 #[inline]
 pub fn validate_user_return_addr(addr: usize) -> Result<UserVAddr, UserAddressError> {
     validate_user_addr(addr)
+}
+
+/// Validates a userspace return range produced by a syscall path.
+#[inline]
+pub fn validate_user_return_range(base: usize, len: usize) -> Result<UserRange, UserAddressError> {
+    validate_user_range(base, len)
+}
+
+/// Validates a userspace mmap hint address.
+///
+/// Hints are not required to be page-aligned, but must still be valid
+/// userspace addresses and lie in the mmap window.
+#[inline]
+pub fn validate_user_mmap_hint(addr: usize) -> Result<UserVAddr, UserAddressError> {
+    let addr = validate_user_addr(addr)?;
+    let raw = addr.as_u64();
+
+    if raw < USER_MMAP_START {
+        return Err(UserAddressError::BelowUserMin);
+    }
+    if raw >= USER_MMAP_END {
+        return Err(UserAddressError::AboveUserMax);
+    }
+
+    Ok(addr)
+}
+
+/// Validates a userspace mmap range.
+///
+/// The returned range is guaranteed to:
+/// - satisfy the canonical userspace ABI contract;
+/// - be page-aligned; and
+/// - lie fully inside the mmap window `[USER_MMAP_START, USER_MMAP_END)`.
+#[inline]
+pub fn validate_user_mmap_range(base: usize, len: usize) -> Result<UserRange, UserAddressError> {
+    let range = validate_user_page_aligned_range(base, len)?;
+
+    if range.start() < USER_MMAP_START as usize {
+        return Err(UserAddressError::BelowUserMin);
+    }
+
+    if (range.end_exclusive() as UserVirtAddr) > USER_MMAP_END {
+        return Err(UserAddressError::AboveUserMax);
+    }
+
+    Ok(range)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +573,7 @@ mod tests {
     #[test]
     fn typed_user_addr_validation_enforces_abi_contract() {
         assert!(validate_user_addr(USER_SPACE_MIN as usize).is_ok());
+        assert!(validate_user_addr((USER_SPACE_MAX - 1) as usize).is_ok());
         assert_eq!(
             validate_user_addr((USER_SPACE_MIN - 1) as usize),
             Err(UserAddressError::BelowUserMin)
@@ -431,18 +589,115 @@ mod tests {
     }
 
     #[test]
+    fn typed_user_ptr_validation_enforces_abi_contract() {
+        assert!(validate_user_ptr::<u8>(USER_SPACE_MIN as usize).is_ok());
+        assert_eq!(
+            validate_user_ptr::<u8>((USER_SPACE_MIN - 1) as usize),
+            Err(UserAddressError::BelowUserMin)
+        );
+        assert_eq!(
+            validate_user_ptr::<u8>(USER_SPACE_MAX as usize),
+            Err(UserAddressError::AboveUserMax)
+        );
+    }
+
+    #[test]
     fn typed_user_range_validation_rejects_empty_and_overflowing_ranges() {
         assert_eq!(
             validate_user_range(USER_SPACE_MIN as usize, 0),
             Err(UserAddressError::EmptyRange)
         );
+        assert!(validate_user_range(USER_SPACE_MIN as usize, 0x2000).is_ok());
         assert_eq!(
             validate_user_range((USER_SPACE_MAX - 1) as usize, 2),
             Err(UserAddressError::AboveUserMax)
         );
         assert_eq!(
-            validate_user_range(usize::MAX - 1, 8),
+            validate_user_range((USER_SPACE_MIN - 1) as usize, 8),
+            Err(UserAddressError::BelowUserMin)
+        );
+        assert_eq!(
+            validate_user_range(USER_SPACE_MIN as usize, usize::MAX),
+            Err(UserAddressError::Overflow)
+        );
+    }
+
+    #[test]
+    fn user_return_addr_validation_reuses_abi_contract() {
+        assert!(validate_user_return_addr(USER_SPACE_MIN as usize).is_ok());
+        assert_eq!(
+            validate_user_return_addr(USER_SPACE_MAX as usize),
+            Err(UserAddressError::AboveUserMax)
+        );
+        assert_eq!(
+            validate_user_return_addr(0x0001_0000_0000_0000usize),
             Err(UserAddressError::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn user_return_range_validation_reuses_abi_contract() {
+        assert!(validate_user_return_range(USER_SPACE_MIN as usize, USER_PAGE_SIZE).is_ok());
+        assert_eq!(
+            validate_user_return_range((USER_SPACE_MAX - USER_PAGE_SIZE as u64 / 2) as usize, USER_PAGE_SIZE),
+            Err(UserAddressError::AboveUserMax)
+        );
+    }
+
+    #[test]
+    fn user_mmap_range_validation_enforces_window_alignment_and_overflow() {
+        assert!(validate_user_mmap_range(USER_MMAP_START as usize, USER_PAGE_SIZE).is_ok());
+
+        assert_eq!(
+            validate_user_mmap_range((USER_MMAP_START - USER_PAGE_SIZE as u64) as usize, USER_PAGE_SIZE),
+            Err(UserAddressError::BelowUserMin)
+        );
+        assert_eq!(
+            validate_user_mmap_range(USER_MMAP_END as usize, USER_PAGE_SIZE),
+            Err(UserAddressError::AboveUserMax)
+        );
+        assert_eq!(
+            validate_user_mmap_range((USER_MMAP_END - USER_PAGE_SIZE as u64 / 2) as usize, USER_PAGE_SIZE),
+            Err(UserAddressError::Unaligned)
+        );
+        assert_eq!(
+            validate_user_mmap_range((USER_MMAP_END - USER_PAGE_SIZE as u64) as usize, USER_PAGE_SIZE * 2),
+            Err(UserAddressError::AboveUserMax)
+        );
+        assert_eq!(
+            validate_user_mmap_range((USER_MMAP_START + 1) as usize, USER_PAGE_SIZE),
+            Err(UserAddressError::Unaligned)
+        );
+        assert_eq!(
+            validate_user_mmap_range(USER_MMAP_START as usize, USER_PAGE_SIZE + 1),
+            Err(UserAddressError::Unaligned)
+        );
+    }
+
+    #[test]
+    fn user_page_aligned_range_validation_enforces_alignment() {
+        assert!(validate_user_page_aligned_range(USER_SPACE_MIN as usize, USER_PAGE_SIZE).is_ok());
+        assert_eq!(
+            validate_user_page_aligned_range((USER_SPACE_MIN + 1) as usize, USER_PAGE_SIZE),
+            Err(UserAddressError::Unaligned)
+        );
+        assert_eq!(
+            validate_user_page_aligned_range(USER_SPACE_MIN as usize, USER_PAGE_SIZE + 1),
+            Err(UserAddressError::Unaligned)
+        );
+    }
+
+    #[test]
+    fn user_mmap_hint_validation_accepts_unaligned_hints_inside_window() {
+        assert!(validate_user_mmap_hint(USER_MMAP_START as usize).is_ok());
+        assert!(validate_user_mmap_hint((USER_MMAP_START + 1) as usize).is_ok());
+        assert_eq!(
+            validate_user_mmap_hint((USER_MMAP_START - 1) as usize),
+            Err(UserAddressError::BelowUserMin)
+        );
+        assert_eq!(
+            validate_user_mmap_hint(USER_MMAP_END as usize),
+            Err(UserAddressError::AboveUserMax)
         );
     }
 }

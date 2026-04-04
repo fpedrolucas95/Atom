@@ -61,9 +61,70 @@ use crate::mm;
 use crate::sched;
 #[allow(unused_imports)]
 use crate::util::UI_DIRTY;
-use crate::{log_debug, log_info, log_panic, log_warn};
+use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::interrupts::LOG_ORIGIN;
+
+// ---------------------------------------------------------------------------
+// Fault loop detector
+//
+// Tracks how many consecutive page faults the same (pid, page) pair has
+// generated without being resolved. If a single page faults more than
+// FAULT_LOOP_THRESHOLD times in a row, the process is killed to prevent
+// a fault storm from freezing the entire system.
+//
+// The counter is stored as a per-CPU approximation using a small fixed-size
+// table keyed by (pid ^ page_addr) % FAULT_LOOP_SLOTS. Hash collisions are
+// acceptable — a false positive kills a process unnecessarily (rare), a false
+// negative allows a few extra faults before detection (bounded).
+// ---------------------------------------------------------------------------
+
+const FAULT_LOOP_SLOTS: usize = 64;
+const FAULT_LOOP_THRESHOLD: u8 = 8;
+
+#[derive(Clone, Copy)]
+struct FaultSlot {
+    pid_raw: u64,
+    page_addr: usize,
+    count: u8,
+}
+
+impl FaultSlot {
+    const EMPTY: Self = Self { pid_raw: 0, page_addr: 0, count: 0 };
+}
+
+static FAULT_LOOP_TABLE: spin::Mutex<[FaultSlot; FAULT_LOOP_SLOTS]> =
+    spin::Mutex::new([FaultSlot::EMPTY; FAULT_LOOP_SLOTS]);
+
+/// Record a fault for (pid, page_addr). Returns true if the fault loop
+/// threshold has been exceeded and the process should be killed.
+fn record_fault_and_check_loop(
+    pid: crate::process::ProcessId,
+    page_addr: usize,
+) -> bool {
+    let slot_idx = ((pid.raw() ^ page_addr as u64) as usize) % FAULT_LOOP_SLOTS;
+    let mut table = FAULT_LOOP_TABLE.lock();
+    let slot = &mut table[slot_idx];
+
+    if slot.pid_raw == pid.raw() && slot.page_addr == page_addr {
+        slot.count = slot.count.saturating_add(1);
+        slot.count >= FAULT_LOOP_THRESHOLD
+    } else {
+        // New (pid, page) pair — reset slot
+        *slot = FaultSlot { pid_raw: pid.raw(), page_addr, count: 1 };
+        false
+    }
+}
+
+/// Clear the fault loop counter for a (pid, page) pair after successful resolution.
+fn clear_fault_loop_counter(pid: crate::process::ProcessId, page_addr: usize) {
+    let slot_idx = ((pid.raw() ^ page_addr as u64) as usize) % FAULT_LOOP_SLOTS;
+    let mut table = FAULT_LOOP_TABLE.lock();
+    let slot = &mut table[slot_idx];
+    if slot.pid_raw == pid.raw() && slot.page_addr == page_addr {
+        *slot = FaultSlot::EMPTY;
+    }
+}
 
 const EXCEPTION_NAMES: [&str; 32] = [
     "#DE - Divide Error",
@@ -161,7 +222,7 @@ pub struct InterruptFrame {
 const _: () = {
     use core::mem::{size_of, offset_of};
 
-    // Total size check (22 fields * 8 bytes = 176 bytes)
+    // INVARIANT: InterruptFrame must be exactly 176 bytes (22 × 8) — structural, not operational.
     assert!(
         size_of::<InterruptFrame>() == 22 * 8,
         "InterruptFrame size mismatch: expected exactly 176 bytes (22 * 8)"
@@ -169,18 +230,27 @@ const _: () = {
 
     // Offset checks for each architectural block
     // 1. Registers pushed by PUSH_ALL (RSP points here initially)
+    // INVARIANT: r15 must be at offset 0 (first register pushed by PUSH_ALL) — structural, not operational.
     assert!(offset_of!(InterruptFrame, r15) == 0);
+    // INVARIANT: rax must be at offset 14*8 (last register pushed by PUSH_ALL) — structural, not operational.
     assert!(offset_of!(InterruptFrame, rax) == 14 * 8);
 
     // 2. Information pushed by the assembly stubs
+    // INVARIANT: exception_number must be at offset 15*8 (pushed by assembly stubs) — structural, not operational.
     assert!(offset_of!(InterruptFrame, exception_number) == 15 * 8);
+    // INVARIANT: error_code must be at offset 16*8 (pushed by assembly stubs) — structural, not operational.
     assert!(offset_of!(InterruptFrame, error_code)       == 16 * 8);
 
     // 3. Hardware-saved state (IRET frame)
+    // INVARIANT: rip must be at offset 17*8 (hardware IRET frame) — structural, not operational.
     assert!(offset_of!(InterruptFrame, rip)    == 17 * 8);
+    // INVARIANT: cs must be at offset 18*8 (hardware IRET frame) — structural, not operational.
     assert!(offset_of!(InterruptFrame, cs)     == 18 * 8);
+    // INVARIANT: rflags must be at offset 19*8 (hardware IRET frame) — structural, not operational.
     assert!(offset_of!(InterruptFrame, rflags) == 19 * 8);
+    // INVARIANT: rsp must be at offset 20*8 (hardware IRET frame) — structural, not operational.
     assert!(offset_of!(InterruptFrame, rsp)    == 20 * 8);
+    // INVARIANT: ss must be at offset 21*8 (hardware IRET frame) — structural, not operational.
     assert!(offset_of!(InterruptFrame, ss)     == 21 * 8);
 };
 
@@ -824,16 +894,64 @@ fn handle_userspace_page_fault(
         }
     };
 
+    // ABI boundary hardening: userspace fault addresses must satisfy the
+    // canonical userspace address contract before entering the VMA pipeline.
+    if let Err(err) = atom_abi::validate_user_addr(cr2 as usize) {
+        log_warn!(
+            LOG_ORIGIN,
+            "[PF] reject_non_abi_user_fault pid={} cr3={:#x} addr={:#x} rip={:#x} err={:#x} abi_err={:?}",
+            pid,
+            current_cr3,
+            cr2,
+            frame.rip,
+            error_code,
+            err
+        );
+        terminate_faulting_userspace_thread(
+            tid,
+            frame,
+            cr2,
+            error_code,
+            mm::vma::FaultResult::InvalidAddress,
+        );
+    }
+
     let ctx = mm::vma::FaultContext::from_x86_error(
         pid,
         mm::vma::AddressSpaceId::new(current_cr3 as usize),
         cr2 as usize,
         error_code,
     );
+
+    let page_addr = (cr2 as usize) & !(crate::mm::pmm::PAGE_SIZE - 1);
+
+    // Check for fault storm before attempting resolution.
+    if record_fault_and_check_loop(pid, page_addr) {
+        log_error!(
+            LOG_ORIGIN,
+            "[PF] FAULT_LOOP pid={} cr3={:#x} addr={:#x} page={:#x} rip={:#x} err={:#x} — killing process",
+            pid,
+            current_cr3,
+            cr2,
+            page_addr,
+            frame.rip,
+            error_code,
+        );
+        clear_fault_loop_counter(pid, page_addr);
+        terminate_faulting_userspace_thread(
+            tid,
+            frame,
+            cr2,
+            error_code,
+            mm::vma::FaultResult::InvalidAddress,
+        );
+    }
+
     let result = mm::vma::handle_page_fault(ctx, error_code);
 
     match classify_fault_outcome(result) {
         FaultOutcome::Resolved => {
+            clear_fault_loop_counter(pid, page_addr);
             log_debug!(
                 LOG_ORIGIN,
                 "[PF] pid={} cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?} action=resume",
@@ -847,9 +965,9 @@ fn handle_userspace_page_fault(
             true
         }
         FaultOutcome::Fatal(fatal_result) => {
-            log_warn!(
+            log_error!(
                 LOG_ORIGIN,
-                "[PF] pid={} cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?} action=terminate",
+                "[PF] FATAL pid={} cr3={:#x} addr={:#x} rip={:#x} err={:#x} result={:?} action=terminate",
                 pid,
                 current_cr3,
                 cr2,

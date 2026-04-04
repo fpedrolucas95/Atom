@@ -1,25 +1,19 @@
 use crate::error::{EINVAL, ENOMEM, SyscallError, SyscallResult};
 use crate::raw::{numbers::*, syscall2, syscall3, syscall4};
-use atom_abi::{has_suspicious_user_high_bits, is_canonical, is_syscall_error, is_user_mmap_addr, is_valid_user_va, UserVirtAddr};
+use atom_abi::{is_syscall_error, validate_user_mmap_range, UserVirtAddr, USER_PAGE_SIZE};
 
 #[inline]
-fn validate_kernel_mapped_addr(addr: UserVirtAddr) -> SyscallResult<UserVirtAddr> {
-    if !is_canonical(addr) {
+fn validate_kernel_mapped_addr(addr: UserVirtAddr, length: usize) -> SyscallResult<UserVirtAddr> {
+    let rounded_len = match length.checked_add(USER_PAGE_SIZE - 1) {
+        Some(v) => v & !(USER_PAGE_SIZE - 1),
+        None => return Err(SyscallError::InvalidArgument),
+    };
+    if rounded_len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if validate_user_mmap_range(addr as usize, rounded_len).is_err() {
         return Err(SyscallError::Unknown(addr));
     }
-
-    if !is_valid_user_va(addr) {
-        return Err(SyscallError::Unknown(addr));
-    }
-
-    if !is_user_mmap_addr(addr) {
-        return Err(SyscallError::Unknown(addr));
-    }
-
-    if has_suspicious_user_high_bits(addr) {
-        return Err(SyscallError::Unknown(addr));
-    }
-
     Ok(addr)
 }
 
@@ -35,7 +29,7 @@ pub fn mmap_anon(length: usize, prot: u64, flags: u64) -> SyscallResult<UserVirt
             _ => Err(SyscallError::Unknown(result)),
         }
     } else {
-        validate_kernel_mapped_addr(result)
+        validate_kernel_mapped_addr(result, length)
     }
 }
 

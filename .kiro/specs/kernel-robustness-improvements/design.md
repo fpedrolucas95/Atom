@@ -4,7 +4,7 @@
 
 Este documento cobre duas camadas de trabalho complementares:
 
-**Camada 1 — Melhorias Incrementais (Fases 1–6, parcialmente implementadas):** Validação de memória, hardening de capabilities, OOM graceful degradation, cleanup de threads, resource limits e observabilidade. As fases 1–3 estão completas; as fases 4–6 estão em progresso.
+**Camada 1 — Melhorias Incrementais (Fases 1–6, parcialmente implementadas):** Validação de memória, hardening de capabilities, OOM graceful degradation, cleanup de threads, resource limits e observabilidade. As fases 1–3 estão completas; as fases 4–5 estão em progresso; a Fase 6 (Syscall Hardening) está planejada.
 
 **Camada 2 — Migração Arquitetural (Fases 0–9):** Plano de migração completo dirigido por invariantes que resolve o problema central: o kernel não está falhando por um único bug de MM, mas por fronteiras mal definidas entre MM, processo, OOM e capability lifecycle. A correção de nível produção exige eleger uma única fonte de verdade por conceito, eliminar semântica híbrida e transformar caminhos críticos em contratos explícitos e tipados.
 
@@ -749,3 +749,396 @@ END
 - `kernel/src/mm/oom.rs` — pressão global, seleção de vítima
 - `kernel/src/cap.rs` — grafo de derivação, revoke state machine
 - `kernel/src/thread.rs` — cleanup coordinator
+
+---
+
+## Fase 6 — Syscall Hardening (Remoção de Falhas Sistêmicas)
+
+### Objetivo
+
+Eliminar a possibilidade de panics globais do kernel causados por drift operacional, substituindo `assert!` e falhas implícitas por tratamento estruturado de erro, contenção local de inconsistências, observabilidade clara e recuperação segura ou terminação controlada.
+
+### Princípios Arquiteturais
+
+- Syscalls nunca devem derrubar o kernel por estado inválido vindo do runtime
+- `assert!` não é mecanismo de validação operacional
+- Toda inconsistência deve virar erro estruturado + ação definida
+- Falhas devem ser contidas no menor escopo possível (thread/processo)
+
+### Diagrama de Contenção de Erros
+
+```mermaid
+graph TD
+    subgraph "Syscall Entry"
+        SE[rust_syscall_dispatcher]
+    end
+
+    subgraph "Validação de Contexto"
+        VC[validate_syscall_context]
+        VC -->|Ok| DISP[dispatch handler]
+        VC -->|Err SyscallContextError| CONT[Contenção Local]
+    end
+
+    subgraph "Contenção Local"
+        CONT --> LOG[error! log estruturado]
+        LOG --> TEAR[transition_to_dying FatalFault]
+        TEAR --> RET[retornar EINVAL ao userspace]
+    end
+
+    subgraph "Handler de Syscall"
+        DISP --> ARG[validar argumentos]
+        ARG -->|Err SyscallError| ERR[retornar errno tipado]
+        ARG -->|Ok| EXEC[executar operação]
+        EXEC -->|Err SyscallError| ERR
+        EXEC -->|Ok| OK[retornar resultado]
+    end
+
+    SE --> VC
+```
+
+### Fluxo de Syscall Hardened
+
+```mermaid
+sequenceDiagram
+    participant U as Userspace
+    participant SE as Syscall Entry
+    participant VC as Context Validator
+    participant H as Handler
+    participant PR as Process
+
+    U->>SE: syscall(num, args...)
+    SE->>VC: validate_syscall_context(tid, pml4)
+    
+    alt Contexto inválido
+        VC-->>SE: Err(SyscallContextError::ThreadProcessMismatch)
+        SE->>PR: transition_to_dying(FatalFault)
+        SE-->>U: EINVAL
+    else Contexto válido
+        VC-->>SE: Ok(ctx)
+        SE->>H: dispatch(ctx, args)
+        
+        alt Argumento inválido
+            H-->>SE: Err(SyscallError::InvalidPointer)
+            SE-->>U: EINVAL
+        else Permissão negada
+            H-->>SE: Err(SyscallError::PermissionDenied)
+            SE-->>U: EPERM
+        else Sucesso
+            H-->>SE: Ok(result)
+            SE-->>U: result
+        end
+    end
+```
+
+### Component 9: SyscallError — Taxonomia de Erros Operacionais
+
+**Purpose**: Padronizar todos os erros operacionais do syscall path em enums claros, rastreáveis e com ação definida. Eliminar retornos `bool`, erros genéricos sem contexto e dependência exclusiva em log textual.
+
+**Interface**:
+```rust
+/// Erros operacionais do syscall path — nunca causam panic global.
+/// Cada variante tem ação definida: retornar errno + log estruturado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallError {
+    /// Address space do processo divergiu do esperado
+    AddressSpaceDrift,
+    /// Metadata do processo está corrompida ou inconsistente
+    ProcessMetadataCorrupted,
+    /// Thread referencia processo diferente do esperado
+    ThreadProcessMismatch,
+    /// Endereço de retorno para userspace é inválido
+    InvalidUserReturnAddress,
+    /// Operação negada por política de admissão
+    AdmissionDenied,
+    /// Revogação de capability foi parcial (alguns filhos falharam)
+    CapabilityRevokePartial,
+    /// Ponteiro de userspace inválido ou fora dos limites
+    InvalidPointer,
+    /// Permissão insuficiente para a operação
+    PermissionDenied,
+    /// Inconsistência interna detectada — contenção local aplicada
+    InternalInconsistency(&'static str),
+}
+
+/// Erros de contexto de syscall — indicam drift de metadata do kernel.
+/// Quando ocorrem, o processo é isolado via transition_to_dying(FatalFault).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallContextError {
+    /// PML4 da thread não corresponde ao processo registrado
+    ProcessContextMismatch,
+    /// Endereço de retorno para userspace é inválido ou aponta para kernel
+    InvalidUserReturnAddress,
+    /// Address space ausente ou não mapeado para o processo
+    MissingAddressSpace,
+    /// Metadata de thread/processo divergiu (thread_id, process_id inconsistentes)
+    ThreadMetadataDrift,
+}
+
+impl SyscallError {
+    /// Converte para errno POSIX-like para retorno ao userspace
+    pub fn to_errno(self) -> u64;
+}
+```
+
+**Mapeamento por subsistema**:
+```rust
+// MM → SyscallError
+AdmissionDenied    // quota excedida, pressão OOM
+InvalidPointer     // ponteiro de userspace inválido
+
+// Process → SyscallError
+ThreadProcessMismatch      // thread.process_id != expected
+ProcessMetadataCorrupted   // metadata inconsistente
+
+// OOM → SyscallError
+AdmissionDenied            // alocação negada por pressão
+InternalInconsistency      // estado OOM inesperado
+
+// Cap → SyscallError
+CapabilityRevokePartial    // revogação parcial surfaceada
+PermissionDenied           // capability insuficiente
+
+// Syscall dispatcher → SyscallContextError
+ProcessContextMismatch     // PML4 mismatch
+InvalidUserReturnAddress   // return addr inválido
+MissingAddressSpace        // address space ausente
+ThreadMetadataDrift        // metadata divergiu
+```
+
+**Responsibilities**:
+- Ser a única fonte de erros operacionais do syscall path
+- Nunca retornar `bool` para indicar falha operacional
+- Nunca depender apenas de log textual para comunicar falha
+- Cada variante mapeia para errno específico + ação de contenção definida
+
+### Component 10: Contenção Local de Falhas
+
+**Purpose**: Garantir que falhas operacionais sejam contidas no menor escopo possível, sem propagar como panic global.
+
+**Interface**:
+```rust
+/// Resultado de validação de contexto de syscall
+pub type SyscallContextResult = Result<SyscallContext, SyscallContextError>;
+
+pub struct SyscallContext {
+    pub thread_id: ThreadId,
+    pub process_id: ProcessId,
+    pub pml4_phys: u64,
+}
+
+/// Valida contexto antes de despachar syscall
+pub fn validate_syscall_context(
+    thread_id: ThreadId,
+    expected_pml4: u64,
+) -> SyscallContextResult;
+
+/// Contenção local: isola processo com falha de contexto
+pub fn contain_context_failure(
+    error: SyscallContextError,
+    thread_id: ThreadId,
+    process_id: Option<ProcessId>,
+);
+```
+
+**Algoritmo de contenção**:
+```pascal
+PROCEDURE contain_context_failure(error, thread_id, process_id)
+  INPUT: error: SyscallContextError, thread_id, process_id: Option
+
+  SEQUENCE
+    // 1. Log estruturado — nunca silencioso
+    error!("syscall context failure: {:?} tid={} pid={:?}", error, thread_id, process_id)
+    
+    // 2. Contenção local — isolar processo, não derrubar kernel
+    IF process_id IS Some(pid) THEN
+      transition_to_dying(pid, KillReason::FatalFault)
+    ELSE
+      // Sem processo identificado: encerrar apenas a thread
+      terminate_thread(thread_id, TerminationReason::ContextFailure)
+    END IF
+    
+    // 3. Kernel continua para outros processos
+    // Retornar EINVAL ao userspace (se possível) ou simplesmente não retornar
+  END SEQUENCE
+END PROCEDURE
+```
+
+### Data Models — Fase 6
+
+#### Model 8: SyscallError (novo — taxonomia de erros operacionais)
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallError {
+    AddressSpaceDrift,
+    ProcessMetadataCorrupted,
+    ThreadProcessMismatch,
+    InvalidUserReturnAddress,
+    AdmissionDenied,
+    CapabilityRevokePartial,
+    InvalidPointer,
+    PermissionDenied,
+    InternalInconsistency(&'static str),
+}
+```
+
+**Validation Rules**:
+- Nunca retornar `bool` para indicar falha operacional
+- Nunca retornar erro genérico sem variante específica
+- Cada variante tem errno correspondente documentado
+- `InternalInconsistency` inclui descrição estática para rastreabilidade
+
+#### Model 9: SyscallContextError (expandido do Component 8 existente)
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallContextError {
+    ProcessContextMismatch,
+    InvalidUserReturnAddress,
+    MissingAddressSpace,
+    ThreadMetadataDrift,
+}
+```
+
+**Validation Rules**:
+- Qualquer ocorrência dispara contenção local (transition_to_dying)
+- Nunca silenciado — sempre logado com contexto completo
+- Nunca propaga como panic global
+
+### Algoritmos — Fase 6
+
+#### Algoritmo: Substituição de assert! por Erro Estruturado
+
+```pascal
+// ❌ Padrão proibido em caminho operacional
+ASSERT thread.process_id = expected_pid
+
+// ✅ Padrão correto
+IF thread.process_id ≠ expected_pid THEN
+  error!("Thread/process mismatch: tid={} expected_pid={} actual_pid={}",
+         thread_id, expected_pid, thread.process_id)
+  RETURN Err(SyscallError::ThreadProcessMismatch)
+END IF
+```
+
+#### Algoritmo: Auditoria de assert! no Syscall Path
+
+```pascal
+ALGORITHM audit_assert_in_syscall_path()
+INPUT: codebase
+OUTPUT: lista de assert! a substituir
+
+BEGIN
+  // Classe A — MANTER (invariantes de compilador/estruturais)
+  KEEP: const _: () = assert!(...)          // verificação em tempo de compilação
+  KEEP: assert! em #[cfg(test)]             // testes unitários
+  KEEP: assert! em handlers.rs InterruptFrame size checks  // invariante de compilador
+  KEEP: assert! em idt.rs const contexts    // invariante de compilador
+  
+  // Classe B — SUBSTITUIR (condições operacionais de runtime)
+  REPLACE: assert! em verify_process_accounting (process.rs ~1046)
+           → Err(SyscallError::ProcessMetadataCorrupted) + log
+  
+  REPLACE: assert! em ProtectedPml4Registry::insert (pmm.rs ~137)
+           → Err(ValidationError::RegistryExhausted) + log + contenção
+  
+  REVIEW: debug_assert! em syscall/mod.rs mmap allocation (~5312)
+          → avaliar se condição pode ocorrer em runtime; se sim, substituir
+  
+  REVIEW: debug_assert! em process.rs thread registration (~240, 264, 303, 521, 539)
+          → debug_assert! é aceitável se nunca ativo em release; documentar
+  
+  REVIEW: debug_assert! em ipc.rs validações (~479, 499)
+          → avaliar se condição pode ocorrer em runtime; se sim, substituir
+END
+```
+
+#### Algoritmo: Validação de Contexto de Syscall
+
+```pascal
+ALGORITHM validate_syscall_context(thread_id, expected_pml4)
+INPUT: thread_id: ThreadId, expected_pml4: u64
+OUTPUT: Result<SyscallContext, SyscallContextError>
+
+BEGIN
+  // 1. Verificar que thread existe e tem processo associado
+  process_id ← get_thread_process_id(thread_id)
+  IF process_id IS None THEN
+    RETURN Err(SyscallContextError::ThreadMetadataDrift)
+  END IF
+  
+  // 2. Verificar que processo existe e tem PML4 consistente
+  process_pml4 ← get_process_pml4(process_id)
+  IF process_pml4 IS None THEN
+    RETURN Err(SyscallContextError::MissingAddressSpace)
+  END IF
+  
+  IF process_pml4 ≠ expected_pml4 THEN
+    RETURN Err(SyscallContextError::ProcessContextMismatch)
+  END IF
+  
+  // 3. Verificar que processo não está em estado terminal
+  IF is_process_dying(process_id) THEN
+    RETURN Err(SyscallContextError::ProcessContextMismatch)
+  END IF
+  
+  RETURN Ok(SyscallContext { thread_id, process_id, pml4_phys: expected_pml4 })
+END
+```
+
+### Regra de Ouro — Uso de assert!
+
+| Contexto | assert! permitido? | Alternativa |
+|----------|-------------------|-------------|
+| Invariante de compilador (`const _: () = assert!(...)`) | ✅ Sim | — |
+| Testes unitários (`#[cfg(test)]`) | ✅ Sim | — |
+| `debug_assert!` para invariante nunca ativo em release | ✅ Sim (documentar) | — |
+| Verificação de tamanho de struct em tempo de compilação | ✅ Sim | — |
+| Estado vindo de userspace ou runtime | ❌ Não | `Err(SyscallError::*)` |
+| Metadata de thread/processo em syscall path | ❌ Não | `Err(SyscallContextError::*)` |
+| Condição de OOM ou quota | ❌ Não | `Err(FaultError::QuotaExceeded)` |
+| Registry cheio (operacional) | ❌ Não | `Err(ValidationError::RegistryExhausted)` |
+
+### Error Handling — Fase 6
+
+#### Error Scenario 6: assert! em Caminho Operacional
+
+**Condition**: `assert!` ou `assert_eq!` falha em condição que pode ocorrer em runtime normal (ex: mismatch de PML4, metadata corrompida)
+**Response**: Kernel panic global — indisponibilidade total
+**Recovery**: Nenhuma — sistema precisa ser reiniciado
+**Solução**: Substituir por `Err(SyscallError::*)` + log estruturado + contenção local
+
+#### Error Scenario 7: Thread/Process Mismatch em Syscall
+
+**Condition**: `thread.process_id != expected_pid` detectado no syscall path
+**Response**: `Err(SyscallContextError::ThreadMetadataDrift)` → contenção local
+**Recovery**: `transition_to_dying(process_id, KillReason::FatalFault)` → kernel continua
+**Logging**: `error!("Thread/process mismatch: tid={} expected={} actual={}")`
+
+#### Error Scenario 8: Registry de PML4 Esgotado
+
+**Condition**: `ProtectedPml4Registry::insert` chamado com registry cheio
+**Response**: `Err(ValidationError::RegistryExhausted)` → negar operação, não panic
+**Recovery**: Log de erro + retornar falha ao caller; kernel continua
+**Logging**: `error!("Protected PML4 registry exhausted at capacity={}")`
+
+### Testing Strategy — Fase 6
+
+#### Testes de Propriedade (Property-Based)
+
+**Property Test Library**: QuickCheck (Rust)
+
+**Properties**:
+1. Para qualquer `SyscallContextError`, o kernel nunca entra em panic — apenas isola o processo
+2. Para qualquer `SyscallError`, o retorno ao userspace é sempre um errno válido (nunca undefined behavior)
+3. Após contenção local de falha de contexto, o processo está em estado `Dying` ou `Dead`, nunca `Running`
+4. `validate_syscall_context` é determinístico: mesmos inputs produzem mesmo resultado
+5. Nenhum `assert!` no syscall path é alcançável por input de userspace
+
+#### Testes de Exemplo
+
+1. **Thread/process mismatch**: injetar thread com `process_id` errado → verificar `SyscallContextError::ThreadMetadataDrift` + processo isolado
+2. **PML4 mismatch**: thread com PML4 diferente do processo → verificar `SyscallContextError::ProcessContextMismatch`
+3. **Registry esgotado**: preencher `ProtectedPml4Registry` → verificar erro estruturado, não panic
+4. **Ponteiro inválido**: syscall com ponteiro kernel-space → verificar `SyscallError::InvalidPointer` + EINVAL
+5. **Processo dying**: syscall de processo em estado `Dying` → verificar rejeição imediata sem panic

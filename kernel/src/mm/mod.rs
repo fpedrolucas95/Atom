@@ -82,6 +82,10 @@ pub enum ValidationError {
         size: usize,
         max_size: usize,
     },
+    /// Registry capacity exhausted — cannot register more entries.
+    RegistryExhausted {
+        current_capacity: usize,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -116,6 +120,13 @@ impl fmt::Display for ValidationError {
                     f,
                     "Invalid size {} (maximum allowed: {})",
                     size, max_size
+                )
+            }
+            ValidationError::RegistryExhausted { current_capacity } => {
+                write!(
+                    f,
+                    "Registry capacity exhausted (current capacity: {})",
+                    current_capacity
                 )
             }
         }

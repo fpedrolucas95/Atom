@@ -86,6 +86,8 @@ use super::{KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, TIMER_INTERRUPT_V
 // A compile-time failure here is intentional and desirable: it is always
 // preferable to a kernel that silently aliases timer interrupts with CPU
 // exception handlers.
+// INVARIANT: TIMER_INTERRUPT_VECTOR must be >= 0x20 — structural, not operational.
+// x86_64 reserves vectors 0x00-0x1F for CPU exceptions; using them for IRQs would alias.
 const _: () = assert!(
     TIMER_INTERRUPT_VECTOR >= 0x20,
     "TIMER_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
@@ -94,18 +96,24 @@ const _: () = assert!(
      Fix the assignment in kernel/build.rs. \
      Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
 );
+// INVARIANT: KEYBOARD_INTERRUPT_VECTOR must be >= 0x20 — structural, not operational.
+// x86_64 reserves vectors 0x00-0x1F for CPU exceptions; using them for IRQs would alias.
 const _: () = assert!(
     KEYBOARD_INTERRUPT_VECTOR >= 0x20,
     "KEYBOARD_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
      for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
      Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
 );
+// INVARIANT: MOUSE_INTERRUPT_VECTOR must be >= 0x20 — structural, not operational.
+// x86_64 reserves vectors 0x00-0x1F for CPU exceptions; using them for IRQs would alias.
 const _: () = assert!(
     MOUSE_INTERRUPT_VECTOR >= 0x20,
     "MOUSE_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
      for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
      Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
 );
+// INVARIANT: USER_TRAP_INTERRUPT_VECTOR must be >= 0x20 — structural, not operational.
+// x86_64 reserves vectors 0x00-0x1F for CPU exceptions; using them for IRQs would alias.
 const _: () = assert!(
     USER_TRAP_INTERRUPT_VECTOR >= 0x20,
     "USER_TRAP_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
@@ -231,6 +239,8 @@ pub fn init() {
     // message identifying the offending constant, its actual value, and the
     // architectural reference.  This is the correct behaviour: a kernel with
     // an aliased IRQ vector is unsound and must not proceed to load the IDT.
+    // INVARIANT: All interrupt vectors must be >= 0x20 — structural, not operational.
+    // Verified at compile time above; this const block provides a redundant runtime check.
     const {
         assert!(TIMER_INTERRUPT_VECTOR >= 0x20);
         assert!(KEYBOARD_INTERRUPT_VECTOR >= 0x20);

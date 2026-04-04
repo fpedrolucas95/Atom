@@ -97,6 +97,7 @@ impl core::fmt::Display for AddressSpaceId {
 pub use atom_abi::{USER_CANONICAL_MAX as USER_CANONICAL_MAX_U64, USER_VA_LIMIT, SYSCALL_ERROR_THRESHOLD};
 
 /// `USER_CANONICAL_MAX` as a `usize`, for kernel-internal address comparisons.
+#[allow(dead_code)]
 pub const USER_CANONICAL_MAX: usize = atom_abi::USER_CANONICAL_MAX as usize;
 
 const MAX_REGION_SIZE: usize = 256 * 1024 * 1024;
@@ -234,6 +235,7 @@ fn map_validation_error(err: crate::mm::ValidationError) -> AddressSpaceError {
         crate::mm::ValidationError::ProtectedResource { .. } => AddressSpaceError::PermissionDenied,
         crate::mm::ValidationError::NotInitialized => AddressSpaceError::KernelMappingSetupFailed,
         crate::mm::ValidationError::InvalidSize { .. } => AddressSpaceError::InvalidSize,
+        crate::mm::ValidationError::RegistryExhausted { .. } => AddressSpaceError::OutOfMemory,
     }
 }
 
@@ -655,6 +657,8 @@ pub fn cleanup_thread_address_spaces(thread_id: ThreadId, thread_primary_pml4: u
     // path can release it. Standalone address spaces still free their PML4 on Drop.
     for id in owned_spaces {
         if let Some(mut space) = spaces.remove(&id) {
+            // INVARIANT: AddressSpaceManager must only manage auxiliary address spaces — structural, not operational.
+            // The kernel PML4 and process primary PML4s are managed by PMM/VM directly.
             debug_assert!(
                 matches!(space.kind(), ManagedAddressSpaceKind::Auxiliary),
                 "AddressSpaceManager must only manage auxiliary address spaces"

@@ -129,17 +129,26 @@ impl ProtectedPml4Registry {
         }
     }
 
-    fn insert(&mut self, pml4_phys: usize) {
+    fn insert(&mut self, pml4_phys: usize) -> Result<(), crate::mm::ValidationError> {
         if self.contains(pml4_phys) {
-            return;
+            return Ok(());
         }
 
-        assert!(
-            self.len < self.entries.len(),
-            "protected PML4 registry exhausted"
-        );
+        if self.len >= self.entries.len() {
+            crate::log_error!(
+                "[pmm]",
+                "ProtectedPml4Registry exhausted: cannot register pml4=0x{:X}, capacity={}",
+                pml4_phys,
+                self.entries.len()
+            );
+            return Err(crate::mm::ValidationError::RegistryExhausted {
+                current_capacity: self.entries.len(),
+            });
+        }
+
         self.entries[self.len] = pml4_phys;
         self.len += 1;
+        Ok(())
     }
 
     fn remove(&mut self, pml4_phys: usize) -> bool {
@@ -1030,7 +1039,15 @@ pub fn register_active_pml4(pml4_phys: usize) -> Result<(), crate::mm::Validatio
     let mut guard = PROTECTED_PML4S.lock();
 
     let was_present = guard.contains(pml4_phys);
-    guard.insert(pml4_phys);
+    if let Err(e) = guard.insert(pml4_phys) {
+        crate::log_error!(
+            "[pmm]",
+            "register_active_pml4 failed for pml4=0x{:X}: {:?}",
+            pml4_phys,
+            e
+        );
+        return Err(e);
+    }
 
     if !was_present {
         log_debug!("[pmm]", "Registered protected PML4 at phys 0x{:X}", pml4_phys);

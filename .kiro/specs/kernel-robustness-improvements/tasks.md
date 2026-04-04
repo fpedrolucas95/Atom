@@ -4,7 +4,7 @@
 
 Este plano cobre duas camadas de trabalho:
 
-**Camada 1 — Melhorias Incrementais (Fases 1–6):** Validação de memória, hardening de capabilities, OOM graceful degradation, cleanup de threads, resource limits e observabilidade. As fases 1–3 estão completas; as fases 4–6 estão em progresso.
+**Camada 1 — Melhorias Incrementais (Fases 1–6):** Validação de memória, hardening de capabilities, OOM graceful degradation, cleanup de threads, resource limits e observabilidade. As fases 1–3 estão completas; as fases 4–5 estão em progresso; a Fase 6 (Syscall Hardening) está planejada.
 
 **Camada 2 — Migração Arquitetural (Fases 0–9):** Plano de migração completo dirigido por invariantes, organizado em 9 epics que seguem a sequência de merge recomendada. Cada epic é independentemente mergeable e tem Definition of Done verificável.
 
@@ -321,6 +321,101 @@ Este plano cobre duas camadas de trabalho:
 
 - [~] 12. Final checkpoint - Integration validation
   - Ensure all tests pass, ask the user if questions arise.
+
+---
+
+## Fase 6 — Syscall Hardening (Remoção de Falhas Sistêmicas)
+
+- [x] 13. Phase 6 — Syscall Hardening
+  - Auditar e eliminar assert! operacionais do syscall path
+  - Introduzir taxonomia de erros SyscallError e SyscallContextError
+  - Implementar contenção local de falhas de contexto
+  - Integrar erros por subsistema na camada de normalização
+  - _Requirements: Req 29, Req 37, Req 38, Req 39, Req 40, Req 41_
+
+  - [x] 13.1 Auditar todos os assert! no syscall path e classificar
+    - Mapear todos os `assert!`, `assert_eq!`, `debug_assert!` em: `syscall/mod.rs`, `process.rs`, `mm/pmm.rs`, `ipc.rs`
+    - Classificar cada ocorrência como: (A) invariante de compilador/estrutural — manter, (B) condição operacional de runtime — substituir
+    - Documentar resultado da auditoria como comentários inline antes de substituir
+    - Confirmar que `const _: () = assert!(...)` em `idt.rs` e size checks em `interrupts/handlers.rs` são Classe A
+    - _Requirements: Req 39.6, Req 39.7_
+
+  - [x] 13.2 Definir SyscallError e SyscallContextError em kernel/src/syscall/mod.rs
+    - Definir `enum SyscallError { AddressSpaceDrift, ProcessMetadataCorrupted, ThreadProcessMismatch, InvalidUserReturnAddress, AdmissionDenied, CapabilityRevokePartial, InvalidPointer, PermissionDenied, InternalInconsistency(&'static str) }`
+    - Definir `enum SyscallContextError { ProcessContextMismatch, InvalidUserReturnAddress, MissingAddressSpace, ThreadMetadataDrift }`
+    - Implementar `SyscallError::to_errno() -> u64` mapeando cada variante para errno POSIX-like
+    - _Requirements: Req 37.1, Req 37.2, Req 37.6, Req 29.4_
+
+  - [x] 13.3 Substituir assert! em ProtectedPml4Registry::insert (pmm.rs ~137)
+    - Substituir `assert!(self.len < self.entries.len(), "protected PML4 registry exhausted")` por retorno de erro estruturado
+    - Adicionar variante `RegistryExhausted` ao `ValidationError` existente (ou tipo equivalente)
+    - Propagar erro ao caller com `error!` log incluindo capacidade atual
+    - _Requirements: Req 39.1, Req 40.1_
+
+  - [x] 13.4 Substituir assert! em verify_process_accounting (process.rs)
+    - Localizar `assert!` em `verify_process_accounting` que é chamado em caminhos operacionais
+    - Substituir por `Err(SyscallError::ProcessMetadataCorrupted)` com log estruturado
+    - Garantir que o caller trata o erro e não propaga como panic
+    - _Requirements: Req 39.2, Req 40.1_
+
+  - [x] 13.5 Revisar e tratar debug_assert! em process.rs (thread registration)
+    - Revisar `debug_assert!` nas linhas ~240, 264, 303, 521, 539 de `process.rs`
+    - Para cada um: avaliar se a condição pode ocorrer em release por estado de runtime
+    - Se sim: substituir por `error!` log + retorno de `SyscallContextError::ThreadMetadataDrift`
+    - Se não (nunca ativo em release): adicionar comentário `// debug-only: [descrição da invariante]`
+    - _Requirements: Req 39.4, Req 39.7_
+
+  - [x] 13.6 Revisar e tratar debug_assert! em ipc.rs (validações ~479, 499)
+    - Revisar `debug_assert!` nas linhas ~479 e 499 de `ipc.rs`
+    - Aplicar mesma classificação da task 13.5
+    - Se operacional: substituir por `Err(SyscallError::InternalInconsistency("ipc validation"))` + log
+    - _Requirements: Req 39.5_
+
+  - [x] 13.7 Implementar validate_syscall_context em kernel/src/syscall/mod.rs
+    - Implementar `fn validate_syscall_context(thread_id: ThreadId, expected_pml4: u64) -> Result<SyscallContext, SyscallContextError>`
+    - Verificar: thread existe, tem processo associado, PML4 do processo bate com `expected_pml4`, processo não está em estado `Dying`/`Dead`
+    - Definir `struct SyscallContext { thread_id, process_id, pml4_phys }`
+    - _Requirements: Req 38.1, Req 38.3_
+
+  - [x] 13.8 Implementar contain_context_failure em kernel/src/syscall/mod.rs
+    - Implementar `fn contain_context_failure(error: SyscallContextError, thread_id: ThreadId, process_id: Option<ProcessId>)`
+    - Emitir `error!` log estruturado com: variante, thread_id, process_id, contexto
+    - Chamar `transition_to_dying(pid, KillReason::FatalFault)` quando process_id disponível
+    - Chamar `terminate_thread` quando apenas thread_id disponível
+    - Garantir que kernel continua após contenção
+    - _Requirements: Req 38.1, Req 38.2, Req 38.3, Req 38.4, Req 38.5, Req 38.6, Req 38.7_
+
+  - [x] 13.9 Substituir log_panic! operacionais no syscall path por SyscallContextError
+    - Identificar todos os `log_panic!` em `syscall/mod.rs` que tratam: contexto ausente, return address inválido, PML4 mismatch
+    - Substituir por: `contain_context_failure(SyscallContextError::*, ...)` + retorno de `EINVAL`
+    - Verificar que nenhum `log_panic!` operacional permanece no dispatcher
+    - _Requirements: Req 29.2, Req 29.3, Req 38.6_
+
+  - [x] 13.10 Integrar mapeamento de erros por subsistema na camada de normalização
+    - No dispatcher de syscall, adicionar conversão de erros de MM → `SyscallError::AdmissionDenied` / `InvalidPointer`
+    - Adicionar conversão de erros de Process → `SyscallError::ThreadProcessMismatch` / `ProcessMetadataCorrupted`
+    - Adicionar conversão de erros de Cap → `SyscallError::CapabilityRevokePartial` / `PermissionDenied`
+    - Garantir que nenhum erro de subsistema chega ao userspace sem passar pela normalização
+    - _Requirements: Req 41.1, Req 41.2, Req 41.3, Req 41.4, Req 41.5, Req 41.6_
+
+  - [x] 13.11 Adicionar testes de propriedade para o syscall hardening
+    - Escrever property test: para qualquer `SyscallContextError`, kernel não entra em panic
+    - Escrever property test: para qualquer `SyscallError`, `to_errno()` retorna valor válido (não zero, não overflow)
+    - Escrever property test: após contenção local, processo está em `Dying` ou `Dead`, nunca `Running`
+    - Escrever testes de exemplo: thread/process mismatch, PML4 mismatch, registry esgotado, ponteiro inválido
+    - _Requirements: Req 37.3, Req 38.1, Req 38.5, Req 40.6_
+
+  - [x] 13.12 Documentar assert! restantes como invariantes estruturais
+    - Para cada `assert!` que permanece (Classe A), adicionar comentário: `// INVARIANT: [descrição] — structural, not operational`
+    - Verificar que nenhum `assert!` sem comentário de invariante existe fora de `#[cfg(test)]` e `const` contexts
+    - _Requirements: Req 39.6, Req 39.7_
+
+- [ ] 14. Checkpoint — Validar Fase 6 Syscall Hardening
+  - Verificar que nenhum `assert!` operacional permanece no syscall path
+  - Verificar que todos os erros de contexto disparam contenção local, não panic
+  - Verificar que `SyscallError::to_errno()` cobre todas as variantes
+  - Executar testes de propriedade da task 13.11
+  - _Requirements: Req 37, Req 38, Req 39, Req 40, Req 41_
 
 
 ---

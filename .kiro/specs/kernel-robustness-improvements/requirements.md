@@ -470,6 +470,80 @@ Os requisitos a seguir capturam os invariantes arquiteturais que devem ser verda
 4. THE migration SHALL NOT proceed to step N+1 until step N passes all existing tests
 5. AFTER all 9 steps, the system SHALL satisfy all 8 architectural invariants defined in the design document
 
+---
+
+## Fase 6 — Syscall Hardening (Requisitos de Implementação)
+
+Os requisitos a seguir especificam os contratos de implementação da Fase 6. Complementam o Req 29 (já existente) com detalhes de taxonomia de erros, contenção local e observabilidade.
+
+### Requirement 37: Taxonomia de Erros Operacionais do Syscall Path
+
+**User Story:** As a kernel developer, I want all operational errors in the syscall path to be expressed as typed enum variants, so that every failure has a defined action and is never silently discarded.
+
+#### Acceptance Criteria
+
+1. THE kernel SHALL define a `SyscallError` enum with variants: `AddressSpaceDrift`, `ProcessMetadataCorrupted`, `ThreadProcessMismatch`, `InvalidUserReturnAddress`, `AdmissionDenied`, `CapabilityRevokePartial`, `InvalidPointer`, `PermissionDenied`, `InternalInconsistency`
+2. THE `SyscallError` enum SHALL implement a `to_errno()` method that maps each variant to a stable POSIX-like error code
+3. THE syscall path SHALL NEVER return a bare `bool` to indicate operational failure — all failures SHALL use `SyscallError` or `SyscallContextError`
+4. THE syscall path SHALL NEVER return a generic error without a specific variant — each failure SHALL carry enough context to identify the subsystem and cause
+5. WHEN a `SyscallError` occurs, THE kernel SHALL log the error with: syscall number, thread ID, process ID, and the specific variant
+6. THE `SyscallContextError` enum SHALL include variants: `ProcessContextMismatch`, `InvalidUserReturnAddress`, `MissingAddressSpace`, `ThreadMetadataDrift`
+7. AFTER migration, there SHALL be no `bool`-returning function in the syscall hot path that indicates operational failure without a typed error
+
+### Requirement 38: Contenção Local de Falhas de Contexto
+
+**User Story:** As a kernel developer, I want context failures in the syscall path to be contained locally, so that a single process with corrupted metadata cannot crash the entire kernel.
+
+#### Acceptance Criteria
+
+1. WHEN a `SyscallContextError` is detected, THE kernel SHALL NOT panic — it SHALL call `transition_to_dying(process_id, KillReason::FatalFault)` and continue running
+2. WHEN `SyscallContextError::ThreadMetadataDrift` occurs, THE kernel SHALL terminate the affected thread and isolate its process
+3. WHEN `SyscallContextError::ProcessContextMismatch` occurs (PML4 mismatch), THE kernel SHALL isolate the process via `transition_to_dying` and return `EINVAL` to userspace
+4. WHEN `SyscallContextError::MissingAddressSpace` occurs, THE kernel SHALL isolate the process and log the missing address space details
+5. AFTER local containment, THE kernel SHALL continue scheduling and serving other processes normally
+6. THE `contain_context_failure` function SHALL be the single point of containment — no inline panic or log_panic! for context errors
+7. WHEN containment is triggered, THE kernel SHALL emit a structured log entry with: error variant, thread ID, process ID, syscall number
+
+### Requirement 39: Eliminação de assert! em Caminhos Operacionais de Runtime
+
+**User Story:** As a kernel developer, I want assert! macros removed from all runtime-reachable operational paths, so that no userspace-triggered condition can cause a kernel panic via assert.
+
+#### Acceptance Criteria
+
+1. THE `assert!` in `ProtectedPml4Registry::insert` (pmm.rs) SHALL be replaced by a structured error return (`ValidationError::RegistryExhausted` or equivalent) with log
+2. THE `assert!` in `verify_process_accounting` (process.rs) SHALL be replaced by a structured error return with log — this function is called in operational paths
+3. ALL `assert!` and `assert_eq!` in the syscall dispatcher and syscall handlers SHALL be replaced by structured error returns
+4. `debug_assert!` macros in `process.rs` thread registration paths SHALL be reviewed: if the condition can occur in release builds due to runtime state, they SHALL be replaced by structured errors
+5. `debug_assert!` macros in `ipc.rs` validation paths SHALL be reviewed with the same criteria as criterion 4
+6. THE following `assert!` usages SHALL be explicitly documented as permitted invariants and SHALL NOT be replaced: `const _: () = assert!(...)` in `idt.rs`, size checks in `interrupts/handlers.rs`
+7. AFTER migration, every `assert!` remaining in non-test, non-const code SHALL have a comment: `// INVARIANT: [description] — structural, not operational`
+
+### Requirement 40: Observabilidade de Erros Operacionais
+
+**User Story:** As a kernel developer, I want every operational error in the syscall path to produce a structured, queryable log entry, so that post-mortem analysis is possible without kernel panic traces.
+
+#### Acceptance Criteria
+
+1. WHEN any `SyscallError` variant is returned, THE kernel SHALL emit an `error!` log with: variant name, subsystem, thread ID, process ID, and relevant context values
+2. WHEN any `SyscallContextError` variant triggers containment, THE kernel SHALL emit an `error!` log before initiating teardown
+3. THE log entries for syscall errors SHALL be machine-parseable (structured fields, not free-form text)
+4. WHEN `SyscallError::InternalInconsistency` is returned, THE kernel SHALL include the static description string in the log
+5. THE kernel SHALL NEVER emit only a textual log for an operational error without also returning a typed error variant — log-only errors are prohibited in the syscall path
+6. AFTER migration, there SHALL be no operational error in the syscall path that is silently discarded (no `let _ = result` patterns for syscall errors)
+
+### Requirement 41: Integração da Taxonomia de Erros por Subsistema
+
+**User Story:** As a kernel developer, I want each kernel subsystem to map its internal errors to the SyscallError taxonomy, so that the syscall layer has a uniform error surface regardless of which subsystem failed.
+
+#### Acceptance Criteria
+
+1. THE MM subsystem SHALL map its errors to: `SyscallError::AdmissionDenied` (quota/OOM), `SyscallError::InvalidPointer` (invalid userspace pointer)
+2. THE Process subsystem SHALL map its errors to: `SyscallError::ThreadProcessMismatch`, `SyscallError::ProcessMetadataCorrupted`
+3. THE OOM subsystem SHALL map its errors to: `SyscallError::AdmissionDenied` (allocation denied), `SyscallError::InternalInconsistency` (unexpected OOM state)
+4. THE Capability subsystem SHALL map its errors to: `SyscallError::CapabilityRevokePartial` (partial revocation), `SyscallError::PermissionDenied` (insufficient capability)
+5. THE syscall dispatcher SHALL be the normalization point — it receives subsystem-specific errors and maps them to `SyscallError` before returning to userspace
+6. AFTER migration, there SHALL be no subsystem error that reaches userspace without passing through the `SyscallError` normalization layer
+
 ### Requirement 36: Critérios de Pronto do Sistema
 
 **User Story:** As a kernel developer, I want unambiguous system-level acceptance criteria for the migration, so that completion can be verified objectively.
