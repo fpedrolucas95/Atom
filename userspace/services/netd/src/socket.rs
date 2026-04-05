@@ -84,6 +84,9 @@ pub struct PendingIcmp {
     pub start_tick: u64,
     pub timeout_ticks: u64,
     pub in_use: bool,
+    pub delivered: bool,
+    pub timed_out: bool,
+    pub completed_at: Option<u64>,
 }
 
 impl PendingIcmp {
@@ -96,6 +99,9 @@ impl PendingIcmp {
             start_tick: 0,
             timeout_ticks: 0,
             in_use: false,
+            delivered: false,
+            timed_out: false,
+            completed_at: None,
         }
     }
 }
@@ -396,8 +402,20 @@ impl SocketManager {
     ) -> Option<(u64, Vec<u8>)> {
         for pi in self.pending_icmps.iter_mut() {
             if pi.in_use && pi.identifier == id && pi.sequence == seq && pi.dest_ip == src_ip {
+                if pi.delivered {
+                    log(&format!("[netd] Duplicate ICMP reply ignored: id=0x{:04x} seq={}", id, seq));
+                    return None;
+                }
+
+                if pi.timed_out {
+                    log(&format!("[netd] Late ICMP reply ignored (grace period): id=0x{:04x} seq={}", id, seq));
+                    // Entry will be cleaned up by check_icmp_timeouts after grace period
+                    return None;
+                }
+
                 let reply_port = pi.reply_port;
-                pi.in_use = false;
+                pi.delivered = true;
+                pi.completed_at = Some(now_ticks);
 
                 log_netd_icmp_match(id, seq, src_ip);
 
@@ -422,12 +440,23 @@ impl SocketManager {
         None
     }
 
-    /// Periodic cleanup of timed out ICMP requests.
+    /// Periodic cleanup of timed out ICMP requests and completed entries.
     pub fn check_icmp_timeouts(&mut self, now_ticks: u64) -> alloc::vec::Vec<(u64, Vec<u8>)> {
-        let mut timed_out = alloc::vec::Vec::new();
+        let mut notifications = alloc::vec::Vec::new();
+        const GRACE_PERIOD_TICKS: u64 = 50; // 500ms at 100Hz
+
         for pi in self.pending_icmps.iter_mut() {
-            if pi.in_use && now_ticks.saturating_sub(pi.start_tick) >= pi.timeout_ticks {
-                pi.in_use = false;
+            if !pi.in_use { continue; }
+
+            let elapsed = now_ticks.saturating_sub(pi.start_tick);
+
+            // Case 1: Active request exceeds timeout
+            if !pi.delivered && !pi.timed_out && elapsed >= pi.timeout_ticks {
+                pi.timed_out = true;
+                pi.completed_at = Some(now_ticks);
+
+                log(&format!("[netd] ICMP timeout: id=0x{:04x} seq={}", pi.identifier, pi.sequence));
+
                 let reply = NetIcmpEchoReplyMsg {
                     src_ip: NetIpAddr::ipv4(pi.dest_ip.to_be_bytes()),
                     sequence: pi.sequence,
@@ -437,10 +466,19 @@ impl SocketManager {
                     payload_len: 0,
                     payload: [0u8; 64],
                 };
-                timed_out.push((pi.reply_port, reply.to_bytes()));
+                notifications.push((pi.reply_port, reply.to_bytes()));
+                continue;
+            }
+
+            // Case 2: Entry is completed (either delivered or timed out) and exceeds grace period
+            if let Some(done_at) = pi.completed_at {
+                if now_ticks.saturating_sub(done_at) >= GRACE_PERIOD_TICKS {
+                    pi.in_use = false;
+                    // Registry entry finally freed
+                }
             }
         }
-        timed_out
+        notifications
     }
 
     /// Check if there's a pending recv for this socket; if so, fulfill it.

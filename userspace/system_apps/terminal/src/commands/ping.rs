@@ -14,7 +14,7 @@ pub fn cmd_ping(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
     let host = cmd.args[0];
     let mut count = 4;
     let mut interval_ms = 1000;
-    let mut timeout_ms = 1000;
+    let mut timeout_ms = 2000;
 
     // Simple arg parsing
     let mut i = 1;
