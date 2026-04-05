@@ -20,18 +20,17 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 mod error;
 mod fs;
 
-use fs::{Dir, DirEntry, FsOps};
+use fs::{Dir, DirEntry};
 
 use atom_syscall::graphics::{Color, SharedSurface};
-use atom_syscall::ipc::{create_port, close_port, try_recv, send, wait_any, PortId};
+use atom_syscall::ipc::{create_port, try_recv, send, PortId};
 use atom_syscall::thread::{exit, yield_now, get_ticks};
 use atom_syscall::debug::log;
 
 use libipc::messages::{
     MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg,
     KeyEvent as IpcKeyEvent, MouseButtonEvent, MouseMoveEvent, MouseButton,
-    MouseScrollEvent,
-    AppLaunchRequestMsg, AppLaunchReplyMsg, launch_status,
+    AppRegisterMsg,
 };
 
 use atom_theme::colors as ds;
@@ -461,7 +460,7 @@ impl FileManager {
 
     fn handle_event(&mut self) {
         let mut buf = [0u8; 1024];
-        if let Ok(Some(len)) = try_recv(self.local_port, &mut buf) {
+        if let Ok(Some(_len)) = try_recv(self.local_port, &mut buf) {
             let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
             match hdr.msg_type {
                 MessageType::MouseMove => {
@@ -469,17 +468,15 @@ impl FileManager {
                     self.mouse_x = ev.x;
                     self.mouse_y = ev.y;
                 }
-                MessageType::MouseButton => {
+                MessageType::MouseButtonDown => {
                     let ev = MouseButtonEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
-                    if ev.button == MouseButton::Left && ev.pressed {
+                    if ev.button == MouseButton::Left {
                         self.handle_click();
                     }
                 }
-                MessageType::KeyEvent => {
+                MessageType::KeyPress => {
                     let ev = IpcKeyEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
-                    if ev.pressed {
-                        self.handle_key(ev);
-                    }
+                    self.handle_key(ev);
                 }
                 _ => {}
             }
@@ -487,8 +484,16 @@ impl FileManager {
     }
 
     fn handle_click(&mut self) {
+        // Toolbar click — check first (takes priority over sidebar)
+        if self.mouse_y < TOOLBAR_H as i32 {
+            if self.mouse_x >= spacing::MD as i32 && self.mouse_x < (spacing::MD + 32) as i32 {
+                self.go_back();
+            } else if self.mouse_x >= (spacing::MD + 40) as i32 && self.mouse_x < (spacing::MD + 72) as i32 {
+                self.go_up();
+            }
+        }
         // Sidebar click
-        if self.mouse_x < SIDEBAR_W as i32 {
+        else if self.mouse_x < SIDEBAR_W as i32 {
             let mut y = TOOLBAR_H + spacing::MD;
             for i in 0..SIDEBAR_ITEMS.len() {
                 if self.mouse_y >= y as i32 && self.mouse_y < (y + 40) as i32 {
@@ -497,14 +502,6 @@ impl FileManager {
                     break;
                 }
                 y += 40;
-            }
-        }
-        // Toolbar click
-        else if self.mouse_y < TOOLBAR_H as i32 {
-            if self.mouse_x >= spacing::MD as i32 && self.mouse_x < (spacing::MD + 32) as i32 {
-                self.go_back();
-            } else if self.mouse_x >= (spacing::MD + 40) as i32 && self.mouse_x < (spacing::MD + 72) as i32 {
-                self.go_up();
             }
         }
         // Content click
@@ -554,14 +551,14 @@ impl FileManager {
     }
 
     fn handle_key(&mut self, ev: IpcKeyEvent) {
-        // Simple search input
-        if ev.keycode >= 32 && ev.keycode <= 126 {
-            self.search_query.push(ev.keycode as u8 as char);
+        // Simple search input — use ev.character for printable chars
+        if ev.character >= 32 && ev.character <= 126 {
+            self.search_query.push(ev.character as char);
             self.apply_filter();
-        } else if ev.keycode == 8 { // Backspace
+        } else if ev.character == 8 || ev.scancode == 0x0E { // Backspace
             self.search_query.pop();
             self.apply_filter();
-        } else if ev.keycode == 27 { // Esc
+        } else if ev.character == 27 || ev.scancode == 0x01 { // Esc
             self.search_query.clear();
             self.apply_filter();
         }
@@ -623,16 +620,25 @@ fn format_size(b: u64) -> String {
 }
 
 fn main() -> ! {
-    let compositor_port = libipc::protocol::lookup_service("compositor").unwrap();
     let local_port = create_port().unwrap();
 
-    // Register with compositor
-    let reg = libipc::messages::AppRegisterMsg::new(local_port, "File Explorer");
-    let hdr = MessageHeader::new(MessageType::AppRegister, libipc::messages::AppRegisterMsg::SIZE as u32);
+    // Wait for compositor.register to be available and register
+    let register_port = loop {
+        match libipc::protocol::lookup_service("compositor.register") {
+            Ok(port) => break port,
+            Err(_) => { atom_syscall::thread::yield_now(); }
+        }
+    };
+
+    let reg = AppRegisterMsg { app_port: local_port, pid: 0 };
+    let hdr = MessageHeader::new(MessageType::AppRegister, AppRegisterMsg::SIZE as u32);
     let mut buf = [0u8; 128];
     buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
-    buf[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::AppRegisterMsg::SIZE].copy_from_slice(&reg.to_bytes());
-    send(compositor_port, &buf).unwrap();
+    buf[MessageHeader::SIZE..MessageHeader::SIZE + AppRegisterMsg::SIZE].copy_from_slice(&reg.to_bytes());
+    send(register_port, &buf[..MessageHeader::SIZE + AppRegisterMsg::SIZE]).unwrap();
+
+    // Also get the main compositor port for SurfacePresent messages
+    let compositor_port = libipc::protocol::lookup_service("compositor").unwrap();
 
     let mut fm: Option<FileManager> = None;
 
@@ -642,7 +648,7 @@ fn main() -> ! {
             f.render();
             
             // Present surface
-            let pres = SurfacePresentMsg::new(f.window_id);
+            let pres = SurfacePresentMsg { window_id: f.window_id };
             let hdr = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
             let mut buf = [0u8; 64];
             buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
@@ -654,7 +660,7 @@ fn main() -> ! {
                 let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
                 if hdr.msg_type == MessageType::SurfaceAssign {
                     let msg = SurfaceAssignMsg::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
-                    let surface = SharedSurface::map(msg.region_id, msg.width, msg.height).unwrap();
+                    let surface = SharedSurface::from_region(msg.region_id, msg.width, msg.height).unwrap();
                     fm = Some(FileManager::new(msg.window_id, compositor_port, local_port, surface));
                 }
             }
