@@ -6,6 +6,7 @@ pub mod system;
 pub mod process;
 pub mod filesystem;
 pub mod ping;
+pub mod net;
 
 use crate::buffer::DisplayBuffer;
 use crate::ipc_client::IpcClient;
@@ -93,6 +94,9 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     }
     if cmd_eq(c, "ping") {
         return ping::cmd_ping(cmd, ctx);
+    }
+    if cmd_eq(c, "ifconfig") || cmd_eq(c, "netinfo") {
+        return net::cmd_ifconfig(cmd, ctx);
     }
 
     // ── Process management ──────────────────────────────────────────────────
@@ -246,4 +250,5 @@ static COMMANDS: &[(&str, &str, &str)] = &[
     ("ports",    "ports",                  "List IPC ports"),
     ("caps",     "caps",                   "List process capabilities"),
     ("ping",     "ping <host> [options]",  "Send ICMP ECHO_REQUEST to network hosts"),
+    ("ifconfig", "ifconfig",               "Display network interface configuration"),
 ];

@@ -515,6 +515,10 @@ pub enum MessageType {
     NetIcmpEchoRequest = 1422,
     /// netd -> app: ICMP Echo Reply
     NetIcmpEchoReply = 1423,
+    /// app -> netd: get current network config
+    NetGetConfig = 1424,
+    /// netd -> app: network config reply
+    NetGetConfigReply = 1425,
 }
 
 impl MessageType {
@@ -659,6 +663,8 @@ impl MessageType {
             1421 => Some(Self::NetResolveReply),
             1422 => Some(Self::NetIcmpEchoRequest),
             1423 => Some(Self::NetIcmpEchoReply),
+            1424 => Some(Self::NetGetConfig),
+            1425 => Some(Self::NetGetConfigReply),
             _ => None,
         }
     }
@@ -716,6 +722,69 @@ impl SurfaceAssignMsg {
             bytes_per_pixel: u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
             compositor_port: u64::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31], bytes[32], bytes[33], bytes[34], bytes[35]]),
             scale_factor: u32::from_le_bytes([bytes[36], bytes[37], bytes[38], bytes[39]]),
+        })
+    }
+}
+
+/// app -> netd: get current network config
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetGetConfigMsg {
+    pub reply_port: u64,
+}
+
+impl NetGetConfigMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.reply_port.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+        })
+    }
+}
+
+/// netd -> app: network config reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetGetConfigReplyMsg {
+    pub own_ip: u32,
+    pub netmask: u32,
+    pub gateway: u32,
+    pub dns_server: u32,
+    pub mac: [u8; 6],
+    pub _pad: [u8; 2],
+}
+
+impl NetGetConfigReplyMsg {
+    pub const SIZE: usize = 24;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.own_ip.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.netmask.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.gateway.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.dns_server.to_le_bytes());
+        bytes[16..22].copy_from_slice(&self.mac);
+        bytes[22..24].copy_from_slice(&self._pad);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&bytes[16..22]);
+        Some(Self {
+            own_ip:     u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            netmask:    u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            gateway:    u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            dns_server: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            mac,
+            _pad: [bytes[22], bytes[23]],
         })
     }
 }

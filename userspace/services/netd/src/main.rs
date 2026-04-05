@@ -439,9 +439,6 @@ fn dispatch_rx(
                             if udp_hdr.src_port == 53 {
                                 log("netd: received UDP from port 53 (DNS response)");
                                 if let Some(dns_resp) = parse_dns_response(udp_payload) {
-                                    let now = atom_syscall::thread::get_ticks();
-                                    let ttl = dns_resp.ttl.max(30);
-
                                     if let Some((reply_port, reply_bytes)) =
                                         sock_mgr.notify_dns_resolved(dns_resp.id, dns_resp.ip)
                                     {
@@ -778,6 +775,20 @@ fn handle_ipc(
 
                 push_to_tx(tx_producer, &eth_buf[..eth_len]);
                 log("netd: ICMP Echo Request pushed to TX");
+            }
+        }
+        MessageType::NetGetConfig => {
+            log("netd: received NetGetConfig");
+            if let Some(msg) = libipc::messages::NetGetConfigMsg::from_bytes(payload) {
+                let reply = libipc::messages::NetGetConfigReplyMsg {
+                    own_ip: cfg.own_ip,
+                    netmask: cfg.netmask,
+                    gateway: cfg.gateway,
+                    dns_server: cfg.dns_server,
+                    mac: cfg.own_mac,
+                    _pad: [0u8; 2],
+                };
+                send_message(msg.reply_port, MessageType::NetGetConfigReply, &reply.to_bytes()).ok();
             }
         }
         _ => {}

@@ -1,6 +1,6 @@
 use crate::commands::{CommandContext, CommandResult};
 use crate::parser::ParsedCommand;
-use libnet::{net_resolve, net_icmp_echo, IpAddr, NetError};
+use libnet::{net_resolve, net_icmp_echo, NetError};
 use libipc::protocol::lookup_service;
 use alloc::format;
 use alloc::vec::Vec;
