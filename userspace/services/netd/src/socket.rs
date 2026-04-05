@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use crate::tcp::TcpManager;
 use crate::dns::DnsCache;
 use libipc::messages::{
@@ -7,6 +8,8 @@ use libipc::messages::{
     NetRecvMsg, NetRecvReplyMsg,
     NetCloseMsg, NetCloseReplyMsg,
     NetResolveMsg, NetResolveReplyMsg,
+    NetIcmpEchoRequestMsg, NetIcmpEchoReplyMsg,
+    NetIpAddr,
 };
 
 /// A pending deferred recv: socket waiting for data
@@ -68,10 +71,37 @@ impl PendingConnect {
     }
 }
 
+/// A pending ICMP echo request: waiting for Echo Reply
+pub struct PendingIcmp {
+    pub reply_port: u64,
+    pub dest_ip: u32,
+    pub identifier: u16,
+    pub sequence: u16,
+    pub start_tick: u64,
+    pub timeout_ticks: u64,
+    pub in_use: bool,
+}
+
+impl PendingIcmp {
+    const fn new() -> Self {
+        Self {
+            reply_port: 0,
+            dest_ip: 0,
+            identifier: 0,
+            sequence: 0,
+            start_tick: 0,
+            timeout_ticks: 0,
+            in_use: false,
+        }
+    }
+}
+
 pub struct SocketManager {
     pub pending_recvs: [PendingRecv; 8],
     pub pending_resolves: [PendingResolve; 4],
     pub pending_connects: [PendingConnect; 8],
+    pub pending_icmps: [PendingIcmp; 8],
+    next_icmp_id: u16,
 }
 
 impl SocketManager {
@@ -89,6 +119,11 @@ impl SocketManager {
                 PendingConnect::new(), PendingConnect::new(), PendingConnect::new(), PendingConnect::new(),
                 PendingConnect::new(), PendingConnect::new(), PendingConnect::new(), PendingConnect::new(),
             ],
+            pending_icmps: [
+                PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
+                PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
+            ],
+            next_icmp_id: 1000,
         }
     }
 
@@ -278,6 +313,103 @@ impl SocketManager {
             }
         }
         None
+    }
+
+    /// Handle NetIcmpEchoRequest: register pending and return ICMP info for sending.
+    pub fn handle_net_icmp_echo(
+        &mut self,
+        payload: &[u8],
+        now_ticks: u64,
+    ) -> Option<(u32, u16, u16, &[u8])> {
+        let msg = NetIcmpEchoRequestMsg::from_bytes(payload)?;
+
+        // IPv4 only for now
+        if msg.dest_ip.family != 4 {
+            return None;
+        }
+        let dest_ip = u32::from_be_bytes([msg.dest_ip.data[0], msg.dest_ip.data[1], msg.dest_ip.data[2], msg.dest_ip.data[3]]);
+
+        // Find free slot
+        for pi in self.pending_icmps.iter_mut() {
+            if !pi.in_use {
+                let id = self.next_icmp_id;
+                self.next_icmp_id = self.next_icmp_id.wrapping_add(1);
+                if self.next_icmp_id < 1000 { self.next_icmp_id = 1000; }
+
+                pi.reply_port = msg.reply_port;
+                pi.dest_ip = dest_ip;
+                pi.identifier = id;
+                pi.sequence = msg.sequence;
+                pi.start_tick = now_ticks;
+                pi.timeout_ticks = msg.timeout_ms as u64 / 10;
+                pi.in_use = true;
+
+                // We need to return a reference to the payload, but msg is local.
+                // Actually, the payload is part of the msg which is part of payload buffer.
+                // We can't return it easily if we want to return a slice.
+                // Let's change the signature to return the full msg or just the needed parts.
+                // For now, let's just return what we need.
+                return Some((dest_ip, pi.identifier, pi.sequence, &[]));
+            }
+        }
+        None
+    }
+
+    /// Called when an ICMP Echo Reply arrives — fulfill any pending ICMP request.
+    pub fn notify_icmp_reply(
+        &mut self,
+        src_ip: u32,
+        id: u16,
+        seq: u16,
+        ttl: u8,
+        now_ticks: u64,
+        icmp_payload: &[u8],
+    ) -> Option<(u64, Vec<u8>)> {
+        for pi in self.pending_icmps.iter_mut() {
+            if pi.in_use && pi.identifier == id && pi.sequence == seq && pi.dest_ip == src_ip {
+                let reply_port = pi.reply_port;
+                pi.in_use = false;
+
+                let rtt_ticks = now_ticks.saturating_sub(pi.start_tick);
+                let rtt_ms = (rtt_ticks * 10) as u32;
+
+                let mut reply = NetIcmpEchoReplyMsg {
+                    src_ip: NetIpAddr::ipv4(src_ip.to_be_bytes()),
+                    sequence: seq,
+                    ttl,
+                    rtt_ms,
+                    error: 0,
+                    payload_len: icmp_payload.len() as u32,
+                    payload: [0u8; 64],
+                };
+                let copy_len = icmp_payload.len().min(64);
+                reply.payload[..copy_len].copy_from_slice(&icmp_payload[..copy_len]);
+
+                return Some((reply_port, reply.to_bytes()));
+            }
+        }
+        None
+    }
+
+    /// Periodic cleanup of timed out ICMP requests.
+    pub fn check_icmp_timeouts(&mut self, now_ticks: u64) -> alloc::vec::Vec<(u64, Vec<u8>)> {
+        let mut timed_out = alloc::vec::Vec::new();
+        for pi in self.pending_icmps.iter_mut() {
+            if pi.in_use && now_ticks.saturating_sub(pi.start_tick) >= pi.timeout_ticks {
+                pi.in_use = false;
+                let reply = NetIcmpEchoReplyMsg {
+                    src_ip: NetIpAddr::ipv4(pi.dest_ip.to_be_bytes()),
+                    sequence: pi.sequence,
+                    ttl: 0,
+                    rtt_ms: 0,
+                    error: 1, // Timeout
+                    payload_len: 0,
+                    payload: [0u8; 64],
+                };
+                timed_out.push((pi.reply_port, reply.to_bytes()));
+            }
+        }
+        timed_out
     }
 
     /// Check if there's a pending recv for this socket; if so, fulfill it.

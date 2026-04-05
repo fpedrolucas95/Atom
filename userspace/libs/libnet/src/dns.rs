@@ -7,9 +7,11 @@ fn ipc_err(_e: atom_syscall::SyscallError) -> NetError {
     NetError::IpcError
 }
 
-/// Resolve a hostname to an IPv4 address (host byte order u32).
+use crate::IpAddr;
+
+/// Resolve a hostname to an IP address.
 /// hostname must be <= 255 bytes.
-pub fn net_resolve(netd_port: PortId, hostname: &str) -> Result<u32, NetError> {
+pub fn net_resolve(netd_port: PortId, hostname: &str) -> Result<IpAddr, NetError> {
     let hostname_bytes = hostname.as_bytes();
     if hostname_bytes.len() > 255 {
         return Err(NetError::InvalidArgument);
@@ -39,7 +41,7 @@ pub fn net_resolve(netd_port: PortId, hostname: &str) -> Result<u32, NetError> {
             let payload = get_payload(&buf, len);
             if let Some(reply) = NetResolveReplyMsg::from_bytes(payload) {
                 if reply.error == 0 && reply.ip != 0 {
-                    result = Ok(reply.ip);
+                    result = Ok(IpAddr::from_u32(reply.ip));
                 } else {
                     result = Err(NetError::DnsResolutionFailed);
                 }

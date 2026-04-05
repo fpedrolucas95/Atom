@@ -52,14 +52,18 @@ pub fn net_socket(netd_port: PortId) -> Result<u32, NetError> {
     result
 }
 
+use crate::IpAddr;
+
 /// Connect a TCP socket to remote_ip:remote_port.
-pub fn net_connect(netd_port: PortId, socket_id: u32, remote_ip: u32, remote_port: u16) -> Result<(), NetError> {
+pub fn net_connect(netd_port: PortId, socket_id: u32, remote_ip: IpAddr, remote_port: u16) -> Result<(), NetError> {
     let reply_port = atom_syscall::ipc::create_port().map_err(ipc_err)?;
+
+    let ipv4 = remote_ip.to_u32().ok_or(NetError::InvalidArgument)?;
 
     let msg = NetConnectMsg {
         reply_port: reply_port as u64,
         socket_id,
-        remote_ip,
+        remote_ip: ipv4,
         remote_port,
         _pad: [0u8; 2],
     };

@@ -11,6 +11,7 @@ description = "Atom OS userspace terminal emulator"
 atom_abi = { path = "../../../shared/abi" }
 atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
+libnet = { path = "../../libs/libnet" }
 
 [[bin]]
 name = "terminal"

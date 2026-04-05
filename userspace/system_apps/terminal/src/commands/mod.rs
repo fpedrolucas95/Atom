@@ -5,6 +5,7 @@
 pub mod system;
 pub mod process;
 pub mod filesystem;
+pub mod ping;
 
 use crate::buffer::DisplayBuffer;
 use crate::ipc_client::IpcClient;
@@ -89,6 +90,9 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     }
     if cmd_eq(c, "caps") {
         return system::cmd_caps(cmd, ctx);
+    }
+    if cmd_eq(c, "ping") {
+        return ping::cmd_ping(cmd, ctx);
     }
 
     // ── Process management ──────────────────────────────────────────────────
@@ -241,4 +245,5 @@ static COMMANDS: &[(&str, &str, &str)] = &[
     ("exit",     "exit",                   "Exit the terminal"),
     ("ports",    "ports",                  "List IPC ports"),
     ("caps",     "caps",                   "List process capabilities"),
+    ("ping",     "ping <host> [options]",  "Send ICMP ECHO_REQUEST to network hosts"),
 ];

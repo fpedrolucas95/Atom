@@ -511,6 +511,10 @@ pub enum MessageType {
     NetResolve = 1420,
     /// netd -> app: resolve reply
     NetResolveReply = 1421,
+    /// app -> netd: ICMP Echo Request
+    NetIcmpEchoRequest = 1422,
+    /// netd -> app: ICMP Echo Reply
+    NetIcmpEchoReply = 1423,
 }
 
 impl MessageType {
@@ -653,6 +657,8 @@ impl MessageType {
             1419 => Some(Self::NetCloseReply),
             1420 => Some(Self::NetResolve),
             1421 => Some(Self::NetResolveReply),
+            1422 => Some(Self::NetIcmpEchoRequest),
+            1423 => Some(Self::NetIcmpEchoReply),
             _ => None,
         }
     }
@@ -2122,6 +2128,40 @@ impl WallpaperFailedMsg {
 // Networking Messages (1400-1499)
 // ============================================================================
 
+/// Network IP Address (IPv4 or IPv6)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct NetIpAddr {
+    pub family: u8, // 4 = IPv4, 6 = IPv6
+    pub data: [u8; 16],
+}
+
+impl NetIpAddr {
+    pub fn ipv4(addr: [u8; 4]) -> Self {
+        let mut data = [0u8; 16];
+        data[0..4].copy_from_slice(&addr);
+        Self { family: 4, data }
+    }
+
+    pub fn ipv6(addr: [u8; 16]) -> Self {
+        Self { family: 6, data: addr }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 17] {
+        let mut bytes = [0u8; 17];
+        bytes[0] = self.family;
+        bytes[1..17].copy_from_slice(&self.data);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 17 { return None; }
+        let mut data = [0u8; 16];
+        data.copy_from_slice(&bytes[1..17]);
+        Some(Self { family: bytes[0], data })
+    }
+}
+
 /// netd -> nic_driver: Provide shared memory region for Ring Buffers
 #[derive(Debug, Clone, Copy)]
 pub struct NetAssignRingsMsg {
@@ -2144,6 +2184,102 @@ impl NetAssignRingsMsg {
         Some(Self {
             region_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
             ring_capacity: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+        })
+    }
+}
+
+/// app -> netd: ICMP Echo Request
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetIcmpEchoRequestMsg {
+    pub reply_port: u64,
+    pub dest_ip: NetIpAddr,
+    pub sequence: u16,
+    pub timeout_ms: u32,
+    pub payload_len: u32,
+    pub payload: [u8; 64],
+}
+
+impl NetIcmpEchoRequestMsg {
+    pub const SIZE: usize = 8 + 17 + 2 + 4 + 4 + 64;
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::SIZE);
+        bytes.extend_from_slice(&self.reply_port.to_le_bytes());
+        bytes.extend_from_slice(&self.dest_ip.to_bytes());
+        bytes.extend_from_slice(&self.sequence.to_le_bytes());
+        bytes.extend_from_slice(&self.timeout_ms.to_le_bytes());
+        bytes.extend_from_slice(&self.payload_len.to_le_bytes());
+        bytes.extend_from_slice(&self.payload);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let reply_port = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let dest_ip = NetIpAddr::from_bytes(&bytes[8..25])?;
+        let sequence = u16::from_le_bytes(bytes[25..27].try_into().ok()?);
+        let timeout_ms = u32::from_le_bytes(bytes[27..31].try_into().ok()?);
+        let payload_len = u32::from_le_bytes(bytes[31..35].try_into().ok()?);
+        let mut payload = [0u8; 64];
+        payload.copy_from_slice(&bytes[35..99]);
+        Some(Self {
+            reply_port,
+            dest_ip,
+            sequence,
+            timeout_ms,
+            payload_len,
+            payload,
+        })
+    }
+}
+
+/// netd -> app: ICMP Echo Reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetIcmpEchoReplyMsg {
+    pub src_ip: NetIpAddr,
+    pub sequence: u16,
+    pub ttl: u8,
+    pub rtt_ms: u32,
+    pub error: u32, // 0 = success, 1 = timeout, 2 = other
+    pub payload_len: u32,
+    pub payload: [u8; 64],
+}
+
+impl NetIcmpEchoReplyMsg {
+    pub const SIZE: usize = 17 + 2 + 1 + 4 + 4 + 4 + 64;
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::SIZE);
+        bytes.extend_from_slice(&self.src_ip.to_bytes());
+        bytes.extend_from_slice(&self.sequence.to_le_bytes());
+        bytes.push(self.ttl);
+        bytes.extend_from_slice(&self.rtt_ms.to_le_bytes());
+        bytes.extend_from_slice(&self.error.to_le_bytes());
+        bytes.extend_from_slice(&self.payload_len.to_le_bytes());
+        bytes.extend_from_slice(&self.payload);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let src_ip = NetIpAddr::from_bytes(&bytes[0..17])?;
+        let sequence = u16::from_le_bytes(bytes[17..19].try_into().ok()?);
+        let ttl = bytes[19];
+        let rtt_ms = u32::from_le_bytes(bytes[20..24].try_into().ok()?);
+        let error = u32::from_le_bytes(bytes[24..28].try_into().ok()?);
+        let payload_len = u32::from_le_bytes(bytes[28..32].try_into().ok()?);
+        let mut payload = [0u8; 64];
+        payload.copy_from_slice(&bytes[32..96]);
+        Some(Self {
+            src_ip,
+            sequence,
+            ttl,
+            rtt_ms,
+            error,
+            payload_len,
+            payload,
         })
     }
 }

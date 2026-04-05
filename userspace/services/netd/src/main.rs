@@ -205,7 +205,7 @@ fn main() -> ! {
     {
         let mut pkt_buf = [0u8; 1600];
         let mut icmp_buf = [0u8; 8];
-        let icmp_len = build_icmp_echo_request(1, 1, &mut icmp_buf);
+        let icmp_len = build_icmp_echo_request(1, 1, &[], &mut icmp_buf);
         let mut ip_buf = [0u8; 64];
         let ip_len = build_ipv4(cfg.own_ip, cfg.gateway, IP_PROTO_ICMP, 64, &icmp_buf[..icmp_len], &mut ip_buf);
         let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
@@ -310,6 +310,13 @@ fn main() -> ! {
         // ARP eviction: 60s = 6000 ticks at 100Hz
         arp_table.evict_expired(now, 6000);
 
+        // ICMP timeouts
+        let timed_out = sock_mgr.check_icmp_timeouts(now);
+        for (reply_port, reply_bytes) in timed_out {
+            send_message(reply_port, MessageType::NetIcmpEchoReply, &reply_bytes).ok();
+            log("netd: ICMP timeout notification sent");
+        }
+
         // TCP tick
         let mut tcp_out = [0u8; 1600];
         if let Some((pkt_len, event)) = tcp_mgr.tick(cfg.own_ip, now, &mut tcp_out) {
@@ -391,9 +398,23 @@ fn dispatch_rx(
                 match ip_hdr.protocol {
                     IP_PROTO_ICMP => {
                         log("netd: RX ICMP");
-                        if let Some(icmp_pkt) = parse_icmp(ip_payload) {
+                        if let Some((icmp_pkt, icmp_payload)) = parse_icmp(ip_payload) {
                             if icmp_pkt.icmp_type == ICMP_ECHO_REPLY {
-                                log("netd: gateway reachable (ping ok)");
+                                log("netd: ICMP Echo Reply received");
+                                let now = atom_syscall::thread::get_ticks();
+                                if let Some((reply_port, reply_bytes)) = sock_mgr.notify_icmp_reply(
+                                    ip_hdr.src,
+                                    icmp_pkt.id,
+                                    icmp_pkt.seq,
+                                    ip_hdr.ttl,
+                                    now,
+                                    icmp_payload,
+                                ) {
+                                    send_message(reply_port, MessageType::NetIcmpEchoReply, &reply_bytes).ok();
+                                    log("netd: NetIcmpEchoReply sent to app");
+                                } else {
+                                    log("netd: gateway reachable (smoke ping ok)");
+                                }
                             }
                         }
                     }
@@ -731,6 +752,37 @@ fn handle_ipc(
             if let Some(msg) = libipc::messages::NetConfigureMsg::from_bytes(payload) {
                 let _ = msg; // Would update cfg, but cfg is not mut here
                 // In a real implementation, we'd update the config
+            }
+        }
+        MessageType::NetIcmpEchoRequest => {
+            let now = atom_syscall::thread::get_ticks();
+            log("netd: received NetIcmpEchoRequest");
+            if let Some((dest_ip, id, seq, icmp_payload)) = sock_mgr.handle_net_icmp_echo(payload, now) {
+                let mut icmp_buf = [0u8; 128];
+                // In handle_net_icmp_echo we didn't return the payload easily,
+                // but for now we'll just re-parse it from the original payload if needed.
+                // Or just use empty payload for now as an MVP improvement.
+                let mut echo_payload = [0u8; 64];
+                let mut echo_payload_len = 0;
+                if let Some(msg) = libipc::messages::NetIcmpEchoRequestMsg::from_bytes(payload) {
+                    echo_payload_len = msg.payload_len as usize;
+                    let copy_len = echo_payload_len.min(64);
+                    echo_payload[..copy_len].copy_from_slice(&msg.payload[..copy_len]);
+                }
+
+                let icmp_len = build_icmp_echo_request(id, seq, &echo_payload[..echo_payload_len], &mut icmp_buf);
+
+                let mut ip_buf = [0u8; 200];
+                let ip_len = build_ipv4(cfg.own_ip, dest_ip, IP_PROTO_ICMP, 64, &icmp_buf[..icmp_len], &mut ip_buf);
+
+                let hop = next_hop(dest_ip, cfg.own_ip, cfg.netmask, cfg.gateway);
+                let dst_mac = get_or_broadcast_mac(hop, tx_producer, cfg);
+
+                let mut eth_buf = [0u8; 256];
+                let eth_len = build_eth_frame(dst_mac, cfg.own_mac, 0x0800, &ip_buf[..ip_len], &mut eth_buf);
+
+                push_to_tx(tx_producer, &eth_buf[..eth_len]);
+                log("netd: ICMP Echo Request pushed to TX");
             }
         }
         _ => {}
