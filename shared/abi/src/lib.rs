@@ -286,6 +286,18 @@ pub const EINTR: u64 = u64::MAX - 31;
 pub const E2BIG: u64 = u64::MAX - 32;
 pub const ENODEV: u64 = u64::MAX - 33;  // No such device
 
+// ---------------------------------------------------------------------------
+// Infrastructure / Networking Phase 1 syscalls
+// ---------------------------------------------------------------------------
+pub const SYS_PCI_GET_BAR:            u64 = 81;
+pub const SYS_DEVICE_BIND_IRQ:        u64 = 82;
+pub const SYS_IRQ_LISTEN:             u64 = 83;
+pub const SYS_DMA_ALLOC:              u64 = 84;
+pub const SYS_DMA_MAP:                u64 = 85;
+pub const SYS_DMA_FREE:               u64 = 86;
+pub const SYS_MAP_MMIO:               u64 = 87;
+pub const SYS_IRQ_ACK:                u64 = 88;
+
 /// Check whether a raw syscall return value represents an error code.
 ///
 /// This is the **single authoritative way** to distinguish error returns
@@ -455,6 +467,7 @@ pub const PROT_EXEC: u64 = 4;
 /// mmap flags
 pub const MAP_ANONYMOUS: u64 = 0x20;
 pub const MAP_PRIVATE: u64 = 0x02;
+pub const SYS_CAP_CHECK: u64 = 9;
 pub const MAP_FIXED: u64 = 0x10;
 
 /// Default user heap start (above typical text/data/bss)
@@ -466,6 +479,49 @@ pub const USER_MMAP_END: UserVirtAddr = 0x0000_7000_0000_0000;
 
 /// Standard userspace stack top.
 pub const USER_STACK_TOP: UserVirtAddr = 0x0000_8000_0000;
+
+// ---------------------------------------------------------------------------
+// Infrastructure syscall structures (Phase 1 Networking)
+// ---------------------------------------------------------------------------
+
+/// Information about a PCI Base Address Register (BAR).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PciBarInfo {
+    pub base_addr: u64,
+    pub size: u64,
+    pub mmio_cap: u64,
+    pub is_mmio: u32,
+    pub is_64bit: u32,
+    pub prefetchable: u32,
+}
+
+/// Information returned when binding a device IRQ.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IrqBindInfo {
+    pub irq_cap: u64,
+    pub vector: u32,
+    pub reserved: u32,
+}
+
+/// Parameters for DMA memory allocation.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DmaAllocParams {
+    pub size: u64,
+    pub align: u64,
+    pub flags: u64,
+}
+
+/// Information about a DMA memory mapping.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DmaMappingInfo {
+    pub user_va: u64,
+    pub phys_addr: u64,
+    pub size: u64,
+}
 
 /// Number of unmapped guard pages reserved below each userspace stack.
 pub const USER_STACK_GUARD_PAGES: usize = 1;

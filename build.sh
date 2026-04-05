@@ -111,6 +111,8 @@ USERSPACE_SERVICES=(
     "service_manager"
     "fsd"
     "app_launcher"
+    "netd"
+    "nic_driver"
 )
 
 USERSPACE_APPS=(

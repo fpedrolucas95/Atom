@@ -157,6 +157,7 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     // consuming command ACK bytes prematurely.
     input::init();
     input::init_ps2_mouse_full(); // Use full initialization with 1:1 scaling
+    drivers::pci::init();         // Enumerate PCI bus
     drivers::xhci::init();        // Initialize USB xHCI controller
 
     log_info!(LOG_APIC, "Enabling interrupts...");

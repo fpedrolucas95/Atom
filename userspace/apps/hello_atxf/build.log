@@ -1,0 +1,10 @@
+warning: unused import: `SyscallResult`
+ --> /app/userspace/libs/syscall/src/cap.rs:3:20
+  |
+3 | use crate::error::{SyscallResult};
+  |                    ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `atom_syscall` (lib) generated 1 warning (run `cargo fix --lib -p atom_syscall` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.09s

@@ -479,6 +479,12 @@ pub enum MessageType {
     WallpaperApplied = 1302,
     /// Notification that wallpaper application failed
     WallpaperFailed = 1303,
+
+    // Networking (1400-1499)
+    /// netd -> nic_driver: Here is the shared memory region for rings
+    NetAssignRings = 1400,
+    /// nic_driver -> netd: I'm ready
+    NetDriverReady = 1401,
 }
 
 impl MessageType {
@@ -606,6 +612,8 @@ impl MessageType {
             1301 => Some(Self::ApplyWallpaper),
             1302 => Some(Self::WallpaperApplied),
             1303 => Some(Self::WallpaperFailed),
+            1400 => Some(Self::NetAssignRings),
+            1401 => Some(Self::NetDriverReady),
             _ => None,
         }
     }
@@ -2067,6 +2075,36 @@ impl WallpaperFailedMsg {
         let msg = core::str::from_utf8(&bytes[4..4 + len]).ok()?;
         Some(Self {
             error_message: String::from(msg),
+        })
+    }
+}
+
+// ============================================================================
+// Networking Messages (1400-1499)
+// ============================================================================
+
+/// netd -> nic_driver: Provide shared memory region for Ring Buffers
+#[derive(Debug, Clone, Copy)]
+pub struct NetAssignRingsMsg {
+    pub region_id: u64,
+    pub ring_capacity: u32,
+}
+
+impl NetAssignRingsMsg {
+    pub const SIZE: usize = 12;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.region_id.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.ring_capacity.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            region_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            ring_capacity: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
         })
     }
 }

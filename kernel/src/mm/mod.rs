@@ -195,6 +195,14 @@ pub fn validate_page_range(start: usize, end: usize) -> Result<(), ValidationErr
     Ok(())
 }
 
+/// Check if a physical range is "safe" for DMA (i.e. is conventional memory).
+#[allow(dead_code)]
+pub fn is_dma_safe_range(_phys: usize, _size: usize) -> bool {
+    // For MVP, we assume any page allocated via PMM is DMA safe.
+    // In a stricter system, we would check if it falls within a DMA-capable zone.
+    true
+}
+
 pub fn validate_initialized(initialized: bool) -> Result<(), ValidationError> {
     if initialized {
         Ok(())
