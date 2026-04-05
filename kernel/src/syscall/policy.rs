@@ -182,6 +182,13 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         SYS_GET_VIDEO_MODES | SYS_GET_CURRENT_VIDEO_MODE | SYS_VIDEO_MODE_COUNT
             => ExplicitlyUnrestricted,
 
+        // ── Infrastructure / Networking Phase 1 ───────────────────────────
+        // Handlers perform parametric capability checks.
+        SYS_PCI_GET_BAR | SYS_DEVICE_BIND_IRQ | SYS_IRQ_LISTEN
+        | SYS_DMA_ALLOC | SYS_DMA_MAP | SYS_DMA_FREE | SYS_MAP_MMIO
+        | SYS_IRQ_ACK | SYS_PCI_QUERY_DEVICE
+            => ExplicitlyUnrestricted,
+
         // ── IRQ management ────────────────────────────────────────────────
         // Handler uses ALLOWED_IRQS allowlist today; no additional class gate.
         SYS_REGISTER_IRQ_HANDLER | SYS_UNREGISTER_IRQ_HANDLER | SYS_GET_IRQ_COUNT
@@ -272,12 +279,40 @@ pub(super) fn validate_io_port_access(
     required_perm: crate::cap::CapPermissions,
 ) -> Result<(), u64> {
     let caller = crate::sched::current_thread().ok_or(EPERM)?;
-    let has_permission = crate::thread::validate_thread_capability_by_type(
+
+    // Check 1: Explicit IoPort capability
+    let has_io_cap = crate::thread::validate_thread_capability_by_type(
         caller,
         required_perm,
         |resource| matches!(resource, crate::cap::ResourceType::IoPort { port: p } if *p == port),
     );
-    if !has_permission {
+    if has_io_cap {
+        return Ok(());
+    }
+
+    // Check 2: Device capability that contains this port (for VirtIO Legacy I/O BARs)
+    let has_device_cap = crate::thread::validate_thread_capability_by_type(
+        caller,
+        required_perm,
+        |resource| {
+            if let crate::cap::ResourceType::Device { bdf } = resource {
+                let bus = (bdf >> 8) as u8;
+                let dev = ((bdf >> 3) & 0x1f) as u8;
+                let func = (bdf & 0x07) as u8;
+                // Check if any BAR of this device is an I/O BAR and contains the requested port
+                for i in 0..6 {
+                    if let Some(bar) = crate::drivers::pci::get_bar_info(bus, dev, func, i) {
+                        if !bar.is_mmio && port >= bar.base as u16 && (port as u64) < bar.base + bar.size {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+    );
+
+    if !has_device_cap {
         log_warn!(
             "syscall",
             "io_port access denied: port=0x{:X} perm={:?} caller={}",

@@ -111,6 +111,8 @@ USERSPACE_SERVICES=(
     "service_manager"
     "fsd"
     "app_launcher"
+    "netd"
+    "nic_driver"
 )
 
 USERSPACE_APPS=(
@@ -783,5 +785,7 @@ if [ "$RUN" = true ]; then
         -debugcon file:serial_log.txt \
         -global isa-debugcon.iobase=0xE9 \
         -d int,pcall,guest_errors,unimp \
-        -D qemu_execution.log
+        -D qemu_execution.log \
+        -netdev user,id=net0 \
+        -device e1000,netdev=net0
 fi

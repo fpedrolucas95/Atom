@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 atom_abi = { path = "../../../shared/abi" }
+bitflags = "2.11"
 
 [features]
 default = []

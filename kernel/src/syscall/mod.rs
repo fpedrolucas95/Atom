@@ -62,6 +62,7 @@
 
 mod policy;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::gdt::{KERNEL_CODE_SELECTOR, USER_CODE_SELECTOR};
 use crate::{log_debug, log_info, log_warn, log_error, log_panic};
 
@@ -122,6 +123,22 @@ pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
 pub const SYS_GET_CPU_BRAND: u64 = 52;
+
+// ---------------------------------------------------------------------------
+// Infrastructure / Networking Phase 1 syscalls
+// ---------------------------------------------------------------------------
+pub const SYS_PCI_GET_BAR:            u64 = 81;
+pub const SYS_DEVICE_BIND_IRQ:        u64 = 82;
+pub const SYS_IRQ_LISTEN:             u64 = 83;
+pub const SYS_DMA_ALLOC:              u64 = 84;
+pub const SYS_DMA_MAP:                u64 = 85;
+pub const SYS_DMA_FREE:               u64 = 86;
+pub const SYS_MAP_MMIO:               u64 = 87;
+pub const SYS_IRQ_ACK:                u64 = 88;
+/// Query PCI device identity (vendor/device/class) from a DeviceCap.
+/// Allows userspace drivers to discover what hardware they hold without
+/// the kernel needing to know which driver handles which device.
+pub const SYS_PCI_QUERY_DEVICE:       u64 = 89;
 
 // ---------------------------------------------------------------------------
 // Video mode management syscalls (BGA/VBE_DISPI)
@@ -855,6 +872,17 @@ extern "win64" fn rust_syscall_dispatcher(
 
         // App launcher — spawn ATXF by path
         SYS_SPAWN_FROM_PATH => sys_spawn_from_path(arg0, arg1 as usize),
+
+        // Infrastructure / Networking Phase 1
+        SYS_PCI_GET_BAR     => sys_pci_get_bar(arg0, arg1 as u8, arg2),
+        SYS_DEVICE_BIND_IRQ => sys_device_bind_irq(arg0, arg1),
+        SYS_IRQ_LISTEN      => sys_irq_listen(arg0, arg1),
+        SYS_DMA_ALLOC       => sys_dma_alloc(arg0, arg1),
+        SYS_DMA_MAP         => sys_dma_map(arg0, arg1),
+        SYS_DMA_FREE        => sys_dma_free(arg0),
+        SYS_MAP_MMIO        => sys_map_mmio(arg0, arg1),
+        SYS_IRQ_ACK         => sys_irq_ack(arg0),
+        SYS_PCI_QUERY_DEVICE => sys_pci_query_device(arg0, arg1),
 
         // Video mode management (BGA/VBE_DISPI)
         SYS_SET_VIDEO_MODE         => sys_set_video_mode(arg0, arg1),
@@ -2948,28 +2976,34 @@ fn sys_cap_transfer(cap_handle_raw: u64, target_tid_raw: u64) -> u64 {
 }
 
 fn sys_cap_list(buffer_ptr: u64, buffer_size: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "cap_list(buffer={:#x}, size={})",
-        buffer_ptr,
-        buffer_size
-    );
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return 0,
+    };
 
-    let stats = crate::cap::get_capability_stats();
+    let handles = crate::thread::list_thread_local_capabilities(caller);
+    let count = handles.len();
 
-    log_debug!(
-        "syscall",
-        "cap_list: total={} (T:{} M:{} I:{} IRQ:{} D:{} DMA:{})",
-        stats.total,
-        stats.thread_caps,
-        stats.memory_caps,
-        stats.ipc_caps,
-        stats.irq_caps,
-        stats.device_caps,
-        stats.dma_caps
-    );
+    // If buffer provided, write handles (as u64) into it
+    if buffer_ptr != 0 && buffer_size > 0 {
+        let max_entries = (buffer_size / 8) as usize;
+        let to_write = count.min(max_entries);
 
-    stats.total as u64
+        let buf_ptr = match validate_user_addr(buffer_ptr) {
+            Ok(ptr) => ptr,
+            Err(_) => return count as u64,
+        };
+        if validate_user_range(buf_ptr.as_u64(), to_write * 8).is_err() {
+            return count as u64;
+        }
+
+        let out = buf_ptr.as_mut_ptr::<u64>();
+        for (i, h) in handles.iter().take(to_write).enumerate() {
+            unsafe { *out.add(i) = h.raw(); }
+        }
+    }
+
+    count as u64
 }
 
 fn sys_cap_query_parent(handle_raw: u64) -> u64 {
@@ -3712,8 +3746,19 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
 use spin::Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
 
-/// Registered IRQ handlers - maps IRQ number to (ThreadId, port for notification)
-static IRQ_HANDLERS: Mutex<BTreeMap<u8, (crate::thread::ThreadId, u64)>> = Mutex::new(BTreeMap::new());
+struct IrqBinding {
+    owner: crate::thread::ThreadId,
+    port: u64,
+    pending: AtomicBool,
+    /// When true, delivery is coalesced: a new IRQ is suppressed while
+    /// `pending` is set, and the consumer must call SYS_IRQ_ACK to re-arm.
+    /// When false (legacy SYS_REGISTER_IRQ_HANDLER path), every IRQ is
+    /// delivered unconditionally — the consumer does not call SYS_IRQ_ACK.
+    requires_ack: bool,
+}
+
+/// Registered IRQ handlers - maps IRQ number to IrqBinding
+static IRQ_BINDINGS: Mutex<BTreeMap<u8, IrqBinding>> = Mutex::new(BTreeMap::new());
 static CLEANED_FD_PROCESSES: Mutex<BTreeSet<crate::process::ProcessId>> =
     Mutex::new(BTreeSet::new());
 
@@ -3728,9 +3773,9 @@ fn sys_register_irq_handler(irq: u8, notification_port: u64) -> u64 {
         None => return EINVAL,
     };
 
-    let mut handlers = IRQ_HANDLERS.lock();
+    let mut bindings = IRQ_BINDINGS.lock();
 
-    if handlers.contains_key(&irq) {
+    if bindings.contains_key(&irq) {
         log_warn!(
             "syscall",
             "IRQ {} already has registered handler",
@@ -3739,7 +3784,12 @@ fn sys_register_irq_handler(irq: u8, notification_port: u64) -> u64 {
         return EBUSY;
     }
 
-    handlers.insert(irq, (caller, notification_port));
+    bindings.insert(irq, IrqBinding {
+        owner: caller,
+        port: notification_port,
+        pending: AtomicBool::new(false),
+        requires_ack: false, // legacy path: no ACK required, deliver every IRQ
+    });
 
     log_info!(
         "syscall",
@@ -3759,13 +3809,13 @@ fn sys_unregister_irq_handler(irq: u8) -> u64 {
         None => return EINVAL,
     };
 
-    let mut handlers = IRQ_HANDLERS.lock();
+    let mut bindings = IRQ_BINDINGS.lock();
 
-    if let Some((owner, _)) = handlers.get(&irq) {
-        if let Err(e) = policy::validate_irq_owner(*owner, caller) {
+    if let Some(binding) = bindings.get(&irq) {
+        if let Err(e) = policy::validate_irq_owner(binding.owner, caller) {
             return e;
         }
-        handlers.remove(&irq);
+        bindings.remove(&irq);
         log_info!(
             "syscall",
             "Thread {} unregistered handler for IRQ {}",
@@ -3778,13 +3828,31 @@ fn sys_unregister_irq_handler(irq: u8) -> u64 {
     }
 }
 
-/// Called from interrupt handlers to notify userspace of IRQ
+/// Called from interrupt handlers to notify userspace of IRQ.
+///
+/// Delivery semantics depend on `IrqBinding::requires_ack`:
+///
+/// - `requires_ack = false` (legacy SYS_REGISTER_IRQ_HANDLER, PS/2):
+///   Every IRQ is delivered unconditionally. The consumer does not call
+///   SYS_IRQ_ACK, so `pending` is never used as a gate here.
+///
+/// - `requires_ack = true` (SYS_IRQ_LISTEN, NIC/device drivers):
+///   Coalesced delivery — suppressed while `pending` is set. The consumer
+///   must call SYS_IRQ_ACK to clear `pending` and re-arm delivery.
 pub fn notify_irq_handler(irq: u8) {
-    let handlers = IRQ_HANDLERS.lock();
+    let bindings = IRQ_BINDINGS.lock();
 
-    if let Some((_tid, port)) = handlers.get(&irq) {
-        // Send notification via IPC port
-        let port_id = crate::ipc::PortId::from_raw(*port);
+    if let Some(binding) = bindings.get(&irq) {
+        // For requires_ack bindings: coalesced delivery — skip if already pending.
+        // For legacy bindings: always deliver, never gate on pending.
+        if binding.requires_ack {
+            if binding.pending.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                // Already pending, coalesced — drop this IRQ notification.
+                return;
+            }
+        }
+
+        let port_id = crate::ipc::PortId::from_raw(binding.port);
 
         // Create a libipc-compatible IrqNotification message (MessageType 20)
         // Header: [msg_type (4 bytes), payload_size (4 bytes), sequence (4 bytes)]
@@ -3801,7 +3869,7 @@ pub fn notify_irq_handler(irq: u8) {
             payload,
         );
 
-        // Non-blocking send - we're in interrupt context
+        // Non-blocking send — we're in interrupt context.
         if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
             log_debug!(
                 "syscall",
@@ -3809,14 +3877,18 @@ pub fn notify_irq_handler(irq: u8) {
                 irq,
                 e
             );
+            // For requires_ack bindings: reset pending so the next IRQ can be delivered.
+            if binding.requires_ack {
+                binding.pending.store(false, Ordering::SeqCst);
+            }
         }
     }
 }
 
 /// Check if an IRQ has a userspace handler registered
 pub fn has_userspace_irq_handler(irq: u8) -> bool {
-    let handlers = IRQ_HANDLERS.lock();
-    handlers.contains_key(&irq)
+    let bindings = IRQ_BINDINGS.lock();
+    bindings.contains_key(&irq)
 }
 
 // ============================================================================
@@ -3913,14 +3985,14 @@ fn sys_get_irq_count(irq: u8) -> u64 {
     };
 
     // Verify caller owns this IRQ handler
-    let handlers = IRQ_HANDLERS.lock();
-    match handlers.get(&irq) {
-        Some((owner, _)) if policy::validate_irq_owner(*owner, caller).is_ok() => {
-            drop(handlers);
+    let bindings = IRQ_BINDINGS.lock();
+    match bindings.get(&irq) {
+        Some(binding) if policy::validate_irq_owner(binding.owner, caller).is_ok() => {
+            drop(bindings);
             let counts = IRQ_COUNTS.lock();
             counts.get(&irq).copied().unwrap_or(0)
         }
-        Some((_owner, _)) => EPERM,
+        Some(_) => EPERM,
         None => EINVAL,
     }
 }
@@ -4591,6 +4663,27 @@ fn spawn_process_internal(
         if let Ok(cap) = cap::create_root_capability(fs_resource, pid, fs_perms) {
             let _ = crate::thread::add_thread_capability(pid, cap);
             log_info!("spawn", "Granted FsNamespace cap to fsd (pid={})", pid);
+        }
+    }
+
+    // PCI Device capabilities — grant all network devices (class 0x02) to nic_driver.
+    // The kernel does not know or care which specific NIC the driver supports;
+    // nic_driver uses SYS_PCI_QUERY_DEVICE to inspect each capability and decides
+    // which device to drive based on vendor/device ID.
+    if name == "nic_driver" {
+        let net_devs: alloc::vec::Vec<_> = crate::drivers::pci::get_devices_by_class(0x02)
+            .into_iter()
+            .collect();
+        if net_devs.is_empty() {
+            log_warn!("spawn", "No PCI network devices found for nic_driver");
+        }
+        for dev in net_devs {
+            let res = ResourceType::Device { bdf: dev.bdf() };
+            if let Ok(cap) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
+                let _ = crate::thread::add_thread_capability(pid, cap);
+                log_info!("spawn", "Granted DeviceCap({:02x}:{:02x}.{}) to nic_driver",
+                    dev.bus, dev.device, dev.function);
+            }
         }
     }
 
@@ -7983,6 +8076,491 @@ fn sys_get_current_video_mode(buf_ptr: u64) -> u64 {
 /// SYS_VIDEO_MODE_COUNT: Return the total number of available video modes.
 fn sys_video_mode_count() -> u64 {
     crate::graphics::available_mode_count() as u64
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure / Networking Phase 1 syscall handlers
+// ---------------------------------------------------------------------------
+
+fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let handle = crate::cap::CapHandle::from_raw(dev_cap_handle);
+
+    // Validate capability: must be Device type
+    let bdf = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+        Ok(()) => {
+            let cap = crate::cap::lookup_capability(handle).unwrap();
+            match cap.resource {
+                crate::cap::ResourceType::Device { bdf } => bdf,
+                _ => return EPERM,
+            }
+        }
+        Err(_) => return EPERM,
+    };
+
+    let bus = (bdf >> 8) as u8;
+    let dev = ((bdf >> 3) & 0x1F) as u8;
+    let func = (bdf & 0x07) as u8;
+
+    let bar = match crate::drivers::pci::get_bar_info(bus, dev, func, index) {
+        Some(b) => b,
+        None => return EINVAL,
+    };
+
+    let info_ptr = match validate_user_addr(info_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::PciBarInfo>()).is_err() {
+        return EINVAL;
+    }
+
+    // Auto-create MMIO capability if it's MMIO
+    let mmio_cap = if bar.is_mmio {
+        let mmio_res = crate::cap::ResourceType::MemoryRegion {
+            virt_addr: 0, // not yet mapped
+            phys_addr: bar.base,
+            size: bar.size as usize,
+        };
+        match crate::cap::create_root_capability(mmio_res, caller, crate::cap::CapPermissions::ALL) {
+            Ok(cap) => {
+                match crate::thread::add_thread_capability(caller, cap) {
+                    Ok(h) => h.raw(),
+                    Err(_) => 0,
+                }
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
+
+    let out = atom_abi::PciBarInfo {
+        base_addr: bar.base,
+        size: bar.size,
+        mmio_cap,
+        is_mmio: if bar.is_mmio { 1 } else { 0 },
+        is_64bit: if bar.is_64bit { 1 } else { 0 },
+        prefetchable: if bar.prefetchable { 1 } else { 0 },
+    };
+
+    unsafe {
+        *(info_ptr.as_mut_ptr::<atom_abi::PciBarInfo>()) = out;
+    }
+
+    ESUCCESS
+}
+
+/// Query PCI device identity from a DeviceCap.
+/// Returns vendor_id, device_id, class, subclass, irq_line into a PciDeviceInfo struct.
+/// The kernel does not interpret these values — the driver decides what to do with them.
+fn sys_pci_query_device(dev_cap_handle: u64, info_ptr: u64) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let handle = crate::cap::CapHandle::from_raw(dev_cap_handle);
+
+    let bdf = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+        Ok(()) => {
+            let cap = crate::cap::lookup_capability(handle).unwrap();
+            match cap.resource {
+                crate::cap::ResourceType::Device { bdf } => bdf,
+                _ => {
+                    log_warn!("syscall", "pci_query_device: handle={} resource is not Device", dev_cap_handle);
+                    return EPERM;
+                }
+            }
+        }
+        Err(e) => {
+            log_warn!("syscall", "pci_query_device: handle={} validate failed: {:?}", dev_cap_handle, e);
+            return EPERM;
+        }
+    };
+
+    let dev = match crate::drivers::pci::find_by_bdf(bdf) {
+        Some(d) => d,
+        None => {
+            log_warn!("syscall", "pci_query_device: bdf={:#x} not found in PCI registry", bdf);
+            return EINVAL;
+        }
+    };
+
+    let info_ptr = match validate_user_addr(info_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::PciDeviceInfo>()).is_err() {
+        return EINVAL;
+    }
+
+    let out = atom_abi::PciDeviceInfo {
+        vendor_id: dev.vendor_id,
+        device_id: dev.device_id,
+        class: dev.class,
+        subclass: dev.subclass,
+        prog_if: dev.prog_if,
+        irq_line: dev.irq_line,
+        bus: dev.bus,
+        device: dev.device,
+        function: dev.function,
+        _pad: 0,
+    };
+
+    unsafe {
+        *(info_ptr.as_mut_ptr::<atom_abi::PciDeviceInfo>()) = out;
+    }
+
+    ESUCCESS
+}
+
+fn sys_device_bind_irq(dev_cap_handle: u64, info_ptr: u64) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let handle = crate::cap::CapHandle::from_raw(dev_cap_handle);
+
+    let bdf = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+        Ok(()) => {
+            let cap = crate::cap::lookup_capability(handle).unwrap();
+            match cap.resource {
+                crate::cap::ResourceType::Device { bdf } => bdf,
+                _ => return EPERM,
+            }
+        }
+        Err(_) => return EPERM,
+    };
+
+    let _bus = (bdf >> 8) as u8;
+    let _dev = ((bdf >> 3) & 0x1F) as u8;
+    let _func = (bdf & 0x07) as u8;
+
+    let pci_dev = match crate::drivers::pci::find_by_bdf(bdf) {
+        Some(d) => d,
+        None => return EINVAL,
+    };
+
+    if pci_dev.irq_line == 0 || pci_dev.irq_line == 0xFF {
+        return ENOTSUP;
+    }
+
+    // Create Irq capability
+    let irq_res = crate::cap::ResourceType::Irq { irq_num: pci_dev.irq_line };
+    let irq_cap = match crate::cap::create_root_capability(irq_res, caller, crate::cap::CapPermissions::ALL) {
+        Ok(cap) => {
+            match crate::thread::add_thread_capability(caller, cap) {
+                Ok(h) => h,
+                Err(_) => return ENOMEM,
+            }
+        }
+        Err(_) => return ENOMEM,
+    };
+
+    let info_ptr = match validate_user_addr(info_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::IrqBindInfo>()).is_err() {
+        return EINVAL;
+    }
+
+    let out = atom_abi::IrqBindInfo {
+        irq_cap: irq_cap.raw(),
+        vector: pci_dev.irq_line as u32,
+        reserved: 0,
+    };
+
+    unsafe {
+        *(info_ptr.as_mut_ptr::<atom_abi::IrqBindInfo>()) = out;
+    }
+
+    ESUCCESS
+}
+
+fn sys_irq_listen(irq_cap_handle: u64, port_id: u64) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let handle = crate::cap::CapHandle::from_raw(irq_cap_handle);
+
+    let irq_num = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+        Ok(()) => {
+            let cap = crate::cap::lookup_capability(handle).unwrap();
+            match cap.resource {
+                crate::cap::ResourceType::Irq { irq_num } => irq_num,
+                _ => return EPERM,
+            }
+        }
+        Err(_) => return EPERM,
+    };
+
+    let mut bindings = IRQ_BINDINGS.lock();
+    if bindings.contains_key(&irq_num) {
+        return EBUSY;
+    }
+
+    bindings.insert(irq_num, IrqBinding {
+        owner: caller,
+        port: port_id,
+        pending: AtomicBool::new(false),
+        requires_ack: true, // new path: ACK required via SYS_IRQ_ACK to re-arm
+    });
+    ESUCCESS
+}
+
+fn sys_irq_ack(irq_cap_handle: u64) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let handle = crate::cap::CapHandle::from_raw(irq_cap_handle);
+
+    let irq_num = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::WRITE) {
+        Ok(()) => {
+            let cap = crate::cap::lookup_capability(handle).unwrap();
+            match cap.resource {
+                crate::cap::ResourceType::Irq { irq_num } => irq_num,
+                _ => return EPERM,
+            }
+        }
+        Err(_) => return EPERM,
+    };
+
+    let bindings = IRQ_BINDINGS.lock();
+    if let Some(binding) = bindings.get(&irq_num) {
+        if binding.owner != caller {
+            return EPERM;
+        }
+        binding.pending.store(false, Ordering::SeqCst);
+        ESUCCESS
+    } else {
+        EINVAL
+    }
+}
+
+fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let caller_process = match crate::thread::get_thread_process_id(caller) {
+        Some(pid) => pid,
+        None => {
+            log_warn!("syscall", "dma_alloc: no process for caller");
+            return EPERM;
+        }
+    };
+
+    let params_ptr = match validate_user_addr(params_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => {
+            log_warn!("syscall", "dma_alloc: invalid params_ptr={:#x} err={:#x}", params_ptr, e);
+            return e;
+        }
+    };
+    if validate_user_range(params_ptr.as_u64(), core::mem::size_of::<atom_abi::DmaAllocParams>()).is_err() {
+        log_warn!("syscall", "dma_alloc: params range check failed");
+        return EINVAL;
+    }
+    let params = unsafe { *(params_ptr.as_ptr::<atom_abi::DmaAllocParams>()) };
+
+    if params.size == 0 || params.size > 1024 * 1024 * 16 {
+        log_warn!("syscall", "dma_alloc: invalid size={}", params.size);
+        return EINVAL;
+    }
+
+    let pages = (params.size as usize).div_ceil(crate::mm::pmm::PAGE_SIZE);
+    let phys_addr = match crate::mm::pmm::alloc_pages_zeroed(pages) {
+        Some(p) => p,
+        None => {
+            log_warn!("syscall", "dma_alloc: alloc_pages_zeroed failed for {} pages", pages);
+            return ENOMEM;
+        }
+    };
+
+    // Create DmaBuffer capability
+    let dma_res = crate::cap::ResourceType::DmaBuffer {
+        phys_addr: phys_addr as u64,
+        size: params.size as usize,
+    };
+    let dma_cap = match crate::cap::create_root_capability(dma_res, caller, crate::cap::CapPermissions::ALL) {
+        Ok(cap) => {
+            match crate::thread::add_thread_capability(caller, cap) {
+                Ok(h) => h,
+                Err(e) => {
+                    log_warn!("syscall", "dma_alloc: add_thread_capability failed: {:?}", e);
+                    let _ = crate::mm::pmm::free_pages(phys_addr, pages);
+                    return ENOMEM;
+                }
+            }
+        }
+        Err(e) => {
+            log_warn!("syscall", "dma_alloc: create_root_capability failed: {:?}", e);
+            let _ = crate::mm::pmm::free_pages(phys_addr, pages);
+            return ENOMEM;
+        }
+    };
+
+    // Map into userspace
+    let flags = crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::WRITABLE | crate::mm::vm::PageFlags::USER;
+
+    let pml4 = match crate::thread::get_thread_address_space(caller) {
+        Some(p) => p,
+        None => {
+            log_warn!("syscall", "dma_alloc: no address space for caller");
+            return EINVAL;
+        }
+    };
+
+    let user_va = match crate::mm::vma::find_process_free_region(caller_process, atom_abi::USER_MMAP_START as usize, atom_abi::USER_MMAP_END as usize, pages * crate::mm::pmm::PAGE_SIZE) {
+        Ok(Some(addr)) => addr,
+        other => {
+            log_warn!("syscall", "dma_alloc: find_free_region failed for process={} pages={}: {:?}", caller_process, pages, other);
+            let _ = crate::mm::pmm::free_pages(phys_addr, pages);
+            return ENOMEM;
+        }
+    };
+
+    for i in 0..pages {
+        let v = user_va + i * crate::mm::pmm::PAGE_SIZE;
+        let p = phys_addr + i * crate::mm::pmm::PAGE_SIZE;
+        if let Err(e) = crate::mm::vm::map_page_in_pml4(pml4 as usize, v, p, flags) {
+            log_warn!("syscall", "dma_alloc: map_page_in_pml4 failed page={} v={:#x} p={:#x}: {:?}", i, v, p, e);
+            return ENOMEM;
+        }
+    }
+
+    // Register VMA
+    let vma = crate::mm::vma::Vma {
+        start: user_va,
+        end: user_va + pages * crate::mm::pmm::PAGE_SIZE,
+        perms: crate::mm::vma::VmaPermissions::read_write(),
+        backing: crate::mm::vma::VmaBacking::Device { phys_base: phys_addr },
+        label: "dma",
+    };
+    if let Err(e) = crate::mm::vma::insert_process_vma(caller_process, vma) {
+        log_warn!("syscall", "dma_alloc: insert_process_vma failed: {:?}", e);
+        return ENOMEM;
+    }
+
+    let info_ptr = match validate_user_addr(info_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => {
+            log_warn!("syscall", "dma_alloc: invalid info_ptr={:#x} err={:#x}", info_ptr, e);
+            return e;
+        }
+    };
+    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::DmaMappingInfo>()).is_err() {
+        log_warn!("syscall", "dma_alloc: info_ptr range check failed");
+        return EINVAL;
+    }
+
+    let out = atom_abi::DmaMappingInfo {
+        user_va: user_va as u64,
+        phys_addr: phys_addr as u64,
+        size: params.size,
+    };
+
+    unsafe {
+        *(info_ptr.as_mut_ptr::<atom_abi::DmaMappingInfo>()) = out;
+    }
+
+    dma_cap.raw()
+}
+
+fn sys_dma_map(_dma_cap_handle: u64, _info_ptr: u64) -> u64 {
+    // For MVP, sys_dma_alloc already maps it.
+    ENOSYS
+}
+
+fn sys_dma_free(_dma_cap_handle: u64) -> u64 {
+    // TODO: implement revocation callback for DmaBuffer to free physical pages and unmap
+    ENOSYS
+}
+
+fn sys_map_mmio(mmio_cap_handle: u64, out_addr_ptr: u64) -> u64 {
+    // For simplicity in MVP, we might allow mapping a BAR directly if holding DeviceCap
+    // or we implement the MmioRegionCap derivation.
+    // Let's use the MmioRegionCap approach.
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+    let caller_process = match crate::thread::get_thread_process_id(caller) {
+        Some(pid) => pid,
+        None => return EPERM,
+    };
+    let pml4 = match crate::thread::get_thread_address_space(caller) {
+        Some(p) => p,
+        None => return EINVAL,
+    };
+
+    let handle = crate::cap::CapHandle::from_raw(mmio_cap_handle);
+    let (phys_addr, size) = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+        Ok(()) => {
+            let cap = crate::cap::lookup_capability(handle).unwrap();
+            match cap.resource {
+                crate::cap::ResourceType::MemoryRegion { phys_addr, size, .. } => (phys_addr, size),
+                _ => {
+                    log_warn!("syscall", "map_mmio: handle={} not MemoryRegion", mmio_cap_handle);
+                    return EPERM;
+                }
+            }
+        }
+        Err(e) => {
+            log_warn!("syscall", "map_mmio: handle={} validate failed: {:?}", mmio_cap_handle, e);
+            return EPERM;
+        }
+    };
+
+    let pages = size.div_ceil(crate::mm::pmm::PAGE_SIZE);
+    let user_va = match crate::mm::vma::find_process_free_region(caller_process, atom_abi::USER_MMAP_START as usize, atom_abi::USER_MMAP_END as usize, pages * crate::mm::pmm::PAGE_SIZE) {
+        Ok(Some(addr)) => addr,
+        other => {
+            log_warn!("syscall", "map_mmio: find_free_region failed for {} pages: {:?}", pages, other);
+            return ENOMEM;
+        }
+    };
+
+    let flags = crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::WRITABLE | crate::mm::vm::PageFlags::USER | crate::mm::vm::PageFlags::CACHE_DISABLE;
+
+    for i in 0..pages {
+        let v = user_va + i * crate::mm::pmm::PAGE_SIZE;
+        let p = (phys_addr as usize) + i * crate::mm::pmm::PAGE_SIZE;
+        if let Err(_) = crate::mm::vm::map_page_in_pml4(pml4 as usize, v, p, flags) {
+            return ENOMEM;
+        }
+    }
+
+    // Register VMA so subsequent find_free_region calls skip this range.
+    let vma = crate::mm::vma::Vma {
+        start: user_va,
+        end: user_va + pages * crate::mm::pmm::PAGE_SIZE,
+        perms: crate::mm::vma::VmaPermissions::read_write(),
+        backing: crate::mm::vma::VmaBacking::Device { phys_base: phys_addr as usize },
+        label: "mmio",
+    };
+    let _ = crate::mm::vma::insert_process_vma(caller_process, vma);
+
+    let out_addr_ptr = match validate_user_addr(out_addr_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(out_addr_ptr.as_u64(), 8).is_err() {
+        return EINVAL;
+    }
+
+    unsafe {
+        *(out_addr_ptr.as_mut_ptr::<u64>()) = user_va as u64;
+    }
+
+    ESUCCESS
 }
 
 // ============================================================================

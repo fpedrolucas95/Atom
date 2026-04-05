@@ -61,6 +61,19 @@ pub mod numbers {
     pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51;
     pub const SYS_GET_CPU_BRAND: u64 = 52;
 
+    // ---------------------------------------------------------------------------
+    // Infrastructure / Networking Phase 1 syscalls
+    // ---------------------------------------------------------------------------
+    pub const SYS_PCI_GET_BAR:            u64 = 81;
+    pub const SYS_DEVICE_BIND_IRQ:        u64 = 82;
+    pub const SYS_IRQ_LISTEN:             u64 = 83;
+    pub const SYS_DMA_ALLOC:              u64 = 84;
+    pub const SYS_DMA_MAP:                u64 = 85;
+    pub const SYS_DMA_FREE:               u64 = 86;
+    pub const SYS_MAP_MMIO:               u64 = 87;
+    pub const SYS_IRQ_ACK:                u64 = 88;
+    pub const SYS_PCI_QUERY_DEVICE:       u64 = 89;
+
     // Filesystem syscalls (53-76)
     pub const SYS_FS_OPEN:     u64 = 53;
     pub const SYS_FS_CLOSE:    u64 = 54;
@@ -125,6 +138,34 @@ pub mod numbers {
     pub const SYS_MPROTECT:  u64 = 102;
     pub const SYS_BRK:       u64 = 103;
     pub const SYS_FORK:      u64 = 104;
+}
+
+pub fn pci_get_bar(dev_cap: u64, index: u8, info: &mut atom_abi::PciBarInfo) -> u64 {
+    unsafe { syscall3(numbers::SYS_PCI_GET_BAR, dev_cap, index as u64, info as *mut _ as u64) }
+}
+
+pub fn pci_query_device(dev_cap: u64, info: &mut atom_abi::PciDeviceInfo) -> u64 {
+    unsafe { syscall2(numbers::SYS_PCI_QUERY_DEVICE, dev_cap, info as *mut _ as u64) }
+}
+
+pub fn device_bind_irq(dev_cap: u64, info: &mut atom_abi::IrqBindInfo) -> u64 {
+    unsafe { syscall2(numbers::SYS_DEVICE_BIND_IRQ, dev_cap, info as *mut _ as u64) }
+}
+
+pub fn irq_listen(irq_cap: u64, port: u64) -> u64 {
+    unsafe { syscall2(numbers::SYS_IRQ_LISTEN, irq_cap, port) }
+}
+
+pub fn dma_alloc(params: &atom_abi::DmaAllocParams, info: &mut atom_abi::DmaMappingInfo) -> u64 {
+    unsafe { syscall2(numbers::SYS_DMA_ALLOC, params as *const _ as u64, info as *mut _ as u64) }
+}
+
+pub fn map_mmio(mmio_cap: u64, out_va: &mut u64) -> u64 {
+    unsafe { syscall2(numbers::SYS_MAP_MMIO, mmio_cap, out_va as *mut _ as u64) }
+}
+
+pub fn irq_ack(irq_cap: u64) -> u64 {
+    unsafe { syscall1(numbers::SYS_IRQ_ACK, irq_cap) }
 }
 
 /// Raw syscall with no arguments

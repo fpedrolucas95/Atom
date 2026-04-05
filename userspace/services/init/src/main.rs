@@ -274,6 +274,11 @@ fn boot_sequence() {
     // Separate drivers are no longer needed.
     let _display_pid = spawn_service("display");
 
+    // Networking infrastructure
+    log("[Phase 3] Spawning networking services...");
+    let _nic_pid = spawn_service("nic_driver");
+    let _netd_pid = spawn_service("netd");
+
     // Give drivers time to initialize
     atom_syscall::thread::sleep_ms(50);
 

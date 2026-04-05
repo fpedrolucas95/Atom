@@ -143,18 +143,12 @@ pub fn init() {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-
-    unsafe {
-        core::arch::asm!("cli", options(nomem, nostack));
-    }
-
-    {
-        SERIAL1.lock().write_fmt(args).unwrap();
-    }
-
-    unsafe {
-        core::arch::asm!("sti", options(nomem, nostack));
-    }
+    // The spinlock provides mutual exclusion — no need to disable interrupts.
+    // Disabling interrupts here is dangerous: it can re-enable them at the
+    // wrong time during early boot (e.g. inside apic::init before the IDT
+    // is fully armed), causing spurious vector-0 (#DE) faults from devices
+    // like AHCI that fire before the legacy PIC is remapped and masked.
+    SERIAL1.lock().write_fmt(args).unwrap();
 }
 
 #[macro_export]

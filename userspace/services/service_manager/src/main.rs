@@ -602,6 +602,8 @@ fn init_default_services() {
         "display",
         "ui_shell",
         "terminal",
+        "nic_driver",
+        "netd",
     ];
 
     for name in known_services {

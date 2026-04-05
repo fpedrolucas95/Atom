@@ -8,6 +8,7 @@ members = [
     "userspace/libs/atom_theme",
     "userspace/libs/atom_ui",
     "userspace/libs/libimage",
+    "userspace/libs/libring",
 ]
 # Os drivers userspace serao compilados separadamente como binarios ATXF
 # quando o loader de executaveis estiver pronto.
@@ -28,6 +29,8 @@ exclude = [
     "userspace/services/fsd",
     "userspace/services/app_launcher",
     "userspace/apps/hello_atxf",
+    "userspace/services/nic_driver",
+    "userspace/services/netd",
 ]
 resolver = "2"
 

@@ -24,6 +24,10 @@ pub mod error;
 pub mod process;
 pub mod fs;
 pub mod vm;
+pub mod shared_mem;
+pub mod cap;
+
+pub use atom_abi;
 
 // Re-export common types at crate root
 pub use error::{SyscallError, SyscallResult};
