@@ -60,6 +60,8 @@
 
 #![allow(dead_code)]
 
+mod policy;
+
 use crate::arch::gdt::{KERNEL_CODE_SELECTOR, USER_CODE_SELECTOR};
 use crate::{log_debug, log_info, log_warn, log_error, log_panic};
 
@@ -601,66 +603,6 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-// ============================================================================
-// Privileged Process Registry
-// ============================================================================
-//
-// BOOTSTRAP HACK — will be replaced by a capability of type ResourceType::Spawn
-// (or equivalent root-authority cap) once process abstraction (struct Process)
-// is introduced.  Until then, the first userspace process spawned (init) is
-// registered here and used as the single source of privilege for operations
-// that must be restricted to a trusted root (sys_cap_create of arbitrary
-// resources, sys_read_klog, etc.).
-//
-// Rules:
-//   - Registered exactly once: the first call to spawn_process_internal.
-//   - All code that needs to check privilege calls has_privilege() — NEVER
-//     reads PRIVILEGED_PID directly — so replacing this with a cap check
-//     later requires changing only one function.
-//   - has_privilege() returns false if PRIVILEGED_PID has not been set yet
-//     (during early boot before init exists).
-
-use core::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
-
-static PRIVILEGED_PID: AtomicU64 = AtomicU64::new(0);
-
-/// Register the first spawned userspace process as the privileged (init) process.
-/// Must be called exactly once; subsequent calls are no-ops (logged as warnings).
-pub fn register_privileged_process(pid: crate::thread::ThreadId) {
-    let result = PRIVILEGED_PID.compare_exchange(
-        0,
-        pid.raw(),
-        AtomicOrd::SeqCst,
-        AtomicOrd::SeqCst,
-    );
-    match result {
-        Ok(_) => log_info!("syscall", "Privileged process registered: pid={}", pid),
-        Err(existing) => log_warn!(
-            "syscall",
-            "register_privileged_process called again (existing={}, new={}) — ignored",
-            existing,
-            pid
-        ),
-    }
-}
-
-/// Returns true if the current thread is the registered privileged process (init).
-///
-/// This is a bootstrap identity check, not a capability check.  It is intentionally
-/// encapsulated here so that the single call-site can be replaced with a proper
-/// capability lookup when process abstraction is available.
-#[inline]
-fn has_privilege() -> bool {
-
-    let privileged = PRIVILEGED_PID.load(AtomicOrd::SeqCst);
-    if privileged == 0 {
-        return false; // init not yet registered
-    }
-    crate::sched::current_thread()
-        .map(|t| t.raw() == privileged)
-        .unwrap_or(false)
-}
-
 /// Normalize a raw errno value to a SyscallError variant for observability.
 /// Returns None for non-error results or unclassified errors.
 /// Does NOT change the errno — only provides a structured classification.
@@ -693,221 +635,6 @@ struct SyscallSavedFrame {
     user_rflags: u64,
     user_rsp: u64,
     user_ss: u64,
-}
-
-// ============================================================================
-// Syscall Policy Table  (P2-A)
-// ============================================================================
-//
-// Every syscall must be explicitly classified here.  The dispatcher checks
-// the policy BEFORE the handler runs, so handlers only need to validate the
-// specific *instance* of the resource (e.g. which port, which FD), not the
-// class-level permission.
-//
-// Classification kinds:
-//   ExplicitlyUnrestricted — any process may call this; no capability gate.
-//                            Use for public information or operations whose
-//                            safety is guaranteed entirely by the handler.
-//   Requires(R)            — caller must hold at least one capability matching
-//                            CapRequirement R.  Uses READ permission as the
-//                            minimum threshold (sufficient to prove possession).
-//
-// Default for unclassified syscalls:
-//   ALWAYS fail-closed (EPERM). Unclassified entries are never implicitly open.
-
-/// Discrete capability requirements used by the policy table.
-/// Prefer adding a new variant here over writing inline closures so the
-/// policy table remains human-readable and statically auditable.
-#[derive(Debug, Clone, Copy)]
-enum CapRequirement {
-    /// Caller must hold an InputDevice{Mouse} cap with READ.
-    InputMouse,
-    /// Caller must hold an InputDevice{Keyboard} cap with READ.
-    InputKeyboard,
-    /// Caller must hold any Framebuffer cap (any dimensions) with READ.
-    AnyFramebuffer,
-    /// Caller must hold any FsNamespace cap with READ.
-    /// Used to gate the kernel-internal FAT32 backend syscalls (200-202)
-    /// so that only fsd can reach the raw filesystem driver.
-    AnyFsNamespace,
-    /// Caller must be the registered privileged process (init bootstrap).
-    /// Covers operations that produce sensitive system-wide information.
-    PrivilegedOnly,
-}
-
-/// Per-syscall policy decision returned by `syscall_policy`.
-#[derive(Debug)]
-enum SysPolicy {
-    /// No capability gate — handler is solely responsible for safety.
-    ExplicitlyUnrestricted,
-    /// Gate: caller must satisfy the given CapRequirement.
-    Requires(CapRequirement),
-    /// Fail-closed decision for unknown/unclassified syscalls.
-    ExplicitlyDenied(u64),
-}
-
-/// Evaluate `req` against the current thread.  Returns true if the
-/// requirement is satisfied.
-fn check_cap_requirement(req: CapRequirement) -> bool {
-    use crate::cap::{CapPermissions, ResourceType};
-    use crate::cap::InputDeviceType;
-
-    let caller = match crate::sched::current_thread() {
-        Some(t) => t,
-        None => return false,
-    };
-
-    match req {
-        CapRequirement::InputMouse =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::InputDevice {
-                    device_type: InputDeviceType::Mouse
-                }),
-            ),
-
-        CapRequirement::InputKeyboard =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::InputDevice {
-                    device_type: InputDeviceType::Keyboard
-                }),
-            ),
-
-        CapRequirement::AnyFramebuffer =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::Framebuffer { .. }),
-            ),
-
-        CapRequirement::AnyFsNamespace =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::FsNamespace { .. }),
-            ),
-
-        CapRequirement::PrivilegedOnly => has_privilege(),
-    }
-}
-
-/// Return the policy for `syscall_num`.
-///
-/// Every syscall number that the kernel handles should appear here.
-/// Unclassified syscalls are denied by default (fail-closed).
-fn syscall_policy(num: u64) -> SysPolicy {
-    use SysPolicy::*;
-    use CapRequirement::*;
-
-    match num {
-        // ── Thread management ──────────────────────────────────────────────
-        // yield/exit/sleep carry no sensitive effect; thread_create's handler
-        // already validates Thread(WRITE) capability.
-        SYS_THREAD_YIELD | SYS_THREAD_EXIT | SYS_THREAD_SLEEP | SYS_THREAD_CREATE
-            => ExplicitlyUnrestricted,
-
-        // ── IPC ────────────────────────────────────────────────────────────
-        // All IPC handlers perform parametric port-ownership checks; no
-        // additional class-level gate needed here.
-        SYS_IPC_CREATE_PORT | SYS_IPC_CLOSE_PORT
-        | SYS_IPC_SEND | SYS_IPC_RECV
-        | SYS_IPC_SEND_WITH_CAP
-        | SYS_IPC_SEND_BATCH | SYS_IPC_RECV_BATCH
-        | SYS_IPC_SEND_ASYNC | SYS_IPC_TRY_RECV
-        | SYS_IPC_TRACE_READ | SYS_IPC_PORT_STATS
-        | SYS_IPC_WAIT_ANY | SYS_IPC_CREATE_PORT_WITH_ID
-            => ExplicitlyUnrestricted,
-
-        // ── Capability management ──────────────────────────────────────────
-        // Individual handlers enforce ownership / derivation rules.
-        // (sys_cap_create is additionally guarded in its own body.)
-        SYS_CAP_CREATE | SYS_CAP_CHECK | SYS_CAP_REVOKE | SYS_CAP_DERIVE
-        | SYS_CAP_LIST | SYS_CAP_TRANSFER
-        | SYS_CAP_QUERY_PARENT | SYS_CAP_QUERY_CHILDREN
-            => ExplicitlyUnrestricted,
-
-        // ── Shared memory / address space ──────────────────────────────────
-        SYS_SHARED_REGION_CREATE | SYS_SHARED_REGION_MAP
-        | SYS_SHARED_REGION_UNMAP | SYS_SHARED_REGION_DESTROY
-        | SYS_ADDRSPACE_CREATE | SYS_ADDRSPACE_DESTROY
-        | SYS_MAP_REGION | SYS_UNMAP_REGION | SYS_REMAP_REGION
-        | SYS_REGISTER_FAULT_HANDLER
-        | SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | SYS_FORK
-            => ExplicitlyUnrestricted,
-
-        // ── Input devices ─────────────────────────────────────────────────
-        // Gated by InputDevice capability type.
-        // Note: all processes currently receive these caps at spawn time
-        // (over-provisioning — see P1-A TODO in spawn_process_internal).
-        // Fixing over-provisioning will automatically tighten access here
-        // without further changes to this table.
-        SYS_MOUSE_POLL | SYS_MOUSE_GET_ID   => Requires(InputMouse),
-        SYS_KEYBOARD_POLL                    => Requires(InputKeyboard),
-
-        // ── Framebuffer / display ──────────────────────────────────────────
-        // Gated by Framebuffer cap.  Same over-provisioning caveat applies.
-        SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER | SYS_SET_VIDEO_MODE
-            => Requires(AnyFramebuffer),
-
-        // Video info queries — non-sensitive, public.
-        SYS_GET_VIDEO_MODES | SYS_GET_CURRENT_VIDEO_MODE | SYS_VIDEO_MODE_COUNT
-            => ExplicitlyUnrestricted,
-
-        // ── IRQ management ────────────────────────────────────────────────
-        // Handler uses ALLOWED_IRQS allowlist today; no additional class gate.
-        SYS_REGISTER_IRQ_HANDLER | SYS_UNREGISTER_IRQ_HANDLER | SYS_GET_IRQ_COUNT
-            => ExplicitlyUnrestricted,
-
-        // ── Kernel FS backend (for fsd only) ──────────────────────────────
-        // These syscalls bypass fsd and talk directly to the kernel FAT32
-        // driver.  Gated by FsNamespace cap which is granted only to "fsd"
-        // at spawn time.  This is the first hard enforcement of the rule
-        // "only fsd calls kern_fs_*".
-        SYS_KERN_FS_READ_FILE | SYS_KERN_FS_LIST_DIR | SYS_KERN_FS_STAT_PATH
-            => Requires(AnyFsNamespace),
-
-        // ── POSIX FS (via fsd IPC) ─────────────────────────────────────────
-        SYS_FS_OPEN | SYS_FS_CLOSE | SYS_FS_READ | SYS_FS_WRITE | SYS_FS_SEEK
-        | SYS_FS_STAT | SYS_FS_FSTAT
-        | SYS_FS_MKDIR | SYS_FS_RMDIR | SYS_FS_UNLINK | SYS_FS_RENAME
-        | SYS_FS_READDIR | SYS_FS_TRUNCATE | SYS_FS_FSYNC
-        | SYS_FS_MOUNT | SYS_FS_UMOUNT | SYS_FS_CHMOD
-        | SYS_FS_DUP | SYS_FS_DUP2
-        | SYS_FS_LINK | SYS_FS_SYMLINK | SYS_FS_READLINK
-        | SYS_FS_UTIMES | SYS_FS_STATVFS
-            => ExplicitlyUnrestricted,
-
-        // ── Process / spawn ───────────────────────────────────────────────
-        // TODO: restrict SYS_SPAWN_* to processes holding a future Spawn cap.
-        //       For now, service_manager and app_launcher call these without
-        //       a dedicated capability.
-        SYS_SPAWN_PROCESS | SYS_SPAWN_FROM_PATH
-            => ExplicitlyUnrestricted,
-
-        // ── Sensitive system information ───────────────────────────────────
-        // Kernel log exposes internal addresses, thread states, and error
-        // details.  Restricted to the privileged (init) process.
-        SYS_READ_KLOG => Requires(PrivilegedOnly),
-
-        // Process enumeration is also privileged; non-init processes should
-        // query the service_manager via IPC instead of the kernel directly.
-        SYS_LIST_PROCESSES | SYS_GET_PROCESS_COUNT
-            => Requires(PrivilegedOnly),
-
-        // Non-sensitive system information — public.
-        SYS_GET_TICKS | SYS_GET_MEMORY_INFO | SYS_GET_CPU_BRAND
-            => ExplicitlyUnrestricted,
-
-        // Debug log — no cap required (process names its own output).
-        SYS_DEBUG_LOG => ExplicitlyUnrestricted,
-
-        // ── Unclassified ──────────────────────────────────────────────────
-        // Fail-closed by construction: unknown rows are denied.
-        _ => ExplicitlyDenied(EPERM),
-    }
 }
 
 #[no_mangle]
@@ -1001,37 +728,7 @@ extern "win64" fn rust_syscall_dispatcher(
         arg0, arg1, arg2, arg3, arg4, arg5
     );
 
-    // ----------------------------------------------------------------
-    // Policy gate — class-level capability check.
-    //
-    // syscall_policy() returns the required CapRequirement (if any) for
-    // this syscall number.  The check happens BEFORE the handler so that
-    // handlers only need to validate the specific resource instance they
-    // receive; the class-level "is the caller allowed to touch this kind
-    // of resource at all?" question is answered here.
-    //
-    // Unclassified syscalls: denied by default (fail-closed).
-    // ----------------------------------------------------------------
-    let policy_result: Option<u64> = match syscall_policy(syscall_num) {
-        SysPolicy::ExplicitlyUnrestricted => None,
-        SysPolicy::Requires(req) => {
-            if check_cap_requirement(req) {
-                None  // requirement satisfied — proceed to handler
-            } else {
-                log_warn!(
-                    LOG_ORIGIN,
-                    "Policy gate DENIED: syscall={} tid={:?} requirement={:?}",
-                    syscall_num,
-                    crate::sched::current_thread(),
-                    req
-                );
-                Some(EPERM)
-            }
-        }
-        SysPolicy::ExplicitlyDenied(errno) => Some(errno),
-    };
-
-    if let Some(early_return) = policy_result {
+    if let Some(early_return) = policy::authorize_syscall_class(syscall_num, LOG_ORIGIN) {
         return early_return;
     }
 
@@ -1258,35 +955,9 @@ fn sys_mouse_get_id() -> u64 {
     crate::input::get_mouse_id() as u64
 }
 
-/// Validates that the calling thread holds an IoPort capability for `port` with
-/// the specified permission. Returns `Ok(())` on success or `Err(EPERM)` on
-/// failure, logging a warning with context in the denial case.
-fn validate_io_port_access(
-    port: u16,
-    required_perm: crate::cap::CapPermissions,
-) -> Result<(), u64> {
-    let caller = crate::sched::current_thread().ok_or(EPERM)?;
-    let has_permission = crate::thread::validate_thread_capability_by_type(
-        caller,
-        required_perm,
-        |resource| matches!(resource, crate::cap::ResourceType::IoPort { port: p } if *p == port),
-    );
-    if !has_permission {
-        log_warn!(
-            "syscall",
-            "io_port access denied: port=0x{:X} perm={:?} caller={}",
-            port,
-            required_perm,
-            caller
-        );
-        return Err(EPERM);
-    }
-    Ok(())
-}
-
 /// Read a byte from an IO port (privileged operation for drivers)
 fn sys_io_port_read(port: u16, _size: u8) -> u64 {
-    if let Err(e) = validate_io_port_access(port, crate::cap::CapPermissions::READ) {
+    if let Err(e) = policy::validate_io_port_access(port, crate::cap::CapPermissions::READ) {
         return e;
     }
 
@@ -1306,7 +977,7 @@ fn sys_io_port_read(port: u16, _size: u8) -> u64 {
 
 /// Write a byte to an IO port (privileged operation for drivers)
 fn sys_io_port_write(port: u16, value: u8) -> u64 {
-    if let Err(e) = validate_io_port_access(port, crate::cap::CapPermissions::WRITE) {
+    if let Err(e) = policy::validate_io_port_access(port, crate::cap::CapPermissions::WRITE) {
         return e;
     }
 
@@ -1523,26 +1194,9 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         }
     };
 
-    let has_permission = crate::thread::validate_thread_capability_by_type(
-        caller,
-        crate::cap::CapPermissions::WRITE,
-        |resource| matches!(resource, crate::cap::ResourceType::Thread(_)),
-    );
-
-    if !has_permission {
-        log_warn!(
-            LOG_ORIGIN,
-            "thread_create denied: missing Thread capability with WRITE permission (caller={})",
-            caller
-        );
-        return EPERM;
+    if let Err(e) = policy::validate_thread_create_capability(caller, LOG_ORIGIN) {
+        return e;
     }
-
-    log_debug!(
-        LOG_ORIGIN,
-        "thread_create capability validated (caller={})",
-        caller
-    );
 
     const KERNEL_STACK_SIZE: usize = 64 * 1024;  // 64KB to handle deep call stacks with logging/IPC
     let kernel_stack_phys = match crate::mm::pmm::alloc_pages(KERNEL_STACK_SIZE / 4096) {
@@ -2954,50 +2608,15 @@ fn sys_ipc_send_with_cap(
     };
 
     let port_id = crate::ipc::PortId::from_raw(port_id_raw);
-    let has_port_permission = crate::thread::validate_thread_capability_by_type(
-        sender,
-        crate::cap::CapPermissions::WRITE,
-        |resource| {
-            matches!(
-                resource,
-                crate::cap::ResourceType::IpcPort { port_id: id }
-                    if *id == port_id.raw()
-            )
-        },
-    );
-
-    if !has_port_permission {
-        log_warn!(
-            "syscall",
-            "ipc_send_with_cap: denied (missing IPCPortCap::WRITE, sender={:?}, port={})",
-            sender,
-            port_id_raw
-        );
-        return EPERM;
-    }
-
     let cap_handle = crate::cap::CapHandle::from_raw(cap_handle_raw);
-    if !crate::thread::thread_has_capability(sender, cap_handle) {
-        log_warn!(
-            "syscall",
-            "ipc_send_with_cap: denied (sender does not own capability cap={:#x})",
-            cap_handle_raw
-        );
-        return EPERM;
-    }
-
-    let has_grant_permission = crate::thread::validate_thread_capability_by_type(
+    if let Err(e) = policy::validate_ipc_send_with_cap_permissions(
         sender,
-        crate::cap::CapPermissions::GRANT,
-        |_resource| true,
-    );
-
-    if !has_grant_permission {
-        log_warn!(
-            "syscall",
-            "ipc_send_with_cap: denied (missing GRANT permission)"
-        );
-        return EPERM;
+        port_id,
+        port_id_raw,
+        cap_handle,
+        cap_handle_raw,
+    ) {
+        return e;
     }
 
     let payload = alloc::vec::Vec::new();
@@ -3070,73 +2689,9 @@ fn sys_cap_create(resource_type: u64, resource_id: u64, permissions: u64) -> u64
         }
     };
 
-    // ── Ownership / privilege checks ─────────────────────────────────────────
-    //
-    // sys_cap_create is a restricted operation: processes may only create
-    // capabilities for resources they already own, or for their own identity.
-    // Creating capabilities for arbitrary external resources requires privilege
-    // (i.e. the caller must be the init process registered in PRIVILEGED_PID).
-    //
-    // This closes the capability-forgery vector where an unprivileged process
-    // could create a Thread cap for another process's ThreadId and abuse it.
-    //
-    // Resource types and their current creation policy:
-    //   0 = Thread  → caller may only wrap their OWN ThreadId; init may wrap any
-    //   2 = IpcPort → allowed (caller creates ports for themselves via IPC API)
-    //   3 = Irq     → privileged only (hardware interrupt routing)
-    //   _           → unsupported / ENOSYS
-
-    let resource = match resource_type {
-        0 => {
-            let tid = crate::thread::ThreadId::from_raw(resource_id);
-            // Non-privileged processes may only create a Thread cap for themselves.
-            if tid != caller && !has_privilege() {
-                log_warn!(
-                    "syscall",
-                    "cap_create: DENIED — unprivileged attempt to forge Thread cap \
-                     for tid={} by caller={}",
-                    resource_id,
-                    caller
-                );
-                return EPERM;
-            }
-            crate::cap::ResourceType::Thread(tid)
-        }
-        2 => {
-            crate::cap::ResourceType::IpcPort { port_id: resource_id }
-        }
-        3 => {
-            // IRQ capabilities are hardware-level — restricted to init only.
-            if !has_privilege() {
-                log_warn!(
-                    "syscall",
-                    "cap_create: DENIED — unprivileged attempt to create Irq cap \
-                     irq={} by caller={}",
-                    resource_id,
-                    caller
-                );
-                return EPERM;
-            }
-            if resource_id > 255 {
-                log_warn!(
-                    "syscall",
-                    "cap_create: invalid IRQ number {}",
-                    resource_id
-                );
-                return EINVAL;
-            }
-            crate::cap::ResourceType::Irq {
-                irq_num: resource_id as u8,
-            }
-        }
-        _ => {
-            log_warn!(
-                "syscall",
-                "cap_create: unsupported resource type {}",
-                resource_type
-            );
-            return ENOSYS;
-        }
+    let resource = match policy::resolve_cap_create_resource(resource_type, resource_id, caller) {
+        Ok(resource) => resource,
+        Err(e) => return e,
     };
 
     let perms = crate::cap::CapPermissions::from_bits(permissions as u32);
@@ -3407,13 +2962,13 @@ fn sys_cap_query_parent(handle_raw: u64) -> u64 {
 
     let handle = crate::cap::CapHandle::from_raw(handle_raw);
 
-    if !crate::thread::thread_has_capability(caller, handle) {
-        log_warn!(
-            "syscall",
-            "cap_query_parent: denied (caller does not own capability handle={:#x})",
-            handle_raw
-        );
-        return EPERM;
+    if let Err(e) = policy::validate_cap_query_ownership(
+        caller,
+        handle,
+        handle_raw,
+        "cap_query_parent",
+    ) {
+        return e;
     }
 
     match crate::cap::query_parent(handle) {
@@ -3462,13 +3017,13 @@ fn sys_cap_query_children(handle_raw: u64, buffer_ptr: u64, buffer_size: u64) ->
 
     let handle = crate::cap::CapHandle::from_raw(handle_raw);
 
-    if !crate::thread::thread_has_capability(caller, handle) {
-        log_warn!(
-            "syscall",
-            "cap_query_children: denied (caller does not own capability handle={:#x})",
-            handle_raw
-        );
-        return EPERM;
+    if let Err(e) = policy::validate_cap_query_ownership(
+        caller,
+        handle,
+        handle_raw,
+        "cap_query_children",
+    ) {
+        return e;
     }
 
     match crate::cap::query_children(handle) {
@@ -3537,17 +3092,11 @@ fn sys_shared_region_create(size: u64) -> u64 {
         }
     };
 
-    let caller_process = match crate::thread::get_thread_process_id(caller) {
-        Some(process_id) => process_id,
-        None => {
-            log_error!(
-                "syscall",
-                "shared_region_create: thread {} has no process_id",
-                caller
-            );
-            return EPERM;
-        }
-    };
+    let caller_process =
+        match policy::require_shared_region_caller_process(caller, "shared_region_create") {
+            Ok(process_id) => process_id,
+            Err(e) => return e,
+        };
 
     match crate::shared_mem::create_region(caller_process, size as usize) {
         Ok(region_id) => {
@@ -3595,17 +3144,11 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         }
     };
 
-    let caller_process = match crate::thread::get_thread_process_id(caller) {
-        Some(process_id) => process_id,
-        None => {
-            log_error!(
-                "syscall",
-                "shared_region_map: thread {} has no process_id",
-                caller
-            );
-            return EPERM;
-        }
-    };
+    let caller_process =
+        match policy::require_shared_region_caller_process(caller, "shared_region_map") {
+            Ok(process_id) => process_id,
+            Err(e) => return e,
+        };
 
     // Get the caller's PML4 (address space)
     let caller_pml4 = match crate::thread::get_thread_address_space(caller) {
@@ -3719,17 +3262,11 @@ fn sys_shared_region_unmap(region_id_raw: u64) -> u64 {
         }
     };
 
-    let caller_process = match crate::thread::get_thread_process_id(caller) {
-        Some(process_id) => process_id,
-        None => {
-            log_error!(
-                "syscall",
-                "shared_region_unmap: thread {} has no process_id",
-                caller
-            );
-            return EPERM;
-        }
-    };
+    let caller_process =
+        match policy::require_shared_region_caller_process(caller, "shared_region_unmap") {
+            Ok(process_id) => process_id,
+            Err(e) => return e,
+        };
 
     let caller_pml4 = match crate::thread::get_thread_address_space(caller) {
         Some(pml4) => pml4,
@@ -3787,17 +3324,11 @@ fn sys_shared_region_destroy(region_id_raw: u64) -> u64 {
         }
     };
 
-    let caller_process = match crate::thread::get_thread_process_id(caller) {
-        Some(process_id) => process_id,
-        None => {
-            log_error!(
-                "syscall",
-                "shared_region_destroy: thread {} has no process_id",
-                caller
-            );
-            return EPERM;
-        }
-    };
+    let caller_process =
+        match policy::require_shared_region_caller_process(caller, "shared_region_destroy") {
+            Ok(process_id) => process_id,
+            Err(e) => return e,
+        };
 
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
 
@@ -4155,18 +3686,10 @@ static IRQ_HANDLERS: Mutex<BTreeMap<u8, (crate::thread::ThreadId, u64)>> = Mutex
 static CLEANED_FD_PROCESSES: Mutex<BTreeSet<crate::process::ProcessId>> =
     Mutex::new(BTreeSet::new());
 
-/// Allowed IRQs for userspace drivers
-const ALLOWED_IRQS: [u8; 2] = [1, 12]; // Keyboard (IRQ1), Mouse (IRQ12)
-
 /// Register an IRQ handler for userspace
 fn sys_register_irq_handler(irq: u8, notification_port: u64) -> u64 {
-    if !ALLOWED_IRQS.contains(&irq) {
-        log_warn!(
-            "syscall",
-            "Attempt to register handler for disallowed IRQ {}",
-            irq
-        );
-        return EPERM;
+    if let Err(e) = policy::validate_irq_registration(irq) {
+        return e;
     }
 
     let caller = match crate::sched::current_thread() {
@@ -4208,8 +3731,8 @@ fn sys_unregister_irq_handler(irq: u8) -> u64 {
     let mut handlers = IRQ_HANDLERS.lock();
 
     if let Some((owner, _)) = handlers.get(&irq) {
-        if *owner != caller {
-            return EPERM;
+        if let Err(e) = policy::validate_irq_owner(*owner, caller) {
+            return e;
         }
         handlers.remove(&irq);
         log_info!(
@@ -4361,12 +3884,12 @@ fn sys_get_irq_count(irq: u8) -> u64 {
     // Verify caller owns this IRQ handler
     let handlers = IRQ_HANDLERS.lock();
     match handlers.get(&irq) {
-        Some((owner, _)) if *owner == caller => {
+        Some((owner, _)) if policy::validate_irq_owner(*owner, caller).is_ok() => {
             drop(handlers);
             let counts = IRQ_COUNTS.lock();
             counts.get(&irq).copied().unwrap_or(0)
         }
-        Some(_) => EPERM,
+        Some((_owner, _)) => EPERM,
         None => EINVAL,
     }
 }
@@ -5011,7 +4534,7 @@ fn spawn_process_internal(
 
     // Register the very first spawned process as privileged (init).
     // PRIVILEGED_PID is guarded by compare_exchange so subsequent spawns are no-ops.
-    register_privileged_process(pid);
+    policy::register_privileged_process(pid);
 
     // Grant capabilities
     //
@@ -5543,14 +5066,8 @@ fn sys_mmap(
     let tid = vma_ctx.tid;
     let process_id = vma_ctx.pid;
     let pml4 = vma_ctx.pml4;
-    if !crate::process::process_allows_memory_operations(process_id) {
-        log_warn!(
-            "syscall",
-            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
-            process_id,
-            tid
-        );
-        return EPERM;
+    if let Err(e) = policy::enforce_vma_memory_operation_allowed(process_id, tid) {
+        return e;
     }
 
     // Build VMA permissions from prot flags
@@ -5845,14 +5362,8 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
     };
     let process_id = vma_ctx.pid;
     let pml4 = vma_ctx.pml4;
-    if !crate::process::process_allows_memory_operations(process_id) {
-        log_warn!(
-            "syscall",
-            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
-            process_id,
-            vma_ctx.tid
-        );
-        return EPERM;
+    if let Err(e) = policy::enforce_vma_memory_operation_allowed(process_id, vma_ctx.tid) {
+        return e;
     }
 
     match vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
@@ -5904,14 +5415,8 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     };
     let process_id = vma_ctx.pid;
     let pml4 = vma_ctx.pml4;
-    if !crate::process::process_allows_memory_operations(process_id) {
-        log_warn!(
-            "syscall",
-            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
-            process_id,
-            vma_ctx.tid
-        );
-        return EPERM;
+    if let Err(e) = policy::enforce_vma_memory_operation_allowed(process_id, vma_ctx.tid) {
+        return e;
     }
 
     let mut perms = VmaPermissions::NONE;
@@ -5968,14 +5473,8 @@ fn sys_brk(new_brk: u64) -> u64 {
     };
     let process_id = vma_ctx.pid;
     let pml4 = vma_ctx.pml4;
-    if !crate::process::process_allows_memory_operations(process_id) {
-        log_warn!(
-            "syscall",
-            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
-            process_id,
-            vma_ctx.tid
-        );
-        return EPERM;
+    if let Err(e) = policy::enforce_vma_memory_operation_allowed(process_id, vma_ctx.tid) {
+        return e;
     }
 
     let heap_start = atom_abi::USER_HEAP_START as usize;
@@ -6489,43 +5988,15 @@ fn map_fd_error(err: FdPathError) -> u64 {
 }
 
 fn current_fd_owner_context() -> Result<FdOwnerContext, FdContextError> {
-    let tid = crate::sched::current_thread().ok_or(FdContextError::NoCurrentThread)?;
-    let process_id = crate::thread::get_thread_process_id(tid).ok_or(FdContextError::NoCurrentProcess)?;
-    let address_space_pml4 =
-        crate::thread::get_thread_address_space(tid).ok_or(FdContextError::CorruptedState)?;
-    if address_space_pml4 == 0 {
-        return Err(FdContextError::CorruptedState);
-    }
-
-    let process = crate::process::get_process(process_id).ok_or(FdContextError::CorruptedState)?;
-    if process.pml4_phys == 0 {
-        return Err(FdContextError::CorruptedState);
-    }
-    if process.pml4_phys != address_space_pml4 {
-        return Err(FdContextError::CorruptedState);
-    }
-
-    Ok(FdOwnerContext {
-        process_id,
-        address_space_pml4,
-    })
+    policy::current_fd_owner_context()
 }
 
 fn fd_owner_process(fd: &KernelFd) -> Result<crate::process::ProcessId, FdContextError> {
-    fd.owner_process.ok_or(FdContextError::InvalidOwner)
+    policy::fd_owner_process(fd)
 }
 
 fn validate_fd_process_alignment(fd: &KernelFd) -> Result<(), FdContextError> {
-    if !fd.in_use {
-        return Ok(());
-    }
-
-    let process_id = fd_owner_process(fd)?;
-    let process = crate::process::get_process(process_id).ok_or(FdContextError::CorruptedState)?;
-    if process.pml4_phys == 0 {
-        return Err(FdContextError::CorruptedState);
-    }
-    Ok(())
+    policy::validate_fd_process_alignment(fd)
 }
 
 /// A kernel-side open file/directory (zero-heap, stored in .bss).
@@ -6642,14 +6113,7 @@ fn path_buf_as_str(buf: &[u8; MAX_PATH_BUF], len: usize) -> &str {
 }
 
 fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Result<(), FdPathError> {
-    let caller = current_fd_owner_context()?;
-    validate_fd_process_alignment(&table[idx])?;
-
-    if fd_owner_process(&table[idx])? != caller.process_id {
-        return Err(FdContextError::OwnershipMismatch.into());
-    }
-
-    Ok(())
+    policy::validate_fd_ownership(idx, table)
 }
 
 fn validate_fd_ownership_with_owner(
@@ -6657,13 +6121,7 @@ fn validate_fd_ownership_with_owner(
     table: &[KernelFd; MAX_KERNEL_FDS],
     caller: FdOwnerContext,
 ) -> Result<(), FdPathError> {
-    validate_fd_process_alignment(&table[idx])?;
-
-    if fd_owner_process(&table[idx])? != caller.process_id {
-        return Err(FdContextError::OwnershipMismatch.into());
-    }
-
-    Ok(())
+    policy::validate_fd_ownership_with_owner(idx, table, caller)
 }
 
 fn note_fd_process_activity(process_id: crate::process::ProcessId) {
