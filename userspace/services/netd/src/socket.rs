@@ -106,6 +106,13 @@ impl PendingIcmp {
     }
 }
 
+pub enum IcmpMatchResult {
+    Matched(u64, Vec<u8>),
+    Duplicate,
+    Late,
+    NoMatch,
+}
+
 pub struct SocketManager {
     pub pending_recvs: [PendingRecv; 8],
     pub pending_resolves: [PendingResolve; 4],
@@ -374,6 +381,9 @@ impl SocketManager {
                 pi.identifier = id;
                 pi.sequence = msg.sequence;
                 pi.start_tick = now_ticks;
+                pi.delivered = false;
+                pi.timed_out = false;
+                pi.completed_at = None;
 
                 log_netd_icmp_registered(id, msg.sequence, dest_ip, msg.reply_port);
                 pi.timeout_ticks = msg.timeout_ms as u64 / 10;
@@ -399,18 +409,15 @@ impl SocketManager {
         ttl: u8,
         now_ticks: u64,
         icmp_payload: &[u8],
-    ) -> Option<(u64, Vec<u8>)> {
+    ) -> IcmpMatchResult {
         for pi in self.pending_icmps.iter_mut() {
             if pi.in_use && pi.identifier == id && pi.sequence == seq && pi.dest_ip == src_ip {
                 if pi.delivered {
-                    log(&format!("[netd] Duplicate ICMP reply ignored: id=0x{:04x} seq={}", id, seq));
-                    return None;
+                    return IcmpMatchResult::Duplicate;
                 }
 
                 if pi.timed_out {
-                    log(&format!("[netd] Late ICMP reply ignored (grace period): id=0x{:04x} seq={}", id, seq));
-                    // Entry will be cleaned up by check_icmp_timeouts after grace period
-                    return None;
+                    return IcmpMatchResult::Late;
                 }
 
                 let reply_port = pi.reply_port;
@@ -434,10 +441,10 @@ impl SocketManager {
                 let copy_len = icmp_payload.len().min(64);
                 reply.payload[..copy_len].copy_from_slice(&icmp_payload[..copy_len]);
 
-                return Some((reply_port, reply.to_bytes()));
+                return IcmpMatchResult::Matched(reply_port, reply.to_bytes());
             }
         }
-        None
+        IcmpMatchResult::NoMatch
     }
 
     /// Periodic cleanup of timed out ICMP requests and completed entries.

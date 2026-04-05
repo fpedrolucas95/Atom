@@ -402,7 +402,9 @@ fn dispatch_rx(
                             if icmp_pkt.icmp_type == ICMP_ECHO_REPLY {
                                 log("netd: ICMP Echo Reply received");
                                 let now = atom_syscall::thread::get_ticks();
-                                if let Some((reply_port, reply_bytes)) = sock_mgr.notify_icmp_reply(
+
+                                use crate::socket::IcmpMatchResult;
+                                match sock_mgr.notify_icmp_reply(
                                     ip_hdr.src,
                                     icmp_pkt.id,
                                     icmp_pkt.seq,
@@ -410,9 +412,23 @@ fn dispatch_rx(
                                     now,
                                     icmp_payload,
                                 ) {
-                                    send_message(reply_port, MessageType::NetIcmpEchoReply, &reply_bytes).ok();
-                                } else {
-                                    log("netd: gateway reachable (smoke ping ok)");
+                                    IcmpMatchResult::Matched(reply_port, reply_bytes) => {
+                                        send_message(reply_port, MessageType::NetIcmpEchoReply, &reply_bytes).ok();
+                                    }
+                                    IcmpMatchResult::Duplicate => {
+                                        log(&format!("[netd] Duplicate ICMP reply ignored: id=0x{:04x} seq={}", icmp_pkt.id, icmp_pkt.seq));
+                                    }
+                                    IcmpMatchResult::Late => {
+                                        log(&format!("[netd] Late ICMP reply ignored (grace period): id=0x{:04x} seq={}", icmp_pkt.id, icmp_pkt.seq));
+                                    }
+                                    IcmpMatchResult::NoMatch => {
+                                        if icmp_pkt.id == 1 {
+                                            log("netd: gateway reachable (smoke ping ok)");
+                                        } else {
+                                            log(&format!("[netd] Unmatched ICMP reply: id=0x{:04x} seq={} src={}",
+                                                icmp_pkt.id, icmp_pkt.seq, ip_hdr.src));
+                                        }
+                                    }
                                 }
                             }
                         }
