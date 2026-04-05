@@ -1,3 +1,6 @@
+use alloc::vec::Vec;
+use alloc::format;
+use atom_syscall::debug::log;
 use crate::tcp::TcpManager;
 use crate::dns::DnsCache;
 use libipc::messages::{
@@ -7,6 +10,8 @@ use libipc::messages::{
     NetRecvMsg, NetRecvReplyMsg,
     NetCloseMsg, NetCloseReplyMsg,
     NetResolveMsg, NetResolveReplyMsg,
+    NetIcmpEchoRequestMsg, NetIcmpEchoReplyMsg,
+    NetIpAddr,
 };
 
 /// A pending deferred recv: socket waiting for data
@@ -30,6 +35,7 @@ impl PendingRecv {
 
 /// A pending DNS resolve: waiting for DNS response to arrive
 pub struct PendingResolve {
+    pub transaction_id: u16,
     pub name: [u8; 256],
     pub name_len: usize,
     pub reply_port: u64,
@@ -41,6 +47,7 @@ pub struct PendingResolve {
 impl PendingResolve {
     const fn new() -> Self {
         Self {
+            transaction_id: 0,
             name: [0u8; 256],
             name_len: 0,
             reply_port: 0,
@@ -68,10 +75,67 @@ impl PendingConnect {
     }
 }
 
+/// A pending ICMP echo request: waiting for Echo Reply
+pub struct PendingIcmp {
+    pub reply_port: u64,
+    pub dest_ip: u32,
+    pub identifier: u16,
+    pub sequence: u16,
+    pub start_tick: u64,
+    pub timeout_ticks: u64,
+    pub in_use: bool,
+    pub delivered: bool,
+    pub timed_out: bool,
+    pub completed_at: Option<u64>,
+}
+
+impl PendingIcmp {
+    const fn new() -> Self {
+        Self {
+            reply_port: 0,
+            dest_ip: 0,
+            identifier: 0,
+            sequence: 0,
+            start_tick: 0,
+            timeout_ticks: 0,
+            in_use: false,
+            delivered: false,
+            timed_out: false,
+            completed_at: None,
+        }
+    }
+}
+
+pub enum IcmpMatchResult {
+    Matched(u64, Vec<u8>),
+    Duplicate,
+    Late,
+    NoMatch,
+}
+
 pub struct SocketManager {
     pub pending_recvs: [PendingRecv; 8],
     pub pending_resolves: [PendingResolve; 4],
     pub pending_connects: [PendingConnect; 8],
+    next_dns_id: u16,
+    pub pending_icmps: [PendingIcmp; 8],
+    next_icmp_id: u16,
+}
+
+fn log_netd_icmp_registered(id: u16, seq: u16, dest: u32, client: u64) {
+    let dest_b = dest.to_be_bytes();
+    log(&format!(
+        "[netd] ICMP request registered: id=0x{:04x} seq={} dest={}.{}.{}.{} client=Port({})",
+        id, seq, dest_b[0], dest_b[1], dest_b[2], dest_b[3], client
+    ));
+}
+
+fn log_netd_icmp_match(id: u16, seq: u16, src: u32) {
+    let src_b = src.to_be_bytes();
+    log(&format!(
+        "[netd] ICMP match found: id=0x{:04x} seq={} src={}.{}.{}.{} -> delivering to client",
+        id, seq, src_b[0], src_b[1], src_b[2], src_b[3]
+    ));
 }
 
 impl SocketManager {
@@ -89,6 +153,12 @@ impl SocketManager {
                 PendingConnect::new(), PendingConnect::new(), PendingConnect::new(), PendingConnect::new(),
                 PendingConnect::new(), PendingConnect::new(), PendingConnect::new(), PendingConnect::new(),
             ],
+            pending_icmps: [
+                PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
+                PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
+            ],
+            next_icmp_id: 1000,
+            next_dns_id: 0xABCD,
         }
     }
 
@@ -236,7 +306,7 @@ impl SocketManager {
         payload: &[u8],
         dns: &mut DnsCache,
         now_ticks: u64,
-    ) -> Option<(u64, [u8; NetResolveReplyMsg::SIZE])> {
+    ) -> Option<Result<(u64, [u8; NetResolveReplyMsg::SIZE]), u16>> {
         let msg = NetResolveMsg::from_bytes(payload)?;
         let name_len = (msg.name_len as usize).min(256);
         let name_bytes = &msg.name[..name_len];
@@ -245,32 +315,37 @@ impl SocketManager {
         if let Some(ip) = dns.lookup(name, now_ticks) {
             // Cache hit — reply immediately
             let reply = NetResolveReplyMsg { ip, error: 0 };
-            return Some((msg.reply_port, reply.to_bytes()));
+            return Some(Ok((msg.reply_port, reply.to_bytes())));
         }
 
         // Cache miss — store pending resolve, caller will send DNS query
         for pr in self.pending_resolves.iter_mut() {
             if !pr.in_use {
+                let tid = self.next_dns_id;
+                self.next_dns_id = self.next_dns_id.wrapping_add(1);
+
+                pr.transaction_id = tid;
                 pr.name[..name_len].copy_from_slice(name_bytes);
                 pr.name_len = name_len;
                 pr.reply_port = msg.reply_port;
                 pr.in_use = true;
-                break;
+
+                // Return transaction ID to caller so they can build the packet
+                return Some(Err(tid));
             }
         }
 
-        None // No reply yet; will be sent when DNS response arrives
+        None // No free slots
     }
 
-    /// Called when a DNS response arrives — fulfill any pending resolve for this name.
+    /// Called when a DNS response arrives — fulfill any pending resolve for this ID.
     pub fn notify_dns_resolved(
         &mut self,
-        name: &str,
+        transaction_id: u16,
         ip: u32,
     ) -> Option<(u64, [u8; NetResolveReplyMsg::SIZE])> {
-        let name_bytes = name.as_bytes();
         for pr in self.pending_resolves.iter_mut() {
-            if pr.in_use && &pr.name[..pr.name_len] == name_bytes {
+            if pr.in_use && pr.transaction_id == transaction_id {
                 let reply_port = pr.reply_port;
                 pr.in_use = false;
                 let reply = NetResolveReplyMsg { ip, error: 0 };
@@ -278,6 +353,139 @@ impl SocketManager {
             }
         }
         None
+    }
+
+    /// Handle NetIcmpEchoRequest: register pending and return ICMP info for sending.
+    pub fn handle_net_icmp_echo(
+        &mut self,
+        payload: &[u8],
+        now_ticks: u64,
+    ) -> Option<(u32, u16, u16, &[u8])> {
+        let msg = NetIcmpEchoRequestMsg::from_bytes(payload)?;
+
+        // IPv4 only for now
+        if msg.dest_ip.family != 4 {
+            return None;
+        }
+        let dest_ip = u32::from_be_bytes([msg.dest_ip.data[0], msg.dest_ip.data[1], msg.dest_ip.data[2], msg.dest_ip.data[3]]);
+
+        // Find free slot
+        for pi in self.pending_icmps.iter_mut() {
+            if !pi.in_use {
+                let id = self.next_icmp_id;
+                self.next_icmp_id = self.next_icmp_id.wrapping_add(1);
+                if self.next_icmp_id < 1000 { self.next_icmp_id = 1000; }
+
+                pi.reply_port = msg.reply_port;
+                pi.dest_ip = dest_ip;
+                pi.identifier = id;
+                pi.sequence = msg.sequence;
+                pi.start_tick = now_ticks;
+                pi.delivered = false;
+                pi.timed_out = false;
+                pi.completed_at = None;
+
+                log_netd_icmp_registered(id, msg.sequence, dest_ip, msg.reply_port);
+                pi.timeout_ticks = msg.timeout_ms as u64 / 10;
+                pi.in_use = true;
+
+                // We need to return a reference to the payload, but msg is local.
+                // Actually, the payload is part of the msg which is part of payload buffer.
+                // We can't return it easily if we want to return a slice.
+                // Let's change the signature to return the full msg or just the needed parts.
+                // For now, let's just return what we need.
+                return Some((dest_ip, pi.identifier, pi.sequence, &[]));
+            }
+        }
+        None
+    }
+
+    /// Called when an ICMP Echo Reply arrives — fulfill any pending ICMP request.
+    pub fn notify_icmp_reply(
+        &mut self,
+        src_ip: u32,
+        id: u16,
+        seq: u16,
+        ttl: u8,
+        now_ticks: u64,
+        icmp_payload: &[u8],
+    ) -> IcmpMatchResult {
+        for pi in self.pending_icmps.iter_mut() {
+            if pi.in_use && pi.identifier == id && pi.sequence == seq && pi.dest_ip == src_ip {
+                if pi.delivered {
+                    return IcmpMatchResult::Duplicate;
+                }
+
+                if pi.timed_out {
+                    return IcmpMatchResult::Late;
+                }
+
+                let reply_port = pi.reply_port;
+                pi.delivered = true;
+                pi.completed_at = Some(now_ticks);
+
+                log_netd_icmp_match(id, seq, src_ip);
+
+                let rtt_ticks = now_ticks.saturating_sub(pi.start_tick);
+                let rtt_ms = (rtt_ticks * 10) as u32;
+
+                let mut reply = NetIcmpEchoReplyMsg {
+                    src_ip: NetIpAddr::ipv4(src_ip.to_be_bytes()),
+                    sequence: seq,
+                    ttl,
+                    rtt_ms,
+                    error: 0,
+                    payload_len: icmp_payload.len() as u32,
+                    payload: [0u8; 64],
+                };
+                let copy_len = icmp_payload.len().min(64);
+                reply.payload[..copy_len].copy_from_slice(&icmp_payload[..copy_len]);
+
+                return IcmpMatchResult::Matched(reply_port, reply.to_bytes());
+            }
+        }
+        IcmpMatchResult::NoMatch
+    }
+
+    /// Periodic cleanup of timed out ICMP requests and completed entries.
+    pub fn check_icmp_timeouts(&mut self, now_ticks: u64) -> alloc::vec::Vec<(u64, Vec<u8>)> {
+        let mut notifications = alloc::vec::Vec::new();
+        const GRACE_PERIOD_TICKS: u64 = 50; // 500ms at 100Hz
+
+        for pi in self.pending_icmps.iter_mut() {
+            if !pi.in_use { continue; }
+
+            let elapsed = now_ticks.saturating_sub(pi.start_tick);
+
+            // Case 1: Active request exceeds timeout
+            if !pi.delivered && !pi.timed_out && elapsed >= pi.timeout_ticks {
+                pi.timed_out = true;
+                pi.completed_at = Some(now_ticks);
+
+                log(&format!("[netd] ICMP timeout: id=0x{:04x} seq={}", pi.identifier, pi.sequence));
+
+                let reply = NetIcmpEchoReplyMsg {
+                    src_ip: NetIpAddr::ipv4(pi.dest_ip.to_be_bytes()),
+                    sequence: pi.sequence,
+                    ttl: 0,
+                    rtt_ms: 0,
+                    error: 1, // Timeout
+                    payload_len: 0,
+                    payload: [0u8; 64],
+                };
+                notifications.push((pi.reply_port, reply.to_bytes()));
+                continue;
+            }
+
+            // Case 2: Entry is completed (either delivered or timed out) and exceeds grace period
+            if let Some(done_at) = pi.completed_at {
+                if now_ticks.saturating_sub(done_at) >= GRACE_PERIOD_TICKS {
+                    pi.in_use = false;
+                    // Registry entry finally freed
+                }
+            }
+        }
+        notifications
     }
 
     /// Check if there's a pending recv for this socket; if so, fulfill it.

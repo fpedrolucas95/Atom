@@ -60,6 +60,7 @@ pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         // Category headers and their members
         let categories: &[(&str, &[&str])] = &[
             ("System", &["help","version","uptime","date","sysinfo","clear","echo","log"]),
+            ("Network", &["ping", "ifconfig"]),
             ("Process", &["ps","kill","exec","mem","services"]),
             ("Navigation & Read", &["ls","cd","pwd","cat","head","tail","wc","stat","find","tree"]),
             ("Write & Manage", &["mkdir","rmdir","rm","mv","cp","touch","fsync","chmod","ln","df","du"]),
@@ -288,6 +289,20 @@ fn show_command_help(topic: &str, ctx: &mut CommandContext<'_>) {
             ctx.println("  du /home/user");
             ctx.println("  du -sh /var");
             ctx.println("  du -h /tmp");
+        }
+        "ping" => {
+            ctx.println_colored("Options:", Theme::TEXT_DIM);
+            ctx.println("  -c N   Stop after sending N ECHO_REQUEST packets");
+            ctx.println("  -i MS  Wait MS milliseconds between sending each packet");
+            ctx.println("  -t MS  Timeout in MS milliseconds for each packet");
+            ctx.println("");
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  ping 8.8.8.8");
+            ctx.println("  ping www.google.com -c 10");
+        }
+        "ifconfig" | "netinfo" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  ifconfig");
         }
         "ps" | "procs" => {
             ctx.println_colored("Examples:", Theme::PROMPT_USER);
@@ -606,6 +621,14 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     let uptime = unsafe { core::str::from_utf8_unchecked(&uptime_buf[..len]) };
     ctx.print("Uptime:       ");
     ctx.println(uptime);
+
+    // Network
+    if let Ok(netd_port) = libipc::protocol::lookup_service("netd") {
+        if let Ok(config) = libnet::net_get_config(netd_port) {
+            ctx.print("Network:      ");
+            ctx.println(&alloc::format!("{}", config.ip));
+        }
+    }
 
     ctx.println("");
 
