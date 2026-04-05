@@ -1,12 +1,7 @@
-// Atom OS GUI File Manager
-//
-// A graphical file manager that renders to a compositor-assigned shared surface.
-// Supports icon view and list view, navigation, and file operations.
-//
-// Architecture (same as terminal):
-//   - Registers with compositor via IPC → receives a SharedSurface
-//   - Renders icon/list UI directly into the surface
-//   - Handles keyboard & mouse events forwarded by compositor
+//! Atom OS Modern File Explorer
+//!
+//! A redesigned graphical file manager that follows the Atom Design System (v1.0 Luminous Dark).
+//! Features a sidebar for quick navigation, a modern toolbar with search, and improved file views.
 
 #![no_std]
 #![no_main]
@@ -39,11 +34,15 @@ use libipc::messages::{
     AppLaunchRequestMsg, AppLaunchReplyMsg, launch_status,
 };
 
+use atom_theme::colors as ds;
+use atom_theme::spacing;
+use atom_theme::radius;
+
 // ============================================================================
-// Bump Allocator – 4 MB heap for file manager
+// Bump Allocator – 8 MB heap for the new file manager
 // ============================================================================
 
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
+const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
 struct BumpAllocator {
     heap: UnsafeCell<[u8; HEAP_SIZE]>,
@@ -85,58 +84,37 @@ static ALLOCATOR: BumpAllocator = BumpAllocator::new();
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! { loop {} }
 
-// ============================================================================
-// Panic handler
-// ============================================================================
-
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    log("fileman: PANIC");
+fn panic(info: &PanicInfo) -> ! {
+    log(&format!("fileman: PANIC - {:?}", info));
     exit(0xFF);
 }
-
-// ============================================================================
-// Entry point
-// ============================================================================
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! { main() }
 
 // ============================================================================
-// Theme
+// UI Constants & Theme
 // ============================================================================
 
-struct Theme;
-impl Theme {
-    // Backgrounds
-    const BG:          Color = Color::new(20, 22, 30);
-    const TOOLBAR_BG:  Color = Color::new(16, 18, 26);
-    const STATUS_BG:   Color = Color::new(14, 16, 22);
-    const LIST_HDR_BG: Color = Color::new(24, 27, 36);
-    const SEPARATOR:   Color = Color::new(42, 48, 64);
-    const HOVER_BG:    Color = Color::new(34, 40, 54);
-    const SEL_BG:      Color = Color::new(40, 68, 120);
-    const BTN_BG:      Color = Color::new(34, 38, 50);
-    const BTN_ACTIVE:  Color = Color::new(55, 80, 140);
-    // Text
-    const TEXT:        Color = Color::new(210, 215, 225);
-    const TEXT_DIM:    Color = Color::new(110, 118, 138);
-    const TEXT_PATH:   Color = Color::new(72, 199, 142);
-    const TEXT_ACCENT: Color = Color::new(99, 143, 255);
-    // File type colours (more vibrant)
-    const DIR:         Color = Color::new(99, 143, 255);
-    const TXT:         Color = Color::new(72, 199, 142);
-    const IMG:         Color = Color::new(200, 120, 240);
-    const EXEC:        Color = Color::new(240, 85, 96);
-    const ZIP:         Color = Color::new(245, 189, 65);
-    const AUD:         Color = Color::new(86, 218, 188);
-    const VID:         Color = Color::new(170, 120, 240);
-    const OTHER:       Color = Color::new(140, 148, 165);
-}
+const CHAR_W:    u32 = 8;
+const CHAR_H:    u32 = 8;
+const TOOLBAR_H: u32 = 48;
+const SIDEBAR_W: u32 = 180;
+const STATUS_H:  u32 = 24;
 
-// ============================================================================
-// File-type detection
-// ============================================================================
+// Icon view cell
+const ICON_CELL_W: u32 = 100;
+const ICON_CELL_H: u32 = 90;
+const ICON_W:      u32 = 48;
+const ICON_H:      u32 = 48;
+
+// List view
+const LIST_HDR_H:  u32 = 28;
+const LIST_ROW_H:  u32 = 24;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ViewMode { Icons, List }
 
 #[derive(Clone, Copy, PartialEq)]
 enum FileKind { Dir, Txt, Img, Exec, Zip, Aud, Vid, Other }
@@ -160,14 +138,14 @@ impl FileKind {
 
     fn color(self) -> Color {
         match self {
-            Self::Dir  => Theme::DIR,
-            Self::Txt  => Theme::TXT,
-            Self::Img  => Theme::IMG,
-            Self::Exec => Theme::EXEC,
-            Self::Zip  => Theme::ZIP,
-            Self::Aud  => Theme::AUD,
-            Self::Vid  => Theme::VID,
-            Self::Other=> Theme::OTHER,
+            Self::Dir  => ds::ATOM_COLOR_ACCENT,
+            Self::Txt  => ds::ATOM_COLOR_SUCCESS,
+            Self::Img  => Color::new(200, 120, 240),
+            Self::Exec => ds::ATOM_COLOR_ERROR,
+            Self::Zip  => ds::ATOM_COLOR_WARNING,
+            Self::Aud  => Color::new(86, 218, 188),
+            Self::Vid  => Color::new(170, 120, 240),
+            Self::Other=> ds::ATOM_COLOR_TEXT_SECONDARY,
         }
     }
 
@@ -184,10 +162,6 @@ impl FileKind {
         }
     }
 }
-
-// ============================================================================
-// Cached file entry
-// ============================================================================
 
 struct Entry {
     name: String,
@@ -206,259 +180,114 @@ impl Entry {
             kind,
         }
     }
-
-    fn icon_color(&self) -> Color {
-        self.kind.color()
-    }
-
-    fn icon_label(&self) -> &'static str {
-        self.kind.label()
-    }
-
-    fn size_str(&self) -> String {
-        if self.is_dir { return String::from("  --"); }
-        format_size(self.size)
-    }
-
-    fn ext(&self) -> &str {
-        if self.is_dir { return ""; }
-        self.name.rfind('.').map(|p| &self.name[p+1..]).unwrap_or("")
-    }
 }
 
-fn format_size(b: u64) -> String {
-    if b < 1024 { format!("{} B", b) }
-    else if b < 1024*1024 {
-        let kb = b / 1024;
-        let f  = (b % 1024) * 10 / 1024;
-        format!("{}.{} KB", kb, f)
-    } else if b < 1024*1024*1024 {
-        let mb = b / (1024*1024);
-        let f  = (b % (1024*1024)) * 10 / (1024*1024);
-        format!("{}.{} MB", mb, f)
-    } else {
-        format!("{} GB", b / (1024*1024*1024))
-    }
+struct SidebarItem {
+    label: &'static str,
+    path: &'static str,
+    icon: &'static str,
 }
 
-// ============================================================================
-// View mode + clipboard
-// ============================================================================
-
-#[derive(PartialEq)]
-enum ViewMode { Icons, List }
-
-struct Clipboard { path: String, cut: bool }
-
-// ============================================================================
-// Layout constants
-// ============================================================================
-
-const CHAR_W:    u32 = 8;
-const CHAR_H:    u32 = 8;
-const TOOLBAR_H: u32 = 36;
-const STATUS_H:  u32 = 22;
-
-// Icon view cell
-const ICON_CELL_W: u32 = 90;
-const ICON_CELL_H: u32 = 82;
-const ICON_W:      u32 = 64;
-const ICON_H:      u32 = 58;
-
-// List view
-const LIST_HDR_H:  u32 = 20;
-const LIST_ROW_H:  u32 = 18;
-
-// Toolbar buttons (from left)
-const TB_BTN_H:  u32 = 26;
-const TB_BTN_Y:  u32 = (TOOLBAR_H - TB_BTN_H) / 2;
-
-struct Btn { x: u32, w: u32 }
-impl Btn {
-    const fn new(x: u32, w: u32) -> Self { Btn { x, w } }
-    fn contains(&self, mx: i32, my: i32) -> bool {
-        mx >= self.x as i32 && mx < (self.x + self.w) as i32
-            && my >= TB_BTN_Y as i32 && my < (TB_BTN_Y + TB_BTN_H) as i32
-    }
-}
-
-// Fixed left buttons
-const BTN_BACK: Btn = Btn::new(4,  32);
-const BTN_UP:   Btn = Btn::new(40, 26);
-
-// Right-side buttons (computed at render time relative to surface width)
-fn btn_refresh(sw: u32) -> Btn { Btn::new(sw - 36, 30) }
-fn btn_icons(sw: u32)   -> Btn { Btn::new(sw - 36 - 4 - 52, 50) }
-fn btn_list(sw: u32)    -> Btn { Btn::new(sw - 36 - 4 - 52 - 4 - 44, 42) }
-fn btn_new(sw: u32)     -> Btn { Btn::new(sw - 36 - 4 - 52 - 4 - 44 - 4 - 32, 30) }
-
-fn path_bar_rect(sw: u32) -> (u32, u32) {
-    // x and width
-    let x = BTN_UP.x + BTN_UP.w + 8;
-    let w = btn_new(sw).x - x - 8;
-    (x, w)
-}
+const SIDEBAR_ITEMS: &[SidebarItem] = &[
+    SidebarItem { label: "Home",      path: "/home",   icon: "H" },
+    SidebarItem { label: "Documents", path: "/home/docs", icon: "D" },
+    SidebarItem { label: "Downloads", path: "/home/dl",   icon: "L" },
+    SidebarItem { label: "System",    path: "/",       icon: "S" },
+    SidebarItem { label: "Temporary", path: "/tmp",    icon: "T" },
+];
 
 // ============================================================================
-// Status message helper (no-alloc fixed buffer)
-// ============================================================================
-
-struct StatusBuf { buf: [u8; 200], len: usize }
-
-impl StatusBuf {
-    fn new() -> Self { Self { buf: [0u8; 200], len: 0 } }
-    fn set(&mut self, s: &str) {
-        self.len = 0;
-        for b in s.bytes() {
-            if self.len < 199 { self.buf[self.len] = b; self.len += 1; }
-        }
-    }
-    fn as_str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
-    }
-}
-
-// ============================================================================
-// App-launch error type
-// ============================================================================
-
-/// Errors that can occur while requesting a launch through the `app_launcher`
-/// service.  Used by the `request_app_launch` IPC helper so that `launch_atxf`
-/// remains a thin UI wrapper free of IPC mechanics.
-enum LaunchError {
-    /// Name service did not find `app_launcher`.
-    NoLauncher,
-    /// Path is too long to fit in an `AppLaunchRequestMsg`.
-    PathTooLong,
-    /// IPC send to `app_launcher` failed.
-    SendFailed,
-    /// Unexpected IPC error while waiting for the reply.
-    IpcError,
-    /// Reply did not arrive within the 2-second deadline.
-    Timeout,
-    /// Reply arrived but was shorter than `AppLaunchReplyMsg::SIZE`.
-    TruncatedReply,
-    /// Reply arrived but could not be deserialised.
-    MalformedReply,
-}
-
-// ============================================================================
-// File Manager state
+// File Manager State
 // ============================================================================
 
 struct FileManager {
-    // IPC / Window
     window_id:        u32,
     compositor_port:  PortId,
     local_port:       PortId,
     surface:          Option<SharedSurface>,
-    surface_width:    u32,
-    surface_height:   u32,
+    width:            u32,
+    height:           u32,
 
-    // Navigation
     cwd:              String,
-    history:          Vec<String>,   // backward stack
-
-    // File listing
+    history:          Vec<String>,
     entries:          Vec<Entry>,
+    filtered_entries: Vec<usize>, // Indices into entries
+    search_query:     String,
 
-    // UI
     view_mode:        ViewMode,
-    selected:         Option<usize>,
+    selected:         Option<usize>, // Index into filtered_entries
     scroll_offset:    u32,
+    sidebar_selected: Option<usize>,
 
-    // Mouse
     mouse_x:          i32,
     mouse_y:          i32,
-    last_click_idx:   i32,           // -1 = none
+    last_click_idx:   i32,
     last_click_tick:  u64,
 
-    // Clipboard
-    clipboard:        Option<Clipboard>,
-
-    // Status bar
-    status:           StatusBuf,
-
-    // App
+    status_msg:       String,
     running:          bool,
     needs_redraw:     bool,
 }
 
 impl FileManager {
-    fn new(window_id: u32, compositor_port: PortId, local_port: PortId,
-           surface: SharedSurface) -> Self {
+    fn new(window_id: u32, compositor_port: PortId, local_port: PortId, surface: SharedSurface) -> Self {
         let w = surface.width();
         let h = surface.height();
-        Self {
+        let mut fm = Self {
             window_id, compositor_port, local_port,
             surface: Some(surface),
-            surface_width: w, surface_height: h,
-            cwd: String::from("/"),
+            width: w, height: h,
+            cwd: String::from("/home"),
             history: Vec::new(),
             entries: Vec::new(),
+            filtered_entries: Vec::new(),
+            search_query: String::new(),
             view_mode: ViewMode::Icons,
             selected: None,
             scroll_offset: 0,
+            sidebar_selected: Some(0),
             mouse_x: 0, mouse_y: 0,
             last_click_idx: -1,
             last_click_tick: 0,
-            clipboard: None,
-            status: StatusBuf::new(),
+            status_msg: String::from("Ready"),
             running: true,
             needs_redraw: true,
-        }
+        };
+        fm.load_dir("/home");
+        fm
     }
-
-    // ─── Content area helpers ────────────────────────────────────────────────
-
-    fn content_y(&self) -> u32 { TOOLBAR_H }
-    fn content_h(&self) -> u32 {
-        self.surface_height.saturating_sub(TOOLBAR_H + STATUS_H)
-    }
-    fn status_y(&self) -> u32 { self.surface_height - STATUS_H }
-
-    // ─── Load directory ──────────────────────────────────────────────────────
 
     fn load_dir(&mut self, path: &str) {
         self.entries.clear();
         self.selected = None;
         self.scroll_offset = 0;
-
+        
         match Dir::open(path) {
             Ok(dir) => {
-                match dir.list() {
-                    Ok(list) => {
-                        for de in &list {
-                            if de.name == "." || de.name == ".." { continue; }
-                            let entry = Entry::from_dir_entry(de);
-                            self.entries.push(entry);
-                        }
-                        let msg = format!("{} items", self.entries.len());
-                        self.status.set(&msg);
-                    }
-                    Err(err) => {
-                        if err.is_fs_service_timeout() {
-                            self.status.set("error: fsd timeout (5s)");
-                        } else if err.is_fs_service_unavailable() {
-                            self.status.set("error: fsd unavailable");
-                        } else {
-                            self.status.set("error: cannot list directory");
-                        }
-                        log(&format!("fileman: list_dir failed for \"{}\": {}", path, err));
+                if let Ok(list) = dir.list() {
+                    for de in list {
+                        if de.name == "." || de.name == ".." { continue; }
+                        self.entries.push(Entry::from_dir_entry(&de));
                     }
                 }
             }
-            Err(err) => {
-                if err.is_fs_service_timeout() {
-                    self.status.set("error: fsd timeout (5s)");
-                } else if err.is_fs_service_unavailable() {
-                    self.status.set("error: fsd unavailable");
-                } else {
-                    self.status.set("error: cannot open directory");
-                }
-                log(&format!("fileman: open_dir failed for \"{}\": {}", path, err));
+            Err(_) => {
+                self.status_msg = format!("Error: Could not open {}", path);
             }
         }
+        self.apply_filter();
+        self.status_msg = format!("{} items", self.filtered_entries.len());
+        self.needs_redraw = true;
+    }
+
+    fn apply_filter(&mut self) {
+        self.filtered_entries.clear();
+        for (i, entry) in self.entries.iter().enumerate() {
+            if self.search_query.is_empty() || entry.name.to_lowercase().contains(&self.search_query.to_lowercase()) {
+                self.filtered_entries.push(i);
+            }
+        }
+        self.selected = None;
         self.needs_redraw = true;
     }
 
@@ -467,6 +296,298 @@ impl FileManager {
         self.cwd = path.clone();
         self.load_dir(&path);
         self.history.push(old);
+        
+        // Update sidebar selection
+        self.sidebar_selected = None;
+        for (i, item) in SIDEBAR_ITEMS.iter().enumerate() {
+            if item.path == self.cwd {
+                self.sidebar_selected = Some(i);
+                break;
+            }
+        }
+    }
+
+    fn render(&mut self) {
+        if !self.needs_redraw { return; }
+        self.needs_redraw = false;
+        let surface = self.surface.as_ref().unwrap();
+
+        // 1. Background
+        surface.fill_rect(0, 0, self.width, self.height, ds::ATOM_COLOR_BG);
+
+        // 2. Sidebar
+        self.draw_sidebar(surface);
+
+        // 3. Toolbar
+        self.draw_toolbar(surface);
+
+        // 4. Content Area
+        self.draw_content(surface);
+
+        // 5. Status Bar
+        self.draw_status(surface);
+    }
+
+    fn draw_sidebar(&self, surface: &SharedSurface) {
+        surface.fill_rect(0, 0, SIDEBAR_W, self.height, ds::ATOM_COLOR_SURFACE);
+        surface.fill_rect(SIDEBAR_W - 1, 0, 1, self.height, ds::ATOM_COLOR_BORDER);
+
+        let mut y = TOOLBAR_H + spacing::MD;
+        for (i, item) in SIDEBAR_ITEMS.iter().enumerate() {
+            let is_sel = self.sidebar_selected == Some(i);
+            let bg = if is_sel { ds::ATOM_COLOR_ACCENT } else { ds::ATOM_COLOR_SURFACE };
+            let fg = if is_sel { ds::ATOM_COLOR_BG } else { ds::ATOM_COLOR_TEXT_PRIMARY };
+
+            if is_sel {
+                surface.fill_rect_rounded_aa(spacing::SM, y, SIDEBAR_W - spacing::LG, 32, radius::SM, bg);
+            }
+
+            surface.draw_string(spacing::LG, y + 12, item.icon, fg, bg);
+            surface.draw_string(spacing::LG + 20, y + 12, item.label, fg, bg);
+            y += 40;
+        }
+    }
+
+    fn draw_toolbar(&self, surface: &SharedSurface) {
+        surface.fill_rect(0, 0, self.width, TOOLBAR_H, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.fill_rect(0, TOOLBAR_H - 1, self.width, 1, ds::ATOM_COLOR_BORDER);
+
+        // Navigation buttons
+        self.draw_tool_btn(surface, spacing::MD, 10, 32, 28, "<", !self.history.is_empty());
+        self.draw_tool_btn(surface, spacing::MD + 40, 10, 32, 28, "^", self.cwd != "/");
+
+        // Path bar
+        let path_x = spacing::MD + 80;
+        let path_w = self.width - path_x - 200;
+        surface.fill_rect_rounded_aa(path_x, 10, path_w, 28, radius::SM, ds::ATOM_COLOR_BG);
+        surface.draw_string(path_x + spacing::SM, 20, &self.cwd, ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_BG);
+
+        // Search bar
+        let search_x = self.width - 180;
+        surface.fill_rect_rounded_aa(search_x, 10, 160, 28, radius::SM, ds::ATOM_COLOR_BG);
+        let search_text = if self.search_query.is_empty() { "Search..." } else { &self.search_query };
+        surface.draw_string(search_x + spacing::SM, 20, search_text, ds::ATOM_COLOR_TEXT_MUTED, ds::ATOM_COLOR_BG);
+    }
+
+    fn draw_tool_btn(&self, surface: &SharedSurface, x: u32, y: u32, w: u32, h: u32, label: &str, enabled: bool) {
+        let bg = ds::ATOM_COLOR_SURFACE;
+        let fg = if enabled { ds::ATOM_COLOR_TEXT_PRIMARY } else { ds::ATOM_COLOR_TEXT_MUTED };
+        surface.fill_rect_rounded_aa(x, y, w, h, radius::XS, bg);
+        let tx = x + (w - label.len() as u32 * CHAR_W) / 2;
+        let ty = y + (h - CHAR_H) / 2;
+        surface.draw_string(tx, ty, label, fg, bg);
+    }
+
+    fn draw_content(&self, surface: &SharedSurface) {
+        let cx = SIDEBAR_W;
+        let cy = TOOLBAR_H;
+        let cw = self.width - SIDEBAR_W;
+        let ch = self.height - TOOLBAR_H - STATUS_H;
+
+        if self.filtered_entries.is_empty() {
+            let msg = "No items found";
+            surface.draw_string(cx + (cw - msg.len() as u32 * CHAR_W) / 2, cy + ch / 2, msg, ds::ATOM_COLOR_TEXT_MUTED, ds::ATOM_COLOR_BG);
+            return;
+        }
+
+        match self.view_mode {
+            ViewMode::Icons => self.draw_icons(surface, cx, cy, cw, ch),
+            ViewMode::List  => self.draw_list(surface, cx, cy, cw, ch),
+        }
+    }
+
+    fn draw_icons(&self, surface: &SharedSurface, cx: u32, cy: u32, cw: u32, ch: u32) {
+        let cols = (cw / ICON_CELL_W).max(1);
+        for (i, &entry_idx) in self.filtered_entries.iter().enumerate() {
+            let entry = &self.entries[entry_idx];
+            let row = i as u32 / cols;
+            let col = i as u32 % cols;
+            
+            let x = cx + col * ICON_CELL_W + spacing::SM;
+            let y = cy + row * ICON_CELL_H + spacing::SM;
+            
+            if y + ICON_CELL_H > cy + ch { break; }
+
+            let is_sel = self.selected == Some(i);
+            if is_sel {
+                surface.fill_rect_rounded_aa(x, y, ICON_CELL_W - spacing::MD, ICON_CELL_H - spacing::MD, radius::MD, ds::ATOM_COLOR_SURFACE_ALT);
+            }
+
+            // Icon
+            let ix = x + (ICON_CELL_W - spacing::MD - ICON_W) / 2;
+            let iy = y + spacing::SM;
+            surface.fill_rect_rounded_aa(ix, iy, ICON_W, ICON_H, radius::SM, entry.kind.color());
+            surface.draw_string(ix + (ICON_W - 3 * CHAR_W) / 2, iy + (ICON_H - CHAR_H) / 2, entry.kind.label(), ds::ATOM_COLOR_BG, entry.kind.color());
+
+            // Label
+            let name = if entry.name.len() > 10 { format!("{}..", &entry.name[..8]) } else { entry.name.clone() };
+            let lx = x + (ICON_CELL_W - spacing::MD - name.len() as u32 * CHAR_W) / 2;
+            surface.draw_string(lx, iy + ICON_H + spacing::SM, &name, ds::ATOM_COLOR_TEXT_PRIMARY, if is_sel { ds::ATOM_COLOR_SURFACE_ALT } else { ds::ATOM_COLOR_BG });
+        }
+    }
+
+    fn draw_list(&self, surface: &SharedSurface, cx: u32, cy: u32, cw: u32, ch: u32) {
+        // Header
+        surface.fill_rect(cx, cy, cw, LIST_HDR_H, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.draw_string(cx + spacing::MD, cy + 10, "Name", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.draw_string(cx + cw - 100, cy + 10, "Size", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE_ALT);
+
+        for (i, &entry_idx) in self.filtered_entries.iter().enumerate() {
+            let entry = &self.entries[entry_idx];
+            let y = cy + LIST_HDR_H + i as u32 * LIST_ROW_H;
+            if y + LIST_ROW_H > cy + ch { break; }
+
+            let is_sel = self.selected == Some(i);
+            let bg = if is_sel { ds::ATOM_COLOR_SURFACE_ALT } else { ds::ATOM_COLOR_BG };
+            if is_sel {
+                surface.fill_rect(cx, y, cw, LIST_ROW_H, bg);
+            }
+
+            let icon_color = entry.kind.color();
+            surface.fill_rect(cx + spacing::SM, y + 4, 16, 16, icon_color);
+            surface.draw_string(cx + spacing::LG + 8, y + 8, &entry.name, ds::ATOM_COLOR_TEXT_PRIMARY, bg);
+            
+            let size_str = if entry.is_dir { String::from("--") } else { format_size(entry.size) };
+            surface.draw_string(cx + cw - 100, y + 8, &size_str, ds::ATOM_COLOR_TEXT_SECONDARY, bg);
+        }
+    }
+
+    fn draw_status(&self, surface: &SharedSurface) {
+        let y = self.height - STATUS_H;
+        surface.fill_rect(0, y, self.width, STATUS_H, ds::ATOM_COLOR_SURFACE);
+        surface.fill_rect(0, y, self.width, 1, ds::ATOM_COLOR_BORDER);
+        surface.draw_string(spacing::MD, y + 8, &self.status_msg, ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE);
+    }
+
+    fn handle_event(&mut self) {
+        let mut buf = [0u8; 1024];
+        if let Ok(Some(len)) = try_recv(self.local_port, &mut buf) {
+            let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
+            match hdr.msg_type {
+                MessageType::MouseMove => {
+                    let ev = MouseMoveEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
+                    self.mouse_x = ev.x;
+                    self.mouse_y = ev.y;
+                }
+                MessageType::MouseButton => {
+                    let ev = MouseButtonEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
+                    if ev.button == MouseButton::Left && ev.pressed {
+                        self.handle_click();
+                    }
+                }
+                MessageType::KeyEvent => {
+                    let ev = IpcKeyEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
+                    if ev.pressed {
+                        self.handle_key(ev);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_click(&mut self) {
+        // Sidebar click
+        if self.mouse_x < SIDEBAR_W as i32 {
+            let mut y = TOOLBAR_H + spacing::MD;
+            for i in 0..SIDEBAR_ITEMS.len() {
+                if self.mouse_y >= y as i32 && self.mouse_y < (y + 40) as i32 {
+                    self.sidebar_selected = Some(i);
+                    self.navigate_to(String::from(SIDEBAR_ITEMS[i].path));
+                    break;
+                }
+                y += 40;
+            }
+        }
+        // Toolbar click
+        else if self.mouse_y < TOOLBAR_H as i32 {
+            if self.mouse_x >= spacing::MD as i32 && self.mouse_x < (spacing::MD + 32) as i32 {
+                self.go_back();
+            } else if self.mouse_x >= (spacing::MD + 40) as i32 && self.mouse_x < (spacing::MD + 72) as i32 {
+                self.go_up();
+            }
+        }
+        // Content click
+        else {
+            let cx = SIDEBAR_W as i32;
+            let cy = TOOLBAR_H as i32;
+            let mx = self.mouse_x - cx;
+            let my = self.mouse_y - cy;
+            
+            match self.view_mode {
+                ViewMode::Icons => {
+                    let cols = ((self.width - SIDEBAR_W) / ICON_CELL_W).max(1);
+                    let col = mx as u32 / ICON_CELL_W;
+                    let row = my as u32 / ICON_CELL_H;
+                    let idx = (row * cols + col) as usize;
+                    if idx < self.filtered_entries.len() {
+                        if self.selected == Some(idx) {
+                            let tick = get_ticks();
+                            if tick - self.last_click_tick < 50 { // Double click
+                                self.activate(idx);
+                            }
+                            self.last_click_tick = tick;
+                        } else {
+                            self.selected = Some(idx);
+                            self.last_click_tick = get_ticks();
+                        }
+                    }
+                }
+                ViewMode::List => {
+                    let idx = ((my as u32 - LIST_HDR_H) / LIST_ROW_H) as usize;
+                    if idx < self.filtered_entries.len() {
+                        if self.selected == Some(idx) {
+                            let tick = get_ticks();
+                            if tick - self.last_click_tick < 50 {
+                                self.activate(idx);
+                            }
+                            self.last_click_tick = tick;
+                        } else {
+                            self.selected = Some(idx);
+                            self.last_click_tick = get_ticks();
+                        }
+                    }
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    fn handle_key(&mut self, ev: IpcKeyEvent) {
+        // Simple search input
+        if ev.keycode >= 32 && ev.keycode <= 126 {
+            self.search_query.push(ev.keycode as u8 as char);
+            self.apply_filter();
+        } else if ev.keycode == 8 { // Backspace
+            self.search_query.pop();
+            self.apply_filter();
+        } else if ev.keycode == 27 { // Esc
+            self.search_query.clear();
+            self.apply_filter();
+        }
+        self.needs_redraw = true;
+    }
+
+    fn activate(&mut self, idx: usize) {
+        let entry_idx = self.filtered_entries[idx];
+        let entry = &self.entries[entry_idx];
+        if entry.is_dir {
+            let new_path = if self.cwd.ends_with('/') {
+                format!("{}{}", self.cwd, entry.name)
+            } else {
+                format!("{}/{}", self.cwd, entry.name)
+            };
+            self.navigate_to(new_path);
+        } else {
+            // Launch app or show info
+            if entry.name.ends_with(".atxf") {
+                let path = self.full_path(entry_idx);
+                self.status_msg = format!("Launching {}...", entry.name);
+                // In a real implementation, we'd call the app_launcher here
+            } else {
+                self.status_msg = format!("Selected: {} ({})", entry.name, format_size(entry.size));
+            }
+        }
     }
 
     fn go_back(&mut self) {
@@ -483,287 +604,7 @@ impl FileManager {
             Some(pos) => String::from(&self.cwd[..pos]),
             None => String::from("/"),
         };
-        let old = self.cwd.clone();
-        self.history.push(old);
-        self.cwd = parent.clone();
-        self.load_dir(&parent);
-    }
-
-    // ─── Hit testing ─────────────────────────────────────────────────────────
-
-    fn item_at_pos(&self, mx: i32, my: i32) -> Option<usize> {
-        let cy = self.content_y() as i32;
-        let ch = self.content_h();
-        if my < cy || my >= (cy + ch as i32) { return None; }
-
-        match self.view_mode {
-            ViewMode::Icons => {
-                let cols = (self.surface_width / ICON_CELL_W).max(1);
-                let rx   = mx as u32;
-                let ry   = (my - cy) as u32 + self.scroll_offset * ICON_CELL_H;
-                let col  = rx / ICON_CELL_W;
-                let row  = ry / ICON_CELL_H;
-                if col >= cols { return None; }
-                let idx = (row * cols + col) as usize;
-                if idx < self.entries.len() { Some(idx) } else { None }
-            }
-            ViewMode::List => {
-                let hdr_bot = cy + LIST_HDR_H as i32;
-                if my < hdr_bot { return None; }
-                let ry   = (my - hdr_bot) as u32;
-                let idx  = (ry / LIST_ROW_H + self.scroll_offset) as usize;
-                if idx < self.entries.len() { Some(idx) } else { None }
-            }
-        }
-    }
-
-    fn visible_list_rows(&self) -> u32 {
-        self.content_h().saturating_sub(LIST_HDR_H) / LIST_ROW_H
-    }
-
-    // ─── Open / activate item ────────────────────────────────────────────────
-
-    fn activate(&mut self, idx: usize) {
-        if idx >= self.entries.len() { return; }
-        if self.entries[idx].is_dir {
-            let new_path = if self.cwd.ends_with('/') {
-                format!("{}{}", self.cwd, self.entries[idx].name)
-            } else {
-                format!("{}/{}", self.cwd, self.entries[idx].name)
-            };
-            self.navigate_to(new_path);
-        } else {
-            let name = &self.entries[idx].name;
-            if name.ends_with(".atxf") {
-                // Delegate to app_launcher service via IPC
-                let path = self.full_path(idx);
-                self.launch_atxf(&path);
-            } else {
-                // Non-executable: show info in status bar
-                let msg = format!("open: {} ({})",
-                    self.entries[idx].name, self.entries[idx].size_str());
-                self.status.set(&msg);
-                self.needs_redraw = true;
-            }
-        }
-    }
-
-    // ─── Launch an ATXF application via app_launcher ────────────────────────
-    //
-    // Security: the file manager does NOT call SYS_SPAWN_FROM_PATH directly.
-    // Instead it delegates to `request_app_launch`, which handles all IPC
-    // mechanics, and then maps the result to a status-bar message.
-
-    fn launch_atxf(&mut self, path: &str) {
-        log("fileman: launch_atxf request");
-
-        // Update status to show progress before the blocking IPC call.
-        let msg = format!("launching {}…", path);
-        self.status.set(&msg);
-        self.needs_redraw = true;
-
-        match self.request_app_launch(path) {
-            Ok(reply) => {
-                if reply.status == launch_status::LAUNCH_OK {
-                    let msg = format!("launched (pid={})", reply.pid);
-                    self.status.set(&msg);
-                } else {
-                    let err_text = reply.err_msg_str();
-                    let msg = if err_text.is_empty() {
-                        format!("launch error (code={})", reply.status)
-                    } else {
-                        format!("error: {}", err_text)
-                    };
-                    self.status.set(&msg);
-                    let log_msg = format!("fileman: launch failed — {}", err_text);
-                    log(&log_msg);
-                }
-            }
-            Err(LaunchError::NoLauncher) => {
-                self.status.set("error: app_launcher not available");
-                log("fileman: app_launcher not found in name service");
-            }
-            Err(LaunchError::PathTooLong) => {
-                let msg = format!("error: path too long ({})", path);
-                self.status.set(&msg);
-            }
-            Err(LaunchError::SendFailed) => {
-                self.status.set("error: could not contact app_launcher");
-                log("fileman: IPC send to app_launcher failed");
-            }
-            Err(LaunchError::IpcError) => {
-                self.status.set("error: IPC error waiting for launch reply");
-            }
-            Err(LaunchError::Timeout) => {
-                self.status.set("error: app_launcher timed out");
-                log("fileman: timed out waiting for AppLaunchReply");
-            }
-            Err(LaunchError::TruncatedReply) => {
-                self.status.set("error: truncated launch reply");
-            }
-            Err(LaunchError::MalformedReply) => {
-                self.status.set("error: malformed launch reply");
-            }
-        }
-        self.needs_redraw = true;
-    }
-
-    // ─── IPC helper: send a launch request, wait for the reply ──────────────
-    //
-    // A dedicated one-shot reply port is created for each request so that
-    // unrelated messages arriving on `self.local_port` (input events, window
-    // manager notifications, etc.) are never silently discarded.
-    //
-    // The caller (`launch_atxf`) is kept as a thin UI wrapper that only maps
-    // the result to status-bar text.
-
-    fn request_app_launch(&self, path: &str) -> Result<AppLaunchReplyMsg, LaunchError> {
-        // ── 1. Resolve the app_launcher port ────────────────────────────────
-        let launcher_port = libipc::protocol::lookup_service("app_launcher")
-            .map_err(|_| LaunchError::NoLauncher)?;
-
-        // ── 2. Create a dedicated one-shot reply port ────────────────────────
-        //
-        // Using a fresh port means only the AppLaunchReply will ever be
-        // delivered here; no other IPC traffic can interleave and be lost.
-        let reply_port = create_port().map_err(|_| LaunchError::IpcError)?;
-
-        // ── 3. Build and send the request ───────────────────────────────────
-        let req = AppLaunchRequestMsg::new(reply_port, path)
-            .ok_or(LaunchError::PathTooLong)?;
-
-        let hdr = MessageHeader::new(
-            MessageType::AppLaunchRequest,
-            AppLaunchRequestMsg::SIZE as u32,
-        );
-        let mut buf = [0u8; MessageHeader::SIZE + AppLaunchRequestMsg::SIZE];
-        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
-        buf[MessageHeader::SIZE..].copy_from_slice(&req.to_bytes());
-
-        if send(launcher_port, &buf).is_err() {
-            let _ = close_port(reply_port);
-            return Err(LaunchError::SendFailed);
-        }
-
-        // ── 4. Poll the reply port until we get the response or time out ────
-        let deadline = get_ticks() + 200; // 200 × 10 ms = 2 s
-        let mut reply_buf = [0u8; MessageHeader::SIZE + AppLaunchReplyMsg::SIZE + 16];
-        let result = loop {
-            match try_recv(reply_port, &mut reply_buf) {
-                Ok(Some(len)) if len >= MessageHeader::SIZE + AppLaunchReplyMsg::SIZE => {
-                    let payload_start = MessageHeader::SIZE;
-                    match AppLaunchReplyMsg::from_bytes(&reply_buf[payload_start..]) {
-                        Some(reply) => break Ok(reply),
-                        None => break Err(LaunchError::MalformedReply),
-                    }
-                }
-                Ok(Some(_)) => break Err(LaunchError::TruncatedReply),
-                Ok(None) => { /* no message yet — keep polling */ }
-                Err(_) => break Err(LaunchError::IpcError),
-            }
-            if get_ticks() >= deadline {
-                break Err(LaunchError::Timeout);
-            }
-            yield_now();
-        };
-
-        // ── 5. Clean up the one-shot port regardless of outcome ─────────────
-        let _ = close_port(reply_port);
-        result
-    }
-
-    // ─── File operations ─────────────────────────────────────────────────────
-
-    fn delete_selected(&mut self) {
-        let Some(idx) = self.selected else { return; };
-        if idx >= self.entries.len() { return; }
-        let path = self.full_path(idx);
-        let result = if self.entries[idx].is_dir {
-            FsOps::rm_recursive(&path)
-        } else {
-            FsOps::unlink(&path)
-        };
-        match result {
-            Ok(()) => {
-                let msg = format!("deleted: {}", self.entries[idx].name);
-                self.status.set(&msg);
-                let cwd = self.cwd.clone();
-                self.load_dir(&cwd);
-            }
-            Err(_) => { self.status.set("error: delete failed"); }
-        }
-    }
-
-    fn copy_selected(&mut self) {
-        let Some(idx) = self.selected else {
-            self.status.set("nothing selected");
-            return;
-        };
-        let path = self.full_path(idx);
-        let msg = format!("copied: {}", self.entries[idx].name);
-        self.clipboard = Some(Clipboard { path, cut: false });
-        self.status.set(&msg);
-        self.needs_redraw = true;
-    }
-
-    fn cut_selected(&mut self) {
-        let Some(idx) = self.selected else {
-            self.status.set("nothing selected");
-            return;
-        };
-        let path = self.full_path(idx);
-        let msg = format!("cut: {}", self.entries[idx].name);
-        self.clipboard = Some(Clipboard { path, cut: true });
-        self.status.set(&msg);
-        self.needs_redraw = true;
-    }
-
-    fn paste(&mut self) {
-        let Some(ref cb) = self.clipboard else {
-            self.status.set("clipboard empty");
-            return;
-        };
-        let src  = cb.path.clone();
-        let is_cut = cb.cut;
-        let fname = src.rfind('/').map(|p| &src[p+1..]).unwrap_or(&src);
-        let dst = if self.cwd.ends_with('/') {
-            format!("{}{}", self.cwd, fname)
-        } else {
-            format!("{}/{}", self.cwd, fname)
-        };
-
-        let result = if is_cut {
-            FsOps::rename(&src, &dst)
-        } else {
-            FsOps::copy(&src, &dst)
-        };
-
-        match result {
-            Ok(()) => {
-                let msg = format!("pasted: {}", fname);
-                self.status.set(&msg);
-                if is_cut { self.clipboard = None; }
-                let cwd = self.cwd.clone();
-                self.load_dir(&cwd);
-            }
-            Err(_) => { self.status.set("error: paste failed"); }
-        }
-    }
-
-    fn new_folder(&mut self) {
-        let path = if self.cwd.ends_with('/') {
-            format!("{}new_folder", self.cwd)
-        } else {
-            format!("{}/new_folder", self.cwd)
-        };
-        match FsOps::mkdir(&path) {
-            Ok(()) => {
-                self.status.set("created: new_folder");
-                let cwd = self.cwd.clone();
-                self.load_dir(&cwd);
-            }
-            Err(_) => { self.status.set("error: could not create folder"); }
-        }
+        self.navigate_to(parent);
     }
 
     fn full_path(&self, idx: usize) -> String {
@@ -773,619 +614,51 @@ impl FileManager {
             format!("{}/{}", self.cwd, self.entries[idx].name)
         }
     }
-
-    // ─── Scroll helpers ──────────────────────────────────────────────────────
-
-    fn scroll_down(&mut self) {
-        let max = self.max_scroll();
-        if self.scroll_offset < max { self.scroll_offset += 1; self.needs_redraw = true; }
-    }
-
-    fn scroll_up(&mut self) {
-        if self.scroll_offset > 0 { self.scroll_offset -= 1; self.needs_redraw = true; }
-    }
-
-    fn max_scroll(&self) -> u32 {
-        match self.view_mode {
-            ViewMode::Icons => {
-                let cols = (self.surface_width / ICON_CELL_W).max(1);
-                let rows = (self.entries.len() as u32 + cols - 1) / cols;
-                let vis  = self.content_h() / ICON_CELL_H;
-                rows.saturating_sub(vis)
-            }
-            ViewMode::List => {
-                let vis = self.visible_list_rows();
-                (self.entries.len() as u32).saturating_sub(vis)
-            }
-        }
-    }
-
-    // ─── Rendering ───────────────────────────────────────────────────────────
-
-    fn render(&mut self) {
-        if !self.needs_redraw { return; }
-        self.needs_redraw = false;
-
-        let surface = match self.surface { Some(ref s) => s, None => return };
-
-        // Full background
-        surface.fill_rect(0, 0, self.surface_width, self.surface_height, Theme::BG);
-
-        // Toolbar
-        self.draw_toolbar(surface);
-
-        // File area
-        match self.view_mode {
-            ViewMode::Icons => self.draw_icons(surface),
-            ViewMode::List  => self.draw_list(surface),
-        }
-
-        // Status bar
-        self.draw_status(surface);
-    }
-
-    fn draw_toolbar(&self, surface: &SharedSurface) {
-        let sw = self.surface_width;
-        surface.fill_rect(0, 0, sw, TOOLBAR_H, Theme::TOOLBAR_BG);
-        // Bottom separator
-        surface.fill_rect(0, TOOLBAR_H - 1, sw, 1, Theme::SEPARATOR);
-
-        // Back button
-        self.draw_btn(surface, &BTN_BACK, "<-",
-            !self.history.is_empty());
-
-        // Up button
-        let can_up = self.cwd != "/";
-        self.draw_btn(surface, &BTN_UP, "^", can_up);
-
-        // Right buttons
-        let b_ref  = btn_refresh(sw);
-        let b_ico  = btn_icons(sw);
-        let b_lst  = btn_list(sw);
-        let b_new  = btn_new(sw);
-        self.draw_btn(surface, &b_ref, "R",   true);
-        self.draw_btn_active(surface, &b_ico, "ICONS",
-            self.view_mode == ViewMode::Icons);
-        self.draw_btn_active(surface, &b_lst, "LIST",
-            self.view_mode == ViewMode::List);
-        self.draw_btn(surface, &b_new, "+",   true);
-
-        // Path bar (rounded)
-        let (pbx, pbw) = path_bar_rect(sw);
-        surface.fill_rect_rounded_aa(pbx, TB_BTN_Y, pbw, TB_BTN_H, 4,
-            Color::new(12, 14, 20));
-        // Path text
-        let path = &self.cwd;
-        let max_chars = ((pbw.saturating_sub(8)) / CHAR_W) as usize;
-        let display = if path.len() > max_chars {
-            &path[path.len() - max_chars..]
-        } else {
-            path.as_str()
-        };
-        surface.draw_string(pbx + 4, TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2,
-            display, Theme::TEXT_PATH, Color::new(12, 14, 20));
-    }
-
-    fn draw_btn(&self, surface: &SharedSurface, btn: &Btn, label: &str, _enabled: bool) {
-        surface.fill_rect_rounded_aa(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, Theme::BTN_BG);
-        let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
-        let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
-        surface.draw_string(tx, ty, label, Theme::TEXT, Theme::BTN_BG);
-    }
-
-    fn draw_btn_active(&self, surface: &SharedSurface, btn: &Btn, label: &str, active: bool) {
-        let bg = if active { Theme::BTN_ACTIVE } else { Theme::BTN_BG };
-        let fg = if active { Theme::TEXT_ACCENT } else { Theme::TEXT };
-        surface.fill_rect_rounded_aa(btn.x, TB_BTN_Y, btn.w, TB_BTN_H, 4, bg);
-        let tx = btn.x + (btn.w.saturating_sub(label.len() as u32 * CHAR_W)) / 2;
-        let ty = TB_BTN_Y + (TB_BTN_H - CHAR_H) / 2;
-        surface.draw_string(tx, ty, label, fg, bg);
-    }
-
-    fn draw_icons(&self, surface: &SharedSurface) {
-        let sw   = self.surface_width;
-        let cols = (sw / ICON_CELL_W).max(1);
-        let cy   = self.content_y();
-        let ch   = self.content_h();
-
-        // How many rows fit on screen?
-        let visible_rows = ch / ICON_CELL_H;
-
-        for (i, entry) in self.entries.iter().enumerate() {
-            let row = i as u32 / cols;
-            // Only render visible rows
-            if row < self.scroll_offset { continue; }
-            let vis_row = row - self.scroll_offset;
-            if vis_row >= visible_rows { break; }
-
-            let col = i as u32 % cols;
-            let cx  = col * ICON_CELL_W;
-            let cell_y = cy + vis_row * ICON_CELL_H;
-
-            // Cell background
-            let is_sel = self.selected == Some(i);
-            let cell_bg = if is_sel { Theme::SEL_BG } else { Theme::BG };
-            if is_sel {
-                surface.fill_rect_rounded_aa(cx + 2, cell_y + 2, ICON_CELL_W - 4, ICON_CELL_H - 4, 6, cell_bg);
-            }
-
-            // Icon box (rounded, centred horizontally in cell)
-            let icon_x = cx + (ICON_CELL_W - ICON_W) / 2;
-            let icon_y = cell_y + 6;
-
-            let lbl   = entry.icon_label();
-            let lbl_w = lbl.len() as u32 * CHAR_W;
-            let lbl_x = icon_x + (ICON_W - lbl_w) / 2;
-            let lbl_y = icon_y + (ICON_H - CHAR_H) / 2;
-            surface.draw_string(lbl_x, lbl_y, lbl, entry.icon_color(), Theme::BG);
-
-            // File name below icon (max ~10 chars, truncated)
-            let max_name = (ICON_CELL_W / CHAR_W).saturating_sub(2) as usize;
-            let name = if entry.name.len() > max_name {
-                &entry.name[..max_name]
-            } else {
-                &entry.name
-            };
-            let name_w = name.len() as u32 * CHAR_W;
-            let name_x = cx + (ICON_CELL_W.saturating_sub(name_w)) / 2;
-            let name_y = icon_y + ICON_H + 4;
-            let name_bg = if is_sel { cell_bg } else { Theme::BG };
-            surface.draw_string(name_x, name_y, name, Theme::TEXT, name_bg);
-        }
-
-        // Empty directory label
-        if self.entries.is_empty() {
-            let msg = "Empty directory";
-            let mx  = (sw.saturating_sub(msg.len() as u32 * CHAR_W)) / 2;
-            let my  = cy + ch / 2;
-            surface.draw_string(mx, my, msg, Theme::TEXT_DIM, Theme::BG);
-        }
-    }
-
-    fn draw_list(&self, surface: &SharedSurface) {
-        let sw  = self.surface_width;
-        let cy  = self.content_y();
-
-        // Column X positions
-        let col_icon_x = 4u32;
-        let col_name_x = col_icon_x + 48;
-        let col_size_x = sw.saturating_sub(160);
-        let col_ext_x  = sw.saturating_sub(80);
-        let _col_date_x = sw.saturating_sub(40);   // placeholder
-
-        // Header row
-        surface.fill_rect(0, cy, sw, LIST_HDR_H, Theme::LIST_HDR_BG);
-        surface.fill_rect(0, cy + LIST_HDR_H - 1, sw, 1, Theme::SEPARATOR);
-        surface.draw_string(col_icon_x, cy + (LIST_HDR_H - CHAR_H) / 2,
-            "Type", Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
-        surface.draw_string(col_name_x, cy + (LIST_HDR_H - CHAR_H) / 2,
-            "Name", Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
-        surface.draw_string(col_size_x, cy + (LIST_HDR_H - CHAR_H) / 2,
-            "Size", Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
-        surface.draw_string(col_ext_x,  cy + (LIST_HDR_H - CHAR_H) / 2,
-            "Ext",  Theme::TEXT_ACCENT, Theme::LIST_HDR_BG);
-
-        let list_y  = cy + LIST_HDR_H;
-        let vis     = self.visible_list_rows();
-
-        for (vi, ei) in (self.scroll_offset as usize ..).enumerate() {
-            if vi as u32 >= vis || ei >= self.entries.len() { break; }
-            let entry  = &self.entries[ei];
-            let row_y  = list_y + vi as u32 * LIST_ROW_H;
-
-            let is_sel = self.selected == Some(ei);
-            let row_bg = if is_sel { Theme::SEL_BG }
-                else if vi % 2 == 0 { Theme::BG }
-                else { Color::new(24, 27, 36) };
-
-            surface.fill_rect(0, row_y, sw, LIST_ROW_H, row_bg);
-
-            // Type label chip
-            let lbl   = entry.icon_label();
-            let lbl_x = col_icon_x + (36u32.saturating_sub(lbl.len() as u32 * CHAR_W)) / 2;
-            surface.draw_string(lbl_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                lbl, entry.icon_color(), row_bg);
-
-            // Name (truncate to fit)
-            let max_name = ((col_size_x - col_name_x).saturating_sub(8) / CHAR_W) as usize;
-            let name = if entry.name.len() > max_name {
-                &entry.name[..max_name]
-            } else {
-                &entry.name
-            };
-            let name_fg = if entry.is_dir { Theme::DIR } else { Theme::TEXT };
-            surface.draw_string(col_name_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                name, name_fg, row_bg);
-
-            // Size
-            let sz = entry.size_str();
-            surface.draw_string(col_size_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                &sz, Theme::TEXT_DIM, row_bg);
-
-            // Extension
-            let ext = entry.ext();
-            if !ext.is_empty() {
-                surface.draw_string(col_ext_x, row_y + (LIST_ROW_H - CHAR_H) / 2,
-                    ext, Theme::TEXT_DIM, row_bg);
-            }
-        }
-
-        // Empty label
-        if self.entries.is_empty() {
-            let msg = "Empty directory";
-            let mx  = (sw.saturating_sub(msg.len() as u32 * CHAR_W)) / 2;
-            surface.draw_string(mx, list_y + 20, msg, Theme::TEXT_DIM, Theme::BG);
-        }
-    }
-
-    fn draw_status(&self, surface: &SharedSurface) {
-        let sw = self.surface_width;
-        let sy = self.status_y();
-        surface.fill_rect(0, sy, sw, STATUS_H, Theme::STATUS_BG);
-        surface.fill_rect(0, sy, sw, 1, Theme::SEPARATOR);
-
-        // Left: item count / selected
-        let left_msg = if let Some(idx) = self.selected {
-            if idx < self.entries.len() {
-                let e = &self.entries[idx];
-                if e.is_dir {
-                    format!("{} items  |  {} [dir]", self.entries.len(), e.name)
-                } else {
-                    format!("{} items  |  {}  {}  .{}",
-                        self.entries.len(), e.name, e.size_str(), e.ext())
-                }
-            } else {
-                format!("{} items", self.entries.len())
-            }
-        } else {
-            format!("{} items", self.entries.len())
-        };
-
-        surface.draw_string(8, sy + (STATUS_H - CHAR_H) / 2,
-            &left_msg, Theme::TEXT_DIM, Theme::STATUS_BG);
-
-        // Right: status message (copy/paste/error etc.)
-        let s = self.status.as_str();
-        if !s.is_empty() {
-            let tx = sw.saturating_sub(s.len() as u32 * CHAR_W + 8);
-            surface.draw_string(tx, sy + (STATUS_H - CHAR_H) / 2,
-                s, Theme::TEXT_ACCENT, Theme::STATUS_BG);
-        }
-
-        // Clipboard indicator
-        if let Some(ref cb) = self.clipboard {
-            let marker = if cb.cut { "[cut]" } else { "[copied]" };
-            let mx = sw / 2 - marker.len() as u32 * CHAR_W / 2;
-            surface.draw_string(mx, sy + (STATUS_H - CHAR_H) / 2,
-                marker, Theme::TEXT_ACCENT, Theme::STATUS_BG);
-        }
-    }
-
-    // ─── IPC: notify compositor ───────────────────────────────────────────────
-
-    fn present(&self) {
-        let msg   = SurfacePresentMsg { window_id: self.window_id };
-        let hdr   = MessageHeader::new(MessageType::SurfacePresent,
-                        SurfacePresentMsg::SIZE as u32);
-        let mut buf = [0u8; MessageHeader::SIZE + SurfacePresentMsg::SIZE];
-        buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
-        buf[MessageHeader::SIZE..].copy_from_slice(&msg.to_bytes());
-        let _ = send(self.compositor_port, &buf);
-    }
-
-    // ─── Event handlers ───────────────────────────────────────────────────────
-
-    fn handle_mouse_move(&mut self, ev: &MouseMoveEvent) {
-        self.mouse_x = ev.x;
-        self.mouse_y = ev.y;
-    }
-
-    fn handle_mouse_button_down(&mut self, ev: &MouseButtonEvent) {
-        if ev.button != MouseButton::Left { return; }
-        let mx = ev.x;
-        let my = ev.y;
-        let sw = self.surface_width;
-
-        // Toolbar button hit test
-        if my >= 0 && my < TOOLBAR_H as i32 {
-            if BTN_BACK.contains(mx, my) { self.go_back(); return; }
-            if BTN_UP.contains(mx, my)   { self.go_up();   return; }
-            if btn_icons(sw).contains(mx, my) {
-                self.view_mode = ViewMode::Icons;
-                self.scroll_offset = 0;
-                self.needs_redraw = true; return;
-            }
-            if btn_list(sw).contains(mx, my) {
-                self.view_mode = ViewMode::List;
-                self.scroll_offset = 0;
-                self.needs_redraw = true; return;
-            }
-            if btn_refresh(sw).contains(mx, my) {
-                let cwd = self.cwd.clone();
-                self.load_dir(&cwd); return;
-            }
-            if btn_new(sw).contains(mx, my) {
-                self.new_folder(); return;
-            }
-            return; // click on toolbar but no button
-        }
-
-        // File area hit test
-        if let Some(idx) = self.item_at_pos(mx, my) {
-            let now   = get_ticks();
-            let dbl   = self.last_click_idx == idx as i32
-                     && now.saturating_sub(self.last_click_tick) < 40; // ~400ms
-
-            self.selected        = Some(idx);
-            self.last_click_idx  = idx as i32;
-            self.last_click_tick = now;
-            self.needs_redraw    = true;
-
-            if dbl { self.activate(idx); }
-            else {
-                // Single click: show info
-                let e = &self.entries[idx];
-                if e.is_dir {
-                    let msg = format!("{} [directory]", e.name);
-                    self.status.set(&msg);
-                } else {
-                    let msg = format!("{}  {}  .{}", e.name, e.size_str(), e.ext());
-                    self.status.set(&msg);
-                }
-                self.needs_redraw = true;
-            }
-        } else {
-            // Click on empty area → deselect
-            self.selected = None;
-            self.last_click_idx = -1;
-            self.needs_redraw = true;
-        }
-    }
-
-    fn handle_scroll(&mut self, ev: &MouseScrollEvent) {
-        if ev.dz < 0 { self.scroll_down(); }
-        else          { self.scroll_up();   }
-    }
-
-    fn handle_key(&mut self, ev: &IpcKeyEvent) {
-        let ch  = ev.character;
-        let ctrl = ev.modifiers.ctrl;
-
-        match ch {
-            // Ctrl shortcuts
-            _ if ctrl => match ch {
-                b'c' | b'C' => self.copy_selected(),
-                b'x' | b'X' => self.cut_selected(),
-                b'v' | b'V' => self.paste(),
-                b'r' | b'R' | b'f' | b'F' => {
-                    let cwd = self.cwd.clone();
-                    self.load_dir(&cwd);
-                }
-                _ => {}
-            },
-            // Backspace = go up
-            0x08 => self.go_up(),
-            // Delete = delete selected
-            0x7F | 0xFF => self.delete_selected(),
-            // Enter = open/activate
-            b'\n' | b'\r' => {
-                if let Some(idx) = self.selected { self.activate(idx); }
-            }
-            // Escape = deselect
-            0x1B => {
-                self.selected = None;
-                self.needs_redraw = true;
-            }
-            // Arrow keys (sent as special scancodes; check scancode)
-            _ => {
-                // Arrow key scancodes from the compositor
-                match ev.scancode {
-                    0x48 => { // Up arrow
-                        self.scroll_up();
-                        // Or move selection up
-                        if let Some(sel) = self.selected {
-                            if sel > 0 {
-                                self.selected = Some(sel - 1);
-                                self.needs_redraw = true;
-                            }
-                        }
-                    }
-                    0x50 => { // Down arrow
-                        self.scroll_down();
-                        // Or move selection down
-                        if let Some(sel) = self.selected {
-                            if sel + 1 < self.entries.len() {
-                                self.selected = Some(sel + 1);
-                                self.needs_redraw = true;
-                            }
-                        } else if !self.entries.is_empty() {
-                            self.selected = Some(0);
-                            self.needs_redraw = true;
-                        }
-                    }
-                    0x4B => { // Left arrow – go back
-                        self.go_back();
-                    }
-                    0x4D => { // Right arrow – enter if dir
-                        if let Some(idx) = self.selected {
-                            if idx < self.entries.len() && self.entries[idx].is_dir {
-                                self.activate(idx);
-                            }
-                        }
-                    }
-                    0x49 => self.scroll_up(),   // Page Up
-                    0x51 => self.scroll_down(),  // Page Down
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // ─── IPC message dispatch ─────────────────────────────────────────────────
-
-    fn process_message(&mut self, buf: &[u8], len: usize) {
-        if len < MessageHeader::SIZE { return; }
-        let Some(hdr) = MessageHeader::from_bytes(buf) else { return };
-
-        match hdr.msg_type {
-            MessageType::TerminateRequest => {
-                self.running = false;
-            }
-            MessageType::SurfaceAssign => {
-                let p = MessageHeader::SIZE;
-                if let Some(msg) = SurfaceAssignMsg::from_bytes(&buf[p..]) {
-                    if let Ok(s) = SharedSurface::from_region(
-                            msg.region_id, msg.width, msg.height) {
-                        self.surface_width  = msg.width;
-                        self.surface_height = msg.height;
-                        self.compositor_port = msg.compositor_port as u64;
-                        self.surface = Some(s);
-                        self.needs_redraw = true;
-                    }
-                }
-            }
-            MessageType::KeyPress => {
-                let p = MessageHeader::SIZE;
-                if len >= p + 3 {
-                    if let Some(ev) = IpcKeyEvent::from_bytes(&buf[p..]) {
-                        self.handle_key(&ev);
-                    }
-                }
-            }
-            MessageType::MouseMove => {
-                let p = MessageHeader::SIZE;
-                if let Some(ev) = MouseMoveEvent::from_bytes(&buf[p..]) {
-                    self.handle_mouse_move(&ev);
-                }
-            }
-            MessageType::MouseButtonDown => {
-                let p = MessageHeader::SIZE;
-                if let Some(ev) = MouseButtonEvent::from_bytes(&buf[p..]) {
-                    self.handle_mouse_button_down(&ev);
-                }
-            }
-            MessageType::MouseScroll => {
-                let p = MessageHeader::SIZE;
-                if let Some(ev) = MouseScrollEvent::from_bytes(&buf[p..]) {
-                    self.handle_scroll(&ev);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // ─── Surface assignment (wait on startup) ─────────────────────────────────
-
-    fn wait_for_surface(port: PortId) -> Option<SurfaceAssignMsg> {
-        let mut buf   = [0u8; 64];
-        let ports = [port];
-        for _ in 0..100 {
-            if wait_any(&ports, 100).is_ok() {
-                if let Ok(Some(len)) = try_recv(port, &mut buf) {
-                    if len >= MessageHeader::SIZE {
-                        if let Some(hdr) = MessageHeader::from_bytes(&buf) {
-                            if hdr.msg_type == MessageType::SurfaceAssign {
-                                let p = MessageHeader::SIZE;
-                                if len >= p + SurfaceAssignMsg::SIZE {
-                                    return SurfaceAssignMsg::from_bytes(&buf[p..]);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    // ─── Main loop ────────────────────────────────────────────────────────────
-
-    fn run(&mut self) {
-        log("fileman: entering main loop");
-
-        // Load root directory on startup
-        self.load_dir("/");
-
-        let mut msg_buf = [0u8; 256];
-        let ports = [self.local_port];
-
-        while self.running {
-            // Drain incoming IPC messages
-            while let Ok(Some(len)) = try_recv(self.local_port, &mut msg_buf) {
-                self.process_message(&msg_buf, len);
-            }
-
-            // Render if dirty
-            if self.needs_redraw {
-                self.render();
-                self.present();
-            }
-
-            // Block until next event (100ms timeout)
-            let _ = wait_any(&ports, 100);
-        }
-
-        log("fileman: exiting");
-    }
 }
 
-// ============================================================================
-// Main
-// ============================================================================
+fn format_size(b: u64) -> String {
+    if b < 1024 { format!("{} B", b) }
+    else if b < 1024*1024 { format!("{} KB", b / 1024) }
+    else { format!("{} MB", b / (1024*1024)) }
+}
 
 fn main() -> ! {
-    log("fileman: starting GUI file manager");
+    let compositor_port = libipc::protocol::lookup_service("compositor").unwrap();
+    let local_port = create_port().unwrap();
 
-    let local_port = match create_port() {
-        Ok(p) => p,
-        Err(_) => { log("fileman: failed to create port"); exit(1); }
-    };
+    // Register with compositor
+    let reg = libipc::messages::AppRegisterMsg::new(local_port, "File Explorer");
+    let hdr = MessageHeader::new(MessageType::AppRegister, libipc::messages::AppRegisterMsg::SIZE as u32);
+    let mut buf = [0u8; 128];
+    buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+    buf[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::AppRegisterMsg::SIZE].copy_from_slice(&reg.to_bytes());
+    send(compositor_port, &buf).unwrap();
 
-    // Register service name
-    let _ = libipc::protocol::register_service("fileman", local_port);
+    let mut fm: Option<FileManager> = None;
 
-    // Find compositor registration port
-    log("fileman: looking up compositor.register...");
-    let register_port = loop {
-        match libipc::protocol::lookup_service("compositor.register") {
-            Ok(p) => break p,
-            Err(_) => yield_now(),
+    loop {
+        if let Some(ref mut f) = fm {
+            f.handle_event();
+            f.render();
+            
+            // Present surface
+            let pres = SurfacePresentMsg::new(f.window_id);
+            let hdr = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
+            let mut buf = [0u8; 64];
+            buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+            buf[MessageHeader::SIZE..MessageHeader::SIZE + SurfacePresentMsg::SIZE].copy_from_slice(&pres.to_bytes());
+            send(compositor_port, &buf).unwrap();
+        } else {
+            let mut buf = [0u8; 1024];
+            if let Ok(Some(_)) = try_recv(local_port, &mut buf) {
+                let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
+                if hdr.msg_type == MessageType::SurfaceAssign {
+                    let msg = SurfaceAssignMsg::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
+                    let surface = SharedSurface::map(msg.region_id, msg.width, msg.height).unwrap();
+                    fm = Some(FileManager::new(msg.window_id, compositor_port, local_port, surface));
+                }
+            }
         }
-    };
-
-    // Send AppRegister
-    let mut full_msg = [0u8; 48];
-    let hdr = MessageHeader::new(MessageType::AppRegister, 16);
-    full_msg[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
-    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + 8]
-        .copy_from_slice(&local_port.to_le_bytes());
-    full_msg[MessageHeader::SIZE + 8..MessageHeader::SIZE + 16]
-        .copy_from_slice(&0u64.to_le_bytes());
-
-    log("fileman: registering with compositor");
-    let _ = send(register_port, &full_msg[..MessageHeader::SIZE + 16]);
-
-    // Wait for surface
-    let surf_info = match FileManager::wait_for_surface(local_port) {
-        Some(i) => i,
-        None => { log("fileman: timeout waiting for surface"); exit(1); }
-    };
-
-    log("fileman: surface received");
-
-    let surface = match SharedSurface::from_region(
-            surf_info.region_id, surf_info.width, surf_info.height) {
-        Ok(s) => s,
-        Err(_) => { log("fileman: failed to map surface"); exit(1); }
-    };
-
-    let mut fm = FileManager::new(
-        surf_info.window_id,
-        surf_info.compositor_port as u64,
-        local_port,
-        surface,
-    );
-
-    fm.run();
-    exit(0);
+        yield_now();
+    }
 }
