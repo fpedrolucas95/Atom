@@ -45,9 +45,9 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 
 ### User Space
 
-- **Services:** init (PID 1), namesvc (service discovery), service_manager (declarative boot), fsd (filesystem daemon), app_launcher (privileged process creation)
+- **Services:** init (PID 1), namesvc (service discovery), service_manager (declarative boot), fsd (filesystem daemon), app_launcher (privileged process creation), nic_driver (e1000 NIC), netd (TCP/IP stack: ARP, IPv4, ICMP, UDP, TCP, DNS)
 - **System applications:** display driver, keyboard driver, mouse driver, ui_shell (compositor + window manager), terminal emulator
-- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), filesystem test suite, display settings
+- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), filesystem test suite, display settings, timesync (HTTP GET to worldtimeapi.org, demonstrates full networking stack)
 
 ### Runtime and Libraries
 
@@ -201,7 +201,7 @@ Serial output via QEMU console is the primary debugging channel. The kernel incl
 Atom is an experimental system in active development. Current known limitations include:
 
 - **Single-core only** — no SMP support yet; scheduler and IPC are designed for single-core execution
-- **No networking** — no NIC driver or TCP/IP stack
+- **Networking requires QEMU `user` netdev** — the e1000 NIC driver and TCP/IP stack (`netd`) use QEMU's built-in user-mode networking (`-netdev user,id=net0 -device e1000,netdev=net0`). Both build scripts include these flags automatically when running with `--run`. Real hardware or other QEMU netdev backends are not yet supported.
 - **Journal replay integration for userspace FAT32 is still maturing** — normal read/write path is userspace-owned in fsd, but crash-recovery replay coverage is still being expanded
 - **Capability enforcement is partial** — the capability infrastructure (handles, permissions, derivation, revocation) is implemented, but not all syscalls enforce capability checks before execution
 - **No ASLR or stack overflow detection** in user space

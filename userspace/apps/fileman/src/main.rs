@@ -30,8 +30,9 @@ use atom_syscall::debug::log;
 use libipc::messages::{
     MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg,
     KeyEvent as IpcKeyEvent, MouseButtonEvent, MouseMoveEvent, MouseButton,
-    AppRegisterMsg,
+    AppRegisterMsg, AppLaunchRequestMsg, AppLaunchReplyMsg,
 };
+use libipc::protocol::{lookup_service, send_message, try_recv_message, get_payload};
 
 use atom_theme::colors as ds;
 use atom_theme::spacing;
@@ -576,15 +577,74 @@ impl FileManager {
             };
             self.navigate_to(new_path);
         } else {
-            // Launch app or show info
             if entry.name.ends_with(".atxf") {
                 let path = self.full_path(entry_idx);
                 self.status_msg = format!("Launching {}...", entry.name);
-                // In a real implementation, we'd call the app_launcher here
+                self.needs_redraw = true;
+                self.launch_app(&path);
             } else {
                 self.status_msg = format!("Selected: {} ({})", entry.name, format_size(entry.size));
             }
         }
+    }
+
+    fn launch_app(&mut self, path: &str) {
+        // Look up app_launcher service
+        let launcher_port = match lookup_service("app_launcher") {
+            Ok(p) => p,
+            Err(_) => {
+                self.status_msg = String::from("Error: app_launcher not available");
+                log("fileman: app_launcher not found in namesvc");
+                return;
+            }
+        };
+
+        // Build the launch request
+        let req = match AppLaunchRequestMsg::new(self.local_port as u64, path) {
+            Some(r) => r,
+            None => {
+                self.status_msg = String::from("Error: path too long");
+                return;
+            }
+        };
+
+        // Send the request
+        if send_message(launcher_port, MessageType::AppLaunchRequest, &req.to_bytes()).is_err() {
+            self.status_msg = String::from("Error: failed to send launch request");
+            log("fileman: failed to send AppLaunchRequest");
+            return;
+        }
+
+        // Wait for reply (up to ~5 seconds at 100Hz)
+        let mut buf = [0u8; 512];
+        for _ in 0..500 {
+            match try_recv_message(self.local_port, &mut buf) {
+                Ok(Some((header, len))) if header.msg_type == MessageType::AppLaunchReply => {
+                    let payload = get_payload(&buf, len);
+                    if let Some(reply) = AppLaunchReplyMsg::from_bytes(payload) {
+                        if reply.status == libipc::messages::launch_status::LAUNCH_OK {
+                            self.status_msg = format!("Launched (pid={})", reply.pid);
+                            log("fileman: app launched successfully");
+                        } else {
+                            let err = reply.err_msg_str();
+                            self.status_msg = format!("Launch failed: {}", err);
+                            let msg = format!("fileman: launch error — {}", err);
+                            log(&msg);
+                        }
+                    }
+                    return;
+                }
+                Ok(Some(_)) => {
+                    // Other message (e.g. mouse/key event) — re-queue by ignoring for now
+                }
+                _ => {
+                    atom_syscall::thread::yield_now();
+                }
+            }
+        }
+
+        self.status_msg = String::from("Launch timed out");
+        log("fileman: timed out waiting for AppLaunchReply");
     }
 
     fn go_back(&mut self) {

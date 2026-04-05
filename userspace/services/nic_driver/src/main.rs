@@ -12,8 +12,8 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use atom_syscall::debug::log;
-use libipc::protocol::{register_service, try_recv_message, get_payload};
-use libipc::messages::{MessageType, NetAssignRingsMsg};
+use libipc::protocol::{register_service, lookup_service, send_message, try_recv_message, get_payload};
+use libipc::messages::{MessageType, NetAssignRingsMsg, NetDriverReadyMsg};
 use libring::{RingHeader, RingEntry, RingProducer, RingConsumer};
 
 mod allocator {
@@ -260,9 +260,11 @@ impl E1000 {
 
         let desc = unsafe { &mut *self.tx_descs.add(self.tx_tail) };
 
-        // Wait for previous descriptor to be done (ring full guard)
-        if desc.status & TDESC_STA_DD == 0 && self.tx_tail != 0 {
-            return false;
+        // Wait for descriptor to be done (ring full guard)
+        // DD bit is set by hardware when transmission is complete.
+        // On first use (status=0, not yet transmitted), we can use it freely.
+        if desc.status != 0 && desc.status & TDESC_STA_DD == 0 {
+            return false; // descriptor still in use by hardware
         }
 
         // Copy packet into TX buffer
@@ -275,6 +277,8 @@ impl E1000 {
         desc.status = 0;
 
         self.tx_tail = (self.tx_tail + 1) % NUM_TX_DESC;
+        // Fence to ensure descriptor write is visible before updating TDT
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         self.write32(E1000_TDT, self.tx_tail as u32);
         true
     }
@@ -284,22 +288,43 @@ impl E1000 {
         let next = (self.rx_tail + 1) % NUM_RX_DESC;
         let desc = unsafe { &mut *self.rx_descs.add(next) };
 
+        // Memory fence to ensure we see hardware writes to the descriptor
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
         if desc.status & RDESC_STA_DD == 0 {
             return 0; // nothing yet
         }
 
+        // Check for errors
+        if desc.errors != 0 {
+            // Return descriptor to hardware even on error
+            desc.status = 0;
+            self.rx_tail = next;
+            self.write32(E1000_RDT, self.rx_tail as u32);
+            return 0;
+        }
+
         let len = desc.length as usize;
+        if len == 0 || len > RX_BUF_SIZE {
+            desc.status = 0;
+            self.rx_tail = next;
+            self.write32(E1000_RDT, self.rx_tail as u32);
+            return 0;
+        }
+
         let src = unsafe {
             core::slice::from_raw_parts(
                 self.rx_bufs.add(next * RX_BUF_SIZE),
-                len.min(RX_BUF_SIZE),
+                len,
             )
         };
-        out[..src.len()].copy_from_slice(src);
+        out[..len].copy_from_slice(src);
 
         // Return descriptor to hardware
         desc.status = 0;
         self.rx_tail = next;
+        // Fence to ensure descriptor write is visible before updating RDT
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         self.write32(E1000_RDT, self.rx_tail as u32);
 
         len
@@ -429,21 +454,54 @@ fn main() -> ! {
     nic.init(tx_desc_phys, rx_desc_phys, rx_buf_phys);
     log("nic_driver: e1000 initialized");
 
+    // Log the MAC address
+    {
+        let m = nic.mac;
+        let mut msg = [0u8; 64];
+        let prefix = b"nic_driver: MAC=";
+        msg[..prefix.len()].copy_from_slice(prefix);
+        let mut pos = prefix.len();
+        for (i, &b) in m.iter().enumerate() {
+            let hi = b >> 4;
+            let lo = b & 0xF;
+            msg[pos] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+            msg[pos+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+            pos += 2;
+            if i < 5 { msg[pos] = b':'; pos += 1; }
+        }
+        if let Ok(s) = core::str::from_utf8(&msg[..pos]) {
+            log(s);
+        }
+    }
+
     // ── 7. Register with namesvc ──────────────────────────────────────────────
     register_service("nic_driver", port).expect("failed to register nic_driver");
     log("nic_driver: registered, waiting for netd");
+
+    // ── 7b. Wait for netd and send MAC address ────────────────────────────────
+    let netd_port = loop {
+        match lookup_service("netd") {
+            Ok(p) => break p,
+            Err(_) => atom_syscall::thread::sleep_ms(50),
+        }
+    };
+    let ready_msg = NetDriverReadyMsg { mac: nic.mac, _pad: [0u8; 2] };
+    send_message(netd_port, MessageType::NetDriverReady, &ready_msg.to_bytes())
+        .expect("nic_driver: failed to send MAC to netd");
+    log("nic_driver: sent MAC to netd");
 
     // ── 8. Main loop ──────────────────────────────────────────────────────────
     let mut tx_consumer: Option<RingConsumer> = None;
     let mut rx_producer: Option<RingProducer> = None;
     let mut ipc_buf = [0u8; 512];
     let mut rx_pkt  = [0u8; RX_BUF_SIZE];
+    let mut rx_check_counter = 0u32;
 
     loop {
         // Handle IPC (ring assignment from netd, IRQ notifications)
         let ports = [port];
-        if atom_syscall::ipc::wait_any(&ports, 10).is_ok() {
-            if let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
+        if atom_syscall::ipc::wait_any(&ports, 0).is_ok() {
+            while let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
                 if header.msg_type == MessageType::NetAssignRings {
                     let payload = get_payload(&ipc_buf, len);
                     if let Some(msg) = NetAssignRingsMsg::from_bytes(payload) {
@@ -466,7 +524,11 @@ fn main() -> ! {
                 if let Some(entry) = tx.pop() {
                     let len = entry.len as usize;
                     if len > 0 && len <= 1514 {
-                        nic.send(&entry.data[..len]);
+                        if nic.send(&entry.data[..len]) {
+                            log("nic_driver: TX packet sent");
+                        } else {
+                            log("nic_driver: TX ring full, packet dropped");
+                        }
                     }
                 }
             }
@@ -474,9 +536,33 @@ fn main() -> ! {
 
         // Drain received packets → push to RX ring
         if let Some(ref mut rx) = rx_producer {
+            // Periodically log RX descriptor status for diagnostics
+            rx_check_counter += 1;
+            if rx_check_counter >= 5000 {
+                rx_check_counter = 0;
+                let rdh = nic.read32(E1000_RDH);
+                let rdt = nic.read32(E1000_RDT);
+                let status = nic.read32(E1000_STATUS);
+                let rctl = nic.read32(E1000_RCTL);
+                // Log if RDH != expected (hardware advanced past our tail)
+                let expected_rdh = (nic.rx_tail + 1) % NUM_RX_DESC;
+                if rdh != expected_rdh as u32 {
+                    // Hardware has received packets we haven't processed
+                    log("nic_driver: RDH mismatch — hardware received packets");
+                }
+                // Log link status
+                if status & 0x2 != 0 {
+                    // Link up bit
+                } else {
+                    log("nic_driver: WARNING link down");
+                }
+                let _ = (rdh, rdt, rctl);
+            }
+
             loop {
                 let len = nic.recv(&mut rx_pkt);
                 if len == 0 { break; }
+                log("nic_driver: RX packet received");
                 if rx.can_push() {
                     let mut entry = RingEntry {
                         len: len as u16,
@@ -487,9 +573,13 @@ fn main() -> ! {
                     let copy_len = len.min(1528);
                     entry.data[..copy_len].copy_from_slice(&rx_pkt[..copy_len]);
                     rx.push(entry).ok();
+                } else {
+                    log("nic_driver: RX ring full, packet dropped");
                 }
             }
         }
+
+        atom_syscall::thread::yield_now();
     }
 }
 

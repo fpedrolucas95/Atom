@@ -483,8 +483,34 @@ pub enum MessageType {
     // Networking (1400-1499)
     /// netd -> nic_driver: Here is the shared memory region for rings
     NetAssignRings = 1400,
-    /// nic_driver -> netd: I'm ready
+    /// nic_driver -> netd: I'm ready (includes MAC address)
     NetDriverReady = 1401,
+    /// init -> netd: configure IP/mask/gateway/DNS
+    NetConfigure = 1402,
+    /// app -> netd: create socket
+    NetSocket = 1410,
+    /// netd -> app: socket creation reply
+    NetSocketReply = 1411,
+    /// app -> netd: connect TCP socket
+    NetConnect = 1412,
+    /// netd -> app: connect reply
+    NetConnectReply = 1413,
+    /// app -> netd: send data
+    NetSend = 1414,
+    /// netd -> app: send reply
+    NetSendReply = 1415,
+    /// app -> netd: receive data
+    NetRecv = 1416,
+    /// netd -> app: receive reply
+    NetRecvReply = 1417,
+    /// app -> netd: close socket
+    NetClose = 1418,
+    /// netd -> app: close reply
+    NetCloseReply = 1419,
+    /// app -> netd: resolve hostname
+    NetResolve = 1420,
+    /// netd -> app: resolve reply
+    NetResolveReply = 1421,
 }
 
 impl MessageType {
@@ -614,6 +640,19 @@ impl MessageType {
             1303 => Some(Self::WallpaperFailed),
             1400 => Some(Self::NetAssignRings),
             1401 => Some(Self::NetDriverReady),
+            1402 => Some(Self::NetConfigure),
+            1410 => Some(Self::NetSocket),
+            1411 => Some(Self::NetSocketReply),
+            1412 => Some(Self::NetConnect),
+            1413 => Some(Self::NetConnectReply),
+            1414 => Some(Self::NetSend),
+            1415 => Some(Self::NetSendReply),
+            1416 => Some(Self::NetRecv),
+            1417 => Some(Self::NetRecvReply),
+            1418 => Some(Self::NetClose),
+            1419 => Some(Self::NetCloseReply),
+            1420 => Some(Self::NetResolve),
+            1421 => Some(Self::NetResolveReply),
             _ => None,
         }
     }
@@ -2105,6 +2144,438 @@ impl NetAssignRingsMsg {
         Some(Self {
             region_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
             ring_capacity: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+        })
+    }
+}
+
+/// nic_driver -> netd: driver is ready, includes MAC address
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetDriverReadyMsg {
+    pub mac: [u8; 6],
+    pub _pad: [u8; 2],
+}
+
+impl NetDriverReadyMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..6].copy_from_slice(&self.mac);
+        bytes[6..8].copy_from_slice(&self._pad);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&bytes[0..6]);
+        Some(Self { mac, _pad: [bytes[6], bytes[7]] })
+    }
+}
+
+/// init -> netd: configure IP/mask/gateway/DNS
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetConfigureMsg {
+    pub own_ip: u32,
+    pub netmask: u32,
+    pub gateway: u32,
+    pub dns_server: u32,
+}
+
+impl NetConfigureMsg {
+    pub const SIZE: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.own_ip.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.netmask.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.gateway.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.dns_server.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            own_ip:     u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            netmask:    u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            gateway:    u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            dns_server: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+        })
+    }
+}
+
+/// app -> netd: create a socket
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetSocketMsg {
+    pub reply_port: u64,
+    pub proto: u8,       // 0=TCP, 1=UDP
+    pub _pad: [u8; 7],
+}
+
+impl NetSocketMsg {
+    pub const SIZE: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8] = self.proto;
+        bytes[9..16].copy_from_slice(&self._pad);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut pad = [0u8; 7];
+        pad.copy_from_slice(&bytes[9..16]);
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            proto: bytes[8],
+            _pad: pad,
+        })
+    }
+}
+
+/// netd -> app: socket creation reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetSocketReplyMsg {
+    pub socket_id: u32,
+    pub error: u32,
+}
+
+impl NetSocketReplyMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.error.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            error:     u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+        })
+    }
+}
+
+/// app -> netd: connect TCP socket to remote
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetConnectMsg {
+    pub reply_port: u64,
+    pub socket_id: u32,
+    pub remote_ip: u32,
+    pub remote_port: u16,
+    pub _pad: [u8; 2],
+}
+
+impl NetConnectMsg {
+    pub const SIZE: usize = 20;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.remote_ip.to_le_bytes());
+        bytes[16..18].copy_from_slice(&self.remote_port.to_le_bytes());
+        bytes[18..20].copy_from_slice(&self._pad);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            reply_port:  u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            socket_id:   u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            remote_ip:   u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            remote_port: u16::from_le_bytes(bytes[16..18].try_into().ok()?),
+            _pad: [bytes[18], bytes[19]],
+        })
+    }
+}
+
+/// netd -> app: connect reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetConnectReplyMsg {
+    pub socket_id: u32,
+    pub error: u32,
+}
+
+impl NetConnectReplyMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.error.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            error:     u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+        })
+    }
+}
+
+/// app -> netd: send data over socket
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetSendMsg {
+    pub reply_port: u64,
+    pub socket_id: u32,
+    pub len: u32,
+    pub data: [u8; 1024],
+}
+
+impl NetSendMsg {
+    pub const SIZE: usize = 1040;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.len.to_le_bytes());
+        bytes[16..1040].copy_from_slice(&self.data);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut data = [0u8; 1024];
+        data.copy_from_slice(&bytes[16..1040]);
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            socket_id:  u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            len:        u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            data,
+        })
+    }
+}
+
+/// netd -> app: send reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetSendReplyMsg {
+    pub socket_id: u32,
+    pub sent: u32,
+    pub error: u32,
+}
+
+impl NetSendReplyMsg {
+    pub const SIZE: usize = 12;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.sent.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.error.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            sent:      u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error:     u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+        })
+    }
+}
+
+/// app -> netd: receive data from socket
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetRecvMsg {
+    pub reply_port: u64,
+    pub socket_id: u32,
+    pub max_len: u32,
+    pub timeout_ms: u32,
+}
+
+impl NetRecvMsg {
+    pub const SIZE: usize = 20;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.max_len.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.timeout_ms.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            socket_id:  u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            max_len:    u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            timeout_ms: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+        })
+    }
+}
+
+/// netd -> app: receive reply with data
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetRecvReplyMsg {
+    pub socket_id: u32,
+    pub len: u32,
+    pub error: u32,
+    pub data: [u8; 1024],
+}
+
+impl NetRecvReplyMsg {
+    pub const SIZE: usize = 1036;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.len.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.error.to_le_bytes());
+        bytes[12..1036].copy_from_slice(&self.data);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut data = [0u8; 1024];
+        data.copy_from_slice(&bytes[12..1036]);
+        Some(Self {
+            socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            len:       u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error:     u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            data,
+        })
+    }
+}
+
+/// app -> netd: close socket
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetCloseMsg {
+    pub reply_port: u64,
+    pub socket_id: u32,
+    pub _pad: [u8; 4],
+}
+
+impl NetCloseMsg {
+    pub const SIZE: usize = 16;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self._pad);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut pad = [0u8; 4];
+        pad.copy_from_slice(&bytes[12..16]);
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            socket_id:  u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            _pad: pad,
+        })
+    }
+}
+
+/// netd -> app: close reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetCloseReplyMsg {
+    pub socket_id: u32,
+    pub error: u32,
+}
+
+impl NetCloseReplyMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.error.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            error:     u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+        })
+    }
+}
+
+/// app -> netd: resolve hostname to IP
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetResolveMsg {
+    pub reply_port: u64,
+    pub name_len: u32,
+    pub name: [u8; 256],
+}
+
+impl NetResolveMsg {
+    pub const SIZE: usize = 268;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.name_len.to_le_bytes());
+        bytes[12..268].copy_from_slice(&self.name);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        let mut name = [0u8; 256];
+        name.copy_from_slice(&bytes[12..268]);
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            name_len:   u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            name,
+        })
+    }
+}
+
+/// netd -> app: resolve reply
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct NetResolveReplyMsg {
+    pub ip: u32,
+    pub error: u32,
+}
+
+impl NetResolveReplyMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.ip.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.error.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE { return None; }
+        Some(Self {
+            ip:    u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            error: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
         })
     }
 }

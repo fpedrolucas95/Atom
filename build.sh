@@ -119,6 +119,7 @@ USERSPACE_APPS=(
     "fileman"
     "fs_test"
     "hello_atxf"
+    "timesync"
 )
 
 # =========================================================================
@@ -786,6 +787,7 @@ if [ "$RUN" = true ]; then
         -global isa-debugcon.iobase=0xE9 \
         -d int,pcall,guest_errors,unimp \
         -D qemu_execution.log \
-        -netdev user,id=net0 \
-        -device e1000,netdev=net0
+        -netdev user,id=net0,net=10.0.2.0/24,host=10.0.2.2,dns=10.0.2.3,hostfwd=tcp::12222-:22 \
+        -device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+        -object filter-dump,id=f1,netdev=net0,file=net_capture.pcap
 fi

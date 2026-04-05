@@ -45,7 +45,8 @@ $USERSPACE_SERVICES = @(
 $USERSPACE_APPS = @(
     "fileman",
     "fs_test",
-    "hello_atxf"
+    "hello_atxf",
+    "timesync"
 )
 
 # -------------------------------------------------------------------------
@@ -592,7 +593,9 @@ if ($Run) {
         -device usb-mouse `
         -serial stdio `
         -debugcon file:serial_log.txt `
-        -global isa-debugcon.iobase=0xE9
+        -global isa-debugcon.iobase=0xE9 `
+        -netdev user,id=net0 `
+        -device e1000,netdev=net0
 } else {
     Write-Host "Para rodar no QEMU: .\build.ps1 --run" -ForegroundColor Yellow
 }
