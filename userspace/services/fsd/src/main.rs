@@ -26,7 +26,7 @@ mod allocator {
     use core::cell::UnsafeCell;
     use core::ptr::null_mut;
 
-    const HEAP_SIZE: usize = 256 * 1024; // 256 KB heap for fsd
+    const HEAP_SIZE: usize = 512 * 1024; // 512 KB heap for fsd
 
     #[repr(align(4096))]
     struct Heap {
@@ -55,15 +55,33 @@ mod allocator {
             let aligned = (current + align - 1) & !(align - 1);
 
             if aligned + size > HEAP_SIZE {
+                // Heap exhausted — log and return null so the caller gets
+                // an allocation failure rather than a silent memory stomp.
+                atom_syscall::debug::log(
+                    "fsd: HEAP EXHAUSTED — bump allocator out of memory"
+                );
                 return null_mut();
             }
 
             *next = aligned + size;
+
+            // Warn when heap usage crosses 75% so we can catch pressure early.
+            let used = aligned + size;
+            if used > HEAP_SIZE * 3 / 4 && current <= HEAP_SIZE * 3 / 4 {
+                atom_syscall::debug::log(
+                    "fsd: HEAP WARNING — usage crossed 75%"
+                );
+            }
+
             heap_start.add(aligned)
         }
 
         unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-            // Bump allocator doesn't free
+            // Bump allocator: dealloc is a no-op.
+            // The heap is intentionally never freed because fsd is a long-lived
+            // daemon and all allocations are either permanent (static state) or
+            // short-lived per-request Vecs that are dropped after the reply is sent.
+            // If heap pressure becomes a problem, replace with a proper allocator.
         }
     }
 
@@ -105,8 +123,10 @@ mod fat32;
 mod journal;
 mod block_device;
 mod fat32_ops;
+mod backend;
 
 use ipc::FsdIpcHandler;
+use backend::UserspaceFatBackend;
 use journal::JournalManager;
 use block_device::BlockDevice;
 use atom_abi::PORT_FS_SERVICE;
@@ -154,26 +174,17 @@ fn main() -> ! {
         }
     }
 
-    // Create the filesystem service port (well-known port 3, with automatic fallback to dynamic)
+    // Create the filesystem service on the well-known fixed port.
+    // Kernel FS syscalls route to this ID, so dynamic fallback is incorrect.
     let fs_port = match atom_syscall::ipc::create_port_with_id(PORT_FS_SERVICE) {
         Ok(port) => {
-            log(&format!("fsd: created FS port with reserved ID {} (dynamic port would have been accepted too)", port));
+            log(&format!("fsd: created FS port with reserved ID {}", port));
             port
         }
         Err(_) => {
-            // Fallback: if reserved port is busy, use dynamic port assignment
-            log("fsd: WARNING - reserved port busy, attempting dynamic port allocation");
-            match atom_syscall::ipc::create_port() {
-                Ok(port) => {
-                    log(&format!("fsd: allocated dynamic FS port ID {}", port));
-                    port
-                }
-                Err(_) => {
-                    log("fsd: ERROR - failed to create FS port (both reserved and dynamic), exiting");
-                    loop {
-                        atom_syscall::thread::yield_now();
-                    }
-                }
+            log("fsd: ERROR - failed to claim reserved FS port; refusing dynamic fallback");
+            loop {
+                atom_syscall::thread::yield_now();
             }
         }
     };
@@ -204,10 +215,19 @@ fn main() -> ! {
         mounts_manager.active_mount_count()
     ));
 
-    // Create IPC handler
-    let mut ipc_handler = FsdIpcHandler::new(&mut mounts_manager);
+    // Initialize userspace-owned FAT32 backend on top of raw block I/O.
+    if !fat32::init() {
+        log("fsd: ERROR - failed to initialize userspace FAT32 backend");
+        loop {
+            atom_syscall::thread::yield_now();
+        }
+    }
 
-    log("fsd: ready to serve filesystem requests with journal-based crash-consistency");
+    // Create IPC handler with pluggable backend implementation.
+    let backend = UserspaceFatBackend;
+    let mut ipc_handler = FsdIpcHandler::new(&mut mounts_manager, &backend);
+
+    log("fsd: ready to serve filesystem requests (journal logging active; active data path owned by fsd userspace FAT32)");
 
     // Main service loop
     main_loop(fs_port, &mut ipc_handler);
@@ -224,8 +244,8 @@ fn main() -> ! {
 ///
 /// The handler returns a serialised response which we send to reply_port.
 fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler) -> ! {
-    // Allocate receive buffer once for reuse
-    let mut buffer = [0u8; libipc::MAX_MESSAGE_SIZE];
+    // Allocate receive buffer on the heap to avoid consuming stack space
+    let mut buffer = alloc::vec![0u8; libipc::MAX_MESSAGE_SIZE];
 
     log("fsd: entering main loop");
 
@@ -264,13 +284,25 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
                 // The actual request data is after the reply_port
                 let request_data = &payload[8..];
 
-                // Dispatch to handler — returns response bytes (FsReply format)
-                let response = ipc_handler.handle_request(header.msg_type, request_data);
+                match header.msg_type {
+                    // Heap-free fast-path: large sequential reads must not
+                    // allocate per chunk because fsd uses a bump allocator.
+                    libipc::messages::MessageType::FsRead => {
+                        let response = ipc_handler.handle_fs_read_noalloc(request_data);
+                        if let Err(_) = atom_syscall::ipc::send(reply_port, response) {
+                            log("fsd: failed to send read reply");
+                        }
+                    }
+                    _ => {
+                        // Dispatch to handler — returns response bytes (FsReply format)
+                        let response = ipc_handler.handle_request(header.msg_type, request_data);
 
-                // Send raw response bytes back through the reply port.
-                // No MessageHeader wrapping — the kernel expects [error(8)|value(8)|data...]
-                if let Err(_) = atom_syscall::ipc::send(reply_port, &response) {
-                    log("fsd: failed to send reply");
+                        // Send raw response bytes back through the reply port.
+                        // No MessageHeader wrapping — the kernel expects [error(8)|value(8)|data...]
+                        if let Err(_) = atom_syscall::ipc::send(reply_port, &response) {
+                            log("fsd: failed to send reply");
+                        }
+                    }
                 }
             }
             Err(atom_syscall::SyscallError::WouldBlock) => {
@@ -294,8 +326,18 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
 // ============================================================================
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    log("fsd: PANIC");
+fn panic(info: &PanicInfo) -> ! {
+    if let Some(loc) = info.location() {
+        log(&format!(
+            "fsd: PANIC at {}:{}:{}",
+            loc.file(),
+            loc.line(),
+            loc.column()
+        ));
+    } else {
+        log("fsd: PANIC (location unavailable)");
+    }
+    log(&format!("fsd: PANIC message: {}", info.message()));
     loop {
         atom_syscall::thread::yield_now();
     }

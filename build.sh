@@ -660,59 +660,72 @@ fi
 
 DISK_IMG="build/atom_disk.img"
 
-step "Gerando imagem de disco real..."
+# Only create a fresh image if one doesn't exist yet.
+# This preserves runtime user data (files created inside the OS) across
+# reboots.  Run with --clean to force a full rebuild of the image.
+if [ ! -f "$DISK_IMG" ]; then
+    step "Criando nova imagem de disco..."
 
-dd if=/dev/zero of=$DISK_IMG bs=1M count=64 2>/dev/null
+    dd if=/dev/zero of=$DISK_IMG bs=1M count=64 2>/dev/null
 
-mformat -i $DISK_IMG -F ::
+    mformat -i $DISK_IMG -F ::
 
-# ---- EFI partition (boot-only, not visible to users) ----
-mmd -i $DISK_IMG ::/EFI
-mmd -i $DISK_IMG ::/EFI/BOOT
+    # ---- EFI partition (boot-only, not visible to users) ----
+    mmd -i $DISK_IMG ::/EFI
+    mmd -i $DISK_IMG ::/EFI/BOOT
 
-# ---- OS partition directories ----
-mmd -i $DISK_IMG ::/system
-mmd -i $DISK_IMG ::/system/services
-mmd -i $DISK_IMG ::/system/wallpapers
-mmd -i $DISK_IMG ::/apps
-mmd -i $DISK_IMG ::/apps/system
-mmd -i $DISK_IMG ::/apps/user
-mmd -i $DISK_IMG ::/user
-mmd -i $DISK_IMG ::/user/home
-mmd -i $DISK_IMG ::/user/config
-mmd -i $DISK_IMG ::/user/data
+    # ---- OS partition directories ----
+    mmd -i $DISK_IMG ::/system
+    mmd -i $DISK_IMG ::/system/services
+    mmd -i $DISK_IMG ::/system/wallpapers
+    mmd -i $DISK_IMG ::/apps
+    mmd -i $DISK_IMG ::/apps/system
+    mmd -i $DISK_IMG ::/apps/user
+    mmd -i $DISK_IMG ::/user
+    mmd -i $DISK_IMG ::/user/home
+    mmd -i $DISK_IMG ::/user/config
+    mmd -i $DISK_IMG ::/user/data
+
+    success "Imagem de disco criada: $DISK_IMG"
+else
+    step "Imagem existente preservada: $DISK_IMG (use --clean para recriar)"
+fi
+
+# Always update OS binaries on the image so the latest build is used,
+# but leave /user and runtime-created files untouched.
+step "Atualizando binários na imagem..."
 
 # ---- Boot files (EFI partition) ----
-mcopy -i $DISK_IMG build/Atom.efi ::/EFI/BOOT/BOOTX64.EFI
+mcopy -i $DISK_IMG -o build/Atom.efi ::/EFI/BOOT/BOOTX64.EFI
 
 if [ -f "efi/EFI/BOOT/init.atxf" ]; then
-    mcopy -i $DISK_IMG efi/EFI/BOOT/init.atxf ::/EFI/BOOT/init.atxf
+    mcopy -i $DISK_IMG -o efi/EFI/BOOT/init.atxf ::/EFI/BOOT/init.atxf
 fi
 
 # ---- System services → /system/services/ ----
 if ls efi/system/services/*.atxf 1>/dev/null 2>&1; then
-    mcopy -i $DISK_IMG efi/system/services/*.atxf ::/system/services/
+    mcopy -i $DISK_IMG -o efi/system/services/*.atxf ::/system/services/
 fi
 
 # ---- System apps → /apps/system/ ----
 if ls efi/apps/system/*.atxf 1>/dev/null 2>&1; then
-    mcopy -i $DISK_IMG efi/apps/system/*.atxf ::/apps/system/
+    mcopy -i $DISK_IMG -o efi/apps/system/*.atxf ::/apps/system/
 fi
 
 # ---- User apps → /apps/user/ ----
 if ls efi/apps/user/*.atxf 1>/dev/null 2>&1; then
-    mcopy -i $DISK_IMG efi/apps/user/*.atxf ::/apps/user/
+    mcopy -i $DISK_IMG -o efi/apps/user/*.atxf ::/apps/user/
 fi
 
 # ---- Wallpaper images → /system/wallpapers/ ----
 if ls userspace/system_apps/ui_shell/img/*.jpg 1>/dev/null 2>&1; then
     for img in userspace/system_apps/ui_shell/img/*.jpg; do
-        mcopy -i $DISK_IMG "$img" ::/system/wallpapers/
+        mcopy -i $DISK_IMG -o "$img" ::/system/wallpapers/
         success "$(basename $img) → system/wallpapers/"
         if command -v sips >/dev/null 2>&1; then
             png_tmp="build/$(basename "${img%.*}").png"
             if sips -s format png "$img" --out "$png_tmp" >/dev/null 2>&1; then
-                mcopy -i $DISK_IMG "$png_tmp" ::/system/wallpapers/
+                mcopy -i $DISK_IMG -o "$png_tmp" ::/system/wallpapers/
                 success "$(basename "$png_tmp") → system/wallpapers/"
             fi
         fi
@@ -721,12 +734,12 @@ fi
 
 if ls userspace/system_apps/ui_shell/img/*.jpeg 1>/dev/null 2>&1; then
     for img in userspace/system_apps/ui_shell/img/*.jpeg; do
-        mcopy -i $DISK_IMG "$img" ::/system/wallpapers/
+        mcopy -i $DISK_IMG -o "$img" ::/system/wallpapers/
         success "$(basename $img) → system/wallpapers/"
         if command -v sips >/dev/null 2>&1; then
             png_tmp="build/$(basename "${img%.*}").png"
             if sips -s format png "$img" --out "$png_tmp" >/dev/null 2>&1; then
-                mcopy -i $DISK_IMG "$png_tmp" ::/system/wallpapers/
+                mcopy -i $DISK_IMG -o "$png_tmp" ::/system/wallpapers/
                 success "$(basename "$png_tmp") → system/wallpapers/"
             fi
         fi
@@ -736,12 +749,12 @@ fi
 # ---- User data files (WADs, etc.) → /apps/user/ ----
 if ls efi/apps/user/*.wad 1>/dev/null 2>&1; then
     for wad in efi/apps/user/*.wad; do
-        mcopy -i $DISK_IMG "$wad" ::/apps/user/
+        mcopy -i $DISK_IMG -o "$wad" ::/apps/user/
         success "$(basename $wad) → apps/user/"
     done
 fi
 
-success "Imagem de disco criada: $DISK_IMG"
+success "Binários atualizados na imagem: $DISK_IMG"
 
 # =========================================================================
 # EXECUTAR QEMU
@@ -762,7 +775,7 @@ if [ "$RUN" = true ]; then
         -cpu qemu64 \
         -m 512M \
         -bios "$OVMF_PATH" \
-        -drive format=raw,file=$DISK_IMG \
+        -drive format=raw,file=$DISK_IMG,cache=writeback \
         -device VGA \
         -usb \
         -device usb-mouse \

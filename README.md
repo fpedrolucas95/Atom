@@ -40,7 +40,7 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 - Capability system with handle-based access, permission bitflags, derivation, transitive revocation, and audit logging
 - Shared memory manager with dynamic VA window allocation and owner-exit cleanup
 - Bochs Graphics Adapter driver for runtime display resolution switching
-- FAT32 filesystem driver (read-only) with kernel-level file descriptor table
+- FAT32 filesystem stack with read/write support through fsd-routed POSIX syscalls, with active on-disk data path owned by fsd userspace FAT32 over raw block I/O
 - Process spawning from filesystem via `SYS_SPAWN_FROM_PATH` loading ATXF executables into isolated address spaces
 
 ### User Space
@@ -202,7 +202,7 @@ Atom is an experimental system in active development. Current known limitations 
 
 - **Single-core only** — no SMP support yet; scheduler and IPC are designed for single-core execution
 - **No networking** — no NIC driver or TCP/IP stack
-- **FAT32 read-only** — filesystem support is limited to reading from a FAT32 disk image
+- **Journal replay integration for userspace FAT32 is still maturing** — normal read/write path is userspace-owned in fsd, but crash-recovery replay coverage is still being expanded
 - **Capability enforcement is partial** — the capability infrastructure (handles, permissions, derivation, revocation) is implemented, but not all syscalls enforce capability checks before execution
 - **No ASLR or stack overflow detection** in user space
 - **QEMU only** — not tested on real hardware

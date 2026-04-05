@@ -471,7 +471,7 @@ pub const USER_STACK_TOP: UserVirtAddr = 0x0000_8000_0000;
 pub const USER_STACK_GUARD_PAGES: usize = 1;
 
 /// Default number of mapped pages for each userspace stack.
-pub const DEFAULT_USER_STACK_PAGES: usize = 64; // 256 KiB
+pub const DEFAULT_USER_STACK_PAGES: usize = 128; // 512 KiB
 
 /// Default mapped userspace stack size in bytes.
 pub const DEFAULT_USER_STACK_SIZE: usize = DEFAULT_USER_STACK_PAGES * 4096;

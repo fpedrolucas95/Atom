@@ -4,6 +4,7 @@
 // All information is obtained via IPC requests to system services.
 
 use super::{CommandContext, CommandResult, get_all_commands, get_command_help};
+use super::filesystem;
 use crate::parser::ParsedCommand;
 use crate::window::Theme;
 use atom_syscall::thread::get_ticks;
@@ -61,7 +62,7 @@ pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
             ("System", &["help","version","uptime","date","sysinfo","clear","echo","log"]),
             ("Process", &["ps","kill","exec","mem","services"]),
             ("Navigation & Read", &["ls","cd","pwd","cat","head","tail","wc","stat","find","tree"]),
-            ("Write & Manage", &["mkdir","rmdir","rm","mv","cp","touch","chmod","ln","df","du"]),
+            ("Write & Manage", &["mkdir","rmdir","rm","mv","cp","touch","fsync","chmod","ln","df","du"]),
             ("Terminal", &["exit","ports","caps"]),
         ];
 
@@ -144,6 +145,16 @@ fn show_command_help(topic: &str, ctx: &mut CommandContext<'_>) {
             ctx.println("  cat readme.txt");
             ctx.println("  cat /etc/version");
             ctx.println("  cat file1.txt file2.txt   (concatenate)");
+        }
+        "echo" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  echo hello");
+            ctx.println("  echo -n prompt>");
+            ctx.println("  echo \"AAA\" > /user/test.txt");
+            ctx.println("  echo \"BBB\" >> /user/test.txt");
+            ctx.println("");
+            ctx.println_colored("Notes:", Theme::TEXT_DIM);
+            ctx.println("  Redirection writes and then calls fsync for durability.");
         }
         "head" => {
             ctx.println_colored("Options:", Theme::TEXT_DIM);
@@ -235,6 +246,14 @@ fn show_command_help(topic: &str, ctx: &mut CommandContext<'_>) {
             ctx.println_colored("Examples:", Theme::PROMPT_USER);
             ctx.println("  touch newfile.txt    (create if not exists)");
             ctx.println("  touch existing.log   (update timestamp)");
+        }
+        "fsync" => {
+            ctx.println_colored("Examples:", Theme::PROMPT_USER);
+            ctx.println("  fsync /user/test.txt");
+            ctx.println("  fsync /user");
+            ctx.println("");
+            ctx.println_colored("Notes:", Theme::TEXT_DIM);
+            ctx.println("  Forces dirty data/metadata to persistent storage.");
         }
         "chmod" => {
             ctx.println_colored("Common modes:", Theme::TEXT_DIM);
@@ -417,11 +436,33 @@ pub fn cmd_date(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
 }
 
 pub fn cmd_echo(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let mut output = [0u8; 256];
-    let mut pos = 0;
+    let mut arg_start = 0usize;
+    let mut append_newline = true;
+    if cmd.arg_count > 0 && cmd.args[0] == "-n" {
+        arg_start = 1;
+        append_newline = false;
+    }
 
-    for i in 0..cmd.arg_count {
-        if i > 0 && pos < output.len() {
+    let mut redir_idx: Option<usize> = None;
+    let mut append_mode = false;
+    for i in arg_start..cmd.arg_count {
+        if cmd.args[i] == ">" {
+            redir_idx = Some(i);
+            append_mode = false;
+            break;
+        }
+        if cmd.args[i] == ">>" {
+            redir_idx = Some(i);
+            append_mode = true;
+            break;
+        }
+    }
+
+    let text_end = redir_idx.unwrap_or(cmd.arg_count);
+    let mut output = [0u8; 256];
+    let mut pos = 0usize;
+    for i in arg_start..text_end {
+        if i > arg_start && pos < output.len() {
             output[pos] = b' ';
             pos += 1;
         }
@@ -433,9 +474,61 @@ pub fn cmd_echo(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         }
     }
 
-    let text = unsafe { core::str::from_utf8_unchecked(&output[..pos]) };
-    ctx.println(text);
+    if append_newline && pos < output.len() {
+        output[pos] = b'\n';
+        pos += 1;
+    }
 
+    if let Some(idx) = redir_idx {
+        if idx + 1 >= cmd.arg_count {
+            ctx.error("echo: missing file path after redirection");
+            return CommandResult::Error;
+        }
+        if idx + 2 < cmd.arg_count {
+            ctx.error("echo: unexpected extra arguments after redirection target");
+            return CommandResult::Error;
+        }
+
+        let path = filesystem::resolve_path_for_shell(cmd.args[idx + 1]);
+        let flags = if append_mode {
+            atom_syscall::fs::OpenFlags::CREAT
+                | atom_syscall::fs::OpenFlags::WRONLY
+                | atom_syscall::fs::OpenFlags::APPEND
+        } else {
+            atom_syscall::fs::OpenFlags::CREAT
+                | atom_syscall::fs::OpenFlags::WRONLY
+                | atom_syscall::fs::OpenFlags::TRUNC
+        };
+
+        let fd = match atom_syscall::fs::open(&path, flags, 0o644) {
+            Ok(fd) => fd,
+            Err(e) => {
+                ctx.error(&alloc::format!("echo: cannot open '{}': {:?}", cmd.args[idx + 1], e));
+                return CommandResult::Error;
+            }
+        };
+
+        if let Err(e) = atom_syscall::fs::write_all(fd, &output[..pos]) {
+            let _ = atom_syscall::fs::close(fd);
+            ctx.error(&alloc::format!("echo: write failed: {:?}", e));
+            return CommandResult::Error;
+        }
+
+        if let Err(e) = atom_syscall::fs::fsync(fd) {
+            let _ = atom_syscall::fs::close(fd);
+            ctx.error(&alloc::format!("echo: fsync failed: {:?}", e));
+            return CommandResult::Error;
+        }
+
+        if let Err(e) = atom_syscall::fs::close(fd) {
+            ctx.error(&alloc::format!("echo: close failed: {:?}", e));
+            return CommandResult::Error;
+        }
+        return CommandResult::Ok;
+    }
+
+    let text = unsafe { core::str::from_utf8_unchecked(&output[..pos]) };
+    ctx.print(text);
     CommandResult::Ok
 }
 

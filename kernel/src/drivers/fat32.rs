@@ -269,11 +269,17 @@ fn write_fat_entry(cluster: u32, value: u32) -> bool {
     let fat_offset = cluster * 4;
     let entry_offset = (fat_offset % info.bytes_per_sector) as usize;
     let masked = value & 0x0FFF_FFFF;
+    crate::log_info!(
+        "fat32",
+        "FAT UPDATE: cluster {} -> 0x{:08X}",
+        cluster,
+        masked
+    );
 
     for fat_idx in 0..info.num_fats {
         let fat_sector = info.fat_start_sector + fat_idx * info.fat_size_sectors + fat_offset / info.bytes_per_sector;
         let mut sector_data = match ahci::read_sectors(fat_sector as u64, 1) {
-            Some(data) => data.to_vec(),
+            Some(data) => data,
             None => return false,
         };
 
@@ -297,15 +303,22 @@ fn write_fat_entry(cluster: u32, value: u32) -> bool {
 fn read_cluster(cluster: u32) -> Option<Vec<u8>> {
     let info = fs_info()?;
     let sector = cluster_to_sector(cluster);
-    let data = ahci::read_sectors(sector as u64, info.sectors_per_cluster as u16)?;
-    Some(data.to_vec())
+    ahci::read_sectors(sector as u64, info.sectors_per_cluster as u16)
 }
 
 fn write_cluster(cluster: u32, data: &[u8]) -> bool {
     if data.len() != cluster_size() {
         return false;
     }
-    ahci::write_sectors(cluster_to_sector(cluster) as u64, data)
+    let sector = cluster_to_sector(cluster) as u64;
+    crate::log_info!(
+        "fat32",
+        "WRITE: cluster={} sector={} bytes={}",
+        cluster,
+        sector,
+        data.len()
+    );
+    ahci::write_sectors(sector, data)
 }
 
 fn zero_cluster(cluster: u32) -> bool {
@@ -380,6 +393,12 @@ fn allocate_cluster(prev: Option<u32>) -> Option<u32> {
         let _ = write_fat_entry(cluster, FAT_FREE);
         return None;
     }
+    crate::log_info!(
+        "fat32",
+        "ALLOC CLUSTER: new={} prev={}",
+        cluster,
+        prev.unwrap_or(0)
+    );
     Some(cluster)
 }
 
@@ -406,6 +425,12 @@ fn free_cluster_chain(start_cluster: u32) -> bool {
         Some(chain) => chain,
         None => return false,
     };
+    crate::log_info!(
+        "fat32",
+        "FREE CHAIN: start={} len={}",
+        start_cluster,
+        chain.len()
+    );
     for cluster in chain {
         if !write_fat_entry(cluster, FAT_FREE) {
             return false;
@@ -621,6 +646,14 @@ fn write_dir_entry_at(dir_cluster: u32, entry_index: usize, entry: &DirEntry) ->
         core::slice::from_raw_parts((entry as *const DirEntry) as *const u8, 32)
     };
     cluster_data[offset..offset + 32].copy_from_slice(entry_bytes);
+    crate::log_info!(
+        "fat32",
+        "DIR UPDATE: dir_cluster={} entry_index={} first_cluster={} size={}",
+        dir_cluster,
+        entry_index,
+        entry_first_cluster(entry),
+        u32::from_le(entry.file_size)
+    );
     write_cluster(cluster, &cluster_data)
 }
 
@@ -634,6 +667,12 @@ fn mark_dir_entry_deleted(dir_cluster: u32, entry_index: usize) -> bool {
         None => return false,
     };
     cluster_data[offset] = 0xE5;
+    crate::log_info!(
+        "fat32",
+        "DIR DELETE: dir_cluster={} entry_index={}",
+        dir_cluster,
+        entry_index
+    );
     write_cluster(cluster, &cluster_data)
 }
 
@@ -730,11 +769,26 @@ pub fn write_file(path: &str, data: &[u8]) -> bool {
     } else {
         data.len().div_ceil(cluster_size())
     };
+    crate::log_info!(
+        "fat32",
+        "WRITE_FILE BEGIN: path={} old_cluster={} bytes={} needed_clusters={}",
+        path,
+        old_cluster,
+        data.len(),
+        needed_clusters
+    );
 
     let new_chain = match allocate_chain(needed_clusters) {
         Some(chain) => chain,
         None => return false,
     };
+    crate::log_info!(
+        "fat32",
+        "WRITE_FILE CHAIN: path={} new_first_cluster={} chain_len={}",
+        path,
+        new_chain.first().copied().unwrap_or(0),
+        new_chain.len()
+    );
 
     if !new_chain.is_empty() && !write_bytes_to_chain(&new_chain, data) {
         let _ = free_cluster_chain(new_chain[0]);
@@ -752,11 +806,29 @@ pub fn write_file(path: &str, data: &[u8]) -> bool {
         return false;
     }
 
+    // Crash-safety ordering:
+    // 1) data + FAT + directory entry for the new version
+    // 2) durability barrier
+    // 3) free old cluster chain (space reclamation)
+    // 4) durability barrier
+    if !sync() {
+        return false;
+    }
+    crate::log_info!("fat32", "WRITE_FILE SYNC1 OK: path={}", path);
+
     if old_cluster >= 2 {
-        let _ = free_cluster_chain(old_cluster);
+        if !free_cluster_chain(old_cluster) {
+            // New file contents are already durable; failure here only leaks space.
+            crate::log_warn!("fat32", "write_file: leaked old cluster chain for path {}", path);
+            return true;
+        }
     }
 
-    true
+    let synced = sync();
+    if synced {
+        crate::log_info!("fat32", "WRITE_FILE SYNC2 OK: path={}", path);
+    }
+    synced
 }
 
 pub fn mkdir(path: &str) -> bool {
@@ -795,7 +867,7 @@ pub fn mkdir(path: &str) -> bool {
         return false;
     }
 
-    true
+    sync()
 }
 
 fn is_directory_empty(cluster: u32) -> bool {
@@ -836,10 +908,16 @@ pub fn unlink(path: &str) -> bool {
     if !mark_dir_entry_deleted(located.dir_cluster, located.entry_index) {
         return false;
     }
-    if first_cluster >= 2 {
-        let _ = free_cluster_chain(first_cluster);
+    if !sync() {
+        return false;
     }
-    true
+    if first_cluster >= 2 {
+        if !free_cluster_chain(first_cluster) {
+            crate::log_warn!("fat32", "unlink: leaked cluster chain for path {}", path);
+            return true;
+        }
+    }
+    sync()
 }
 
 pub fn rmdir(path: &str) -> bool {
@@ -857,7 +935,14 @@ pub fn rmdir(path: &str) -> bool {
     if !mark_dir_entry_deleted(located.dir_cluster, located.entry_index) {
         return false;
     }
-    free_cluster_chain(cluster)
+    if !sync() {
+        return false;
+    }
+    if !free_cluster_chain(cluster) {
+        crate::log_warn!("fat32", "rmdir: leaked directory cluster for path {}", path);
+        return true;
+    }
+    sync()
 }
 
 pub fn rename(old_path: &str, new_path: &str) -> bool {
@@ -891,7 +976,10 @@ pub fn rename(old_path: &str, new_path: &str) -> bool {
 
     let mut updated = old_located.entry;
     updated.name = new_name;
-    write_dir_entry_at(old_located.dir_cluster, old_located.entry_index, &updated)
+    if !write_dir_entry_at(old_located.dir_cluster, old_located.entry_index, &updated) {
+        return false;
+    }
+    sync()
 }
 
 fn find_path_entry(path: &str) -> Option<LocatedEntry> {
@@ -933,6 +1021,13 @@ pub fn open(path: &str) -> Option<Vec<u8>> {
 
 pub fn is_available() -> bool {
     unsafe { FS_INFO.is_some() }
+}
+
+pub fn sync() -> bool {
+    if fs_info().is_none() {
+        return false;
+    }
+    ahci::flush_cache()
 }
 
 pub fn stat_path(path: &str) -> Option<FileStat> {

@@ -53,7 +53,7 @@ pub(super) enum CapRequirement {
     /// Caller must hold any Framebuffer cap (any dimensions) with READ.
     AnyFramebuffer,
     /// Caller must hold any FsNamespace cap with READ.
-    /// Used to gate the kernel-internal FAT32 backend syscalls (200-202)
+    /// Used to gate kernel-internal storage syscalls (200-212 except 203)
     /// so that only fsd can reach the raw filesystem driver.
     AnyFsNamespace,
     /// Caller must be the registered privileged process (init bootstrap).
@@ -193,6 +193,9 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         // at spawn time.  This is the first hard enforcement of the rule
         // "only fsd calls kern_fs_*".
         SYS_KERN_FS_READ_FILE | SYS_KERN_FS_LIST_DIR | SYS_KERN_FS_STAT_PATH
+        | SYS_KERN_FS_WRITE_FILE | SYS_KERN_FS_MKDIR | SYS_KERN_FS_RMDIR
+        | SYS_KERN_FS_UNLINK | SYS_KERN_FS_RENAME | SYS_KERN_FS_SYNC
+        | SYS_KERN_BLOCK_READ | SYS_KERN_BLOCK_WRITE | SYS_KERN_BLOCK_FLUSH
             => Requires(AnyFsNamespace),
 
         // ── POSIX FS (via fsd IPC) ─────────────────────────────────────────

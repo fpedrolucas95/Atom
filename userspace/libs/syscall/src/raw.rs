@@ -91,6 +91,15 @@ pub mod numbers {
     pub const SYS_KERN_FS_READ_FILE: u64 = 200;
     pub const SYS_KERN_FS_LIST_DIR:  u64 = 201;
     pub const SYS_KERN_FS_STAT_PATH: u64 = 202;
+    pub const SYS_KERN_FS_WRITE_FILE: u64 = 204;
+    pub const SYS_KERN_FS_MKDIR:      u64 = 205;
+    pub const SYS_KERN_FS_RMDIR:      u64 = 206;
+    pub const SYS_KERN_FS_UNLINK:     u64 = 207;
+    pub const SYS_KERN_FS_RENAME:     u64 = 208;
+    pub const SYS_KERN_FS_SYNC:       u64 = 209;
+    pub const SYS_KERN_BLOCK_READ:    u64 = 210;
+    pub const SYS_KERN_BLOCK_WRITE:   u64 = 211;
+    pub const SYS_KERN_BLOCK_FLUSH:   u64 = 212;
 
     // App launcher — spawn ATXF by absolute filesystem path.
     // Intended for use by the privileged app_launcher service only; unprivileged

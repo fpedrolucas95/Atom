@@ -4,7 +4,9 @@
 #![allow(dead_code, static_mut_refs)]
 
 use crate::mm::pmm;
+use alloc::vec::Vec;
 use core::ptr;
+use spin::Mutex;
 
 // AHCI register offsets
 const AHCI_CAP: usize = 0x00;      // Host Capabilities
@@ -52,6 +54,7 @@ const FIS_TYPE_REG_H2D: u8 = 0x27;
 // ATA commands
 const ATA_CMD_READ_DMA_EX: u8 = 0x25;
 const ATA_CMD_WRITE_DMA_EX: u8 = 0x35;
+const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
 // PCI configuration for AHCI
@@ -116,6 +119,7 @@ static mut CMD_LIST_BASE: usize = 0;
 static mut FIS_BASE: usize = 0;
 static mut CMD_TABLE_BASE: usize = 0;
 static mut DATA_BUFFER: usize = 0;
+static AHCI_IO_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init() -> bool {
     // Find AHCI controller via PCI
@@ -339,10 +343,13 @@ unsafe fn start_cmd(port: u32) {
 /// lba: Starting sector number
 /// count: Number of sectors to read (max 128)
 /// Returns: Pointer to data buffer on success
-pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
+pub fn read_sectors(lba: u64, count: u16) -> Option<Vec<u8>> {
+    let _guard = AHCI_IO_LOCK.lock();
     unsafe {
         let port = ACTIVE_PORT?;
-        let count = count.min(128); // Max 64KB at a time
+        if count == 0 || count > 128 {
+            return None;
+        }
 
         // Set up command header
         let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
@@ -393,7 +400,8 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
                 write_port_reg(port, PORT_IS, is);
 
                 let size = (count as usize) * 512;
-                return Some(core::slice::from_raw_parts(DATA_BUFFER as *const u8, size));
+                let src = core::slice::from_raw_parts(DATA_BUFFER as *const u8, size);
+                return Some(src.to_vec());
             }
         }
 
@@ -405,6 +413,7 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<&'static [u8]> {
 /// Write sectors to the disk.
 /// `data.len()` must be a non-zero multiple of 512 bytes.
 pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
+    let _guard = AHCI_IO_LOCK.lock();
     unsafe {
         let port = match ACTIVE_PORT {
             Some(port) => port,
@@ -415,8 +424,18 @@ pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
             return false;
         }
 
-        let sector_count = (data.len() / 512).min(128);
+        let sector_count = data.len() / 512;
+        if sector_count == 0 || sector_count > 128 {
+            return false;
+        }
         let byte_count = sector_count * 512;
+        crate::log_info!(
+            "ahci",
+            "AHCI WRITE: lba={} sectors={} bytes={}",
+            lba,
+            sector_count,
+            byte_count
+        );
 
         core::ptr::copy_nonoverlapping(data.as_ptr(), DATA_BUFFER as *mut u8, byte_count);
 
@@ -460,11 +479,58 @@ pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
                     return false;
                 }
                 write_port_reg(port, PORT_IS, is);
+                crate::log_info!("ahci", "AHCI WRITE OK: lba={} sectors={}", lba, sector_count);
                 return true;
             }
         }
 
         crate::log_error!("ahci", "Write timeout on port {}", port);
+        false
+    }
+}
+
+/// Flush the device write cache to persistent media.
+pub fn flush_cache() -> bool {
+    let _guard = AHCI_IO_LOCK.lock();
+    unsafe {
+        let port = match ACTIVE_PORT {
+            Some(port) => port,
+            None => return false,
+        };
+        crate::log_info!("ahci", "AHCI FLUSH: begin");
+
+        let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
+        (*cmd_header).flags = 5; // 5 DWORDs in FIS, no data transfer
+        (*cmd_header).prdtl = 0;
+        (*cmd_header).prdbc = 0;
+
+        let cmd_table = CMD_TABLE_BASE as *mut CommandTable;
+        ptr::write_bytes(cmd_table, 0, 1);
+
+        let fis = &mut (*cmd_table).cfis as *mut [u8; 64] as *mut FisRegH2D;
+        (*fis).fis_type = FIS_TYPE_REG_H2D;
+        (*fis).flags = 0x80;
+        (*fis).command = ATA_CMD_FLUSH_CACHE_EXT;
+        (*fis).device = 0;
+
+        write_port_reg(port, PORT_CI, 1);
+
+        for _ in 0..10000000 {
+            let ci = read_port_reg(port, PORT_CI);
+            if ci == 0 {
+                let is = read_port_reg(port, PORT_IS);
+                if is & 0x40000000 != 0 {
+                    crate::log_error!("ahci", "Flush error on port {}", port);
+                    write_port_reg(port, PORT_IS, is);
+                    return false;
+                }
+                write_port_reg(port, PORT_IS, is);
+                crate::log_info!("ahci", "AHCI FLUSH: completed");
+                return true;
+            }
+        }
+
+        crate::log_error!("ahci", "Flush timeout on port {}", port);
         false
     }
 }

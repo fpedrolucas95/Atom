@@ -772,3 +772,144 @@ pub fn kern_fs_stat_path(path: &str, stat_buf: &mut [u8; 80]) -> FsResult<()> {
         Ok(())
     }
 }
+
+/// Write a full file payload directly via the kernel FAT32 backend.
+pub fn kern_fs_write_file(path: &str, data: &[u8]) -> FsResult<()> {
+    let r = unsafe {
+        syscall4(
+            SYS_KERN_FS_WRITE_FILE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Create a directory directly via the kernel FAT32 backend.
+pub fn kern_fs_mkdir(path: &str) -> FsResult<()> {
+    let r = unsafe {
+        syscall2(
+            SYS_KERN_FS_MKDIR,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove an empty directory directly via the kernel FAT32 backend.
+pub fn kern_fs_rmdir(path: &str) -> FsResult<()> {
+    let r = unsafe {
+        syscall2(
+            SYS_KERN_FS_RMDIR,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove a file directly via the kernel FAT32 backend.
+pub fn kern_fs_unlink(path: &str) -> FsResult<()> {
+    let r = unsafe {
+        syscall2(
+            SYS_KERN_FS_UNLINK,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Rename a path directly via the kernel FAT32 backend.
+pub fn kern_fs_rename(old_path: &str, new_path: &str) -> FsResult<()> {
+    let r = unsafe {
+        syscall4(
+            SYS_KERN_FS_RENAME,
+            old_path.as_ptr() as u64,
+            old_path.len() as u64,
+            new_path.as_ptr() as u64,
+            new_path.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Flush FAT32 metadata and device cache directly via kernel backend.
+pub fn kern_fs_sync() -> FsResult<()> {
+    let r = unsafe { crate::raw::syscall0(SYS_KERN_FS_SYNC) };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Read raw disk sectors from the kernel block layer.
+/// Returns the number of bytes written into `buf`.
+pub fn kern_block_read(lba: u64, sector_count: u32, buf: &mut [u8]) -> FsResult<usize> {
+    let r = unsafe {
+        syscall4(
+            SYS_KERN_BLOCK_READ,
+            lba,
+            sector_count as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(r as usize)
+    }
+}
+
+/// Write raw disk sectors through the kernel block layer.
+pub fn kern_block_write(lba: u64, sector_count: u32, data: &[u8]) -> FsResult<()> {
+    let r = unsafe {
+        syscall4(
+            SYS_KERN_BLOCK_WRITE,
+            lba,
+            sector_count as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        )
+    };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}
+
+/// Flush device write cache through the kernel block layer.
+pub fn kern_block_flush() -> FsResult<()> {
+    let r = unsafe { crate::raw::syscall0(SYS_KERN_BLOCK_FLUSH) };
+    if is_syscall_error(r) {
+        Err(FsError::from_raw(r))
+    } else {
+        Ok(())
+    }
+}

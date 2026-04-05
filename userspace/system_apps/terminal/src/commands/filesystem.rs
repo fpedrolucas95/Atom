@@ -1,8 +1,7 @@
 // Filesystem Commands
 //
 // POSIX-compatible filesystem commands for the Atom terminal.
-// Read-only operations go through the IPC client; write operations
-// use atom_syscall::fs directly (same privilege level as IPC path).
+// All operations go through atom_syscall::fs (which routes to fsd in kernel).
 
 use super::{CommandContext, CommandResult};
 use crate::parser::ParsedCommand;
@@ -82,6 +81,10 @@ fn resolve_path(path: &str) -> String {
     normalize(&combined)
 }
 
+pub(crate) fn resolve_path_for_shell(path: &str) -> String {
+    resolve_path(path)
+}
+
 fn normalize(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for seg in path.split('/') {
@@ -106,21 +109,6 @@ fn file_extension(name: &str) -> &str {
     name.rfind('.').map(|p| &name[p+1..]).unwrap_or("")
 }
 
-// ============================================================================
-// Number formatting helper
-// ============================================================================
-
-fn format_number(mut n: u64, buffer: &mut [u8]) -> usize {
-    if buffer.is_empty() { return 0; }
-    if n == 0 { buffer[0] = b'0'; return 1; }
-    let mut digits = [0u8; 20];
-    let mut count  = 0;
-    while n > 0 { digits[count] = b'0' + (n % 10) as u8; n /= 10; count += 1; }
-    if count > buffer.len() { return 0; }
-    for i in 0..count { buffer[i] = digits[count - 1 - i]; }
-    count
-}
-
 fn fmt_size(bytes: u64) -> String {
     if bytes < 1024 { format!("{} B", bytes) }
     else if bytes < 1024*1024 {
@@ -130,6 +118,18 @@ fn fmt_size(bytes: u64) -> String {
     } else {
         format!("{} GB", bytes/(1024*1024*1024))
     }
+}
+
+fn fs_read_file(path: &str) -> core::result::Result<Vec<u8>, atom_syscall::fs::FsError> {
+    atom_syscall::fs::read_file(path)
+}
+
+fn fs_list_dir(path: &str) -> core::result::Result<Vec<atom_syscall::fs::FsDirent>, atom_syscall::fs::FsError> {
+    let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
+    let fd = atom_syscall::fs::open(path, flags, 0)?;
+    let entries = atom_syscall::fs::readdir(fd);
+    let _ = atom_syscall::fs::close(fd);
+    entries
 }
 
 // ============================================================================
@@ -156,11 +156,33 @@ pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
         ctx.println_colored("----  ----------  ----", Theme::TEXT_DIM);
     }
 
-    ctx.ipc.list_directory(&path, |name, is_dir, size| {
-        if !show_all && name.starts_with('.') { return; }
+    let entries = match fs_list_dir(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("ls: cannot access '{}': {:?}", path, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    };
 
+    for entry in entries {
+        let name = entry.name;
+        if name == "." || name == ".." { continue; }
+        if !show_all && name.starts_with('.') { continue; }
+
+        let is_dir = entry.file_type == atom_syscall::fs::FileType::Directory;
         if long_fmt {
             let type_str = if is_dir { "dir " } else { "file" };
+            let size = if is_dir {
+                0
+            } else {
+                let full = if path.ends_with('/') {
+                    format!("{}{}", path, name)
+                } else {
+                    format!("{}/{}", path, name)
+                };
+                atom_syscall::fs::stat(&full).map(|s| s.size).unwrap_or(0)
+            };
             let size_str = if is_dir { String::from("   --      ") }
                 else { format!("{:<10}  ", size) };
             let line = format!("{}  {}  {}", type_str, size_str, name);
@@ -174,9 +196,9 @@ pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
             let ds = unsafe { core::str::from_utf8_unchecked(&dir_buf[..dp]) };
             ctx.println_colored(ds, Theme::PROMPT_PATH);
         } else {
-            ctx.println(name);
+            ctx.println(&name);
         }
-    });
+    }
 
     ctx.println("");
     CommandResult::Ok
@@ -199,8 +221,22 @@ pub fn cmd_cd(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
     }
 
     let new = resolve_path(target);
-    set_current_dir(&new);
-    CommandResult::Ok
+    match atom_syscall::fs::stat(&new) {
+        Ok(stat) if stat.is_dir() => {
+            set_current_dir(&new);
+            CommandResult::Ok
+        }
+        Ok(_) => {
+            let msg = format!("cd: {}: not a directory", target);
+            ctx.error(&msg);
+            CommandResult::Error
+        }
+        Err(e) => {
+            let msg = format!("cd: {}: {:?}", target, e);
+            ctx.error(&msg);
+            CommandResult::Error
+        }
+    }
 }
 
 // ============================================================================
@@ -228,19 +264,18 @@ pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
         let Some(fname) = cmd.arg(i) else { break; };
         let path = resolve_path(fname);
 
-        let mut buffer = [0u8; 4096];
-        match ctx.ipc.read_file(&path, &mut buffer) {
-            Some(len) => {
+        match fs_read_file(&path) {
+            Ok(buffer) => {
                 if cmd.arg_count > 1 {
                     // Print header for multiple files
                     let hdr = format!("==> {} <==", fname);
                     ctx.println_colored(&hdr, Theme::TEXT_INFO);
                 }
-                let content = unsafe { core::str::from_utf8_unchecked(&buffer[..len]) };
+                let content = unsafe { core::str::from_utf8_unchecked(&buffer) };
                 for line in content.split('\n') { ctx.println(line); }
             }
-            None => {
-                let msg = format!("cat: {}: no such file or not readable", fname);
+            Err(e) => {
+                let msg = format!("cat: {}: {:?}", fname, e);
                 ctx.error(&msg);
             }
         }
@@ -270,17 +305,16 @@ pub fn cmd_head(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         return CommandResult::Error;
     };
     let path = resolve_path(fname);
-    let mut buf = [0u8; 4096];
-    match ctx.ipc.read_file(&path, &mut buf) {
-        Some(len) => {
-            let content = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+    match fs_read_file(&path) {
+        Ok(buf) => {
+            let content = unsafe { core::str::from_utf8_unchecked(&buf) };
             for (i, line) in content.split('\n').enumerate() {
                 if i >= n { break; }
                 ctx.println(line);
             }
         }
-        None => {
-            let msg = format!("head: {}: no such file", fname);
+        Err(e) => {
+            let msg = format!("head: {}: {:?}", fname, e);
             ctx.error(&msg);
             return CommandResult::Error;
         }
@@ -308,16 +342,15 @@ pub fn cmd_tail(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         return CommandResult::Error;
     };
     let path = resolve_path(fname);
-    let mut buf = [0u8; 4096];
-    match ctx.ipc.read_file(&path, &mut buf) {
-        Some(len) => {
-            let content = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+    match fs_read_file(&path) {
+        Ok(buf) => {
+            let content = unsafe { core::str::from_utf8_unchecked(&buf) };
             let lines: Vec<&str> = content.split('\n').collect();
             let start = if lines.len() > n { lines.len() - n } else { 0 };
             for line in &lines[start..] { ctx.println(line); }
         }
-        None => {
-            let msg = format!("tail: {}: no such file", fname);
+        Err(e) => {
+            let msg = format!("tail: {}: {:?}", fname, e);
             ctx.error(&msg);
             return CommandResult::Error;
         }
@@ -340,13 +373,12 @@ pub fn cmd_wc(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
         return CommandResult::Error;
     };
     let path = resolve_path(fname);
-    let mut buf = [0u8; 4096];
-    match ctx.ipc.read_file(&path, &mut buf) {
-        Some(len) => {
-            let content = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+    match fs_read_file(&path) {
+        Ok(buf) => {
+            let content = unsafe { core::str::from_utf8_unchecked(&buf) };
             let lines = content.split('\n').count();
             let words = content.split_whitespace().count();
-            let bytes = len;
+            let bytes = buf.len();
 
             let mut out = String::new();
             if all || show_lines { out.push_str(&format!("{:>8} ", lines)); }
@@ -355,8 +387,8 @@ pub fn cmd_wc(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
             out.push_str(fname);
             ctx.println(&out);
         }
-        None => {
-            let msg = format!("wc: {}: no such file", fname);
+        Err(e) => {
+            let msg = format!("wc: {}: {:?}", fname, e);
             ctx.error(&msg);
             return CommandResult::Error;
         }
@@ -600,6 +632,54 @@ pub fn cmd_touch(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
         }
     }
     CommandResult::Ok
+}
+
+// ============================================================================
+// fsync – force file durability
+// ============================================================================
+
+pub fn cmd_fsync(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let Some(arg) = first_path_arg(cmd) else {
+        ctx.error("Usage: fsync <file>");
+        return CommandResult::Error;
+    };
+    let path = resolve_path(arg);
+
+    let fd = match atom_syscall::fs::open(&path, atom_syscall::fs::OpenFlags::RDONLY, 0) {
+        Ok(fd) => fd,
+        Err(atom_syscall::fs::FsError::IsDir) => {
+            let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
+            match atom_syscall::fs::open(&path, flags, 0) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    let msg = format!("fsync: cannot open '{}': {:?}", arg, e);
+                    ctx.error(&msg);
+                    return CommandResult::Error;
+                }
+            }
+        }
+        Err(e) => {
+            let msg = format!("fsync: cannot open '{}': {:?}", arg, e);
+            ctx.error(&msg);
+            return CommandResult::Error;
+        }
+    };
+
+    let sync_result = atom_syscall::fs::fsync(fd);
+    let _ = atom_syscall::fs::close(fd);
+
+    match sync_result {
+        Ok(()) => {
+            let msg = format!("fsync: '{}': ok", arg);
+            ctx.success(&msg);
+            CommandResult::Ok
+        }
+        Err(e) => {
+            let msg = format!("fsync: '{}': {:?}", arg, e);
+            ctx.error(&msg);
+            CommandResult::Error
+        }
+    }
 }
 
 // ============================================================================

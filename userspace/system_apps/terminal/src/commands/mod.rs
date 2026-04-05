@@ -159,6 +159,9 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     if cmd_eq(c, "touch") {
         return filesystem::cmd_touch(cmd, ctx);
     }
+    if cmd_eq(c, "fsync") {
+        return filesystem::cmd_fsync(cmd, ctx);
+    }
     if cmd_eq(c, "chmod") {
         return filesystem::cmd_chmod(cmd, ctx);
     }
@@ -229,6 +232,7 @@ static COMMANDS: &[(&str, &str, &str)] = &[
     ("mv",       "mv <src> <dst>",        "Move / rename file or directory"),
     ("cp",       "cp <src> <dst>",        "Copy file"),
     ("touch",    "touch <file>",           "Create file or update timestamp"),
+    ("fsync",    "fsync <path>",           "Force file or directory metadata to disk"),
     ("chmod",    "chmod <mode> <path>",   "Change file permissions (octal)"),
     ("ln",       "ln [-s] <tgt> <link>",  "Create hard or symbolic link"),
     ("df",       "df",                     "Show disk free space"),

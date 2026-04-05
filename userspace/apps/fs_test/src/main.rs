@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 use core::fmt::Write;
 use core::arch::asm;
@@ -141,6 +142,10 @@ fn log_error(msg: &str) {
 fn log_warn(msg: &str) {
     log(LogLevel::Warn, msg);
 }
+
+const REBOOT_MARKER_PATH: &str = "/test/reboot_persist_marker.txt";
+const REBOOT_STATE_PATH: &str = "/test/.reboot_persist_state";
+const REBOOT_PAYLOAD: &str = "ATOM_PERSISTENCE_CHECK_V1\n";
 
 // ============================================================================
 // Test Context and Utilities
@@ -496,6 +501,92 @@ fn test_cleanup(ctx: &mut TestContext) -> Result<(), &'static str> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RebootCycleResult {
+    Prepared,
+    Verified,
+}
+
+fn write_full_file_and_fsync(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let fd = atom_syscall::fs::open(
+        path,
+        atom_syscall::fs::OpenFlags::CREAT
+            | atom_syscall::fs::OpenFlags::TRUNC
+            | atom_syscall::fs::OpenFlags::WRONLY,
+        0o644,
+    ).map_err(|_| "open_failed")?;
+
+    atom_syscall::fs::write_all(fd, data).map_err(|_| {
+        let _ = atom_syscall::fs::close(fd);
+        "write_failed"
+    })?;
+
+    atom_syscall::fs::fsync(fd).map_err(|_| {
+        let _ = atom_syscall::fs::close(fd);
+        "fsync_failed"
+    })?;
+
+    atom_syscall::fs::close(fd).map_err(|_| "close_failed")?;
+    Ok(())
+}
+
+fn test_real_reboot_cycle(ctx: &mut TestContext) -> Result<RebootCycleResult, &'static str> {
+    log_test("test_real_reboot_cycle");
+
+    let _ = atom_syscall::fs::mkdir("/test", 0o755);
+    let expected = REBOOT_PAYLOAD.as_bytes();
+    let state_exists = atom_syscall::fs::stat(REBOOT_STATE_PATH).is_ok();
+
+    if !state_exists {
+        write_full_file_and_fsync(REBOOT_MARKER_PATH, expected).map_err(|_| {
+            ctx.fail("test_real_reboot_cycle",
+                "prepare phase failed: cannot persist marker file");
+            "prepare_marker_failed"
+        })?;
+
+        write_full_file_and_fsync(REBOOT_STATE_PATH, expected).map_err(|_| {
+            ctx.fail("test_real_reboot_cycle",
+                "prepare phase failed: cannot persist state file");
+            "prepare_state_failed"
+        })?;
+
+        ctx.pass("test_real_reboot_cycle_prepare");
+        log_warn("REBOOT TEST PREPARED: reboot now and run fs_test again to verify real persistence");
+        log_warn(&format!(
+            "Prepared files: {} and {}",
+            REBOOT_MARKER_PATH,
+            REBOOT_STATE_PATH
+        ));
+        return Ok(RebootCycleResult::Prepared);
+    }
+
+    let state_data: Vec<u8> = atom_syscall::fs::read_file(REBOOT_STATE_PATH).map_err(|e| {
+        ctx.fail("test_real_reboot_cycle",
+            &format!("verify phase failed: cannot read state file: {:?}", e));
+        "verify_state_read_failed"
+    })?;
+
+    let marker_data: Vec<u8> = atom_syscall::fs::read_file(REBOOT_MARKER_PATH).map_err(|e| {
+        ctx.fail("test_real_reboot_cycle",
+            &format!("verify phase failed: cannot read marker file: {:?}", e));
+        "verify_marker_read_failed"
+    })?;
+
+    let ok = state_data == expected && marker_data == expected;
+    if !ok {
+        ctx.fail("test_real_reboot_cycle",
+            "verify phase failed: persisted payload mismatch after reboot");
+        return Err("verify_payload_mismatch");
+    }
+
+    let _ = atom_syscall::fs::unlink(REBOOT_STATE_PATH);
+    let _ = atom_syscall::fs::unlink(REBOOT_MARKER_PATH);
+
+    ctx.pass("test_real_reboot_cycle_verify");
+    log_info("Real reboot persistence verified successfully");
+    Ok(RebootCycleResult::Verified)
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -568,6 +659,23 @@ pub extern "C" fn main() {
     log_info("");
 
     let _ = test_cleanup(&mut context);
+    log_info("");
+
+    match test_real_reboot_cycle(&mut context) {
+        Ok(RebootCycleResult::Prepared) => {
+            log_warn("Real reboot persistence test is prepared.");
+            log_warn("Reboot now and run fs_test again to complete verification.");
+            context.print_summary();
+            return;
+        }
+        Ok(RebootCycleResult::Verified) => {
+            log_info("Real reboot persistence test passed.");
+        }
+        Err(_) => {
+            // Already logged in test function
+            log_warn("Real reboot persistence test failed");
+        }
+    }
     log_info("");
 
     // Print final summary

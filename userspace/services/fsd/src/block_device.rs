@@ -23,7 +23,7 @@ pub struct BlockDeviceInfo {
     pub read_only: bool,
 }
 
-/// Default block device with IPC-based backend
+/// Default block device with kernel block-syscall backend
 pub struct BlockDevice {
     sector_size: u32,
     total_sectors: u64,
@@ -40,31 +40,48 @@ impl BlockDevice {
     }
 
     pub fn read_sectors(&self, lba: u64, count: u32) -> Option<Vec<u8>> {
-        // In real implementation, would send BlockRead IPC message
-        // For now, return placeholder
+        if count == 0 {
+            return Some(Vec::new());
+        }
         let bytes = (count as usize) * (self.sector_size as usize);
-        Some(alloc::vec![0u8; bytes])
+        let mut out = alloc::vec![0u8; bytes];
+        match atom_syscall::fs::kern_block_read(lba, count, &mut out) {
+            Ok(n) if n == bytes => Some(out),
+            Ok(n) if n < bytes => {
+                out.truncate(n);
+                Some(out)
+            }
+            Ok(_) => None,
+            Err(_) => None,
+        }
     }
 
     pub fn write_sectors(&self, lba: u64, data: &[Vec<u8>]) -> Option<bool> {
-        // In real implementation, would send BlockWrite IPC message
         if self.read_only {
             return Some(false);
         }
 
-        // Calculate total bytes
         let total_bytes: usize = data.iter().map(|v| v.len()).sum();
-        if total_bytes % (self.sector_size as usize) != 0 {
+        let sector_size = self.sector_size as usize;
+        if total_bytes == 0 || total_bytes % sector_size != 0 {
             return Some(false);
         }
-
-        Some(true)
+        let mut flat = Vec::with_capacity(total_bytes);
+        for chunk in data {
+            flat.extend_from_slice(chunk);
+        }
+        let sectors = (flat.len() / sector_size) as u32;
+        match atom_syscall::fs::kern_block_write(lba, sectors, &flat) {
+            Ok(()) => Some(true),
+            Err(_) => Some(false),
+        }
     }
 
     pub fn flush(&self) -> Option<bool> {
-        // In real implementation, would send BlockFlush IPC message
-        // Returns only after barriers complete
-        Some(true)
+        match atom_syscall::fs::kern_block_flush() {
+            Ok(()) => Some(true),
+            Err(_) => Some(false),
+        }
     }
 
     pub fn identify(&self) -> Option<BlockDeviceInfo> {

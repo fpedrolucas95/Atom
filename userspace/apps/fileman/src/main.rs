@@ -436,10 +436,28 @@ impl FileManager {
                         let msg = format!("{} items", self.entries.len());
                         self.status.set(&msg);
                     }
-                    Err(_) => { self.status.set("error: cannot list directory"); }
+                    Err(err) => {
+                        if err.is_fs_service_timeout() {
+                            self.status.set("error: fsd timeout (5s)");
+                        } else if err.is_fs_service_unavailable() {
+                            self.status.set("error: fsd unavailable");
+                        } else {
+                            self.status.set("error: cannot list directory");
+                        }
+                        log(&format!("fileman: list_dir failed for \"{}\": {}", path, err));
+                    }
                 }
             }
-            Err(_) => { self.status.set("error: cannot open directory"); }
+            Err(err) => {
+                if err.is_fs_service_timeout() {
+                    self.status.set("error: fsd timeout (5s)");
+                } else if err.is_fs_service_unavailable() {
+                    self.status.set("error: fsd unavailable");
+                } else {
+                    self.status.set("error: cannot open directory");
+                }
+                log(&format!("fileman: open_dir failed for \"{}\": {}", path, err));
+            }
         }
         self.needs_redraw = true;
     }

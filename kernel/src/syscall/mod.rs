@@ -192,6 +192,24 @@ pub const SYS_KERN_FS_READ_FILE: u64 = 200;
 pub const SYS_KERN_FS_LIST_DIR: u64 = 201;
 /// Stat a path:        (path_ptr, path_len, stat_ptr) -> 0 | errno
 pub const SYS_KERN_FS_STAT_PATH: u64 = 202;
+/// Write full file contents: (path_ptr, path_len, buf_ptr, buf_len) -> 0 | errno
+pub const SYS_KERN_FS_WRITE_FILE: u64 = 204;
+/// mkdir(path_ptr, path_len) -> 0 | errno
+pub const SYS_KERN_FS_MKDIR: u64 = 205;
+/// rmdir(path_ptr, path_len) -> 0 | errno
+pub const SYS_KERN_FS_RMDIR: u64 = 206;
+/// unlink(path_ptr, path_len) -> 0 | errno
+pub const SYS_KERN_FS_UNLINK: u64 = 207;
+/// rename(old_ptr, old_len, new_ptr, new_len) -> 0 | errno
+pub const SYS_KERN_FS_RENAME: u64 = 208;
+/// sync filesystem data+metadata to disk cache barrier -> 0 | errno
+pub const SYS_KERN_FS_SYNC: u64 = 209;
+/// raw block read: (lba, sector_count, buf_ptr, buf_len) -> bytes_read | errno
+pub const SYS_KERN_BLOCK_READ: u64 = 210;
+/// raw block write: (lba, sector_count, buf_ptr, buf_len) -> 0 | errno
+pub const SYS_KERN_BLOCK_WRITE: u64 = 211;
+/// raw block flush cache: () -> 0 | errno
+pub const SYS_KERN_BLOCK_FLUSH: u64 = 212;
 
 // ---------------------------------------------------------------------------
 // App launcher syscall — spawn an ATXF executable by filesystem path.
@@ -798,23 +816,32 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_KERN_FS_READ_FILE  => sys_kern_fs_read_file(arg0, arg1 as usize, arg2, arg3 as usize),
         SYS_KERN_FS_LIST_DIR   => sys_kern_fs_list_dir(arg0, arg1 as usize, arg2, arg3 as usize),
         SYS_KERN_FS_STAT_PATH  => sys_kern_fs_stat_path(arg0, arg1 as usize, arg2),
+        SYS_KERN_FS_WRITE_FILE => sys_kern_fs_write_file(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_MKDIR      => sys_kern_fs_mkdir(arg0, arg1 as usize),
+        SYS_KERN_FS_RMDIR      => sys_kern_fs_rmdir(arg0, arg1 as usize),
+        SYS_KERN_FS_UNLINK     => sys_kern_fs_unlink(arg0, arg1 as usize),
+        SYS_KERN_FS_RENAME     => sys_kern_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_SYNC       => sys_kern_fs_sync(),
+        SYS_KERN_BLOCK_READ    => sys_kern_block_read(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_BLOCK_WRITE   => sys_kern_block_write(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_BLOCK_FLUSH   => sys_kern_block_flush(),
 
 
         // Filesystem syscalls — forwarded to fsd via IPC
-        SYS_FS_OPEN     => sys_fs_open(arg0, arg1 as usize, arg2 as u32, arg3 as u32),
-        SYS_FS_CLOSE    => sys_fs_close(arg0),
-        SYS_FS_READ     => sys_fs_read(arg0, arg1, arg2 as usize),
-        SYS_FS_WRITE    => sys_fs_write(arg0, arg1, arg2 as usize),
-        SYS_FS_SEEK     => sys_fs_seek(arg0, arg1 as i64, arg2 as u32),
-        SYS_FS_STAT     => sys_fs_stat(arg0, arg1 as usize, arg2),
-        SYS_FS_FSTAT    => sys_fs_fstat(arg0, arg1),
-        SYS_FS_MKDIR    => sys_fs_mkdir(arg0, arg1 as usize, arg2 as u32),
-        SYS_FS_RMDIR    => sys_fs_rmdir(arg0, arg1 as usize),
-        SYS_FS_UNLINK   => sys_fs_unlink(arg0, arg1 as usize),
-        SYS_FS_RENAME   => sys_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_FS_READDIR  => sys_fs_readdir(arg0, arg1, arg2 as usize),
-        SYS_FS_TRUNCATE => sys_fs_truncate(arg0, arg1),
-        SYS_FS_FSYNC    => sys_fs_fsync(arg0),
+        SYS_FS_OPEN     => fsd_sys_fs_open(arg0, arg1 as usize, arg2 as u32, arg3 as u32),
+        SYS_FS_CLOSE    => fsd_sys_fs_close(arg0),
+        SYS_FS_READ     => fsd_sys_fs_read(arg0, arg1, arg2 as usize),
+        SYS_FS_WRITE    => fsd_sys_fs_write(arg0, arg1, arg2 as usize),
+        SYS_FS_SEEK     => fsd_sys_fs_seek(arg0, arg1 as i64, arg2 as u32),
+        SYS_FS_STAT     => fsd_sys_fs_stat(arg0, arg1 as usize, arg2),
+        SYS_FS_FSTAT    => fsd_sys_fs_fstat(arg0, arg1),
+        SYS_FS_MKDIR    => fsd_sys_fs_mkdir(arg0, arg1 as usize, arg2 as u32),
+        SYS_FS_RMDIR    => fsd_sys_fs_rmdir(arg0, arg1 as usize),
+        SYS_FS_UNLINK   => fsd_sys_fs_unlink(arg0, arg1 as usize),
+        SYS_FS_RENAME   => fsd_sys_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_READDIR  => fsd_sys_fs_readdir(arg0, arg1, arg2 as usize),
+        SYS_FS_TRUNCATE => fsd_sys_fs_truncate(arg0, arg1),
+        SYS_FS_FSYNC    => fsd_sys_fs_fsync(arg0),
         SYS_FS_MOUNT    => sys_fs_mount(arg0, arg1 as usize, arg2, arg3 as usize, arg4, arg5 as usize),
         SYS_FS_UMOUNT   => sys_fs_umount(arg0, arg1 as usize),
         SYS_FS_CHMOD    => sys_fs_chmod(arg0, arg1 as usize, arg2 as u32),
@@ -5911,6 +5938,727 @@ fn fill_stat_to_user(path: &str, stat_range: atom_abi::UserRange) -> u64 {
     }
 }
 
+fn sys_kern_fs_write_file(path_ptr: u64, path_len: usize, buf_ptr: u64, buf_len: usize) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    let data = if buf_len == 0 {
+        Vec::new()
+    } else {
+        let buf_ptr = match validate_user_ptr::<u8>(buf_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        let buf_range = match validate_user_byte_range(buf_ptr, buf_len) {
+            Ok(range) => range,
+            Err(e) => return e,
+        };
+        match copy_buffer_from_user(buf_range, buf_len) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    };
+
+    if crate::drivers::fat32::write_file(path, &data) {
+        ESUCCESS
+    } else {
+        EIO
+    }
+}
+
+fn sys_kern_fs_mkdir(path_ptr: u64, path_len: usize) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    if crate::drivers::fat32::stat_path(path).is_some() {
+        return EEXIST;
+    }
+    if crate::drivers::fat32::mkdir(path) {
+        ESUCCESS
+    } else {
+        EIO
+    }
+}
+
+fn sys_kern_fs_rmdir(path_ptr: u64, path_len: usize) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    match crate::drivers::fat32::stat_path(path) {
+        Some(st) if !st.is_dir => ENOTDIR,
+        Some(_) => {
+            if crate::drivers::fat32::rmdir(path) { ESUCCESS } else { ENOTEMPTY }
+        }
+        None => ENOENT,
+    }
+}
+
+fn sys_kern_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    match crate::drivers::fat32::stat_path(path) {
+        Some(st) if st.is_dir => EISDIR,
+        Some(_) => {
+            if crate::drivers::fat32::unlink(path) { ESUCCESS } else { EIO }
+        }
+        None => ENOENT,
+    }
+}
+
+fn sys_kern_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+    let old_range = match validate_user_path_range(old_path_ptr, old_path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (old_buf, old_len) = match copy_path_from_user(old_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let new_range = match validate_user_path_range(new_path_ptr, new_path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (new_buf, new_len) = match copy_path_from_user(new_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let old_path = path_buf_as_str(&old_buf, old_len);
+    let new_path = path_buf_as_str(&new_buf, new_len);
+
+    if crate::drivers::fat32::stat_path(old_path).is_none() {
+        return ENOENT;
+    }
+    if crate::drivers::fat32::stat_path(new_path).is_some() {
+        return EEXIST;
+    }
+    if crate::drivers::fat32::rename(old_path, new_path) {
+        ESUCCESS
+    } else {
+        EXDEV
+    }
+}
+
+fn sys_kern_fs_sync() -> u64 {
+    if crate::drivers::fat32::sync() {
+        ESUCCESS
+    } else {
+        EIO
+    }
+}
+
+fn sys_kern_block_read(lba: u64, sector_count: usize, buf_ptr: u64, buf_len: usize) -> u64 {
+    const SECTOR_SIZE: usize = 512;
+    const MAX_SECTORS_PER_CALL: usize = 4096;
+    const MAX_AHCI_XFER: usize = 128;
+
+    if sector_count == 0 || sector_count > MAX_SECTORS_PER_CALL {
+        return EINVAL;
+    }
+    let byte_count = match sector_count.checked_mul(SECTOR_SIZE) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if buf_len < byte_count {
+        return EINVAL;
+    }
+
+    let dst_ptr = match validate_user_ptr::<u8>(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    let dst_range = match validate_user_byte_range(dst_ptr, byte_count) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+
+    let mut out = Vec::with_capacity(byte_count);
+    let mut remaining = sector_count;
+    let mut current_lba = lba;
+
+    while remaining > 0 {
+        let step = core::cmp::min(remaining, MAX_AHCI_XFER);
+        let chunk = match crate::drivers::ahci::read_sectors(current_lba, step as u16) {
+            Some(v) => v,
+            None => return EIO,
+        };
+        if chunk.len() != step * SECTOR_SIZE {
+            return EIO;
+        }
+        out.extend_from_slice(&chunk);
+        remaining -= step;
+        current_lba = current_lba.saturating_add(step as u64);
+    }
+
+    if out.len() != byte_count {
+        return EIO;
+    }
+    if let Err(e) = write_buffer_to_user(dst_range, &out) {
+        return e;
+    }
+    out.len() as u64
+}
+
+fn sys_kern_block_write(lba: u64, sector_count: usize, buf_ptr: u64, buf_len: usize) -> u64 {
+    const SECTOR_SIZE: usize = 512;
+    const MAX_SECTORS_PER_CALL: usize = 4096;
+    const MAX_AHCI_XFER: usize = 128;
+
+    if sector_count == 0 || sector_count > MAX_SECTORS_PER_CALL {
+        return EINVAL;
+    }
+    let byte_count = match sector_count.checked_mul(SECTOR_SIZE) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if buf_len < byte_count {
+        return EINVAL;
+    }
+
+    let src_ptr = match validate_user_ptr::<u8>(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    let src_range = match validate_user_byte_range(src_ptr, byte_count) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let data = match copy_buffer_from_user(src_range, byte_count) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let mut written_sectors = 0usize;
+    while written_sectors < sector_count {
+        let step = core::cmp::min(sector_count - written_sectors, MAX_AHCI_XFER);
+        let start = written_sectors * SECTOR_SIZE;
+        let end = start + step * SECTOR_SIZE;
+        if !crate::drivers::ahci::write_sectors(lba + written_sectors as u64, &data[start..end]) {
+            return EIO;
+        }
+        written_sectors += step;
+    }
+    ESUCCESS
+}
+
+fn sys_kern_block_flush() -> u64 {
+    if crate::drivers::ahci::flush_cache() {
+        ESUCCESS
+    } else {
+        EIO
+    }
+}
+
+// ============================================================================
+// FSD forwarding path (authoritative POSIX FS syscall path)
+// ============================================================================
+
+const FS_PORT_ID: u64 = atom_abi::PORT_FS_SERVICE as u64;
+const FS_REQ_TIMEOUT_MS: u64 = 5000;
+const FS_WIRE_HEADER_SIZE: usize = 16;
+const FS_WIRE_REPLY_PORT_SIZE: usize = 8;
+const FS_REPLY_BASE_SIZE: usize = 16;
+const FS_STAT_WIRE_SIZE: usize = 80;
+
+const FS_MSG_OPEN: u32 = 1100;
+const FS_MSG_CLOSE: u32 = 1102;
+const FS_MSG_READ: u32 = 1104;
+const FS_MSG_WRITE: u32 = 1106;
+const FS_MSG_SEEK: u32 = 1108;
+const FS_MSG_STAT: u32 = 1110;
+const FS_MSG_FSTAT: u32 = 1112;
+const FS_MSG_MKDIR: u32 = 1114;
+const FS_MSG_RMDIR: u32 = 1116;
+const FS_MSG_UNLINK: u32 = 1118;
+const FS_MSG_RENAME: u32 = 1120;
+const FS_MSG_READDIR: u32 = 1122;
+const FS_MSG_TRUNCATE: u32 = 1124;
+const FS_MSG_FSYNC: u32 = 1126;
+
+static FS_WIRE_SEQUENCE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(1);
+
+#[inline]
+fn fs_max_write_chunk() -> usize {
+    crate::ipc::MAX_MESSAGE_SIZE
+        .saturating_sub(FS_WIRE_HEADER_SIZE)
+        .saturating_sub(FS_WIRE_REPLY_PORT_SIZE)
+        .saturating_sub(16) // fs write request fixed fields: fd + count
+}
+
+#[inline]
+fn fs_max_read_chunk() -> usize {
+    crate::ipc::MAX_MESSAGE_SIZE.saturating_sub(FS_REPLY_BASE_SIZE)
+}
+
+fn fs_ipc_wait_message(
+    port_id: crate::ipc::PortId,
+    caller: crate::thread::ThreadId,
+    timeout_ms: u64,
+) -> Result<crate::ipc::Message, u64> {
+    if let Ok(Some(msg)) = crate::ipc::try_receive_message(port_id, caller) {
+        return Ok(msg);
+    }
+
+    let priority = crate::sched::get_thread_priority(caller);
+    let deadline = if timeout_ms == u64::MAX {
+        None
+    } else {
+        Some(crate::interrupts::get_ticks() + timeout_ms.div_ceil(10))
+    };
+
+    match crate::ipc::block_receive(port_id, caller, priority, deadline) {
+        Ok(()) => {
+            crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
+            let (prev, next) = crate::sched::on_timer_tick();
+            if let (Some(prev_id), Some(next_id)) = (prev, next) {
+                if prev_id != next_id {
+                    crate::sched::perform_context_switch(prev_id, next_id);
+                }
+            }
+            match crate::ipc::try_receive_message(port_id, caller) {
+                Ok(Some(msg)) => Ok(msg),
+                Ok(None) => Err(ETIMEDOUT),
+                Err(crate::ipc::IpcError::InvalidPort) => Err(ENODEV),
+                Err(_) => Err(EIO),
+            }
+        }
+        Err(crate::ipc::IpcError::InvalidPort) => Err(ENODEV),
+        Err(crate::ipc::IpcError::DeadlockDetected) => Err(EDEADLK),
+        Err(crate::ipc::IpcError::PortBusy) => Err(EBUSY),
+        Err(_) => Err(EIO),
+    }
+}
+
+fn fsd_rpc(msg_type: u32, req_payload: &[u8]) -> Result<Vec<u8>, u64> {
+    let caller = crate::sched::current_thread().ok_or(EINVAL)?;
+    let fs_port = crate::ipc::PortId::from_raw(FS_PORT_ID);
+    let reply_port = crate::ipc::create_port(caller);
+
+    let mut payload = Vec::with_capacity(FS_WIRE_REPLY_PORT_SIZE + req_payload.len());
+    payload.extend_from_slice(&reply_port.raw().to_le_bytes());
+    payload.extend_from_slice(req_payload);
+
+    let sequence = FS_WIRE_SEQUENCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+    let mut wire = Vec::with_capacity(FS_WIRE_HEADER_SIZE + payload.len());
+    wire.extend_from_slice(&1u32.to_le_bytes()); // MessageHeader.version
+    wire.extend_from_slice(&msg_type.to_le_bytes());
+    wire.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    wire.extend_from_slice(&sequence.to_le_bytes());
+    wire.extend_from_slice(&payload);
+
+    let send_result = crate::ipc::send_message(fs_port, crate::ipc::Message::new(caller, 0, wire));
+    if send_result.is_err() {
+        let _ = crate::ipc::close_port(reply_port, caller);
+        return Err(match send_result {
+            Err(crate::ipc::IpcError::InvalidPort) => ENODEV,
+            Err(crate::ipc::IpcError::QueueFull | crate::ipc::IpcError::WouldBlock) => EBUSY,
+            _ => EIO,
+        });
+    }
+
+    let recv = fs_ipc_wait_message(reply_port, caller, FS_REQ_TIMEOUT_MS);
+    let _ = crate::ipc::close_port(reply_port, caller);
+    recv.map(|m| m.payload)
+}
+
+fn fsd_parse_reply_u64(reply: &[u8]) -> Result<u64, u64> {
+    if reply.len() < FS_REPLY_BASE_SIZE {
+        return Err(EIO);
+    }
+    let error = u64::from_le_bytes(reply[0..8].try_into().unwrap());
+    if error != ESUCCESS {
+        return Err(error);
+    }
+    Ok(u64::from_le_bytes(reply[8..16].try_into().unwrap()))
+}
+
+fn fsd_parse_reply_data(reply: &[u8]) -> Result<(usize, &[u8]), u64> {
+    if reply.len() < FS_REPLY_BASE_SIZE {
+        return Err(EIO);
+    }
+    let error = u64::from_le_bytes(reply[0..8].try_into().unwrap());
+    if error != ESUCCESS {
+        return Err(error);
+    }
+    let n = u64::from_le_bytes(reply[8..16].try_into().unwrap()) as usize;
+    if reply.len() < FS_REPLY_BASE_SIZE + n {
+        return Err(EIO);
+    }
+    Ok((n, &reply[16..16 + n]))
+}
+
+fn fsd_parse_reply_stat(reply: &[u8]) -> Result<&[u8], u64> {
+    if reply.len() < 8 + FS_STAT_WIRE_SIZE {
+        return Err(EIO);
+    }
+    let error = u64::from_le_bytes(reply[0..8].try_into().unwrap());
+    if error != ESUCCESS {
+        return Err(error);
+    }
+    Ok(&reply[8..8 + FS_STAT_WIRE_SIZE])
+}
+
+fn fsd_sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, mode: u32) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    let mut req = Vec::with_capacity(4 + path.len() + 8);
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+    req.extend_from_slice(&flags.to_le_bytes());
+    req.extend_from_slice(&mode.to_le_bytes());
+
+    match fsd_rpc(FS_MSG_OPEN, &req).and_then(|r| fsd_parse_reply_u64(&r)) {
+        Ok(fd) => fd,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_close(fd: u64) -> u64 {
+    let req = fd.to_le_bytes();
+    match fsd_rpc(FS_MSG_CLOSE, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let buf_ptr = match validate_user_ptr::<u8>(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    let _buf_range = match validate_user_byte_range(buf_ptr, count) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+
+    let request_count = core::cmp::min(count, fs_max_read_chunk());
+    let mut req = [0u8; 16];
+    req[0..8].copy_from_slice(&fd.to_le_bytes());
+    req[8..16].copy_from_slice(&(request_count as u64).to_le_bytes());
+
+    let reply = match fsd_rpc(FS_MSG_READ, &req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (n, data) = match fsd_parse_reply_data(&reply) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    // n=0 means EOF — return 0 without touching the user buffer.
+    if n == 0 {
+        return 0;
+    }
+
+    let dst_range = match validate_user_byte_range(buf_ptr, n) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    if let Err(e) = write_buffer_to_user(dst_range, data) {
+        return e;
+    }
+    n as u64
+}
+
+fn fsd_sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let src_ptr = match validate_user_ptr::<u8>(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    let _src_range = match validate_user_byte_range(src_ptr, count) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+
+    let request_count = core::cmp::min(count, fs_max_write_chunk());
+    let limited_range = match validate_user_byte_range(src_ptr, request_count) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let src_bytes = match copy_buffer_from_user(limited_range, request_count) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let mut req = Vec::with_capacity(16 + src_bytes.len());
+    req.extend_from_slice(&fd.to_le_bytes());
+    req.extend_from_slice(&(src_bytes.len() as u64).to_le_bytes());
+    req.extend_from_slice(&src_bytes);
+
+    match fsd_rpc(FS_MSG_WRITE, &req).and_then(|r| fsd_parse_reply_u64(&r)) {
+        Ok(n) => n,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
+    let mut req = [0u8; 20];
+    req[0..8].copy_from_slice(&fd.to_le_bytes());
+    req[8..16].copy_from_slice(&offset.to_le_bytes());
+    req[16..20].copy_from_slice(&whence.to_le_bytes());
+    match fsd_rpc(FS_MSG_SEEK, &req).and_then(|r| fsd_parse_reply_u64(&r)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_stat(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
+    let stat_ptr = match validate_user_ptr::<u8>(stat_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    let stat_range = match validate_user_byte_range(stat_ptr, FS_STAT_WIRE_SIZE) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    let mut req = Vec::with_capacity(4 + path.len());
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+
+    let reply = match fsd_rpc(FS_MSG_STAT, &req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let stat = match fsd_parse_reply_stat(&reply) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = write_buffer_to_user(stat_range, stat) {
+        return e;
+    }
+    ESUCCESS
+}
+
+fn fsd_sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
+    let stat_ptr = match validate_user_ptr::<u8>(stat_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    let stat_range = match validate_user_byte_range(stat_ptr, FS_STAT_WIRE_SIZE) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+
+    let req = fd.to_le_bytes();
+    let reply = match fsd_rpc(FS_MSG_FSTAT, &req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let stat = match fsd_parse_reply_stat(&reply) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = write_buffer_to_user(stat_range, stat) {
+        return e;
+    }
+    ESUCCESS
+}
+
+fn fsd_sys_fs_mkdir(path_ptr: u64, path_len: usize, mode: u32) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    let mut req = Vec::with_capacity(4 + path.len() + 4);
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+    req.extend_from_slice(&mode.to_le_bytes());
+
+    match fsd_rpc(FS_MSG_MKDIR, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_rmdir(path_ptr: u64, path_len: usize) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    let mut req = Vec::with_capacity(4 + path.len());
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+
+    match fsd_rpc(FS_MSG_RMDIR, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+
+    let mut req = Vec::with_capacity(4 + path.len());
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+
+    match fsd_rpc(FS_MSG_UNLINK, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+    let old_range = match validate_user_path_range(old_path_ptr, old_path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (old_buf, old_len) = match copy_path_from_user(old_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let new_range = match validate_user_path_range(new_path_ptr, new_path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (new_buf, new_len) = match copy_path_from_user(new_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let old_path = path_buf_as_str(&old_buf, old_len);
+    let new_path = path_buf_as_str(&new_buf, new_len);
+
+    let mut req = Vec::with_capacity(8 + old_path.len() + new_path.len());
+    req.extend_from_slice(&(old_path.len() as u32).to_le_bytes());
+    req.extend_from_slice(old_path.as_bytes());
+    req.extend_from_slice(&(new_path.len() as u32).to_le_bytes());
+    req.extend_from_slice(new_path.as_bytes());
+
+    match fsd_rpc(FS_MSG_RENAME, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
+    if count == 0 {
+        return EINVAL;
+    }
+    let dirent_ptr = match validate_user_ptr::<u8>(dirent_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    let _dirent_range = match validate_user_byte_range(dirent_ptr, count) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+
+    let request_count = core::cmp::min(count, fs_max_read_chunk());
+    let mut req = [0u8; 16];
+    req[0..8].copy_from_slice(&dirfd.to_le_bytes());
+    req[8..16].copy_from_slice(&(request_count as u64).to_le_bytes());
+
+    let reply = match fsd_rpc(FS_MSG_READDIR, &req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (n, data) = match fsd_parse_reply_data(&reply) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let dst_range = match validate_user_byte_range(dirent_ptr, n) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    if let Err(e) = write_buffer_to_user(dst_range, data) {
+        return e;
+    }
+    n as u64
+}
+
+fn fsd_sys_fs_truncate(fd: u64, length: u64) -> u64 {
+    let mut req = [0u8; 16];
+    req[0..8].copy_from_slice(&fd.to_le_bytes());
+    req[8..16].copy_from_slice(&length.to_le_bytes());
+    match fsd_rpc(FS_MSG_TRUNCATE, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
+fn fsd_sys_fs_fsync(fd: u64) -> u64 {
+    let req = fd.to_le_bytes();
+    match fsd_rpc(FS_MSG_FSYNC, &req).and_then(|r| fsd_parse_reply_u64(&r).map(|_| ESUCCESS)) {
+        Ok(v) => v,
+        Err(e) => e,
+    }
+}
+
 // ============================================================================
 // Kernel-side file descriptor table
 //
@@ -6550,36 +7298,6 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     let available = file_len - offset;
     let to_read = available.min(count);
 
-    // ── Pre-fault user pages ───────────────────────────────────────────
-    {
-        let page_size: usize = 4096;
-        let start_page = buf_range.start() & !(page_size - 1);
-        let end_addr = buf_range.start() + to_read;
-        let end_page = if to_read > 0 {
-            (end_addr - 1) & !(page_size - 1)
-        } else {
-            start_page
-        };
-        let mut page = start_page;
-        while page <= end_page {
-            let ctx = crate::mm::vma::FaultContext::from_x86_error(
-                caller.process_id,
-                crate::mm::vma::AddressSpaceId::new(caller.address_space_pml4 as usize),
-                page,
-                0x6, // write|user|not-present
-            );
-            let result = crate::mm::vma::handle_page_fault(ctx, 0x6);
-            match result {
-                crate::mm::vma::FaultResult::Resolved => {}
-                crate::mm::vma::FaultResult::OutOfMemory => return ENOMEM,
-                crate::mm::vma::FaultResult::InvalidAddress
-                | crate::mm::vma::FaultResult::ProtectionViolation
-                | crate::mm::vma::FaultResult::NotHandled => return EINVAL,
-            }
-            page += page_size;
-        }
-    }
-
     // Copy data to user buffer
     let src_slice = &data[offset..offset + to_read];
     let dst_range = match validate_user_byte_range(buf_user_ptr, src_slice.len()) {
@@ -6842,7 +7560,16 @@ fn sys_fs_fsync(fd: u64) -> u64 {
         Ok(v) => v,
         Err(e) => return map_fd_error(e),
     };
-    flush_fd_locked(&mut table, idx)
+    let flush_result = flush_fd_locked(&mut table, idx);
+    if flush_result != ESUCCESS {
+        return flush_result;
+    }
+
+    if crate::drivers::fat32::sync() {
+        ESUCCESS
+    } else {
+        EIO
+    }
 }
 
 // Stub implementations for remaining syscalls (not in priority list)

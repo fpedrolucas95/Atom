@@ -4,6 +4,7 @@
 /// All errors are mapped from filesystem syscall errors to user-friendly messages.
 
 use atom_syscall::fs::FsError;
+use atom_abi::{EBUSY, ENODEV, ETIMEDOUT};
 use core::fmt;
 
 /// Enhanced error type with user messages and exit codes
@@ -93,6 +94,9 @@ impl FilManagerError {
                     FsError::Interrupted => "Operation interrupted",
                     FsError::ArgListTooLong => "Argument list too long",
                     FsError::InvalidArg => "Invalid argument",
+                    FsError::Other(code) if *code == ETIMEDOUT => "Filesystem service timed out",
+                    FsError::Other(code) if *code == ENODEV => "Filesystem service unavailable",
+                    FsError::Other(code) if *code == EBUSY => "Filesystem service busy",
                     FsError::Other(_) => "Unknown filesystem error",
                 }
             },
@@ -113,6 +117,19 @@ impl FilManagerError {
             FilManagerError::InvalidPath => "Invalid path format",
             FilManagerError::CrossDevice => "Cross-filesystem operation not allowed",
         }
+    }
+
+    /// True when fsd is absent/not responding via kernel FS forwarding.
+    pub fn is_fs_service_unavailable(&self) -> bool {
+        matches!(
+            self,
+            FilManagerError::FsOp(FsError::Other(code), _) if *code == ENODEV || *code == ETIMEDOUT
+        )
+    }
+
+    /// True when the kernel->fsd RPC hit timeout.
+    pub fn is_fs_service_timeout(&self) -> bool {
+        matches!(self, FilManagerError::FsOp(FsError::Other(code), _) if *code == ETIMEDOUT)
     }
 }
 
