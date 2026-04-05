@@ -50,6 +50,7 @@ impl core::fmt::Display for ProcessId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminationReason {
     OutOfMemory,
+    KernelInvariantViolation,
     KilledByKernel { reason_code: u64 },
     NormalExit { exit_code: u64 },
 }
@@ -58,6 +59,7 @@ impl TerminationReason {
     pub fn description(self) -> &'static str {
         match self {
             TerminationReason::OutOfMemory => "oom",
+            TerminationReason::KernelInvariantViolation => "kernel_invariant_violation",
             TerminationReason::KilledByKernel { .. } => "killed_by_kernel",
             TerminationReason::NormalExit { .. } => "normal_exit",
         }
@@ -66,6 +68,11 @@ impl TerminationReason {
     fn as_thread_reason(self) -> crate::thread::TerminationReason {
         match self {
             TerminationReason::OutOfMemory => crate::thread::TerminationReason::OutOfMemory,
+            TerminationReason::KernelInvariantViolation => {
+                crate::thread::TerminationReason::KilledByKernel {
+                    reason_code: 0x0000_0000_0000_0A11,
+                }
+            }
             TerminationReason::KilledByKernel { reason_code } => {
                 crate::thread::TerminationReason::KilledByKernel { reason_code }
             }
@@ -83,7 +90,6 @@ impl TerminationReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessTerminationError {
     NotFound,
-    CurrentThreadProcess,
     AlreadyTerminated,
 }
 
@@ -423,12 +429,6 @@ pub fn terminate_process(
     process_id: ProcessId,
     reason: TerminationReason,
 ) -> core::result::Result<(), ProcessTerminationError> {
-    let current_process = crate::sched::current_thread()
-        .and_then(|tid| crate::thread::get_thread_process_id(tid));
-    if current_process == Some(process_id) {
-        return Err(ProcessTerminationError::CurrentThreadProcess);
-    }
-
     let (thread_ids, resident_pages, limit_pages, pml4_phys) = {
         let mut registry = PROCESS_REGISTRY.lock();
         let Some(process) = registry.get_mut(&process_id) else {

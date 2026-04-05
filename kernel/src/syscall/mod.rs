@@ -281,6 +281,95 @@ pub use atom_abi::{
 //   When these occur, the process is isolated via contain_context_failure()
 //   and EINVAL is returned to userspace.
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelOperationalError {
+    ContextCorruption,
+    OwnershipCorruption,
+    AddressSpaceCorruption,
+    InternalInvariantViolation,
+}
+
+impl KernelOperationalError {
+    fn reason_code(self) -> u64 {
+        match self {
+            KernelOperationalError::ContextCorruption => 0x101,
+            KernelOperationalError::OwnershipCorruption => 0x102,
+            KernelOperationalError::AddressSpaceCorruption => 0x103,
+            KernelOperationalError::InternalInvariantViolation => 0x104,
+        }
+    }
+}
+
+fn best_effort_current_process() -> Option<crate::process::ProcessId> {
+    crate::sched::current_thread().and_then(crate::thread::get_thread_process_id)
+}
+
+fn contain_operational_violation(
+    origin: &'static str,
+    operational_error: KernelOperationalError,
+    pid: Option<crate::process::ProcessId>,
+    tid: Option<crate::thread::ThreadId>,
+) {
+    fn schedule_away_if_current_exited() {
+        let Some(current) = crate::sched::current_thread() else {
+            return;
+        };
+        if !matches!(
+            crate::thread::get_thread_state(current),
+            Some(crate::thread::ThreadState::Exited)
+        ) {
+            return;
+        }
+
+        let (prev, next) = crate::sched::on_timer_tick();
+        if let (Some(prev_id), Some(next_id)) = (prev, next) {
+            if prev_id != next_id {
+                crate::sched::perform_context_switch(prev_id, next_id);
+            }
+        }
+    }
+
+    log_error!(
+        "syscall",
+        "[OPERATIONAL_CONTAINMENT] origin={} error={:?} pid={:?} tid={:?}",
+        origin,
+        operational_error,
+        pid,
+        tid
+    );
+
+    if let Some(process_id) = pid {
+        match crate::process::terminate_process(
+            process_id,
+            crate::process::TerminationReason::KernelInvariantViolation,
+        ) {
+            Ok(()) => {
+                schedule_away_if_current_exited();
+                return;
+            }
+            Err(err) => {
+                log_error!(
+                    "syscall",
+                    "[OPERATIONAL_CONTAINMENT] origin={} pid={} terminate_process failed: {:?}",
+                    origin,
+                    process_id,
+                    err
+                );
+            }
+        }
+    }
+
+    if let Some(thread_id) = tid.or_else(crate::sched::current_thread) {
+        crate::thread::terminate_entity(
+            thread_id,
+            crate::thread::TerminationReason::KilledByKernel {
+                reason_code: operational_error.reason_code(),
+            },
+        );
+        schedule_away_if_current_exited();
+    }
+}
+
 /// Operational errors from the syscall path.
 /// Each variant maps to a POSIX-like errno via `to_errno()`.
 /// These errors are NEVER fatal to the kernel — they are contained locally.
@@ -397,6 +486,17 @@ fn context_error_code(error: SyscallContextError) -> u64 {
     }
 }
 
+fn context_error_kind(error: SyscallContextError) -> KernelOperationalError {
+    match error {
+        SyscallContextError::ProcessContextMismatch | SyscallContextError::MissingAddressSpace => {
+            KernelOperationalError::AddressSpaceCorruption
+        }
+        SyscallContextError::InvalidUserReturnAddress | SyscallContextError::ThreadMetadataDrift => {
+            KernelOperationalError::ContextCorruption
+        }
+    }
+}
+
 /// Contain a syscall context failure by isolating the affected process/thread.
 ///
 /// This function is called when `validate_syscall_context` returns an error,
@@ -421,49 +521,12 @@ pub fn contain_context_failure(
         process_id
     );
 
-    if let Some(pid) = process_id {
-        // Transition process to dying state — blocks new faults and memory ops.
-        // This is the preferred containment path when we know the process.
-        let result = crate::process::terminate_process(
-            pid,
-            crate::process::TerminationReason::KilledByKernel { reason_code: context_error_code(error) },
-        );
-        match result {
-            Ok(()) => {
-                log_error!(
-                    "syscall",
-                    "[CONTEXT_FAILURE] pid={} terminated due to context failure: {:?}",
-                    pid,
-                    error
-                );
-            }
-            Err(e) => {
-                log_error!(
-                    "syscall",
-                    "[CONTEXT_FAILURE] pid={} terminate_process failed: {:?} — falling back to thread termination",
-                    pid,
-                    e
-                );
-                // Fallback: terminate the thread directly
-                crate::thread::terminate_entity(
-                    thread_id,
-                    crate::thread::TerminationReason::KilledByKernel { reason_code: context_error_code(error) },
-                );
-            }
-        }
-    } else {
-        // No process context — terminate the thread directly.
-        log_error!(
-            "syscall",
-            "[CONTEXT_FAILURE] tid={} no process context, terminating thread: {:?}",
-            thread_id,
-            error
-        );
-        crate::thread::terminate_entity(
-            thread_id,
-            crate::thread::TerminationReason::KilledByKernel { reason_code: context_error_code(error) },
-        );
-    }
+    contain_operational_violation(
+        "syscall_context",
+        context_error_kind(error),
+        process_id,
+        Some(thread_id),
+    );
     // Kernel continues — containment is local to this process/thread.
 }
 
@@ -650,8 +713,7 @@ struct SyscallSavedFrame {
 //                            minimum threshold (sufficient to prove possession).
 //
 // Default for unclassified syscalls:
-//   debug builds  → panic!  (force the developer to classify)
-//   release builds → EPERM  (fail-closed; never silently open a gap)
+//   ALWAYS fail-closed (EPERM). Unclassified entries are never implicitly open.
 
 /// Discrete capability requirements used by the policy table.
 /// Prefer adding a new variant here over writing inline closures so the
@@ -680,6 +742,8 @@ enum SysPolicy {
     ExplicitlyUnrestricted,
     /// Gate: caller must satisfy the given CapRequirement.
     Requires(CapRequirement),
+    /// Fail-closed decision for unknown/unclassified syscalls.
+    ExplicitlyDenied(u64),
 }
 
 /// Evaluate `req` against the current thread.  Returns true if the
@@ -732,10 +796,8 @@ fn check_cap_requirement(req: CapRequirement) -> bool {
 
 /// Return the policy for `syscall_num`.
 ///
-/// Every syscall number that the kernel handles must appear here.
-/// In debug builds, an unclassified syscall panics so the developer
-/// is forced to add a classification.  In release builds it returns
-/// EPERM (fail-closed).
+/// Every syscall number that the kernel handles should appear here.
+/// Unclassified syscalls are denied by default (fail-closed).
 fn syscall_policy(num: u64) -> SysPolicy {
     use SysPolicy::*;
     use CapRequirement::*;
@@ -843,20 +905,8 @@ fn syscall_policy(num: u64) -> SysPolicy {
         SYS_DEBUG_LOG => ExplicitlyUnrestricted,
 
         // ── Unclassified ──────────────────────────────────────────────────
-        // In debug builds: panic immediately so the developer adds a row.
-        // In release builds: fail-closed (EPERM).  We never silently open
-        // a new syscall to the world without an explicit classification.
-        _ => {
-            #[cfg(debug_assertions)]
-            panic!(
-                "syscall {} has no policy classification — add it to syscall_policy()",
-                num
-            );
-            #[cfg(not(debug_assertions))]
-            // Intentional: use ExplicitlyUnrestricted as a named sentinel
-            // that will be logged as an anomaly in the dispatcher.
-            ExplicitlyUnrestricted
-        }
+        // Fail-closed by construction: unknown rows are denied.
+        _ => ExplicitlyDenied(EPERM),
     }
 }
 
@@ -960,7 +1010,7 @@ extern "win64" fn rust_syscall_dispatcher(
     // receive; the class-level "is the caller allowed to touch this kind
     // of resource at all?" question is answered here.
     //
-    // Unclassified syscalls: panic in debug, EPERM in release (fail-closed).
+    // Unclassified syscalls: denied by default (fail-closed).
     // ----------------------------------------------------------------
     let policy_result: Option<u64> = match syscall_policy(syscall_num) {
         SysPolicy::ExplicitlyUnrestricted => None,
@@ -978,6 +1028,7 @@ extern "win64" fn rust_syscall_dispatcher(
                 Some(EPERM)
             }
         }
+        SysPolicy::ExplicitlyDenied(errno) => Some(errno),
     };
 
     if let Some(early_return) = policy_result {
@@ -5356,32 +5407,84 @@ fn sys_get_cpu_brand(buffer: u64, max_len: usize) -> u64 {
 // Virtual Memory Management Syscalls (mmap/munmap/mprotect/brk)
 // ---------------------------------------------------------------------------
 
-fn current_process_vma_context() -> Option<(crate::thread::ThreadId, crate::process::ProcessId, usize)> {
-    let tid = crate::sched::current_thread()?;
-    let process_id = crate::thread::get_thread_process_id(tid)?;
-    if !crate::process::process_allows_memory_operations(process_id) {
-        log_warn!(
-            "syscall",
-            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
-            process_id,
-            tid
-        );
-        return None;
-    }
-    let process_pml4 = crate::process::get_process_pml4(process_id)?;
-    let cached_pml4 = crate::thread::get_thread_address_space(tid).unwrap_or(0);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessContextError {
+    NoCurrentThread,
+    NoCurrentProcess,
+    MissingAddressSpace,
+    Pml4Drift {
+        thread_pml4: crate::mm::vma::VirtAddr,
+        process_pml4: crate::mm::vma::VirtAddr,
+        tid: crate::thread::ThreadId,
+        pid: crate::process::ProcessId,
+    },
+}
 
-    assert_eq!(
-        cached_pml4,
-        process_pml4,
-        "VM/VMA selection must be Process-directed: thread {} process {} cache 0x{:X} process 0x{:X}",
+#[derive(Debug, Clone, Copy)]
+struct ProcessVmaContext {
+    tid: crate::thread::ThreadId,
+    pid: crate::process::ProcessId,
+    pml4: usize,
+}
+
+fn process_context_error_kind(error: ProcessContextError) -> KernelOperationalError {
+    match error {
+        ProcessContextError::NoCurrentThread | ProcessContextError::NoCurrentProcess => {
+            KernelOperationalError::ContextCorruption
+        }
+        ProcessContextError::MissingAddressSpace | ProcessContextError::Pml4Drift { .. } => {
+            KernelOperationalError::AddressSpaceCorruption
+        }
+    }
+}
+
+fn contain_mm_operational_error(error: ProcessContextError) -> u64 {
+    let (tid, pid) = match error {
+        ProcessContextError::Pml4Drift { tid, pid, .. } => (Some(tid), Some(pid)),
+        _ => (crate::sched::current_thread(), best_effort_current_process()),
+    };
+
+    log_error!(
+        "syscall",
+        "[MM_CONTEXT_CORRUPTION] error={:?} tid={:?} pid={:?}",
+        error,
         tid,
-        process_id,
-        cached_pml4,
-        process_pml4
+        pid
     );
 
-    Some((tid, process_id, process_pml4 as usize))
+    contain_operational_violation(
+        "mm_syscall_context",
+        process_context_error_kind(error),
+        pid,
+        tid,
+    );
+    ESUCCESS
+}
+
+fn current_process_vma_context() -> Result<ProcessVmaContext, ProcessContextError> {
+    let tid = crate::sched::current_thread().ok_or(ProcessContextError::NoCurrentThread)?;
+    let pid = crate::thread::get_thread_process_id(tid).ok_or(ProcessContextError::NoCurrentProcess)?;
+    let process_pml4 = crate::process::get_process_pml4(pid).ok_or(ProcessContextError::MissingAddressSpace)?;
+    let thread_pml4 = crate::thread::get_thread_address_space(tid).ok_or(ProcessContextError::MissingAddressSpace)?;
+
+    if process_pml4 == 0 || thread_pml4 == 0 {
+        return Err(ProcessContextError::MissingAddressSpace);
+    }
+
+    if thread_pml4 != process_pml4 {
+        return Err(ProcessContextError::Pml4Drift {
+            thread_pml4: crate::mm::vma::VirtAddr::new(thread_pml4 as usize),
+            process_pml4: crate::mm::vma::VirtAddr::new(process_pml4 as usize),
+            tid,
+            pid,
+        });
+    }
+
+    Ok(ProcessVmaContext {
+        tid,
+        pid,
+        pml4: process_pml4 as usize,
+    })
 }
 
 /// mmap(addr_hint, length, prot, flags) -> mapped_addr | errno
@@ -5433,10 +5536,22 @@ fn sys_mmap(
     // Round up to page boundary
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    let (_tid, process_id, pml4) = match current_process_vma_context() {
-        Some(ctx) => ctx,
-        None => return EPERM,
+    let vma_ctx = match current_process_vma_context() {
+        Ok(ctx) => ctx,
+        Err(err) => return contain_mm_operational_error(err),
     };
+    let tid = vma_ctx.tid;
+    let process_id = vma_ctx.pid;
+    let pml4 = vma_ctx.pml4;
+    if !crate::process::process_allows_memory_operations(process_id) {
+        log_warn!(
+            "syscall",
+            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
+            process_id,
+            tid
+        );
+        return EPERM;
+    }
 
     // Build VMA permissions from prot flags
     let mut perms = VmaPermissions::NONE;
@@ -5551,15 +5666,24 @@ fn sys_mmap(
             (addr, end, "first_fit")
         };
 
-        // INVARIANT: mmap allocation must not escape the USER_MMAP_END window — structural, not operational.
-        // If this fires, the allocator has a bug, not a runtime condition.
-        debug_assert!(
-            virt_end <= atom_abi::USER_MMAP_END as usize,
-            "mmap allocation escaped window: start=0x{:X} end=0x{:X} limit=0x{:X}",
-            virt_addr,
-            virt_end,
-            atom_abi::USER_MMAP_END
-        );
+        if virt_end > atom_abi::USER_MMAP_END as usize {
+            log_error!(
+                "syscall",
+                "[MMAP_CONTEXT_CORRUPTION] pid={} tid={} reason=allocation_window_escape start=0x{:X} end=0x{:X} limit=0x{:X}",
+                process_id,
+                tid,
+                virt_addr,
+                virt_end,
+                atom_abi::USER_MMAP_END
+            );
+            contain_operational_violation(
+                "sys_mmap_window",
+                KernelOperationalError::AddressSpaceCorruption,
+                Some(process_id),
+                Some(tid),
+            );
+            return Err(ESUCCESS);
+        }
 
         log_info!(
             "syscall",
@@ -5715,10 +5839,21 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
         return EINVAL;
     }
 
-    let (_tid, process_id, pml4) = match current_process_vma_context() {
-        Some(ctx) => ctx,
-        None => return EPERM,
+    let vma_ctx = match current_process_vma_context() {
+        Ok(ctx) => ctx,
+        Err(err) => return contain_mm_operational_error(err),
     };
+    let process_id = vma_ctx.pid;
+    let pml4 = vma_ctx.pml4;
+    if !crate::process::process_allows_memory_operations(process_id) {
+        log_warn!(
+            "syscall",
+            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
+            process_id,
+            vma_ctx.tid
+        );
+        return EPERM;
+    }
 
     match vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
         let removed = vma::remove_process_vma_range(process_id, addr, end).map_err(|_| EINVAL)?;
@@ -5763,10 +5898,21 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
         return EINVAL;
     }
 
-    let (_tid, process_id, pml4) = match current_process_vma_context() {
-        Some(ctx) => ctx,
-        None => return EPERM,
+    let vma_ctx = match current_process_vma_context() {
+        Ok(ctx) => ctx,
+        Err(err) => return contain_mm_operational_error(err),
     };
+    let process_id = vma_ctx.pid;
+    let pml4 = vma_ctx.pml4;
+    if !crate::process::process_allows_memory_operations(process_id) {
+        log_warn!(
+            "syscall",
+            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
+            process_id,
+            vma_ctx.tid
+        );
+        return EPERM;
+    }
 
     let mut perms = VmaPermissions::NONE;
     if prot & atom_abi::PROT_READ != 0 {
@@ -5816,10 +5962,21 @@ fn sys_brk(new_brk: u64) -> u64 {
     use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::mm::pmm::PAGE_SIZE;
 
-    let (_tid, process_id, pml4) = match current_process_vma_context() {
-        Some(ctx) => ctx,
-        None => return ENOMEM,
+    let vma_ctx = match current_process_vma_context() {
+        Ok(ctx) => ctx,
+        Err(err) => return contain_mm_operational_error(err),
     };
+    let process_id = vma_ctx.pid;
+    let pml4 = vma_ctx.pml4;
+    if !crate::process::process_allows_memory_operations(process_id) {
+        log_warn!(
+            "syscall",
+            "[VMA_BLOCKED] pid={} tid={} reason=process_terminating",
+            process_id,
+            vma_ctx.tid
+        );
+        return EPERM;
+    }
 
     let heap_start = atom_abi::USER_HEAP_START as usize;
 
@@ -6272,54 +6429,103 @@ struct FdOwnerContext {
     address_space_pml4: u64,
 }
 
-fn current_fd_owner_context() -> Option<FdOwnerContext> {
-    let tid = crate::sched::current_thread()?;
-    let process_id = crate::thread::get_thread_process_id(tid)
-        .expect("FD operations require the current thread to have a valid ProcessId");
-    let address_space_pml4 = crate::thread::get_thread_address_space(tid)
-        .expect("FD operations require the current thread to have an address space");
-    assert_ne!(
-        address_space_pml4,
-        0,
-        "FD operations require the current thread to have a non-zero userspace PML4"
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FdContextError {
+    NoCurrentThread,
+    NoCurrentProcess,
+    InvalidOwner,
+    FdTableMissing,
+    OwnershipMismatch,
+    CorruptedState,
+}
 
-    let process = crate::process::get_process(process_id)
-        .expect("FD caller process must resolve to a registered process");
-    assert_eq!(
-        process.pml4_phys,
-        address_space_pml4,
-        "FD caller process {} PML4 0x{:X} must match current thread PML4 0x{:X}",
-        process_id,
-        process.pml4_phys,
-        address_space_pml4
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FdPathError {
+    User(u64),
+    Context(FdContextError),
+}
 
-    Some(FdOwnerContext {
+impl From<FdContextError> for FdPathError {
+    fn from(value: FdContextError) -> Self {
+        FdPathError::Context(value)
+    }
+}
+
+fn classify_fd_context_error(error: FdContextError) -> Result<u64, KernelOperationalError> {
+    match error {
+        FdContextError::OwnershipMismatch => Ok(EBADF),
+        FdContextError::NoCurrentThread | FdContextError::NoCurrentProcess => {
+            Err(KernelOperationalError::ContextCorruption)
+        }
+        FdContextError::InvalidOwner => Err(KernelOperationalError::OwnershipCorruption),
+        FdContextError::FdTableMissing => Err(KernelOperationalError::InternalInvariantViolation),
+        FdContextError::CorruptedState => Err(KernelOperationalError::AddressSpaceCorruption),
+    }
+}
+
+fn map_fd_error(err: FdPathError) -> u64 {
+    match err {
+        FdPathError::User(errno) => errno,
+        FdPathError::Context(ctx_err) => match classify_fd_context_error(ctx_err) {
+            Ok(errno) => errno,
+            Err(op_err) => {
+                log_error!(
+                    "syscall",
+                    "[FD_CONTEXT_CORRUPTION] error={:?} pid={:?} tid={:?}",
+                    ctx_err,
+                    best_effort_current_process(),
+                    crate::sched::current_thread()
+                );
+                contain_operational_violation(
+                    "fd_syscall_context",
+                    op_err,
+                    best_effort_current_process(),
+                    crate::sched::current_thread(),
+                );
+                ESUCCESS
+            }
+        },
+    }
+}
+
+fn current_fd_owner_context() -> Result<FdOwnerContext, FdContextError> {
+    let tid = crate::sched::current_thread().ok_or(FdContextError::NoCurrentThread)?;
+    let process_id = crate::thread::get_thread_process_id(tid).ok_or(FdContextError::NoCurrentProcess)?;
+    let address_space_pml4 =
+        crate::thread::get_thread_address_space(tid).ok_or(FdContextError::CorruptedState)?;
+    if address_space_pml4 == 0 {
+        return Err(FdContextError::CorruptedState);
+    }
+
+    let process = crate::process::get_process(process_id).ok_or(FdContextError::CorruptedState)?;
+    if process.pml4_phys == 0 {
+        return Err(FdContextError::CorruptedState);
+    }
+    if process.pml4_phys != address_space_pml4 {
+        return Err(FdContextError::CorruptedState);
+    }
+
+    Ok(FdOwnerContext {
         process_id,
         address_space_pml4,
     })
 }
 
-fn fd_owner_process(fd: &KernelFd) -> crate::process::ProcessId {
-    fd.owner_process
-        .expect("in-use FD entries must always carry owner_process")
+fn fd_owner_process(fd: &KernelFd) -> Result<crate::process::ProcessId, FdContextError> {
+    fd.owner_process.ok_or(FdContextError::InvalidOwner)
 }
 
-fn assert_fd_process_alignment(fd: &KernelFd) {
+fn validate_fd_process_alignment(fd: &KernelFd) -> Result<(), FdContextError> {
     if !fd.in_use {
-        return;
+        return Ok(());
     }
 
-    let process_id = fd_owner_process(fd);
-    let process = crate::process::get_process(process_id)
-        .expect("FD owner_process must resolve to a registered process");
-    debug_assert_ne!(
-        process.pml4_phys,
-        0,
-        "FD owner process {} must have a non-zero PML4",
-        process_id
-    );
+    let process_id = fd_owner_process(fd)?;
+    let process = crate::process::get_process(process_id).ok_or(FdContextError::CorruptedState)?;
+    if process.pml4_phys == 0 {
+        return Err(FdContextError::CorruptedState);
+    }
+    Ok(())
 }
 
 /// A kernel-side open file/directory (zero-heap, stored in .bss).
@@ -6435,16 +6641,12 @@ fn path_buf_as_str(buf: &[u8; MAX_PATH_BUF], len: usize) -> &str {
     unsafe { core::str::from_utf8_unchecked(&buf[..len]) }
 }
 
-fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Result<(), u64> {
-    let caller = match current_fd_owner_context() {
-        Some(owner) => owner,
-        None => return Err(EBADF),
-    };
+fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Result<(), FdPathError> {
+    let caller = current_fd_owner_context()?;
+    validate_fd_process_alignment(&table[idx])?;
 
-    assert_fd_process_alignment(&table[idx]);
-
-    if fd_owner_process(&table[idx]) != caller.process_id {
-        return Err(EBADF);
+    if fd_owner_process(&table[idx])? != caller.process_id {
+        return Err(FdContextError::OwnershipMismatch.into());
     }
 
     Ok(())
@@ -6454,14 +6656,14 @@ fn validate_fd_ownership_with_owner(
     idx: usize,
     table: &[KernelFd; MAX_KERNEL_FDS],
     caller: FdOwnerContext,
-) -> u64 {
-    assert_fd_process_alignment(&table[idx]);
+) -> Result<(), FdPathError> {
+    validate_fd_process_alignment(&table[idx])?;
 
-    if fd_owner_process(&table[idx]) != caller.process_id {
-        return EBADF;
+    if fd_owner_process(&table[idx])? != caller.process_id {
+        return Err(FdContextError::OwnershipMismatch.into());
     }
 
-    ESUCCESS
+    Ok(())
 }
 
 fn note_fd_process_activity(process_id: crate::process::ProcessId) {
@@ -6474,15 +6676,18 @@ fn begin_fd_process_cleanup(process_id: crate::process::ProcessId) -> bool {
 
 fn get_fd_entry(
     idx: usize,
-) -> Result<(spin::MutexGuard<'static, [KernelFd; MAX_KERNEL_FDS]>, usize), u64> {
+) -> Result<(spin::MutexGuard<'static, [KernelFd; MAX_KERNEL_FDS]>, usize), FdPathError> {
+    if MAX_KERNEL_FDS == 0 {
+        return Err(FdContextError::FdTableMissing.into());
+    }
     if idx >= MAX_KERNEL_FDS {
-        return Err(EBADF);
+        return Err(FdPathError::User(EBADF));
     }
 
     let table = KERNEL_FD_TABLE.lock();
 
     if !table[idx].in_use {
-        return Err(EBADF);
+        return Err(FdPathError::User(EBADF));
     }
 
     validate_fd_ownership(idx, &table)?;
@@ -6502,7 +6707,7 @@ pub(crate) fn close_fds_for_process(process_id: crate::process::ProcessId) {
 
     let mut table = KERNEL_FD_TABLE.lock();
     for fd in table.iter_mut() {
-        if fd.in_use && fd_owner_process(fd) == process_id {
+        if fd.in_use && fd_owner_process(fd) == Ok(process_id) {
             fd.free_cache();
             *fd = KernelFd::EMPTY;
         }
@@ -6510,11 +6715,8 @@ pub(crate) fn close_fds_for_process(process_id: crate::process::ProcessId) {
 }
 
 /// Allocate an fd slot (returns 3..MAX_KERNEL_FDS-1, or EMFILE on full).
-fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
-    let owner = match current_fd_owner_context() {
-        Some(owner) => owner,
-        None => return Err(EBADF),
-    };
+fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, FdPathError> {
+    let owner = current_fd_owner_context()?;
 
     note_fd_process_activity(owner.process_id);
     let mut table = KERNEL_FD_TABLE.lock();
@@ -6523,7 +6725,7 @@ fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
         if !table[i].in_use {
             table[i].in_use = true;
             table[i].owner_process = Some(owner.process_id);
-            assert_fd_process_alignment(&table[i]);
+            validate_fd_process_alignment(&table[i])?;
             let plen = path.len().min(MAX_PATH_BUF);
             table[i].path[..plen].copy_from_slice(&path.as_bytes()[..plen]);
             table[i].path_len = plen;
@@ -6534,7 +6736,7 @@ fn alloc_kernel_fd(path: &str, is_dir: bool, flags: u32) -> Result<u64, u64> {
             return Ok(i as u64);
         }
     }
-    Err(EMFILE)
+    Err(FdPathError::User(EMFILE))
 }
 
 fn ensure_fd_cache(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize) -> Result<(), u64> {
@@ -6686,7 +6888,7 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
     let store_path = path.trim_end_matches('/');
     let fd = match alloc_kernel_fd(store_path, is_dir, flags) {
         Ok(fd) => fd,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
 
     if !is_dir && (flags & o_trunc) != 0 {
@@ -6737,7 +6939,7 @@ fn sys_fs_close(fd: u64) -> u64 {
     let idx = fd as usize;
     let (mut table, idx) = match get_fd_entry(idx) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
 
     let flush = flush_fd_locked(&mut table, idx);
@@ -6801,8 +7003,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     }
 
     let caller = match current_fd_owner_context() {
-        Some(owner) => owner,
-        None => return EBADF,
+        Ok(owner) => owner,
+        Err(e) => return map_fd_error(e.into()),
     };
 
     // ── Obtain file data (cached or fresh) ─────────────────────────────────
@@ -6813,9 +7015,8 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return EBADF;
     }
 
-    let err = validate_fd_ownership_with_owner(idx, &table, caller);
-    if err != ESUCCESS {
-        return err;
+    if let Err(err) = validate_fd_ownership_with_owner(idx, &table, caller) {
+        return map_fd_error(err);
     }
 
     if table[idx].is_dir {
@@ -6950,7 +7151,7 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     let idx = fd as usize;
     let (mut table, idx) = match get_fd_entry(idx) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
 
     if table[idx].is_dir {
@@ -7025,7 +7226,7 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
         }
 
         if let Err(e) = validate_fd_ownership(idx, &table) {
-            return e;
+            return map_fd_error(e);
         }
 
         (table[idx].path, table[idx].path_len, table[idx].is_dir)
@@ -7177,7 +7378,7 @@ fn sys_fs_fsync(fd: u64) -> u64 {
     let idx = fd as usize;
     let (mut table, idx) = match get_fd_entry(idx) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
     flush_fd_locked(&mut table, idx)
 }
@@ -7189,7 +7390,7 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
     let idx = fd as usize;
     let (mut table, idx) = match get_fd_entry(idx) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
 
     let new_offset: i64 = match whence {
@@ -7268,7 +7469,7 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
                         alloc::alloc::dealloc(cache_ptr as *mut u8, layout);
                     }
                 }
-                return e;
+                return map_fd_error(e);
             }
 
             // Install cache only if not already populated (guard against races).
@@ -7325,7 +7526,7 @@ fn sys_fs_fstat(fd: u64, stat_ptr: u64) -> u64 {
         }
 
         if let Err(e) = validate_fd_ownership(idx, &table) {
-            return e;
+            return map_fd_error(e);
         }
 
         (table[idx].path, table[idx].path_len)
@@ -7361,7 +7562,7 @@ fn sys_fs_truncate(fd: u64, _length: u64) -> u64 {
     let idx = fd as usize;
     let (_table, _idx) = match get_fd_entry(idx) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
 
     ENOTSUP
@@ -7387,7 +7588,7 @@ fn sys_fs_dup(fd: u64) -> u64 {
     let idx = fd as usize;
     let (_table, _idx) = match get_fd_entry(idx) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return map_fd_error(e),
     };
 
     ENOTSUP
@@ -7409,12 +7610,12 @@ fn sys_fs_dup2(oldfd: u64, newfd: u64) -> u64 {
     }
 
     if let Err(e) = validate_fd_ownership(old_idx, &table) {
-        return e;
+        return map_fd_error(e);
     }
 
     if table[new_idx].in_use {
         if let Err(e) = validate_fd_ownership(new_idx, &table) {
-            return e;
+            return map_fd_error(e);
         }
     }
 

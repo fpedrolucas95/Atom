@@ -1566,26 +1566,92 @@ fn admit_fault(
     }
 }
 
-fn classify_fault_type_for_admission(classified: ClassifiedFault) -> crate::mm::admission::FaultType {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CowMaterializationMode {
+    PromoteInPlace,
+    CopyOnWrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterializationPlan {
+    NotPresentAnonymous,
+    CowWrite { mode: CowMaterializationMode },
+}
+
+impl MaterializationPlan {
+    fn fault_type(self) -> crate::mm::admission::FaultType {
+        match self {
+            MaterializationPlan::NotPresentAnonymous => crate::mm::admission::FaultType::NotPresentAnonymous,
+            MaterializationPlan::CowWrite { .. } => crate::mm::admission::FaultType::CowWrite,
+        }
+    }
+
+    fn charge(self) -> crate::mm::admission::FaultCharge {
+        match self {
+            MaterializationPlan::NotPresentAnonymous => crate::mm::admission::FaultCharge::Pages(1),
+            MaterializationPlan::CowWrite {
+                mode: CowMaterializationMode::PromoteInPlace,
+            } => crate::mm::admission::FaultCharge::None,
+            MaterializationPlan::CowWrite {
+                mode: CowMaterializationMode::CopyOnWrite,
+            } => crate::mm::admission::FaultCharge::Pages(1),
+        }
+    }
+}
+
+fn build_materialization_plan(
+    ctx: &FaultContext,
+    classified: ClassifiedFault,
+    vma: Option<&Vma>,
+) -> Result<MaterializationPlan, FaultResult> {
+    use crate::mm::pmm;
+    use crate::mm::vm::{self, PageFlags};
+
+    let Some(_vma) = vma else {
+        return Err(FaultResult::InvalidAddress);
+    };
+
     match classified {
-        ClassifiedFault::NotPresentAnon => crate::mm::admission::FaultType::NotPresentAnonymous,
-        ClassifiedFault::CowWrite => crate::mm::admission::FaultType::CowWrite,
-        ClassifiedFault::InvalidAddress
-        | ClassifiedFault::AccessDenied
-        | ClassifiedFault::NotHandled => crate::mm::admission::FaultType::Invalid,
+        ClassifiedFault::InvalidAddress => Err(FaultResult::InvalidAddress),
+        ClassifiedFault::AccessDenied => Err(FaultResult::ProtectionViolation),
+        ClassifiedFault::NotHandled => Err(FaultResult::NotHandled),
+        ClassifiedFault::NotPresentAnon => Ok(MaterializationPlan::NotPresentAnonymous),
+        ClassifiedFault::CowWrite => {
+            let pml4_phys = ctx.address_space_id.as_usize();
+            let page_addr = ctx.fault_addr.page_base();
+            let (paddr, flags) = vm::query_mapping_in_pml4(pml4_phys, page_addr)
+                .map_err(|_| FaultResult::NotHandled)?;
+
+            if !vm::is_cow(flags) {
+                if flags.contains(PageFlags::WRITABLE) {
+                    return Ok(MaterializationPlan::CowWrite {
+                        mode: CowMaterializationMode::PromoteInPlace,
+                    });
+                }
+                return Err(FaultResult::NotHandled);
+            }
+
+            let refcount = pmm::phys_ref_get(paddr);
+            let mode = if refcount <= 1 {
+                CowMaterializationMode::PromoteInPlace
+            } else {
+                CowMaterializationMode::CopyOnWrite
+            };
+            Ok(MaterializationPlan::CowWrite { mode })
+        }
     }
 }
 
 fn evaluate_memory_admission(
     ctx: &FaultContext,
-    classified: ClassifiedFault,
+    plan: MaterializationPlan,
 ) -> Result<(), FaultResult> {
     use crate::mm::admission::{AdmissionDecision, MemoryAdmission, MemoryAdmissionContext};
 
     let admission_ctx = MemoryAdmissionContext {
         pid: ctx.pid,
-        requested_pages: 1,
-        fault_type: classify_fault_type_for_admission(classified),
+        charge: plan.charge(),
+        fault_type: plan.fault_type(),
     };
 
     let decision = MemoryAdmission::evaluate(admission_ctx);
@@ -1593,10 +1659,11 @@ fn evaluate_memory_admission(
         AdmissionDecision::Allow => {
             log_debug!(
                 LOG_ORIGIN,
-                "[PF] admission=allow pid={} addr=0x{:X} access={:?} decision={:?}",
+                "[PF] admission=allow pid={} addr=0x{:X} access={:?} plan={:?} decision={:?}",
                 ctx.pid,
                 ctx.fault_addr.as_usize(),
                 ctx.access_type,
+                plan,
                 decision
             );
             Ok(())
@@ -1604,10 +1671,11 @@ fn evaluate_memory_admission(
         AdmissionDecision::DenyProcessLimit | AdmissionDecision::DenyGlobalPressure => {
             log_warn!(
                 LOG_ORIGIN,
-                "[PF] admission=deny pid={} addr=0x{:X} access={:?} decision={:?} action=fatal",
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} plan={:?} decision={:?} action=fatal",
                 ctx.pid,
                 ctx.fault_addr.as_usize(),
                 ctx.access_type,
+                plan,
                 decision
             );
             Err(FaultResult::OutOfMemory)
@@ -1615,10 +1683,11 @@ fn evaluate_memory_admission(
         AdmissionDecision::TriggerOOM => {
             log_warn!(
                 LOG_ORIGIN,
-                "[PF] admission=deny pid={} addr=0x{:X} access={:?} decision={:?} action=trigger_oom_then_fatal",
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} plan={:?} decision={:?} action=trigger_oom_then_fatal",
                 ctx.pid,
                 ctx.fault_addr.as_usize(),
                 ctx.access_type,
+                plan,
                 decision
             );
             MemoryAdmission::trigger_oom(&admission_ctx);
@@ -1627,10 +1696,11 @@ fn evaluate_memory_admission(
         AdmissionDecision::InvalidPolicy => {
             log_warn!(
                 LOG_ORIGIN,
-                "[PF] admission=deny pid={} addr=0x{:X} access={:?} decision={:?} action=fatal_invalid",
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} plan={:?} decision={:?} action=fatal_invalid",
                 ctx.pid,
                 ctx.fault_addr.as_usize(),
                 ctx.access_type,
+                plan,
                 decision
             );
             Err(FaultResult::InvalidAddress)
@@ -1638,17 +1708,20 @@ fn evaluate_memory_admission(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterializationOutcome {
+    Final(FaultResult),
+    Replan,
+}
+
 fn materialize_fault(
     ctx: &FaultContext,
-    classified: ClassifiedFault,
+    plan: MaterializationPlan,
     vma: &Vma,
-) -> FaultResult {
-    match classified {
-        ClassifiedFault::InvalidAddress => FaultResult::InvalidAddress,
-        ClassifiedFault::AccessDenied => FaultResult::ProtectionViolation,
-        ClassifiedFault::NotHandled => FaultResult::NotHandled,
-        ClassifiedFault::NotPresentAnon => materialize_anon(ctx, vma),
-        ClassifiedFault::CowWrite => materialize_cow(ctx, vma),
+) -> MaterializationOutcome {
+    match plan {
+        MaterializationPlan::NotPresentAnonymous => MaterializationOutcome::Final(materialize_anon(ctx, vma)),
+        MaterializationPlan::CowWrite { mode } => materialize_cow(ctx, vma, mode),
     }
 }
 
@@ -1792,7 +1865,8 @@ fn materialize_anon(
 fn materialize_cow(
     ctx: &FaultContext,
     vma: &Vma,
-) -> FaultResult {
+    mode: CowMaterializationMode,
+) -> MaterializationOutcome {
     use crate::mm::pmm;
     use crate::mm::vm::{self, PageFlags};
 
@@ -1812,14 +1886,14 @@ fn materialize_cow(
                     err,
                     vma.label
                 );
-                return FaultResult::NotHandled;
+                return MaterializationOutcome::Final(FaultResult::NotHandled);
             }
         };
 
         if !vm::is_cow(snapshot_flags) || snapshot_flags.contains(PageFlags::WRITABLE) {
             // Another CPU may have already completed the COW break.
             if snapshot_flags.contains(PageFlags::WRITABLE) && !vm::is_cow(snapshot_flags) {
-                return FaultResult::Resolved;
+                return MaterializationOutcome::Final(FaultResult::Resolved);
             }
             log_warn!(
                 LOG_ORIGIN,
@@ -1829,25 +1903,27 @@ fn materialize_cow(
                 snapshot_flags.bits(),
                 vma.label
             );
-            return FaultResult::NotHandled;
+            return MaterializationOutcome::Final(FaultResult::NotHandled);
         }
 
         let snapshot_ref = pmm::phys_ref_get(snapshot_paddr);
-        let mut staged_new_paddr = if snapshot_ref > 1 {
-            match pmm::alloc_page_zeroed() {
-                Some(new_paddr) => {
-                    vm::copy_phys_page(new_paddr, snapshot_paddr);
-                    Some(new_paddr)
+        let mut staged_new_paddr = match mode {
+            CowMaterializationMode::CopyOnWrite if snapshot_ref > 1 => {
+                match pmm::alloc_page_zeroed() {
+                    Some(new_paddr) => {
+                        vm::copy_phys_page(new_paddr, snapshot_paddr);
+                        Some(new_paddr)
+                    }
+                    None => return MaterializationOutcome::Final(FaultResult::OutOfMemory),
                 }
-                None => return FaultResult::OutOfMemory,
             }
-        } else {
-            None
+            _ => None,
         };
 
         enum CowCommitResult {
             Resolved,
             Retry,
+            Replan,
             OutOfMemory,
             NotHandled,
         }
@@ -1877,6 +1953,18 @@ fn materialize_cow(
             }
 
             let old_ref = pmm::phys_ref_get(old_paddr);
+            match mode {
+                CowMaterializationMode::PromoteInPlace => {
+                    if old_ref > 1 {
+                        if let Some(staged) = staged_new_paddr.take() {
+                            let _ = pmm::free_page(staged);
+                        }
+                        return CowCommitResult::Replan;
+                    }
+                }
+                CowMaterializationMode::CopyOnWrite => {}
+            }
+
             if old_ref <= 1 {
                 if let Some(staged) = staged_new_paddr.take() {
                     let _ = pmm::free_page(staged);
@@ -1955,10 +2043,15 @@ fn materialize_cow(
         });
 
         match commit {
-            CowCommitResult::Resolved => return FaultResult::Resolved,
+            CowCommitResult::Resolved => return MaterializationOutcome::Final(FaultResult::Resolved),
             CowCommitResult::Retry => continue,
-            CowCommitResult::OutOfMemory => return FaultResult::OutOfMemory,
-            CowCommitResult::NotHandled => return FaultResult::NotHandled,
+            CowCommitResult::Replan => return MaterializationOutcome::Replan,
+            CowCommitResult::OutOfMemory => {
+                return MaterializationOutcome::Final(FaultResult::OutOfMemory);
+            }
+            CowCommitResult::NotHandled => {
+                return MaterializationOutcome::Final(FaultResult::NotHandled);
+            }
         }
     }
 
@@ -1970,11 +2063,11 @@ fn materialize_cow(
         MAX_COW_RETRIES,
         vma.label
     );
-    FaultResult::NotHandled
+    MaterializationOutcome::Final(FaultResult::NotHandled)
 }
 
 /// Attempt to resolve a page fault with a deterministic pipeline:
-/// classify -> admit -> materialize.
+/// classify -> plan -> derive cost -> admission -> execute.
 pub fn handle_page_fault(
     ctx: FaultContext,
     error_code: u64,
@@ -2046,38 +2139,73 @@ pub fn handle_page_fault(
             ctx.fault_addr.as_usize(),
             ctx.access_type,
             result,
-            vma.map(|v| v.label).unwrap_or("none")
+            vma.as_ref().map(|v| v.label).unwrap_or("none")
         );
         return result;
     }
 
-    if let Err(result) = evaluate_memory_admission(&ctx, classified) {
-        log_warn!(
-            LOG_ORIGIN,
-            "[PF] admission=deny pid={} addr=0x{:X} access={:?} result={:?}",
-            ctx.pid,
-            ctx.fault_addr.as_usize(),
-            ctx.access_type,
-            result
-        );
-        return result;
-    }
-
-    let Some(vma) = vma else {
+    let Some(vma) = vma.as_ref() else {
         return FaultResult::InvalidAddress;
     };
-    let result = materialize_fault(&ctx, classified, &vma);
-    log_debug!(
+
+    const MAX_PLAN_RETRIES: usize = 3;
+    for attempt in 0..MAX_PLAN_RETRIES {
+        let plan = match build_materialization_plan(&ctx, classified, Some(vma)) {
+            Ok(plan) => plan,
+            Err(result) => return result,
+        };
+
+        if let Err(result) = evaluate_memory_admission(&ctx, plan) {
+            log_warn!(
+                LOG_ORIGIN,
+                "[PF] admission=deny pid={} addr=0x{:X} access={:?} plan={:?} result={:?}",
+                ctx.pid,
+                ctx.fault_addr.as_usize(),
+                ctx.access_type,
+                plan,
+                result
+            );
+            return result;
+        }
+
+        match materialize_fault(&ctx, plan, vma) {
+            MaterializationOutcome::Final(result) => {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[PF] result={:?} addr=0x{:X} page=0x{:X} access={:?} user={} label={} plan={:?}",
+                    result,
+                    ctx.fault_addr.as_usize(),
+                    page_addr,
+                    ctx.access_type,
+                    ctx.is_user,
+                    vma.label,
+                    plan
+                );
+                return result;
+            }
+            MaterializationOutcome::Replan => {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[PF] materialize=replan pid={} addr=0x{:X} page=0x{:X} attempt={}",
+                    ctx.pid,
+                    ctx.fault_addr.as_usize(),
+                    page_addr,
+                    attempt + 1
+                );
+                continue;
+            }
+        }
+    }
+
+    log_warn!(
         LOG_ORIGIN,
-        "[PF] result={:?} addr=0x{:X} page=0x{:X} access={:?} user={} label={}",
-        result,
+        "[PF] materialize=deny pid={} addr=0x{:X} page=0x{:X} reason=plan_retry_exhausted attempts={}",
+        ctx.pid,
         ctx.fault_addr.as_usize(),
         page_addr,
-        ctx.access_type,
-        ctx.is_user,
-        vma.label
+        MAX_PLAN_RETRIES
     );
-    result
+    FaultResult::NotHandled
 }
 
 pub fn init() {

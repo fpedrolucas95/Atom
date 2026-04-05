@@ -21,9 +21,25 @@ pub enum FaultType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultCharge {
+    None,
+    Pages(usize),
+}
+
+impl FaultCharge {
+    #[inline]
+    pub const fn resident_delta_pages(self) -> usize {
+        match self {
+            FaultCharge::None => 0,
+            FaultCharge::Pages(pages) => pages,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryAdmissionContext {
     pub pid: ProcessId,
-    pub requested_pages: usize,
+    pub charge: FaultCharge,
     pub fault_type: FaultType,
 }
 
@@ -48,10 +64,10 @@ impl MemoryAdmission {
         let decision = evaluate_with_observation(ctx, process_allows_memory_ops, usage, pressure);
         log_debug!(
             LOG_ORIGIN,
-            "[admission] pid={} fault_type={:?} requested_pages={} pressure={:?} decision={:?}",
+            "[admission] pid={} fault_type={:?} charge={:?} pressure={:?} decision={:?}",
             ctx.pid,
             ctx.fault_type,
-            ctx.requested_pages,
+            ctx.charge,
             pressure,
             decision
         );
@@ -61,10 +77,10 @@ impl MemoryAdmission {
     pub fn trigger_oom(ctx: &MemoryAdmissionContext) {
         log_warn!(
             LOG_ORIGIN,
-            "[admission] trigger_oom pid={} fault_type={:?} requested_pages={}",
+            "[admission] trigger_oom pid={} fault_type={:?} charge={:?}",
             ctx.pid,
             ctx.fault_type,
-            ctx.requested_pages
+            ctx.charge
         );
         let _ = oom::oom_kill();
     }
@@ -83,10 +99,6 @@ fn evaluate_with_observation(
         return AdmissionDecision::InvalidPolicy;
     }
 
-    if ctx.requested_pages == 0 {
-        return AdmissionDecision::InvalidPolicy;
-    }
-
     if !process_allows_memory_ops {
         return AdmissionDecision::InvalidPolicy;
     }
@@ -95,8 +107,15 @@ fn evaluate_with_observation(
         return AdmissionDecision::InvalidPolicy;
     };
 
+    let requested_pages = ctx.charge.resident_delta_pages();
+    if requested_pages == 0 {
+        // No resident growth planned: this fault should never be denied by
+        // quota/pressure admission.
+        return AdmissionDecision::Allow;
+    }
+
     if usage.limit_pages != 0
-        && usage.resident_pages.saturating_add(ctx.requested_pages) > usage.limit_pages
+        && usage.resident_pages.saturating_add(requested_pages) > usage.limit_pages
     {
         return AdmissionDecision::DenyProcessLimit;
     }
@@ -120,7 +139,7 @@ fn run_admission_self_tests() {
     let pid = ProcessId::from_raw(0xAD01);
     let base_ctx = MemoryAdmissionContext {
         pid,
-        requested_pages: 1,
+        charge: FaultCharge::Pages(1),
         fault_type: FaultType::NotPresentAnonymous,
     };
 
@@ -203,7 +222,7 @@ mod tests {
     fn test_ctx() -> MemoryAdmissionContext {
         MemoryAdmissionContext {
             pid: ProcessId::from_raw(77),
-            requested_pages: 1,
+            charge: FaultCharge::Pages(1),
             fault_type: FaultType::NotPresentAnonymous,
         }
     }
@@ -284,6 +303,28 @@ mod tests {
                 MemoryPressure::None
             ),
             AdmissionDecision::InvalidPolicy
+        );
+    }
+
+    #[test]
+    fn zero_charge_cow_bypasses_quota_and_pressure_denials() {
+        let zero_charge_ctx = MemoryAdmissionContext {
+            pid: ProcessId::from_raw(77),
+            charge: FaultCharge::None,
+            fault_type: FaultType::CowWrite,
+        };
+
+        assert_eq!(
+            evaluate_with_observation(
+                zero_charge_ctx,
+                true,
+                Some(ProcessUsageSnapshot {
+                    resident_pages: 8,
+                    limit_pages: 8,
+                }),
+                MemoryPressure::Oom
+            ),
+            AdmissionDecision::Allow
         );
     }
 }
