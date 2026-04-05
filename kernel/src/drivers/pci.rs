@@ -94,6 +94,7 @@ fn probe_device(bus: u8, dev: u8, func: u8) -> Option<PciDevice> {
 }
 
 /// Find a device by vendor and device ID
+#[allow(dead_code)]
 pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
     DISCOVERED_DEVICES.lock().iter().find(|d| d.vendor_id == vendor && d.device_id == device).copied()
 }
@@ -101,6 +102,12 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
 /// Find a device by BDF (Bus/Device/Function)
 pub fn find_by_bdf(bdf: u16) -> Option<PciDevice> {
     DISCOVERED_DEVICES.lock().iter().find(|d| d.bdf() == bdf).copied()
+}
+
+/// Return all devices matching a PCI class code.
+/// The kernel uses this to grant capabilities without knowing specific drivers.
+pub fn get_devices_by_class(class: u8) -> alloc::vec::Vec<PciDevice> {
+    DISCOVERED_DEVICES.lock().iter().filter(|d| d.class == class).copied().collect()
 }
 
 /// Read a 32-bit dword from PCI config space
@@ -179,14 +186,19 @@ pub fn get_bar_info(bus: u8, dev: u8, func: u8, index: u8) -> Option<BarInfo> {
         write_config_dword(bus, dev, func, offset + 4, bar_hi);
 
         base |= (bar_hi as u64) << 32;
-        mask |= (size_mask_hi as u64) << 32;
+        // Only extend mask with high bits if they contribute to size
+        // (size_mask_hi == 0xFFFFFFFF means no size bits in high dword — 32-bit range)
+        if size_mask_hi != 0xFFFF_FFFF {
+            mask |= (size_mask_hi as u64) << 32;
+        }
     }
 
     if mask == 0 {
         return None;
     }
 
-    let size = (!(mask) + 1);
+    // Size = lowest set bit of mask (two's complement trick)
+    let size = mask & mask.wrapping_neg();
 
     Some(BarInfo {
         base,

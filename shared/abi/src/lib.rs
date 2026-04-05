@@ -496,6 +496,25 @@ pub struct PciBarInfo {
     pub prefetchable: u32,
 }
 
+/// Identity information about a PCI device, returned by SYS_PCI_QUERY_DEVICE.
+/// Allows userspace drivers to inspect the device they hold a DeviceCap for
+/// and decide whether they support it — without the kernel knowing anything
+/// about specific drivers.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PciDeviceInfo {
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+    pub irq_line: u8,
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub _pad: u8,
+}
+
 /// Information returned when binding a device IRQ.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

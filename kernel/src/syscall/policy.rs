@@ -186,7 +186,7 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         // Handlers perform parametric capability checks.
         SYS_PCI_GET_BAR | SYS_DEVICE_BIND_IRQ | SYS_IRQ_LISTEN
         | SYS_DMA_ALLOC | SYS_DMA_MAP | SYS_DMA_FREE | SYS_MAP_MMIO
-        | SYS_IRQ_ACK
+        | SYS_IRQ_ACK | SYS_PCI_QUERY_DEVICE
             => ExplicitlyUnrestricted,
 
         // ── IRQ management ────────────────────────────────────────────────

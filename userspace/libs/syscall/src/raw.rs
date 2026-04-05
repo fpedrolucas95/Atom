@@ -72,6 +72,7 @@ pub mod numbers {
     pub const SYS_DMA_FREE:               u64 = 86;
     pub const SYS_MAP_MMIO:               u64 = 87;
     pub const SYS_IRQ_ACK:                u64 = 88;
+    pub const SYS_PCI_QUERY_DEVICE:       u64 = 89;
 
     // Filesystem syscalls (53-76)
     pub const SYS_FS_OPEN:     u64 = 53;
@@ -141,6 +142,10 @@ pub mod numbers {
 
 pub fn pci_get_bar(dev_cap: u64, index: u8, info: &mut atom_abi::PciBarInfo) -> u64 {
     unsafe { syscall3(numbers::SYS_PCI_GET_BAR, dev_cap, index as u64, info as *mut _ as u64) }
+}
+
+pub fn pci_query_device(dev_cap: u64, info: &mut atom_abi::PciDeviceInfo) -> u64 {
+    unsafe { syscall2(numbers::SYS_PCI_QUERY_DEVICE, dev_cap, info as *mut _ as u64) }
 }
 
 pub fn device_bind_irq(dev_cap: u64, info: &mut atom_abi::IrqBindInfo) -> u64 {
