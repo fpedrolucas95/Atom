@@ -1,4 +1,6 @@
 use alloc::vec::Vec;
+use alloc::format;
+use atom_syscall::debug::log;
 use crate::tcp::TcpManager;
 use crate::dns::DnsCache;
 use libipc::messages::{
@@ -33,6 +35,7 @@ impl PendingRecv {
 
 /// A pending DNS resolve: waiting for DNS response to arrive
 pub struct PendingResolve {
+    pub transaction_id: u16,
     pub name: [u8; 256],
     pub name_len: usize,
     pub reply_port: u64,
@@ -44,6 +47,7 @@ pub struct PendingResolve {
 impl PendingResolve {
     const fn new() -> Self {
         Self {
+            transaction_id: 0,
             name: [0u8; 256],
             name_len: 0,
             reply_port: 0,
@@ -100,8 +104,25 @@ pub struct SocketManager {
     pub pending_recvs: [PendingRecv; 8],
     pub pending_resolves: [PendingResolve; 4],
     pub pending_connects: [PendingConnect; 8],
+    next_dns_id: u16,
     pub pending_icmps: [PendingIcmp; 8],
     next_icmp_id: u16,
+}
+
+fn log_netd_icmp_registered(id: u16, seq: u16, dest: u32, client: u64) {
+    let dest_b = dest.to_be_bytes();
+    log(&format!(
+        "[netd] ICMP request registered: id=0x{:04x} seq={} dest={}.{}.{}.{} client=Port({})",
+        id, seq, dest_b[0], dest_b[1], dest_b[2], dest_b[3], client
+    ));
+}
+
+fn log_netd_icmp_match(id: u16, seq: u16, src: u32) {
+    let src_b = src.to_be_bytes();
+    log(&format!(
+        "[netd] ICMP match found: id=0x{:04x} seq={} src={}.{}.{}.{} -> delivering to client",
+        id, seq, src_b[0], src_b[1], src_b[2], src_b[3]
+    ));
 }
 
 impl SocketManager {
@@ -124,6 +145,7 @@ impl SocketManager {
                 PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
             ],
             next_icmp_id: 1000,
+            next_dns_id: 0xABCD,
         }
     }
 
@@ -271,7 +293,7 @@ impl SocketManager {
         payload: &[u8],
         dns: &mut DnsCache,
         now_ticks: u64,
-    ) -> Option<(u64, [u8; NetResolveReplyMsg::SIZE])> {
+    ) -> Option<Result<(u64, [u8; NetResolveReplyMsg::SIZE]), u16>> {
         let msg = NetResolveMsg::from_bytes(payload)?;
         let name_len = (msg.name_len as usize).min(256);
         let name_bytes = &msg.name[..name_len];
@@ -280,32 +302,37 @@ impl SocketManager {
         if let Some(ip) = dns.lookup(name, now_ticks) {
             // Cache hit — reply immediately
             let reply = NetResolveReplyMsg { ip, error: 0 };
-            return Some((msg.reply_port, reply.to_bytes()));
+            return Some(Ok((msg.reply_port, reply.to_bytes())));
         }
 
         // Cache miss — store pending resolve, caller will send DNS query
         for pr in self.pending_resolves.iter_mut() {
             if !pr.in_use {
+                let tid = self.next_dns_id;
+                self.next_dns_id = self.next_dns_id.wrapping_add(1);
+
+                pr.transaction_id = tid;
                 pr.name[..name_len].copy_from_slice(name_bytes);
                 pr.name_len = name_len;
                 pr.reply_port = msg.reply_port;
                 pr.in_use = true;
-                break;
+
+                // Return transaction ID to caller so they can build the packet
+                return Some(Err(tid));
             }
         }
 
-        None // No reply yet; will be sent when DNS response arrives
+        None // No free slots
     }
 
-    /// Called when a DNS response arrives — fulfill any pending resolve for this name.
+    /// Called when a DNS response arrives — fulfill any pending resolve for this ID.
     pub fn notify_dns_resolved(
         &mut self,
-        name: &str,
+        transaction_id: u16,
         ip: u32,
     ) -> Option<(u64, [u8; NetResolveReplyMsg::SIZE])> {
-        let name_bytes = name.as_bytes();
         for pr in self.pending_resolves.iter_mut() {
-            if pr.in_use && &pr.name[..pr.name_len] == name_bytes {
+            if pr.in_use && pr.transaction_id == transaction_id {
                 let reply_port = pr.reply_port;
                 pr.in_use = false;
                 let reply = NetResolveReplyMsg { ip, error: 0 };
@@ -341,6 +368,8 @@ impl SocketManager {
                 pi.identifier = id;
                 pi.sequence = msg.sequence;
                 pi.start_tick = now_ticks;
+
+                log_netd_icmp_registered(id, msg.sequence, dest_ip, msg.reply_port);
                 pi.timeout_ticks = msg.timeout_ms as u64 / 10;
                 pi.in_use = true;
 
@@ -369,6 +398,8 @@ impl SocketManager {
             if pi.in_use && pi.identifier == id && pi.sequence == seq && pi.dest_ip == src_ip {
                 let reply_port = pi.reply_port;
                 pi.in_use = false;
+
+                log_netd_icmp_match(id, seq, src_ip);
 
                 let rtt_ticks = now_ticks.saturating_sub(pi.start_tick);
                 let rtt_ms = (rtt_ticks * 10) as u32;

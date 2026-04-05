@@ -9,6 +9,7 @@
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use alloc::format;
 use atom_syscall::debug::log;
 use libring::{RingHeader, RingEntry, RingProducer, RingConsumer};
 use libipc::protocol::{register_service, lookup_service, send_message, try_recv_message, get_payload};
@@ -397,7 +398,6 @@ fn dispatch_rx(
             if let Some((ip_hdr, ip_payload)) = parse_ipv4(payload) {
                 match ip_hdr.protocol {
                     IP_PROTO_ICMP => {
-                        log("netd: RX ICMP");
                         if let Some((icmp_pkt, icmp_payload)) = parse_icmp(ip_payload) {
                             if icmp_pkt.icmp_type == ICMP_ECHO_REPLY {
                                 log("netd: ICMP Echo Reply received");
@@ -411,7 +411,6 @@ fn dispatch_rx(
                                     icmp_payload,
                                 ) {
                                     send_message(reply_port, MessageType::NetIcmpEchoReply, &reply_bytes).ok();
-                                    log("netd: NetIcmpEchoReply sent to app");
                                 } else {
                                     log("netd: gateway reachable (smoke ping ok)");
                                 }
@@ -427,38 +426,17 @@ fn dispatch_rx(
                                     let now = atom_syscall::thread::get_ticks();
                                     let ttl = dns_resp.ttl.max(30);
 
-                                    // Find the pending resolve name that matches this response
-                                    // by checking all pending resolves and trying to match
-                                    let mut resolved_name_buf = [0u8; 256];
-                                    let mut resolved_name_len = 0usize;
-                                    for pr in sock_mgr.pending_resolves.iter() {
-                                        if pr.in_use {
-                                            resolved_name_buf[..pr.name_len].copy_from_slice(&pr.name[..pr.name_len]);
-                                            resolved_name_len = pr.name_len;
-                                            break; // Take the first pending resolve (FIFO)
-                                        }
-                                    }
-
-                                    if resolved_name_len > 0 {
-                                        if let Ok(name) = core::str::from_utf8(&resolved_name_buf[..resolved_name_len]) {
-                                            // Insert into DNS cache
-                                            dns_cache.insert(name, dns_resp.ip, ttl, now);
-                                            log("netd: DNS response matched, notifying pending resolve");
-
-                                            // Notify pending resolve
-                                            if let Some((reply_port, reply_bytes)) =
-                                                sock_mgr.notify_dns_resolved(name, dns_resp.ip)
-                                            {
-                                                send_message(
-                                                    reply_port,
-                                                    MessageType::NetResolveReply,
-                                                    &reply_bytes,
-                                                ).ok();
-                                                log("netd: NetResolveReply sent");
-                                            }
-                                        }
+                                    if let Some((reply_port, reply_bytes)) =
+                                        sock_mgr.notify_dns_resolved(dns_resp.id, dns_resp.ip)
+                                    {
+                                        log(&format!("[netd] DNS match found: id=0x{:04x} -> delivering to client", dns_resp.id));
+                                        send_message(
+                                            reply_port,
+                                            MessageType::NetResolveReply,
+                                            &reply_bytes,
+                                        ).ok();
                                     } else {
-                                        log("netd: DNS response arrived but no pending resolve found");
+                                        log(&format!("[netd] Duplicate or late DNS response ignored: id=0x{:04x}", dns_resp.id));
                                     }
                                 }
                             }
@@ -699,51 +677,52 @@ fn handle_ipc(
         MessageType::NetResolve => {
             let now = atom_syscall::thread::get_ticks();
             log("netd: received NetResolve request");
-            // handle_net_resolve returns Some on cache hit, None on miss (pending stored)
-            let cache_reply = sock_mgr.handle_net_resolve(payload, dns_cache, now);
 
-            if let Some((reply_port, reply_bytes)) = cache_reply {
-                // Cache hit — reply immediately
-                log("netd: DNS cache hit, replying immediately");
-                send_message(reply_port, MessageType::NetResolveReply, &reply_bytes).ok();
-            } else {
-                // Cache miss — send DNS query; reply will come when DNS response arrives
-                log("netd: DNS cache miss, sending query");
-                if let Some(msg) = libipc::messages::NetResolveMsg::from_bytes(payload) {
-                    let name_len = msg.name_len as usize;
-                    let name_bytes = &msg.name[..name_len.min(256)];
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        let query_id = (atom_syscall::thread::get_ticks() & 0xFFFF) as u16;
-                        let mut dns_buf = [0u8; 512];
-                        let dns_len = build_dns_query(query_id, name, &mut dns_buf);
-                        if dns_len > 0 {
-                            let mut udp_buf = [0u8; 600];
-                            let udp_len = build_udp_with_checksum(
-                                cfg.own_ip, cfg.dns_server,
-                                49000, 53,
-                                &dns_buf[..dns_len],
-                                &mut udp_buf,
-                            );
-                            let mut ip_buf = [0u8; 700];
-                            let ip_len = build_ipv4(
-                                cfg.own_ip, cfg.dns_server,
-                                IP_PROTO_UDP, 64,
-                                &udp_buf[..udp_len],
-                                &mut ip_buf,
-                            );
-                            let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-                            let mut eth_buf = [0u8; 800];
-                            let eth_len = build_eth_frame(
-                                broadcast, cfg.own_mac, 0x0800,
-                                &ip_buf[..ip_len],
-                                &mut eth_buf,
-                            );
-                            push_to_tx(tx_producer, &eth_buf[..eth_len]);
-                            log("netd: DNS query pushed to TX");
-                        } else {
-                            log("netd: ERROR build_dns_query returned 0");
+            match sock_mgr.handle_net_resolve(payload, dns_cache, now) {
+                Some(Ok((reply_port, reply_bytes))) => {
+                    log("netd: DNS cache hit, replying immediately");
+                    send_message(reply_port, MessageType::NetResolveReply, &reply_bytes).ok();
+                }
+                Some(Err(query_id)) => {
+                    log("netd: DNS cache miss, sending query");
+                    if let Some(msg) = libipc::messages::NetResolveMsg::from_bytes(payload) {
+                        let name_len = msg.name_len as usize;
+                        let name_bytes = &msg.name[..name_len.min(256)];
+                        if let Ok(name) = core::str::from_utf8(name_bytes) {
+                            let mut dns_buf = [0u8; 512];
+                            let dns_len = build_dns_query(query_id, name, &mut dns_buf);
+                            if dns_len > 0 {
+                                let mut udp_buf = [0u8; 600];
+                                let udp_len = build_udp_with_checksum(
+                                    cfg.own_ip, cfg.dns_server,
+                                    49000, 53,
+                                    &dns_buf[..dns_len],
+                                    &mut udp_buf,
+                                );
+                                let mut ip_buf = [0u8; 700];
+                                let ip_len = build_ipv4(
+                                    cfg.own_ip, cfg.dns_server,
+                                    IP_PROTO_UDP, 64,
+                                    &udp_buf[..udp_len],
+                                    &mut ip_buf,
+                                );
+                                let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+                                let mut eth_buf = [0u8; 800];
+                                let eth_len = build_eth_frame(
+                                    broadcast, cfg.own_mac, 0x0800,
+                                    &ip_buf[..ip_len],
+                                    &mut eth_buf,
+                                );
+                                push_to_tx(tx_producer, &eth_buf[..eth_len]);
+                                log("netd: DNS query pushed to TX");
+                            } else {
+                                log("netd: ERROR build_dns_query returned 0");
+                            }
                         }
                     }
+                }
+                None => {
+                    log("netd: NetResolve failed (no resources)");
                 }
             }
         }
