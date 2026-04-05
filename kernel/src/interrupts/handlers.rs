@@ -345,6 +345,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
         // address maps to a valid VMA.
         if let Some(tid) = sched::current_thread() {
             if let Some(pml4) = crate::thread::get_thread_address_space(tid) {
+                let pml4 = crate::arch::cr3_to_pml4_phys(pml4);
                 if pml4 != 0 {
                     if let Some(pid) = crate::thread::get_thread_process_id(tid) {
                         let ctx = mm::vma::FaultContext::from_x86_error(
@@ -870,7 +871,8 @@ fn handle_userspace_page_fault(
     cr2: u64,
     error_code: u64,
 ) -> bool {
-    let current_cr3 = crate::arch::read_cr3();
+    let current_cr3_raw = crate::arch::read_cr3();
+    let current_cr3 = crate::arch::cr3_to_pml4_phys(current_cr3_raw);
     if current_cr3 == 0 {
         terminate_faulting_userspace_thread(
             tid,
@@ -878,6 +880,15 @@ fn handle_userspace_page_fault(
             cr2,
             error_code,
             mm::vma::FaultResult::InvalidAddress
+        );
+    }
+
+    if current_cr3_raw != current_cr3 {
+        log_debug!(
+            LOG_ORIGIN,
+            "[PF] cr3_sanitized raw={:#x} pml4={:#x}",
+            current_cr3_raw,
+            current_cr3
         );
     }
 

@@ -3165,11 +3165,15 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         core::arch::asm!("mov {}, cr3", out(reg) cr3);
         cr3
     };
+    let current_pml4 = crate::arch::cr3_to_pml4_phys(current_cr3);
     
     log_info!(
         "syscall",
-        "shared_region_map: current_cr3={:#X} caller_pml4={:#X} match={}",
-        current_cr3, caller_pml4, current_cr3 == caller_pml4
+        "shared_region_map: current_cr3={:#X} current_pml4={:#X} caller_pml4={:#X} match={}",
+        current_cr3,
+        current_pml4,
+        caller_pml4,
+        current_pml4 == caller_pml4
     );
 
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);

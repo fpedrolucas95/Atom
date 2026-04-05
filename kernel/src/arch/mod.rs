@@ -83,6 +83,18 @@ pub fn read_cr3() -> u64 {
     0
 }
 
+/// x86_64 CR3 mask for the physical PML4 base.
+///
+/// Bits 11:0 may carry metadata (PCID / caching controls depending on CPU
+/// configuration).  Kernel page-table code must strip them before using CR3 as
+/// a page-table root pointer.
+pub const CR3_PML4_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+#[inline(always)]
+pub const fn cr3_to_pml4_phys(cr3: u64) -> u64 {
+    cr3 & CR3_PML4_ADDR_MASK
+}
+
 #[inline(always)]
 #[allow(dead_code)]
 pub fn read_tr() -> u16 {
