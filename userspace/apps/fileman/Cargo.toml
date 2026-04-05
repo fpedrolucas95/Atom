@@ -7,6 +7,9 @@ edition = "2021"
 atom_syscall = { path = "../../libs/syscall" }
 atom_abi = { path = "../../libs/syscall/../syscall/../../../shared/abi" }
 libipc = { path = "../../libs/libipc" }
+atom_theme = { path = "../../libs/atom_theme" }
+atom_ui = { path = "../../libs/atom_ui" }
+libgui = { path = "../../libs/libgui" }
 
 [profile.release]
 opt-level = "z"
