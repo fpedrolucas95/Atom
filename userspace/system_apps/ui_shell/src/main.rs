@@ -13,6 +13,10 @@ struct BumpAllocator {
     start: AtomicUsize,
     size: AtomicUsize,
     next: AtomicUsize,
+    // Support for a "scratch stack" of backing regions.
+    // Index 0 is always the permanent logic heap.
+    regions: [(AtomicUsize, AtomicUsize, AtomicUsize); 2],
+    current_region: AtomicUsize,
 }
 
 unsafe impl Sync for BumpAllocator {}
@@ -23,13 +27,34 @@ impl BumpAllocator {
             start: AtomicUsize::new(0),
             size: AtomicUsize::new(0),
             next: AtomicUsize::new(0),
+            regions: [
+                (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)),
+                (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)),
+            ],
+            current_region: AtomicUsize::new(0),
         }
     }
 
     fn init(&self, start: usize, size: usize) {
+        self.regions[0].0.store(start, Ordering::SeqCst);
+        self.regions[0].1.store(size, Ordering::SeqCst);
+        self.regions[0].2.store(0, Ordering::SeqCst);
         self.start.store(start, Ordering::SeqCst);
         self.size.store(size, Ordering::SeqCst);
         self.next.store(0, Ordering::SeqCst);
+    }
+
+    /// Activate a scratch region. Future allocations come from here.
+    fn push_scratch(&self, start: usize, size: usize) {
+        self.regions[1].0.store(start, Ordering::SeqCst);
+        self.regions[1].1.store(size, Ordering::SeqCst);
+        self.regions[1].2.store(0, Ordering::SeqCst);
+        self.current_region.store(1, Ordering::SeqCst);
+    }
+
+    /// Deactivate the scratch region. Future allocations return to the permanent heap.
+    fn pop_scratch(&self) {
+        self.current_region.store(0, Ordering::SeqCst);
     }
 }
 
@@ -38,15 +63,18 @@ unsafe impl GlobalAlloc for BumpAllocator {
         let size = layout.size();
         let align = layout.align().max(16);
 
-        let heap_start = self.start.load(Ordering::Relaxed);
-        let heap_size = self.size.load(Ordering::Relaxed);
+        let rid = self.current_region.load(Ordering::Relaxed);
+        let (start_atom, size_atom, next_atom) = &self.regions[rid];
+
+        let heap_start = start_atom.load(Ordering::Relaxed);
+        let heap_size = size_atom.load(Ordering::Relaxed);
 
         if heap_start == 0 || heap_size == 0 {
             return core::ptr::null_mut();
         }
 
         loop {
-            let current = self.next.load(Ordering::Relaxed);
+            let current = next_atom.load(Ordering::Relaxed);
             let aligned = (current + align - 1) & !(align - 1);
             let new_next = aligned + size;
 
@@ -54,7 +82,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
                 return core::ptr::null_mut();
             }
 
-            if self.next.compare_exchange_weak(
+            if next_atom.compare_exchange_weak(
                 current, new_next, Ordering::SeqCst, Ordering::Relaxed
             ).is_ok() {
                 return (heap_start as *mut u8).add(aligned);
@@ -64,13 +92,14 @@ unsafe impl GlobalAlloc for BumpAllocator {
 
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // LIFO optimisation: reclaim the most-recently-allocated block so
-        // transient Vec allocations (IPC buffers etc.) don't exhaust the heap.
-        let heap_start = self.start.load(Ordering::Relaxed);
+        let rid = self.current_region.load(Ordering::Relaxed);
+        let (start_atom, _, next_atom) = &self.regions[rid];
+
+        let heap_start = start_atom.load(Ordering::Relaxed);
         let blk_offset = ptr as usize - heap_start;
         let blk_end = blk_offset + layout.size();
 
-        let _ = self.next.compare_exchange(
+        let _ = next_atom.compare_exchange(
             blk_end, blk_offset, Ordering::SeqCst, Ordering::Relaxed,
         );
     }
@@ -2076,35 +2105,48 @@ impl Compositor {
             };
 
             if let Some(path) = image_path {
-                match self.load_and_decode_image(&path) {
-                    Ok(wallpaper) => {
-                        let scaled = self.scale_wallpaper(&wallpaper, self.current_scaling_mode);
+                // Use a SCRATCH HEAP for large image operations (decode/scale).
+                // 24 MiB provides enough space for raw JPG data + decoded RGBA image + scaled RGBA image.
+                let scratch_size = 24 * 1024 * 1024;
+                let scratch_region = shared_region_create(scratch_size).expect("Failed to create scratch heap");
+                let scratch_start = shared_region_map(scratch_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map scratch heap");
 
-                        // Store scaled wallpaper in persistent cache region
-                        let sw = self.fb.width();
-                        let sh = self.fb.height();
-                        let size = (sw * sh * 4) as usize;
+                ALLOCATOR.push_scratch(scratch_start as usize, scratch_size);
 
-                        // Cleanup old cache if size changed or first time
-                        if self.wallpaper_cache_region.is_some() {
-                             let _ = shared_region_unmap(self.wallpaper_cache_region.unwrap());
-                             let _ = shared_region_destroy(self.wallpaper_cache_region.unwrap());
-                        }
+                let result = self.load_and_decode_image(&path).and_then(|wallpaper| {
+                    let scaled = self.scale_wallpaper(&wallpaper, self.current_scaling_mode);
 
-                        let region = shared_region_create(size).expect("Failed to create wallpaper cache region");
-                        let ptr = shared_region_map(region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map wallpaper cache") as *mut u8;
+                    // Store scaled wallpaper in persistent cache region
+                    let sw = self.fb.width();
+                    let sh = self.fb.height();
+                    let size = (sw * sh * 4) as usize;
 
-                        let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
-                        scaled.blit_to(buf, sw, 0, 0);
-
-                        self.wallpaper_cache_region = Some(region);
-                        self.wallpaper_cache_ptr = ptr;
-                        self.wallpaper_cache_valid = true;
+                    // Cleanup old cache if size changed or first time
+                    if self.wallpaper_cache_region.is_some() {
+                         let _ = shared_region_unmap(self.wallpaper_cache_region.unwrap());
+                         let _ = shared_region_destroy(self.wallpaper_cache_region.unwrap());
                     }
-                    Err(_) => {
-                        self.revert_to_fallback_wallpaper();
-                    }
+
+                    let region = shared_region_create(size).expect("Failed to create wallpaper cache region");
+                    let ptr = shared_region_map(region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map wallpaper cache") as *mut u8;
+
+                    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
+                    scaled.blit_to(buf, sw, 0, 0);
+
+                    self.wallpaper_cache_region = Some(region);
+                    self.wallpaper_cache_ptr = ptr;
+                    self.wallpaper_cache_valid = true;
+                    Ok(())
+                });
+
+                if result.is_err() {
+                    self.revert_to_fallback_wallpaper();
                 }
+
+                ALLOCATOR.pop_scratch();
+                let _ = shared_region_unmap(scratch_region);
+                let _ = shared_region_destroy(scratch_region);
+
             } else {
                 self.wallpaper_cache_valid = false;
             }
@@ -3177,8 +3219,8 @@ fn main() -> ! {
     // New Memory Model: Logic heap is FIXED and decoupled from graphics.
     // Graphics buffers (backbuffer, wallpaper) use dedicated shared regions.
     //
-    // 4 MiB is plenty for window metadata, icon lists, and IPC transients.
-    let heap_size = 4 * 1024 * 1024;
+    // 8 MiB provides headroom for complex desktop states and window management.
+    let heap_size = 8 * 1024 * 1024;
 
     let region_id = match shared_region_create(heap_size) {
         Ok(id) => id,
