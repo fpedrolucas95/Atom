@@ -181,6 +181,11 @@ const FAT_EOC: u32 = 0x0FFF_FFF8;
 
 static mut FS_INFO: Option<FsInfo> = None;
 
+// Minimal FAT sector cache to avoid redundant disk reads during cluster walks.
+// This is critical because fsd has a limited bump heap.
+static mut FAT_CACHE_SECTOR: u32 = 0xFFFF_FFFF;
+static mut FAT_CACHE_DATA: [u8; 512] = [0u8; 512];
+
 struct FsInfo {
     bytes_per_sector: u32,
     sectors_per_cluster: u32,
@@ -349,14 +354,22 @@ fn read_fat_entry(cluster: u32) -> Option<u32> {
     let fat_offset = cluster * 4;
     let fat_sector = info.fat_start_sector + fat_offset / info.bytes_per_sector;
     let entry_offset = (fat_offset % info.bytes_per_sector) as usize;
-    let sector_data = ahci::read_sectors(fat_sector as u64, 1)?;
-    let entry = u32::from_le_bytes([
-        sector_data[entry_offset],
-        sector_data[entry_offset + 1],
-        sector_data[entry_offset + 2],
-        sector_data[entry_offset + 3],
-    ]);
-    Some(entry & 0x0FFF_FFFF)
+
+    unsafe {
+        if FAT_CACHE_SECTOR != fat_sector {
+            let sector_data = ahci::read_sectors(fat_sector as u64, 1)?;
+            FAT_CACHE_DATA.copy_from_slice(&sector_data);
+            FAT_CACHE_SECTOR = fat_sector;
+        }
+
+        let entry = u32::from_le_bytes([
+            FAT_CACHE_DATA[entry_offset],
+            FAT_CACHE_DATA[entry_offset + 1],
+            FAT_CACHE_DATA[entry_offset + 2],
+            FAT_CACHE_DATA[entry_offset + 3],
+        ]);
+        Some(entry & 0x0FFF_FFFF)
+    }
 }
 
 fn write_fat_entry(cluster: u32, value: u32) -> bool {
@@ -374,24 +387,31 @@ fn write_fat_entry(cluster: u32, value: u32) -> bool {
         masked
     );
 
-    for fat_idx in 0..info.num_fats {
-        let fat_sector = info.fat_start_sector + fat_idx * info.fat_size_sectors + fat_offset / info.bytes_per_sector;
-        let mut sector_data = match ahci::read_sectors(fat_sector as u64, 1) {
-            Some(data) => data,
-            None => return false,
-        };
+    unsafe {
+        for fat_idx in 0..info.num_fats {
+            let fat_sector = info.fat_start_sector + fat_idx * info.fat_size_sectors + fat_offset / info.bytes_per_sector;
+            let mut sector_data = match ahci::read_sectors(fat_sector as u64, 1) {
+                Some(data) => data,
+                None => return false,
+            };
 
-        let existing = u32::from_le_bytes([
-            sector_data[entry_offset],
-            sector_data[entry_offset + 1],
-            sector_data[entry_offset + 2],
-            sector_data[entry_offset + 3],
-        ]);
-        let updated = (existing & 0xF000_0000) | masked;
-        sector_data[entry_offset..entry_offset + 4].copy_from_slice(&updated.to_le_bytes());
+            let existing = u32::from_le_bytes([
+                sector_data[entry_offset],
+                sector_data[entry_offset + 1],
+                sector_data[entry_offset + 2],
+                sector_data[entry_offset + 3],
+            ]);
+            let updated = (existing & 0xF000_0000) | masked;
+            sector_data[entry_offset..entry_offset + 4].copy_from_slice(&updated.to_le_bytes());
 
-        if !ahci::write_sectors(fat_sector as u64, &sector_data) {
-            return false;
+            if !ahci::write_sectors(fat_sector as u64, &sector_data) {
+                return false;
+            }
+
+            // If we wrote to the sector currently in cache, update/invalidate it.
+            if FAT_CACHE_SECTOR == fat_sector {
+                FAT_CACHE_DATA.copy_from_slice(&sector_data);
+            }
         }
     }
 
@@ -610,56 +630,65 @@ fn decode_lfn_part(lfn: &LfnEntry) -> String {
 
 fn find_in_directory_located(dir_cluster: u32, name: &str) -> Option<LocatedEntry> {
     let upper_name = name.to_uppercase();
-    let dir_data = read_cluster_chain(dir_cluster)?;
-    let mut i = 0usize;
+    let chain = get_cluster_chain(dir_cluster)?;
+    let mut entry_index = 0usize;
     let mut lfn_name = String::new();
 
-    while i + 32 <= dir_data.len() {
-        let entry = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
+    for cluster in chain {
+        let dir_data = read_cluster(cluster)?;
+        let mut i = 0usize;
 
-        if entry.name[0] == 0x00 {
-            break;
-        }
-        if entry.name[0] == 0xE5 {
-            i += 32;
-            continue;
-        }
+        while i + 32 <= dir_data.len() {
+            let entry = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
 
-        if entry.attr == ATTR_LFN {
-            let lfn = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
-            let part = decode_lfn_part(&lfn);
-            if (lfn.order & 0x40) != 0 {
-                lfn_name = part;
-            } else {
-                lfn_name = part + &lfn_name;
+            if entry.name[0] == 0x00 {
+                return None;
             }
-            i += 32;
-            continue;
-        }
+            if entry.name[0] == 0xE5 {
+                i += 32;
+                entry_index += 1;
+                continue;
+            }
 
-        if entry.attr & ATTR_VOLUME_ID != 0 {
+            if entry.attr == ATTR_LFN {
+                let lfn = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
+                let part = decode_lfn_part(&lfn);
+                if (lfn.order & 0x40) != 0 {
+                    lfn_name = part;
+                } else {
+                    lfn_name = part + &lfn_name;
+                }
+                i += 32;
+                entry_index += 1;
+                continue;
+            }
+
+            if entry.attr & ATTR_VOLUME_ID != 0 {
+                lfn_name.clear();
+                i += 32;
+                entry_index += 1;
+                continue;
+            }
+
+            let short_name = decode_short_name(&entry);
+            let check_name = if lfn_name.is_empty() {
+                short_name.to_uppercase()
+            } else {
+                lfn_name.to_uppercase()
+            };
+
+            if check_name == upper_name || short_name.to_uppercase() == upper_name {
+                return Some(LocatedEntry {
+                    entry,
+                    dir_cluster,
+                    entry_index,
+                });
+            }
+
             lfn_name.clear();
             i += 32;
-            continue;
+            entry_index += 1;
         }
-
-        let short_name = decode_short_name(&entry);
-        let check_name = if lfn_name.is_empty() {
-            short_name.to_uppercase()
-        } else {
-            lfn_name.to_uppercase()
-        };
-
-        if check_name == upper_name || short_name.to_uppercase() == upper_name {
-            return Some(LocatedEntry {
-                entry,
-                dir_cluster,
-                entry_index: i / 32,
-            });
-        }
-
-        lfn_name.clear();
-        i += 32;
     }
 
     None
@@ -1031,26 +1060,33 @@ pub fn mkdir(path: &str) -> bool {
 }
 
 fn is_directory_empty(cluster: u32) -> bool {
-    let data = match read_cluster_chain(cluster) {
-        Some(data) => data,
+    let chain = match get_cluster_chain(cluster) {
+        Some(chain) => chain,
         None => return false,
     };
 
-    let mut i = 0usize;
-    while i + 32 <= data.len() {
-        let entry = unsafe { core::ptr::read_unaligned(data.as_ptr().add(i) as *const DirEntry) };
-        if entry.name[0] == 0x00 {
-            break;
-        }
-        if entry.name[0] == 0xE5 || entry.attr == ATTR_LFN || entry.attr & ATTR_VOLUME_ID != 0 {
+    for c in chain {
+        let data = match read_cluster(c) {
+            Some(data) => data,
+            None => return false,
+        };
+
+        let mut i = 0usize;
+        while i + 32 <= data.len() {
+            let entry = unsafe { core::ptr::read_unaligned(data.as_ptr().add(i) as *const DirEntry) };
+            if entry.name[0] == 0x00 {
+                return true;
+            }
+            if entry.name[0] == 0xE5 || entry.attr == ATTR_LFN || entry.attr & ATTR_VOLUME_ID != 0 {
+                i += 32;
+                continue;
+            }
+            let name = decode_short_name(&entry);
+            if name != "." && name != ".." {
+                return false;
+            }
             i += 32;
-            continue;
         }
-        let name = decode_short_name(&entry);
-        if name != "." && name != ".." {
-            return false;
-        }
-        i += 32;
     }
 
     true
@@ -1204,48 +1240,52 @@ pub fn stat_path(path: &str) -> Option<FileStat> {
 
 pub fn list_directory(path: &str) -> Option<Vec<String>> {
     let current_cluster = resolve_dir_cluster(path)?;
-    let dir_data = read_cluster_chain(current_cluster)?;
+    let chain = get_cluster_chain(current_cluster)?;
     let mut files = Vec::new();
-    let mut i = 0usize;
     let mut lfn_name = String::new();
 
-    while i + 32 <= dir_data.len() {
-        let entry = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
+    for cluster in chain {
+        let dir_data = read_cluster(cluster)?;
+        let mut i = 0usize;
 
-        if entry.name[0] == 0x00 {
-            break;
-        }
-        if entry.name[0] == 0xE5 {
-            i += 32;
-            continue;
-        }
-        if entry.attr == ATTR_LFN {
-            let lfn = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
-            let part = decode_lfn_part(&lfn);
-            if (lfn.order & 0x40) != 0 {
-                lfn_name = part;
-            } else {
-                lfn_name = part + &lfn_name;
+        while i + 32 <= dir_data.len() {
+            let entry = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
+
+            if entry.name[0] == 0x00 {
+                return Some(files);
             }
-            i += 32;
-            continue;
-        }
-        if entry.attr & ATTR_VOLUME_ID != 0 {
+            if entry.name[0] == 0xE5 {
+                i += 32;
+                continue;
+            }
+            if entry.attr == ATTR_LFN {
+                let lfn = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
+                let part = decode_lfn_part(&lfn);
+                if (lfn.order & 0x40) != 0 {
+                    lfn_name = part;
+                } else {
+                    lfn_name = part + &lfn_name;
+                }
+                i += 32;
+                continue;
+            }
+            if entry.attr & ATTR_VOLUME_ID != 0 {
+                lfn_name.clear();
+                i += 32;
+                continue;
+            }
+
+            let display_name = if lfn_name.is_empty() {
+                decode_short_name(&entry)
+            } else {
+                lfn_name.clone()
+            };
+
+            let suffix = if entry.attr & ATTR_DIRECTORY != 0 { "/" } else { "" };
+            files.push(format!("{}{}", display_name, suffix));
             lfn_name.clear();
             i += 32;
-            continue;
         }
-
-        let display_name = if lfn_name.is_empty() {
-            decode_short_name(&entry)
-        } else {
-            lfn_name.clone()
-        };
-
-        let suffix = if entry.attr & ATTR_DIRECTORY != 0 { "/" } else { "" };
-        files.push(format!("{}{}", display_name, suffix));
-        lfn_name.clear();
-        i += 32;
     }
 
     Some(files)

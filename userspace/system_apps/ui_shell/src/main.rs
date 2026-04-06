@@ -1382,7 +1382,17 @@ impl Compositor {
             _ => {}
         }
 
+        let rect = if let Some(w) = self.wm.get_window(window_id) {
+            Some(Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25))
+        } else {
+            None
+        };
+
         self.wm.close_window(window_id);
+
+        if let Some(r) = rect {
+            self.mark_dirty_rect(r);
+        }
         self.dirty = true;
     }
 
@@ -1604,13 +1614,18 @@ impl Compositor {
                         return;
                     } else if x >= max_x && x < max_x + btn_size {
                         let (wx, wy, ww, wh) = self.get_work_area();
+                        let old_rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         if self.wm.toggle_maximize(id, wx, wy, ww, wh) {
+                            self.mark_dirty_rect(old_rect);
+                            self.mark_dirty_rect(Rect::new(wx - 10, wy - 10, ww + 20, wh + 25));
                             self.reallocate_window_surface(id);
                             self.dirty = true;
                         }
                         return;
                     } else if x >= min_x && x < min_x + btn_size {
+                        let rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         self.wm.minimize_window(id);
+                        self.mark_dirty_rect(rect);
                         self.dirty = true;
                         return;
                     }
@@ -2463,8 +2478,18 @@ impl Compositor {
         // but defer actual destruction (which frees the shared surface) so
         // the client process has time to receive the TerminateRequest and
         // stop writing to the shared memory before it is unmapped.
+        let rect = if let Some(w) = self.wm.get_window(id) {
+            Some(Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25))
+        } else {
+            None
+        };
+
         if let Some(w) = self.wm.get_window_mut(id) {
             w.visible = false;
+        }
+
+        if let Some(r) = rect {
+            self.mark_dirty_rect(r);
         }
 
         // Update focus away from the closing window
