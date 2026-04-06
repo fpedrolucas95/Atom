@@ -15,10 +15,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::panic::PanicInfo;
 
 use atom_syscall::graphics::{SharedSurface, VideoModeEntry, get_video_modes, video_mode_count,
-                              VIDEO_MAX_MODES, Color};
-use atom_syscall::ipc::{create_port, send, try_recv, PortId};
+                              VIDEO_MAX_MODES, Color, set_video_mode};
+use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now, get_ticks};
 use atom_syscall::debug::log;
+use atom_syscall::fs::{open, readdir, close, OpenFlags, FileType};
 
 use libipc::messages::{
     MessageType, MessageHeader,
@@ -26,10 +27,13 @@ use libipc::messages::{
     KeyEvent as IpcKeyEvent,
     MouseButtonEvent,
     MouseMoveEvent,
+    MouseScrollEvent,
     MouseButton,
     ScalingMode,
     ApplyWallpaperMsg,
     WallpaperSourceType,
+    WallpaperAppliedMsg,
+    WallpaperFailedMsg,
 };
 
 use alloc::string::String;
@@ -91,6 +95,13 @@ const TOOLBAR_H: u32 = 48;
 const CHAR_W:    u32 = 8;
 const CHAR_H:    u32 = 8;
 
+const VISIBLE_MODES: usize = 10;
+const MODE_ROW_H: u32 = 28;
+
+const IMAGE_TILE_W: u32 = 140;
+const IMAGE_TILE_H: u32 = 120;
+const IMAGE_TILE_SPACING: u32 = 12;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Category {
     Monitors,
@@ -128,6 +139,19 @@ const CATEGORIES: &[Category] = &[
 #[derive(Clone, Copy)]
 struct Mode { width: u16, height: u16 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThumbnailState {
+    Unloaded,
+    Loaded { width: u16, height: u16 },
+    Failed,
+}
+
+struct WallpaperInfo {
+    name: String,
+    path: String,
+    thumbnail: ThumbnailState,
+}
+
 struct SettingsApp {
     window_id:        u32,
     compositor_port:  PortId,
@@ -144,10 +168,15 @@ struct SettingsApp {
     modes:            [Mode; VIDEO_MAX_MODES],
     mode_count:       usize,
     selected_mode:    usize,
+    mode_scroll:      usize,
     
     // Desktop state
     solid_colors:     [Color; 8],
-    selected_color:   Option<usize>,
+    discovered_images: Vec<WallpaperInfo>,
+    selected_source_idx: Option<usize>, // Index into solid_colors or discovered_images
+    is_image_selected: bool,
+    wallpaper_scroll: usize,
+    selected_scaling: ScalingMode,
     
     // About state (cached info)
     cpu_info:         String,
@@ -166,7 +195,7 @@ impl SettingsApp {
         let w = surface.width();
         let h = surface.height();
         
-        Self {
+        let mut app = Self {
             window_id, compositor_port, local_port,
             surface: Some(surface),
             width: w, height: h,
@@ -175,6 +204,7 @@ impl SettingsApp {
             modes,
             mode_count,
             selected_mode: 0,
+            mode_scroll: 0,
             solid_colors: [
                 Color::new(18, 20, 28),
                 Color::new(12, 14, 22),
@@ -185,7 +215,11 @@ impl SettingsApp {
                 Color::new(20, 30, 24),
                 Color::new(34, 20, 20),
             ],
-            selected_color: None,
+            discovered_images: Vec::new(),
+            selected_source_idx: None,
+            is_image_selected: false,
+            wallpaper_scroll: 0,
+            selected_scaling: ScalingMode::Fill,
             cpu_info: String::from("Atom x86_64 @ 2.4GHz"),
             mem_info: String::from("2048 MB RAM"),
             storage_info: String::from("System: 120MB / 512MB"),
@@ -193,13 +227,62 @@ impl SettingsApp {
             status_ticks: 0,
             running: true,
             needs_redraw: true,
+        };
+        
+        let _ = app.discover_images();
+        app
+    }
+
+    fn discover_images(&mut self) -> Result<(), &'static str> {
+        self.discovered_images.clear();
+        let fd = match open("/system/wallpapers/", OpenFlags::DIRECTORY, 0) {
+            Ok(fd) => fd,
+            Err(_) => return Err("Directory not found"),
+        };
+
+        let mut buf = [0u8; 1024];
+        while let Ok(count) = readdir(fd, &mut buf) {
+            if count == 0 { break; }
+            let mut offset = 0;
+            while offset < count {
+                let entry_type = buf[offset];
+                let name_ptr = &buf[offset + 1..];
+                let name_len = name_ptr.iter().position(|&b| b == 0).unwrap_or(0);
+                let name = core::str::from_utf8(&name_ptr[..name_len]).unwrap_or("");
+                
+                if entry_type == FileType::Regular as u8 {
+                    let lower = name.to_lowercase();
+                    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                        self.discovered_images.push(WallpaperInfo {
+                            name: String::from(name),
+                            path: format!("/system/wallpapers/{}", name),
+                            thumbnail: ThumbnailState::Unloaded,
+                        });
+                    }
+                }
+                offset += 1 + name_len + 1;
+            }
         }
+        let _ = close(fd);
+        Ok(())
     }
 
     fn run(&mut self) {
+        let mut buf = [0u8; 1024];
+        let ports = [self.local_port];
+        
         while self.running {
-            self.render();
-            self.handle_events();
+            if self.needs_redraw {
+                self.render();
+            }
+            
+            // Block until message or timeout (16ms for ~60fps ticks)
+            if let Ok(Some(len)) = try_recv(self.local_port, &mut buf) {
+                self.process_message(&buf, len);
+            } else {
+                let _ = wait_any(&ports, 16);
+            }
+            
             if self.status_ticks > 0 {
                 self.status_ticks -= 1;
                 if self.status_ticks == 0 {
@@ -207,12 +290,57 @@ impl SettingsApp {
                     self.needs_redraw = true;
                 }
             }
-            yield_now();
+        }
+    }
+
+    fn process_message(&mut self, buf: &[u8], len: usize) {
+        let hdr = match MessageHeader::from_bytes(&buf[..len]) {
+            Some(h) => h,
+            None => return,
+        };
+        let payload = &buf[MessageHeader::SIZE..len];
+
+        match hdr.msg_type {
+            MessageType::MouseMove => {
+                if let Some(ev) = MouseMoveEvent::from_bytes(payload) {
+                    self.mouse_x = ev.x;
+                    self.mouse_y = ev.y;
+                }
+            }
+            MessageType::MouseButtonDown => {
+                if let Some(ev) = MouseButtonEvent::from_bytes(payload) {
+                    if ev.button == MouseButton::Left {
+                        self.handle_click();
+                    }
+                }
+            }
+            MessageType::MouseScroll => {
+                if let Some(ev) = MouseScrollEvent::from_bytes(payload) {
+                    self.handle_scroll(ev.dz);
+                }
+            }
+            MessageType::KeyPress => {
+                if let Some(ev) = IpcKeyEvent::from_bytes(payload) {
+                    self.handle_key(ev);
+                }
+            }
+            MessageType::WallpaperApplied => {
+                self.status_msg = String::from("Wallpaper applied");
+                self.status_ticks = 120;
+                self.needs_redraw = true;
+            }
+            MessageType::WallpaperFailed => {
+                if let Some(msg) = WallpaperFailedMsg::from_bytes(payload) {
+                    self.status_msg = format!("Error: {}", msg.error_message);
+                    self.status_ticks = 180;
+                    self.needs_redraw = true;
+                }
+            }
+            _ => {}
         }
     }
 
     fn render(&mut self) {
-        if !self.needs_redraw { return; }
         self.needs_redraw = false;
         let surface = self.surface.as_ref().unwrap();
 
@@ -283,7 +411,8 @@ impl SettingsApp {
         surface.draw_string(cx, cy, "Available Resolutions:", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_BG);
         
         let mut y = cy + 30;
-        for i in 0..self.mode_count {
+        let end = (self.mode_scroll + VISIBLE_MODES).min(self.mode_count);
+        for i in self.mode_scroll..end {
             let mode = self.modes[i];
             let is_sel = self.selected_mode == i;
             let bg = if is_sel { ds::ATOM_COLOR_SURFACE_ALT } else { ds::ATOM_COLOR_BG };
@@ -295,13 +424,17 @@ impl SettingsApp {
             
             let label = format!("{} x {}", mode.width, mode.height);
             surface.draw_string(cx, y, &label, fg, bg);
-            y += 28;
+            y += MODE_ROW_H;
         }
 
         // Apply button
-        let btn_y = cy + 300;
+        let btn_y = self.height - 60;
         surface.fill_rect_rounded_aa(cx, btn_y, 120, 32, radius::SM, ds::ATOM_COLOR_ACCENT);
         surface.draw_string(cx + 35, btn_y + 12, "Apply", ds::ATOM_COLOR_BG, ds::ATOM_COLOR_ACCENT);
+        
+        // Restore button
+        surface.fill_rect_rounded_aa(cx + 140, btn_y, 120, 32, radius::SM, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.draw_string(cx + 165, btn_y + 12, "Restore", ds::ATOM_COLOR_TEXT_PRIMARY, ds::ATOM_COLOR_SURFACE_ALT);
     }
 
     fn draw_desktop(&self, surface: &SharedSurface, cx: u32, cy: u32) {
@@ -310,11 +443,11 @@ impl SettingsApp {
         let mut x = cx;
         let mut y = cy + 30;
         for (i, color) in self.solid_colors.iter().enumerate() {
-            let is_sel = self.selected_color == Some(i);
+            let is_sel = !self.is_image_selected && self.selected_source_idx == Some(i);
             if is_sel {
-                surface.fill_rect(x - 2, y - 2, 44, 44, ds::ATOM_COLOR_ACCENT);
+                surface.draw_rect_rounded_aa(x - 2, y - 2, 44, 44, radius::XS, ds::ATOM_COLOR_ACCENT);
             }
-            surface.fill_rect(x, y, 40, 40, *color);
+            surface.fill_rect_rounded_aa(x, y, 40, 40, radius::XS, *color);
             
             x += 50;
             if (i + 1) % 4 == 0 {
@@ -323,15 +456,65 @@ impl SettingsApp {
             }
         }
 
-        // Wallpaper Image Placeholder
         let img_y = y + 20;
-        surface.draw_string(cx, img_y, "Wallpaper Image:", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_BG);
-        surface.fill_rect_rounded_aa(cx, img_y + 25, 300, 150, radius::MD, ds::ATOM_COLOR_SURFACE_ALT);
-        surface.draw_string(cx + 80, img_y + 90, "No images found", ds::ATOM_COLOR_TEXT_MUTED, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.draw_string(cx, img_y, "Wallpaper Images:", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_BG);
+        
+        let mut ix = cx;
+        let mut iy = img_y + 25;
+        let visible_count = 4; // 2x2 grid visible
+        let end = (self.wallpaper_scroll + visible_count).min(self.discovered_images.len());
+        
+        if self.discovered_images.is_empty() {
+            surface.fill_rect_rounded_aa(cx, iy, 300, 150, radius::MD, ds::ATOM_COLOR_SURFACE_ALT);
+            surface.draw_string(cx + 80, iy + 70, "No images found", ds::ATOM_COLOR_TEXT_MUTED, ds::ATOM_COLOR_SURFACE_ALT);
+        } else {
+            for i in self.wallpaper_scroll..end {
+                let info = &self.discovered_images[i];
+                let is_sel = self.is_image_selected && self.selected_source_idx == Some(i);
+                
+                let bg = if is_sel { ds::ATOM_COLOR_SURFACE_ALT } else { ds::ATOM_COLOR_BG };
+                surface.fill_rect_rounded_aa(ix, iy, IMAGE_TILE_W, IMAGE_TILE_H, radius::MD, bg);
+                surface.draw_rect_rounded_aa(ix, iy, IMAGE_TILE_W, IMAGE_TILE_H, radius::MD, if is_sel { ds::ATOM_COLOR_ACCENT } else { ds::ATOM_COLOR_BORDER });
+                
+                // Preview placeholder
+                surface.fill_rect_rounded_aa(ix + 10, iy + 10, IMAGE_TILE_W - 20, 70, radius::SM, Color::new(40, 45, 60));
+                
+                let name = if info.name.len() > 15 { format!("{}..", &info.name[..13]) } else { info.name.clone() };
+                surface.draw_string(ix + 10, iy + 90, &name, ds::ATOM_COLOR_TEXT_PRIMARY, bg);
+                
+                ix += IMAGE_TILE_W + IMAGE_TILE_SPACING;
+                if (i - self.wallpaper_scroll + 1) % 2 == 0 {
+                    ix = cx;
+                    iy += IMAGE_TILE_H + IMAGE_TILE_SPACING;
+                }
+            }
+        }
+
+        // Scaling modes (only if image selected)
+        if self.is_image_selected {
+            let sx = cx + 320;
+            let mut sy = img_y + 25;
+            surface.draw_string(sx, sy - 20, "Scaling:", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_BG);
+            
+            let modes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch, ScalingMode::Center, ScalingMode::Tile];
+            for mode in modes {
+                let is_sel = self.selected_scaling == mode;
+                let bg = if is_sel { ds::ATOM_COLOR_ACCENT } else { ds::ATOM_COLOR_SURFACE_ALT };
+                let fg = if is_sel { ds::ATOM_COLOR_BG } else { ds::ATOM_COLOR_TEXT_PRIMARY };
+                
+                surface.fill_rect_rounded_aa(sx, sy, 80, 24, radius::XS, bg);
+                surface.draw_string(sx + 10, sy + 8, mode.to_str(), fg, bg);
+                sy += 30;
+            }
+        }
+        
+        // Apply button
+        let btn_y = self.height - 60;
+        surface.fill_rect_rounded_aa(cx, btn_y, 120, 32, radius::SM, ds::ATOM_COLOR_ACCENT);
+        surface.draw_string(cx + 35, btn_y + 12, "Apply", ds::ATOM_COLOR_BG, ds::ATOM_COLOR_ACCENT);
     }
 
     fn draw_about(&self, surface: &SharedSurface, cx: u32, cy: u32) {
-        // System Logo Placeholder
         surface.fill_rect_rounded_aa(cx, cy, 64, 64, radius::MD, ds::ATOM_COLOR_ACCENT);
         surface.draw_string(cx + 24, cy + 28, "A", ds::ATOM_COLOR_BG, ds::ATOM_COLOR_ACCENT);
 
@@ -339,8 +522,6 @@ impl SettingsApp {
         surface.draw_string(cx + 80, cy + 30, "Version 1.0 Luminous", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_BG);
 
         let mut y = cy + 100;
-        
-        // Info sections
         self.draw_info_row(surface, cx, y, "Processor:", &self.cpu_info);
         y += 40;
         self.draw_info_row(surface, cx, y, "Memory:", &self.mem_info);
@@ -356,35 +537,7 @@ impl SettingsApp {
         surface.draw_string(x + 120, y, value, ds::ATOM_COLOR_TEXT_PRIMARY, ds::ATOM_COLOR_BG);
     }
 
-    fn handle_events(&mut self) {
-        let mut buf = [0u8; 1024];
-        if let Ok(Some(_len)) = try_recv(self.local_port, &mut buf) {
-            let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
-            match hdr.msg_type {
-                MessageType::MouseMove => {
-                    let ev = MouseMoveEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
-                    self.mouse_x = ev.x;
-                    self.mouse_y = ev.y;
-                }
-                MessageType::MouseButtonDown => {
-                    let ev = MouseButtonEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
-                    if ev.button == MouseButton::Left {
-                        self.handle_click();
-                    }
-                }
-                MessageType::KeyPress => {
-                    let ev = IpcKeyEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
-                    if ev.character == 27 { // Esc
-                        self.running = false;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     fn handle_click(&mut self) {
-        // Sidebar click
         if self.mouse_x < SIDEBAR_W as i32 {
             let mut y = TOOLBAR_H + spacing::MD;
             for category in CATEGORIES {
@@ -395,45 +548,83 @@ impl SettingsApp {
                 }
                 y += 40;
             }
-        }
-        // Content click
-        else {
+        } else {
             let cx = SIDEBAR_W + spacing::LG;
             let cy = TOOLBAR_H + spacing::LG;
             
             match self.active_category {
                 Category::Monitors => {
                     let mut y = cy + 30;
-                    for i in 0..self.mode_count {
+                    let end = (self.mode_scroll + VISIBLE_MODES).min(self.mode_count);
+                    for i in self.mode_scroll..end {
                         if self.mouse_y >= (y - 4) as i32 && self.mouse_y < (y + 20) as i32 {
                             self.selected_mode = i;
                             self.needs_redraw = true;
                         }
-                        y += 28;
+                        y += MODE_ROW_H;
                     }
                     
-                    // Apply button
-                    let btn_y = cy + 300;
-                    if self.mouse_x >= cx as i32 && self.mouse_x < (cx + 120) as i32 &&
-                       self.mouse_y >= btn_y as i32 && self.mouse_y < (btn_y + 32) as i32 {
-                        self.apply_resolution();
+                    let btn_y = self.height - 60;
+                    if self.mouse_y >= btn_y as i32 && self.mouse_y < (btn_y + 32) as i32 {
+                        if self.mouse_x >= cx as i32 && self.mouse_x < (cx + 120) as i32 {
+                            self.apply_resolution();
+                        } else if self.mouse_x >= (cx + 140) as i32 && self.mouse_x < (cx + 260) as i32 {
+                            self.restore_default();
+                        }
                     }
                 }
                 Category::Desktop => {
+                    // Solid colors
                     let mut x = cx;
                     let mut y = cy + 30;
                     for i in 0..self.solid_colors.len() {
                         if self.mouse_x >= x as i32 && self.mouse_x < (x + 40) as i32 &&
                            self.mouse_y >= y as i32 && self.mouse_y < (y + 40) as i32 {
-                            self.selected_color = Some(i);
-                            self.apply_wallpaper_color(i);
+                            self.selected_source_idx = Some(i);
+                            self.is_image_selected = false;
                             self.needs_redraw = true;
                         }
                         x += 50;
-                        if (i + 1) % 4 == 0 {
-                            x = cx;
-                            y += 50;
+                        if (i + 1) % 4 == 0 { x = cx; y += 50; }
+                    }
+                    
+                    // Images
+                    let img_y = y + 20;
+                    let mut ix = cx;
+                    let mut iy = img_y + 25;
+                    let visible_count = 4;
+                    let end = (self.wallpaper_scroll + visible_count).min(self.discovered_images.len());
+                    for i in self.wallpaper_scroll..end {
+                        if self.mouse_x >= ix as i32 && self.mouse_x < (ix + IMAGE_TILE_W) as i32 &&
+                           self.mouse_y >= iy as i32 && self.mouse_y < (iy + IMAGE_TILE_H) as i32 {
+                            self.selected_source_idx = Some(i);
+                            self.is_image_selected = true;
+                            self.needs_redraw = true;
                         }
+                        ix += IMAGE_TILE_W + IMAGE_TILE_SPACING;
+                        if (i - self.wallpaper_scroll + 1) % 2 == 0 { ix = cx; iy += IMAGE_TILE_H + IMAGE_TILE_SPACING; }
+                    }
+                    
+                    // Scaling
+                    if self.is_image_selected {
+                        let sx = cx + 320;
+                        let mut sy = img_y + 25;
+                        let modes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch, ScalingMode::Center, ScalingMode::Tile];
+                        for mode in modes {
+                            if self.mouse_x >= sx as i32 && self.mouse_x < (sx + 80) as i32 &&
+                               self.mouse_y >= sy as i32 && self.mouse_y < (sy + 24) as i32 {
+                                self.selected_scaling = mode;
+                                self.needs_redraw = true;
+                            }
+                            sy += 30;
+                        }
+                    }
+                    
+                    // Apply
+                    let btn_y = self.height - 60;
+                    if self.mouse_x >= cx as i32 && self.mouse_x < (cx + 120) as i32 &&
+                       self.mouse_y >= btn_y as i32 && self.mouse_y < (btn_y + 32) as i32 {
+                        self.apply_wallpaper();
                     }
                 }
                 Category::About => {}
@@ -441,26 +632,113 @@ impl SettingsApp {
         }
     }
 
+    fn handle_scroll(&mut self, dz: i32) {
+        match self.active_category {
+            Category::Monitors => {
+                if dz > 0 { self.mode_scroll = self.mode_scroll.saturating_sub(1); }
+                else { self.mode_scroll = (self.mode_scroll + 1).min(self.mode_count.saturating_sub(VISIBLE_MODES)); }
+            }
+            Category::Desktop => {
+                if dz > 0 { self.wallpaper_scroll = self.wallpaper_scroll.saturating_sub(2); }
+                else { self.wallpaper_scroll = (self.wallpaper_scroll + 2).min(self.discovered_images.len().saturating_sub(4)); }
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    fn handle_key(&mut self, ev: IpcKeyEvent) {
+        if ev.character == 27 { self.running = false; return; }
+        
+        match self.active_category {
+            Category::Monitors => {
+                if ev.character == 0 {
+                    match ev.scancode & 0x7F {
+                        0x48 => { // Up
+                            if self.selected_mode > 0 { self.selected_mode -= 1; }
+                            self.clamp_mode_scroll();
+                        }
+                        0x50 => { // Down
+                            if self.selected_mode + 1 < self.mode_count { self.selected_mode += 1; }
+                            self.clamp_mode_scroll();
+                        }
+                        _ => {}
+                    }
+                } else if ev.character == b'\n' as u32 || ev.character == b'\r' as u32 {
+                    self.apply_resolution();
+                } else if ev.character == b'r' as u32 || ev.character == b'R' as u32 {
+                    self.restore_default();
+                }
+            }
+            Category::Desktop => {
+                if ev.character == b'\n' as u32 || ev.character == b'\r' as u32 {
+                    self.apply_wallpaper();
+                }
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    fn clamp_mode_scroll(&mut self) {
+        if self.selected_mode < self.mode_scroll { self.mode_scroll = self.selected_mode; }
+        if self.selected_mode >= self.mode_scroll + VISIBLE_MODES {
+            self.mode_scroll = self.selected_mode + 1 - VISIBLE_MODES;
+        }
+    }
+
     fn apply_resolution(&mut self) {
         let mode = self.modes[self.selected_mode];
         log(&format!("Settings: Applying resolution {}x{}", mode.width, mode.height));
         
-        self.status_msg = format!("Applied {}x{}", mode.width, mode.height);
+        if let Err(_) = set_video_mode(mode.width as u32, mode.height as u32, 32) {
+            self.status_msg = String::from("Failed to set mode");
+        } else {
+            // Notify compositor
+            let hdr = MessageHeader::new(MessageType::VideoModeChanged, 0);
+            let _ = send(self.compositor_port, &hdr.to_bytes());
+            
+            self.status_msg = format!("Applied {}x{}", mode.width, mode.height);
+        }
         self.status_ticks = 120;
         self.needs_redraw = true;
     }
 
-    fn apply_wallpaper_color(&mut self, idx: usize) {
-        let color = self.solid_colors[idx];
-        let rgb = ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32);
-        
-        log(&format!("Settings: Applying wallpaper color #{:06x}", rgb));
-        
-        let wallpaper_msg = ApplyWallpaperMsg {
-            source_type: WallpaperSourceType::SolidColor,
-            image_path: None,
-            color_rgb: Some(rgb),
-            scaling_mode: ScalingMode::Fill,
+    fn restore_default(&mut self) {
+        let (w, h) = (1024, 768);
+        if let Err(_) = set_video_mode(w, h, 32) {
+            self.status_msg = String::from("Failed to restore");
+        } else {
+            let hdr = MessageHeader::new(MessageType::VideoModeChanged, 0);
+            let _ = send(self.compositor_port, &hdr.to_bytes());
+            self.status_msg = String::from("Restored 1024x768");
+        }
+        self.status_ticks = 120;
+        self.needs_redraw = true;
+    }
+
+    fn apply_wallpaper(&mut self) {
+        let idx = match self.selected_source_idx {
+            Some(i) => i,
+            None => { self.status_msg = String::from("Select a wallpaper"); self.status_ticks = 120; return; }
+        };
+
+        let wallpaper_msg = if self.is_image_selected {
+            ApplyWallpaperMsg {
+                source_type: WallpaperSourceType::Image,
+                image_path: Some(self.discovered_images[idx].path.clone()),
+                color_rgb: None,
+                scaling_mode: self.selected_scaling,
+            }
+        } else {
+            let color = self.solid_colors[idx];
+            let rgb = ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32);
+            ApplyWallpaperMsg {
+                source_type: WallpaperSourceType::SolidColor,
+                image_path: None,
+                color_rgb: Some(rgb),
+                scaling_mode: ScalingMode::Fill,
+            }
         };
         
         let payload = wallpaper_msg.to_bytes();
@@ -470,23 +748,23 @@ impl SettingsApp {
         msg.extend_from_slice(&payload);
         
         let _ = send(self.compositor_port, &msg);
-        
-        self.status_msg = String::from("Wallpaper updated");
+        self.status_msg = String::from("Applying...");
         self.status_ticks = 120;
         self.needs_redraw = true;
     }
 
     fn wait_for_surface(port: PortId) -> Option<SurfaceAssignMsg> {
         let mut buf = [0u8; 1024];
-        let start = get_ticks();
-        while get_ticks() - start < 500 { // 5s timeout
-            if let Ok(Some(_len)) = try_recv(port, &mut buf) {
-                let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
-                if hdr.msg_type == MessageType::SurfaceAssign {
-                    return SurfaceAssignMsg::from_bytes(&buf[MessageHeader::SIZE..]);
+        let ports = [port];
+        for _ in 0..100 {
+            if wait_any(&ports, 50).is_ok() {
+                if let Ok(Some(len)) = try_recv(port, &mut buf) {
+                    let hdr = MessageHeader::from_bytes(&buf[..len]).unwrap();
+                    if hdr.msg_type == MessageType::SurfaceAssign {
+                        return SurfaceAssignMsg::from_bytes(&buf[MessageHeader::SIZE..len]);
+                    }
                 }
             }
-            yield_now();
         }
         None
     }
@@ -510,10 +788,9 @@ fn query_modes() -> ([Mode; VIDEO_MAX_MODES], usize) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log("Settings: starting");
     let port = match create_port() {
         Ok(p) => p,
-        Err(_) => { log("Settings: create_port failed"); exit(1); }
+        Err(_) => exit(1),
     };
     
     let _ = libipc::protocol::register_service("display_settings", port);
@@ -534,12 +811,12 @@ pub extern "C" fn _start() -> ! {
 
     let sa = match SettingsApp::wait_for_surface(port) {
         Some(sa) => sa,
-        None => { log("Settings: surface timeout"); exit(1); }
+        None => exit(1),
     };
 
     let surface = match SharedSurface::from_region(sa.region_id, sa.width, sa.height) {
         Ok(s) => s,
-        Err(_) => { log("Settings: surface map failed"); exit(1); }
+        Err(_) => exit(1),
     };
 
     let (modes, mode_count) = query_modes();
@@ -549,7 +826,4 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    log(&format!("Settings: PANIC - {:?}", info));
-    exit(0xFF);
-}
+fn panic(_info: &PanicInfo) -> ! { exit(0xFF); }
