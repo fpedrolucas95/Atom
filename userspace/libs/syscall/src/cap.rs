@@ -1,6 +1,5 @@
 //! Capability Syscalls
 
-use crate::error::{SyscallResult};
 use crate::raw::{syscall2, numbers::*};
 
 pub type CapHandle = u64;

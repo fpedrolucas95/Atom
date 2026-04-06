@@ -4,8 +4,10 @@
 // Access is controlled by the kernel's capability system - only authorized
 // ports can be accessed.
 
-use crate::error::{ESUCCESS, EPERM, EINVAL, SyscallError, SyscallResult};
+use crate::error::{ESUCCESS, EPERM, EINVAL, SyscallError, SyscallResult, SYSCALL_ERROR_THRESHOLD};
 use crate::raw::{syscall2, numbers::*};
+
+extern crate alloc;
 
 /// Read a byte from an I/O port
 ///
@@ -42,6 +44,38 @@ pub fn port_write_u8(port: u16, value: u8) -> SyscallResult<()> {
         Err(SyscallError::InvalidArgument)
     } else {
         Err(SyscallError::InvalidArgument)
+    }
+}
+
+/// Enumerate all PCI devices on the bus.
+///
+/// Returns a list of PCI devices discovered by the kernel.
+/// Requires PciEnumerate capability.
+pub fn pci_enumerate() -> SyscallResult<alloc::vec::Vec<atom_abi::PciDeviceInfo>> {
+    let mut buf = [atom_abi::PciDeviceInfo::default(); 64];
+    let result = crate::raw::pci_enumerate(&mut buf);
+
+    if result >= SYSCALL_ERROR_THRESHOLD {
+        return Err(SyscallError::from_raw(result));
+    }
+
+    let count = result as usize;
+    let mut devices = alloc::vec::Vec::with_capacity(count);
+    devices.extend_from_slice(&buf[..count]);
+    Ok(devices)
+}
+
+/// Request a DeviceCap for a specific PCI device.
+///
+/// Returns a capability handle for the requested device.
+/// Requires PciEnumerate capability.
+pub fn pci_request_device(bus: u8, slot: u8, function: u8) -> SyscallResult<u64> {
+    let result = crate::raw::pci_request_device(bus, slot, function);
+
+    if result >= SYSCALL_ERROR_THRESHOLD {
+        Err(SyscallError::from_raw(result))
+    } else {
+        Ok(result)
     }
 }
 

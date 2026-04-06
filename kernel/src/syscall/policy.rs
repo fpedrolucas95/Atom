@@ -56,6 +56,8 @@ pub(super) enum CapRequirement {
     /// Used to gate kernel-internal storage syscalls (200-212 except 203)
     /// so that only fsd can reach the raw filesystem driver.
     AnyFsNamespace,
+    /// Caller must hold a PciEnumerate capability with READ.
+    PciEnumerate,
     /// Caller must be the registered privileged process (init bootstrap).
     /// Covers operations that produce sensitive system-wide information.
     PrivilegedOnly,
@@ -114,6 +116,13 @@ pub(super) fn check_cap_requirement(req: CapRequirement) -> bool {
                 caller,
                 CapPermissions::READ,
                 |r| matches!(r, ResourceType::FsNamespace { .. }),
+            ),
+
+        CapRequirement::PciEnumerate =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::READ,
+                |r| matches!(r, ResourceType::PciEnumerate),
             ),
 
         CapRequirement::PrivilegedOnly => has_privilege(),
@@ -188,6 +197,8 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         | SYS_DMA_ALLOC | SYS_DMA_MAP | SYS_DMA_FREE | SYS_MAP_MMIO
         | SYS_IRQ_ACK | SYS_PCI_QUERY_DEVICE
             => ExplicitlyUnrestricted,
+
+        SYS_PCI_ENUMERATE | SYS_PCI_REQUEST_DEVICE => Requires(PciEnumerate),
 
         // ── IRQ management ────────────────────────────────────────────────
         // Handler uses ALLOWED_IRQS allowlist today; no additional class gate.

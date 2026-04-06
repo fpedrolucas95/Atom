@@ -297,6 +297,9 @@ pub const SYS_DMA_MAP:                u64 = 85;
 pub const SYS_DMA_FREE:               u64 = 86;
 pub const SYS_MAP_MMIO:               u64 = 87;
 pub const SYS_IRQ_ACK:                u64 = 88;
+pub const SYS_PCI_QUERY_DEVICE:       u64 = 89;
+pub const SYS_PCI_ENUMERATE:          u64 = 90;
+pub const SYS_PCI_REQUEST_DEVICE:     u64 = 91;
 
 /// Check whether a raw syscall return value represents an error code.
 ///

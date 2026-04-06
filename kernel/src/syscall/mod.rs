@@ -139,6 +139,12 @@ pub const SYS_IRQ_ACK:                u64 = 88;
 /// Allows userspace drivers to discover what hardware they hold without
 /// the kernel needing to know which driver handles which device.
 pub const SYS_PCI_QUERY_DEVICE:       u64 = 89;
+/// Enumerate all PCI devices on the bus.
+/// Returns number of devices written, or error.
+pub const SYS_PCI_ENUMERATE:          u64 = 90;
+/// Request a DeviceCap for a specific PCI device (BDF).
+/// Caller must hold PciEnumerate capability.
+pub const SYS_PCI_REQUEST_DEVICE:     u64 = 91;
 
 // ---------------------------------------------------------------------------
 // Video mode management syscalls (BGA/VBE_DISPI)
@@ -883,6 +889,8 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_MAP_MMIO        => sys_map_mmio(arg0, arg1),
         SYS_IRQ_ACK         => sys_irq_ack(arg0),
         SYS_PCI_QUERY_DEVICE => sys_pci_query_device(arg0, arg1),
+        SYS_PCI_ENUMERATE   => sys_pci_enumerate(arg0, arg1 as usize),
+        SYS_PCI_REQUEST_DEVICE => sys_pci_request_device(arg0 as u8, arg1 as u8, arg2 as u8),
 
         // Video mode management (BGA/VBE_DISPI)
         SYS_SET_VIDEO_MODE         => sys_set_video_mode(arg0, arg1),
@@ -4666,24 +4674,14 @@ fn spawn_process_internal(
         }
     }
 
-    // PCI Device capabilities — grant all network devices (class 0x02) to nic_driver.
-    // The kernel does not know or care which specific NIC the driver supports;
-    // nic_driver uses SYS_PCI_QUERY_DEVICE to inspect each capability and decides
-    // which device to drive based on vendor/device ID.
-    if name == "nic_driver" {
-        let net_devs: alloc::vec::Vec<_> = crate::drivers::pci::get_devices_by_class(0x02)
-            .into_iter()
-            .collect();
-        if net_devs.is_empty() {
-            log_warn!("spawn", "No PCI network devices found for nic_driver");
-        }
-        for dev in net_devs {
-            let res = ResourceType::Device { bdf: dev.bdf() };
-            if let Ok(cap) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
-                let _ = crate::thread::add_thread_capability(pid, cap);
-                log_info!("spawn", "Granted DeviceCap({:02x}:{:02x}.{}) to nic_driver",
-                    dev.bus, dev.device, dev.function);
-            }
+    // PCI Enumerate capability — grant to nic_driver and other drivers that
+    // need to discover hardware. The driver will then use SYS_PCI_ENUMERATE
+    // and SYS_PCI_REQUEST_DEVICE to claim specific hardware.
+    if name == "nic_driver" || name == "display" {
+        let res = ResourceType::PciEnumerate;
+        if let Ok(cap) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
+            let _ = crate::thread::add_thread_capability(pid, cap);
+            log_info!("spawn", "Granted PciEnumerate cap to {}", name);
         }
     }
 
@@ -8215,6 +8213,76 @@ fn sys_pci_query_device(dev_cap_handle: u64, info_ptr: u64) -> u64 {
     }
 
     ESUCCESS
+}
+
+/// Enumerate all discovered PCI devices into a userspace buffer.
+/// Returns number of devices written, or error code.
+fn sys_pci_enumerate(out_buf: u64, buf_capacity: usize) -> u64 {
+    let devices = crate::drivers::pci::get_all_devices();
+    let count = core::cmp::min(devices.len(), buf_capacity);
+
+    if count > 0 {
+        let out_buf = match validate_user_addr(out_buf) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        if validate_user_range(out_buf.as_u64(), count * core::mem::size_of::<atom_abi::PciDeviceInfo>()).is_err() {
+            return EINVAL;
+        }
+
+        let out_ptr = out_buf.as_mut_ptr::<atom_abi::PciDeviceInfo>();
+        for (i, dev) in devices.iter().enumerate().take(count) {
+            let info = atom_abi::PciDeviceInfo {
+                vendor_id: dev.vendor_id,
+                device_id: dev.device_id,
+                class: dev.class,
+                subclass: dev.subclass,
+                prog_if: dev.prog_if,
+                irq_line: dev.irq_line,
+                bus: dev.bus,
+                device: dev.device,
+                function: dev.function,
+                _pad: 0,
+            };
+            unsafe {
+                *out_ptr.add(i) = info;
+            }
+        }
+    }
+
+    count as u64
+}
+
+/// Request a DeviceCap for a specific BDF.
+/// The caller must already hold PciEnumerate capability (checked by policy gate).
+fn sys_pci_request_device(bus: u8, slot: u8, function: u8) -> u64 {
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let bdf = ((bus as u16) << 8) | ((slot as u16) << 3) | (function as u16);
+
+    // Verify BDF exists in discovered list
+    if crate::drivers::pci::find_by_bdf(bdf).is_none() {
+        log_warn!("syscall", "pci_request_device: BDF {:02x}:{:02x}.{} not found", bus, slot, function);
+        return ENODEV;
+    }
+
+    // Create and grant DeviceCap
+    let res = crate::cap::ResourceType::Device { bdf };
+    match crate::cap::create_root_capability(res, caller, crate::cap::CapPermissions::ALL) {
+        Ok(cap) => {
+            match crate::thread::add_thread_capability(caller, cap) {
+                Ok(h) => {
+                    log_info!("syscall", "Granted DeviceCap({:02x}:{:02x}.{}) to tid={}", bus, slot, function, caller);
+                    h.raw()
+                }
+                Err(_) => ENOMEM,
+            }
+        }
+        Err(_) => ENOMEM,
+    }
 }
 
 fn sys_device_bind_irq(dev_cap_handle: u64, info_ptr: u64) -> u64 {

@@ -106,8 +106,14 @@ pub fn find_by_bdf(bdf: u16) -> Option<PciDevice> {
 
 /// Return all devices matching a PCI class code.
 /// The kernel uses this to grant capabilities without knowing specific drivers.
+#[allow(dead_code)]
 pub fn get_devices_by_class(class: u8) -> alloc::vec::Vec<PciDevice> {
     DISCOVERED_DEVICES.lock().iter().filter(|d| d.class == class).copied().collect()
+}
+
+/// Return all discovered PCI devices.
+pub fn get_all_devices() -> alloc::vec::Vec<PciDevice> {
+    DISCOVERED_DEVICES.lock().clone()
 }
 
 /// Read a 32-bit dword from PCI config space

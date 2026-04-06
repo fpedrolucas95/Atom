@@ -198,6 +198,7 @@ pub enum ResourceType {
     Device {
         bdf: u16,
     },
+    PciEnumerate,
     DmaBuffer {
         phys_addr: u64,
         size: usize,
@@ -429,7 +430,7 @@ impl CapabilityTable {
     pub fn contains(&self, handle: CapHandle) -> bool {
         self.capabilities.contains_key(&handle)
     }
-    
+
     pub fn validate(
         &self,
         handle: CapHandle,
@@ -585,7 +586,7 @@ impl CapabilityManager {
 
         Ok(handle)
     }
-    
+
     pub fn revoke(
         &self,
         handle: CapHandle,
@@ -717,13 +718,13 @@ impl CapabilityManager {
             });
         }
     }
-    
+
     pub fn query_parent(&self, handle: CapHandle) -> Result<Option<CapHandle>, CapError> {
         let caps = self.global_caps.lock();
         let cap = caps.get(&handle).ok_or(CapError::NotFound)?;
         Ok(cap.parent)
     }
-    
+
     pub fn query_children(&self, handle: CapHandle) -> Result<Vec<CapHandle>, CapError> {
         let caps = self.global_caps.lock();
         let cap = caps.get(&handle).ok_or(CapError::NotFound)?;
@@ -739,7 +740,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 13];
+        let mut by_type = [0usize; 14];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -748,14 +749,15 @@ impl CapabilityManager {
                 ResourceType::IpcPort { .. } => 2,
                 ResourceType::Irq { .. } => 3,
                 ResourceType::Device { .. } => 4,
-                ResourceType::DmaBuffer { .. } => 5,
-                ResourceType::SharedMemoryRegion { .. } => 6,
-                ResourceType::Framebuffer { .. } => 7,
-                ResourceType::InputDevice { .. } => 8,
-                ResourceType::FsNamespace { .. } => 9,
-                ResourceType::FsDir { .. } => 10,
-                ResourceType::FsFile { .. } => 11,
-                ResourceType::IoPort { .. } => 12,
+                ResourceType::PciEnumerate => 5,
+                ResourceType::DmaBuffer { .. } => 6,
+                ResourceType::SharedMemoryRegion { .. } => 7,
+                ResourceType::Framebuffer { .. } => 8,
+                ResourceType::InputDevice { .. } => 9,
+                ResourceType::FsNamespace { .. } => 10,
+                ResourceType::FsDir { .. } => 11,
+                ResourceType::FsFile { .. } => 12,
+                ResourceType::IoPort { .. } => 13,
             };
             by_type[idx] += 1;
         }
@@ -767,13 +769,14 @@ impl CapabilityManager {
             ipc_caps: by_type[2],
             irq_caps: by_type[3],
             device_caps: by_type[4],
-            dma_caps: by_type[5],
-            framebuffer_caps: by_type[7],
-            input_caps: by_type[8],
-            fs_namespace_caps: by_type[9],
-            fs_dir_caps: by_type[10],
-            fs_file_caps: by_type[11],
-            io_port_caps: by_type[12],
+            pci_enumerate_caps: by_type[5],
+            dma_caps: by_type[6],
+            framebuffer_caps: by_type[8],
+            input_caps: by_type[9],
+            fs_namespace_caps: by_type[10],
+            fs_dir_caps: by_type[11],
+            fs_file_caps: by_type[12],
+            io_port_caps: by_type[13],
         }
     }
 }
@@ -786,6 +789,7 @@ pub struct CapabilityStats {
     pub ipc_caps: usize,
     pub irq_caps: usize,
     pub device_caps: usize,
+    pub pci_enumerate_caps: usize,
     pub dma_caps: usize,
     pub framebuffer_caps: usize,
     pub input_caps: usize,

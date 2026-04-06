@@ -335,6 +335,15 @@ impl E1000 {
 // Entry Point
 // ============================================================================
 
+const SUPPORTED_NICS: &[(u16, u16)] = &[
+    (0x8086, 0x100E), // Intel e1000 (82540EM) — QEMU default
+    (0x8086, 0x10D3), // Intel e1000e (82574L)
+    (0x8086, 0x100F), // Intel e1000 (82545EM)
+    (0x8086, 0x1502), // Intel 82579LM
+    (0x8086, 0x1503), // Intel 82579V
+    (0x1AF4, 0x1000), // VirtIO Net
+];
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     main();
@@ -343,32 +352,83 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     log("nic_driver: starting e1000 driver");
 
-    // ── 1. Find a DeviceCap for a supported NIC ──────────────────────────────
-    // The kernel grants us DeviceCaps for all class-0x02 devices.
-    // Use SYS_CAP_LIST to enumerate our actual capabilities — no guessing handles.
-    let mut cap_buf = [0u64; 64];
-    let n = atom_syscall::cap::list(&mut cap_buf);
+    // ── 1. Discover supported NIC via PCI enumeration ────────────────────────
+    let devices = match atom_syscall::io::pci_enumerate() {
+        Ok(d) => d,
+        Err(_) => {
+            log("nic_driver: PCI enumeration failed");
+            loop { atom_syscall::thread::sleep_ms(1000); }
+        }
+    };
 
-    let mut device_cap: u64 = 0;
-    let mut dev_info = atom_syscall::atom_abi::PciDeviceInfo::default();
+    log("nic_driver: PCI enumeration found devices:");
+    let mut nic_info = None;
 
-    for &h in &cap_buf[..n] {
-        let mut info = atom_syscall::atom_abi::PciDeviceInfo::default();
-        if atom_syscall::raw::pci_query_device(h, &mut info) != 0 { continue; }
-        // Support: Intel e1000 (8086:100E)
-        if info.vendor_id == 0x8086 && info.device_id == 0x100E {
-            device_cap = h;
-            dev_info = info;
-            break;
+    fn write_hex(buf: &mut [u8], pos: &mut usize, val: u64, digits: usize) {
+        for i in (0..digits).rev() {
+            let nibble = (val >> (i * 4)) & 0xF;
+            buf[*pos] = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            *pos += 1;
         }
     }
 
-    if device_cap == 0 {
-        log("nic_driver: no supported NIC found (need Intel e1000 8086:100E)");
-        loop { atom_syscall::thread::sleep_ms(1000); }
+    for dev in &devices {
+        // Log everything seen — essential for debugging topology shifts
+        let mut msg = [0u8; 128];
+        let mut pos = 0;
+        let s = "  ";
+        msg[pos..pos+s.len()].copy_from_slice(s.as_bytes()); pos += s.len();
+
+        write_hex(&mut msg, &mut pos, dev.bus as u64, 2); msg[pos] = b':'; pos += 1;
+        write_hex(&mut msg, &mut pos, dev.device as u64, 2); msg[pos] = b'.'; pos += 1;
+        write_hex(&mut msg, &mut pos, dev.function as u64, 1);
+        let s = " vendor=0x";
+        msg[pos..pos+s.len()].copy_from_slice(s.as_bytes()); pos += s.len();
+        write_hex(&mut msg, &mut pos, dev.vendor_id as u64, 4);
+        let s = " device=0x";
+        msg[pos..pos+s.len()].copy_from_slice(s.as_bytes()); pos += s.len();
+        write_hex(&mut msg, &mut pos, dev.device_id as u64, 4);
+        let s = " class=0x";
+        msg[pos..pos+s.len()].copy_from_slice(s.as_bytes()); pos += s.len();
+        write_hex(&mut msg, &mut pos, dev.class as u64, 2);
+
+        if let Ok(s) = core::str::from_utf8(&msg[..pos]) {
+            log(s);
+        }
+
+        if nic_info.is_none() {
+            if SUPPORTED_NICS.iter().any(|&(vid, did)| dev.vendor_id == vid && dev.device_id == did) {
+                nic_info = Some(*dev);
+            }
+        }
     }
 
-    log("nic_driver: found e1000 at PCI device");
+    let nic = match nic_info {
+        Some(d) => d,
+        None => {
+            log("nic_driver: no supported NIC found — exiting cleanly");
+            atom_syscall::thread::exit(0);
+        }
+    };
+
+    let mut msg = [0u8; 128];
+    let mut pos = 0;
+    let s = "nic_driver: claiming NIC at ";
+    msg[pos..pos+s.len()].copy_from_slice(s.as_bytes()); pos += s.len();
+    write_hex(&mut msg, &mut pos, nic.bus as u64, 2); msg[pos] = b':'; pos += 1;
+    write_hex(&mut msg, &mut pos, nic.device as u64, 2); msg[pos] = b'.'; pos += 1;
+    write_hex(&mut msg, &mut pos, nic.function as u64, 1);
+    if let Ok(s) = core::str::from_utf8(&msg[..pos]) {
+        log(s);
+    }
+
+    let device_cap = match atom_syscall::io::pci_request_device(nic.bus, nic.device, nic.function) {
+        Ok(h) => h,
+        Err(_) => {
+            log("nic_driver: failed to obtain DeviceCap");
+            loop { atom_syscall::thread::sleep_ms(1000); }
+        }
+    };
 
     // ── 2. Map MMIO BAR0 ─────────────────────────────────────────────────────
     let mut bar0 = atom_syscall::atom_abi::PciBarInfo::default();
