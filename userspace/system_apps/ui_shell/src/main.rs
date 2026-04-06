@@ -2998,7 +2998,7 @@ fn main() -> ! {
     // hit `alloc_error`, which traps in an infinite loop and looked like a
     // compositor freeze immediately after pressing Apply.
     const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
-    const EXTRA_HEAP_HEADROOM: usize = 32 * 1024 * 1024;
+    const EXTRA_HEAP_HEADROOM: usize = 4 * 1024 * 1024;
     let fb_size = fb_info.stride as usize * fb_info.height as usize * fb_info.bytes_per_pixel as usize;
     let heap_size = (MAX_BACKBUFFER_PIXELS * 4).max(fb_size) + EXTRA_HEAP_HEADROOM;
 
