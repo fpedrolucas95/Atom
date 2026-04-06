@@ -1,396 +1,591 @@
-# Atom OS — Roadmap Técnico
+# Atom OS — Roadmap Técnico Atualizado
 
-> **Status do Projeto**: Microkernel funcional com IPC, capabilities, user space, ambiente desktop, libc, OpenGL por software e suporte a aplicações nativas C/Rust  
-> **Última atualização**: 04 de Março de 2026  
-> **Release mais recente**: alpha_4 (`3b85b99`)  
-> **Arquitetura**: x86_64
-
----
-
-## Concluído (até alpha_4)
-
-### Fases 1–6: Fundação do Kernel
-
-- [x] Boot UEFI em x86_64 com transição para kernel
-- [x] Physical Memory Manager — bitmap allocator com bootstrap em duas fases (bitmap estático → dinâmico), autoproteção das páginas do bitmap, suporte a até 16 GiB
-- [x] Virtual Memory Manager — paging 4-level, deep-copy de page tables com passo de verificação/reparo, rastreamento de VMAs com guard pages e backing types (anonymous, stack, device)
-- [x] Heap allocator do kernel (alocações pequenas via slab + fallback para páginas)
-- [x] Tratamento de interrupções/exceções (IDT, APIC Local, preempção por timer)
-- [x] Context switching em assembly x86-64 — trampoline higher-half, validação de stack canaries, verificação de endereços canônicos em RIP/RSP, validação de seletores CS/SS, enforcement de consistência de CR3
-- [x] Scheduler preemptivo por prioridade com round-robin dentro de cada nível
-- [x] Subsistema de IPC — portas, mensagens, síncrono/assíncrono, batching, wait_any, detecção real de ciclo em deadlocks, priority inheritance, wait queues, zero-copy via memória compartilhada
-- [x] Sistema de capabilities — acesso via handles, bitflags de permissão, derivação, revogação transitiva, audit log
-- [x] Init process totalmente isolado com PML4 próprio
-- [x] Service manager com boot declarativo
-- [x] ~80 syscalls (threads, IPC, capabilities, memória compartilhada, filesystem, vídeo, spawn de processos)
-- [x] Logging estruturado e observabilidade (serial, debugcon, tags por subsistema)
-- [x] Gerenciador de memória compartilhada com alocação dinâmica de janela VA e cleanup no exit do processo dono
-
-### Fase 6.5: Stack de User Space (alpha_3 → alpha_4)
-
-- [x] libc freestanding — string, stdlib, stdio, ctype, errno, assert, math (FPU x87), unistd, time, crt0.S, malloc/free via mmap/munmap, vsnprintf completo
-- [x] Port do TinyGL 0.4.1 — biblioteca estática freestanding, bridge de blit RGB565→ARGB32, integrado com o compositor
-- [x] Lançamento de aplicações em runtime — syscall `SYS_SPAWN_FROM_PATH`, loader ATXF, serviço privilegiado app_launcher, lançamento por duplo-clique no gerenciador de arquivos
-- [x] Driver Bochs Graphics Adapter — troca de resolução em runtime, tabela de 12 modos de vídeo, aplicação Display Settings
-- [x] Ambiente desktop — compositor com superfícies compartilhadas, dock em formato de pílula, retângulos arredondados, alpha blending, sombras suaves, controles circulares de janela, shutdown gracioso de janelas (estado PendingClose)
-- [x] Layout de filesystem reorganizado — `/system/services`, `/apps/system`, `/apps/user`, `/user/home`, `/user/config`, `/user/data`
-- [x] Crate atom_abi compartilhado como fonte única de verdade para tipos e constantes entre kernel e user space
+> **Status do projeto**: microkernel funcional e experimental, com kernel, user space, runtime C/Rust, desktop, rede funcional em QEMU e suporte a aplicações nativas  
+> **Última revisão deste roadmap**: 06 de Abril de 2026  
+> **Release de referência**: alpha_5  
+> **Arquitetura atual**: x86_64  
+> **Escopo atual validado**: QEMU/OVMF
 
 ---
 
-## Fase 7: Hardening de Segurança e Robustez
+## Visão Geral
 
-*Objetivo: fechar as lacunas estruturais de segurança antes de adicionar novas funcionalidades. A infraestrutura para tudo isso já existe — esta fase consiste em conectar o enforcement em todos os caminhos de código.*
+O Atom já passou da fase de “fundação do kernel”. O estado atual do código mostra um sistema com:
 
-**Prioridade: CRÍTICA** — Essas lacunas comprometem o modelo de segurança do microkernel.
+- boot UEFI funcional
+- PMM/VMM/heap
+- scheduler preemptivo
+- syscalls amplas
+- IPC + shared memory
+- capability system
+- modelagem de processo
+- spawn de executáveis ATXF
+- `mmap`, `munmap`, `mprotect`, `brk`, `fork`
+- filesystem FAT32 com leitura/escrita
+- ambiente desktop
+- libc freestanding
+- TinyGL
+- infraestrutura de rede em user space com `nic_driver` + `netd`
 
-### 7.1 Tabela de File Descriptors por Processo
+O foco do roadmap deixa de ser “construir o básico” e passa a ser:
 
-**Problema**: `KERNEL_FD_TABLE` é uma tabela estática global compartilhada por todos os processos, com 128 slots. Sem rastreamento de propriedade — qualquer processo pode fechar, ler ou acessar file descriptors de outro processo. `sys_fs_close` verifica apenas se o slot está `in_use`, não se o chamador é o dono.
-
-- [ ] Adicionar campo `owner_pid` (ou `owner_pml4`) ao `KernelFd`
-- [ ] Definir owner no `alloc_kernel_fd`
-- [ ] Verificar propriedade em todas as operações de FD: close, read, seek, readdir, fstat
-- [ ] Retornar `EPERM` em caso de mismatch de propriedade
-- [ ] Limpar todos os FDs pertencentes a um processo na terminação
-
-**Esforço**: Baixo — mudança estrutural em uma tabela + verificações em ~5 syscalls.  
-**Impacto**: Corrige a falha de isolamento mais fundamental do sistema.
-
-### 7.2 Validação de Ponteiros de User Space nas Syscalls Legadas
-
-**Problema**: Syscalls mais recentes (filesystem, spawn) validam ponteiros de user space corretamente via `validate_user_pointer` (verificação de range canônico) e `write_buffer_to_user` (start + end + overflow + cap de 64 MB). Porém, syscalls mais antigas (mouse, keyboard, framebuffer, debug_log) fazem apenas null check. Um processo malicioso pode passar um ponteiro de kernel space e o kernel escreverá nele — escalação de privilégios.
-
-Syscalls vulneráveis:
-- `sys_mouse_poll` — apenas null check, escreve diretamente via raw pointer
-- `sys_keyboard_poll` — mesmo padrão
-- `sys_get_framebuffer` — escreve 5 valores u64 sem verificação canônica
-- `sys_debug_log` — lê de ponteiro de usuário sem verificação canônica
-
-- [ ] Adicionar chamadas a `validate_user_pointer` em todas as syscalls legadas listadas acima
-- [ ] Adicionar `validate_user_buffer(ptr, len)` para operações de leitura (debug_log)
-- [ ] Auditar todas as syscalls restantes para dereferences de ponteiro de usuário não validados
-- [ ] Longo prazo: implementar `copy_from_user` / `copy_to_user` com verificação de page-walk (não apenas verificação canônica)
-
-**Esforço**: Muito baixo — os helpers já existem, é trabalho mecânico.  
-**Impacto**: Elimina o vetor de escalação de privilégios mais óbvio.
-
-### 7.3 Enforcement de Capabilities em Todas as Syscalls
-
-**Problema**: A infraestrutura de capabilities está completa (handles, permissões, derivação, revogação transitiva, audit log, `validate_thread_capability_by_type`). Mas o enforcement é inconsistente:
-
-- **Padrão A (correto)**: `sys_thread_create` e `sys_ipc_send_with_cap` verificam capabilities e retornam `EPERM` em caso de falha
-- **Padrão B (bypass MVP)**: `sys_map_region`, `sys_unmap_region`, `sys_remap_region` verificam capabilities mas logam um aviso e continuam mesmo assim ("proceeding anyway (MVP)")
-- **Padrão C (código morto)**: `validate_required_capability` aceita `_resource_type` (não utilizado) e sempre retorna `Ok(caller)`
-- Acesso a portas I/O usa allow-list hardcoded em vez de capabilities
-
-- [ ] Alterar syscalls do Padrão B para retornar `EPERM` em vez de "proceeding anyway"
-- [ ] Remover `validate_required_capability` (Padrão C) — é código morto que cria falsa sensação de enforcement
-- [ ] Adicionar verificações de capability em `sys_io_port_read` / `sys_io_port_write` usando `DeviceCap` em vez de allow-list hardcoded
-- [ ] Auditar `sys_cap_check` — atualmente só verifica se total de capabilities > 0, não se uma capability específica é possuída
-- [ ] Remover concessão automática de `FramebufferCap` / `InputCap` para todos os processos; apenas ui_shell recebe InputCap, apenas o display driver recebe FramebufferCap
-- [ ] Enforçar: apps recebem apenas capabilities explicitamente delegadas no momento do spawn
-
-**Esforço**: Baixo-médio — a infraestrutura funciona, é enforcement de política.  
-**Impacto**: Transforma o sistema de capabilities de "implementado mas não enforçado" para "modelo de segurança operacional."
-
-### 7.4 Abstração de Processo
-
-**Problema**: Não existe `struct Process`. Tudo é `Thread`. Isso causa:
-- Tabela de FDs global (sem dono)
-- Mapas de VMA indexados por endereço físico do PML4, não por processo
-- Propriedade de address spaces rastreada por ThreadId
-- Cleanup de memória compartilhada itera todos os threads para achar siblings (mesmo PML4 = "mesmo processo")
-- Terminação de entidade requer pipeline de 10 passos que reconstrói implicitamente os limites do processo
-
-- [ ] Introduzir struct `Process` consolidando: pid, pml4, lista de threads, tabela de FDs, tabela de capabilities, propriedade de VMAs
-- [ ] Refatorar criação/terminação de threads para operar através de Process
-- [ ] Simplificar o pipeline de terminate_entity tornando a propriedade de recursos explícita
-- [ ] Habilitar semânticas futuras: fork/exec, limites de recursos por processo, grupos de processos
-
-**Esforço**: Médio — refatoração estrutural em thread.rs, camada de syscalls e IPC.  
-**Impacto**: Simplifica gerenciamento de recursos, habilita cleanup mais limpo, e é pré-requisito para SMP e fork/exec.
-
-### 7.5 Terminação Robusta de Processos
-
-- [ ] Implementar `sys_thread_exit` completo
-- [ ] No exit do processo: liberar todos os frames de memória, revogar todas as capabilities, fechar todas as portas IPC, fechar todos os FDs, desalocar PML4 e page tables, remover da lista global de threads
-- [ ] Verificar zero vazamentos de memória via harness de teste
-- [ ] Tratar edge cases: último thread de um processo, threads bloqueados em IPC no momento da terminação
-
-### 7.6 Atomicidade do IPC Blocking
-
-**Problema**: Em `sys_ipc_recv`, registrar como receiver bloqueado, mudar estado do thread para `Blocked` e ceder para o scheduler são três operações separadas. Em single-core com interrupções mascaradas durante syscall isso funciona, mas é uma race condition latente que vai quebrar sob SMP: outro core poderia executar `send()` entre os passos 1 e 2, chamar `mark_thread_ready()`, e o passo 2 sobrescreveria o estado de volta para `Blocked`.
-
-- [ ] Mover `set_thread_state(Blocked)` para dentro de `block_receive`, protegido pelo mesmo lock
-- [ ] Mesma correção para `sys_ipc_wait_any`
-- [ ] Auditar ordenação de locks em `close_all_thread_ports` (dropa e re-adquire lock de portas no meio da iteração)
-- [ ] Adicionar flag atômica "expecting block" como alternativa, verificada por `mark_thread_ready`
-
-**Esforço**: Baixo.  
-**Impacto**: Previne uma classe de bugs que apareceria assim que SMP fosse habilitado.
+1. **consolidar o que já existe**
+2. **fechar lacunas de segurança e coerência**
+3. **remover caminhos híbridos / transitórios**
+4. **preparar o sistema para hardware real, SMP e perfis de produto**
 
 ---
 
-## Fase 8: SMP (Symmetric Multiprocessing)
+## Concluído até alpha_5
 
-*Objetivo: habilitar execução multi-core. Sistemas modernos exigem paralelismo.*
+### 1. Fundação do Kernel
 
-**Prioridade: ALTA** — bloqueada pela Fase 7.4 (abstração de processo) e 7.6 (atomicidade de IPC).
+- [x] Boot UEFI em x86_64 com transição para o kernel
+- [x] Physical Memory Manager com bootstrap em duas fases e suporte a até 16 GiB
+- [x] Virtual Memory Manager com paginação 4-level, deep-copy de page tables, verificação/reparo e rastreamento de VMA
+- [x] Guard pages e metadados de stack em user space
+- [x] Heap allocator do kernel (slab + fallback por páginas)
+- [x] Tratamento de interrupções e exceções (IDT + APIC Local + timer)
+- [x] Context switching em assembly x86_64 com trampoline higher-half, validação de stack canaries, validação de endereços canônicos e consistência de CR3
+- [x] Scheduler preemptivo por prioridade com round-robin por nível
+- [x] Logging estruturado por subsistema
+- [x] Self-tests arquiteturais no boot
 
-### 8.1 Detecção e Bootstrap de CPUs
+### 2. IPC, Shared Memory e Capabilities
 
-- [ ] Parsing de ACPI MADT — identificar número de CPUs, APIC IDs, endereço base do Local APIC
-- [ ] Startup de APs (Application Processors) via sequência SIPI
-- [ ] GDT, IDT, TSS, stacks IST por CPU
+- [x] IPC com portas, mensagens, sync/async, batching e `wait_any`
+- [x] Detecção de deadlock em IPC
+- [x] Priority inheritance
+- [x] Shared memory com mapeamento dinâmico e cleanup na saída do dono
+- [x] Capability system com handles, permissões, derivação e revogação transitiva
+- [x] Audit log de capabilities
 
-### 8.2 Estruturas Per-CPU
+### 3. Modelo de Processo, Thread e Address Space
 
-- [ ] Dados per-CPU via MSR `GS_BASE` — struct `CpuLocal` com ID da CPU, thread atual, idle thread
-- [ ] Stacks de interrupção per-CPU (IST)
-- [ ] Decidir: filas de ready per-CPU vs fila global com lock (começar com fila global para 2–4 cores)
+- [x] Processo isolado com PML4 próprio
+- [x] Registry de processos com `ProcessId`, `Process`, `PROCESS_REGISTRY` e `PML4_TO_PROCESS`
+- [x] Tabela de capabilities canônica por processo
+- [x] Metadados de processo: threads, PML4, accounting de memória, memory limit, flags de lifecycle
+- [x] Pipeline determinístico de terminação de processo
+- [x] Cleanup de threads, address space, shared memory, FDs e capabilities no teardown
+- [x] `mmap`, `munmap`, `mprotect`, `brk`
+- [x] `fork()` com clonagem de address space e COW
 
-### 8.3 Sincronização Kernel SMP-Safe
+### 4. Syscall Layer
 
-- [ ] Auditar todos os `Mutex` / `RwLock` no kernel — lista de threads, tabela de capabilities, filas de IPC, bitmap do PMM, tabela de FDs
-- [ ] Verificar uso correto de operações atômicas e ordenação de memória (acquire/release)
-- [ ] Decidir: contador global de ticks (atômico) vs arrays de ticks per-CPU
-- [ ] Garantir que timestamps de IPC permaneçam coerentes entre cores
+- [x] ~80 syscalls cobrindo threads, IPC, capabilities, memória compartilhada, vídeo, processos, MM, PCI/MMIO/DMA/IRQ e filesystem
+- [x] Taxonomia de erros operacionais/contextuais em syscall path
+- [x] Containment local de corrupção operacional
+- [x] Validação ABI-typed para boa parte dos ponteiros de user space
+- [x] Testes de hardening na syscall layer
 
-### 8.4 Scheduler SMP
+### 5. Runtime, Executáveis e User Space
 
-- [ ] Load balancing — atribuição round-robin de novos threads entre cores (MVP)
-- [ ] Migração de threads entre cores quando desbalanceado
-- [ ] Idle threads per-CPU
+- [x] `init` isolado em Ring 3
+- [x] `service_manager` com boot declarativo
+- [x] `namesvc`
+- [x] Loader ATXF
+- [x] `SYS_SPAWN_PROCESS`
+- [x] `SYS_SPAWN_FROM_PATH`
+- [x] `app_launcher`
+- [x] Lançamento de apps em runtime a partir do filesystem
 
-### 8.5 Validação
+### 6. libc, ABI e Ferramentas
 
-- [ ] Teste de stress: N threads em M cores (N >> M)
-- [ ] Verificar ausência de race conditions, deadlocks, starvation
-- [ ] Validar que o scheduler distribui carga entre cores
-- [ ] Rodar userspace completo (compositor + apps) em multi-core
+- [x] libc freestanding com `crt0.S`
+- [x] `malloc/free` via `mmap/munmap`
+- [x] stdio/string/stdlib/assert/ctype/time/math básicos
+- [x] `vsnprintf`
+- [x] crate `atom_abi` como fonte única de verdade de ABI
+- [x] toolchain de build ATXF
 
----
+### 7. Gráficos, Desktop e Apps
 
-## Fase 9: Maturidade do Filesystem
+- [x] Driver BGA com troca de resolução em runtime
+- [x] Query de modos de vídeo
+- [x] Framebuffer / compositor com superfícies compartilhadas
+- [x] Dock, janelas, z-order, shutdown gracioso de janela
+- [x] `libgui`
+- [x] TinyGL portado e integrado
+- [x] Terminal, file manager, display settings e demos
 
-*Objetivo: filesystem robusto com suporte a escrita, FDs por processo e abstração VFS.*
+### 8. Filesystem
 
-### 9.1 Camada VFS
+- [x] FAT32 no kernel com leitura e escrita
+- [x] Syscalls de backend para fsd (`SYS_KERN_FS_*`)
+- [x] Syscalls POSIX básicas visíveis para apps
+- [x] `open`, `close`, `read`, `write`, `seek`, `stat`, `fstat`, `mkdir`, `rmdir`, `unlink`, `rename`, `readdir`, `fsync`
+- [x] Estrutura reorganizada de diretórios do sistema
+- [x] Ownership básico de FDs por processo e cleanup por processo no kernel
 
-- [ ] Abstração de Virtual File System com mount table
-- [ ] Resolução de paths (`/mnt/disk/arquivo.txt`)
-- [ ] Registro de filesystems (FAT32 inicialmente, ext2 ou outro depois)
+### 9. Infraestrutura de Drivers e Rede
 
-### 9.2 FAT32 Leitura-Escrita
-
-- [ ] Suporte a escrita: create, write, mkdir, delete
-- [ ] Cache de blocos em memória
-- [ ] Journaling ou ao menos semântica de fsync para segurança contra crashes
-
-### 9.3 Tabela de FDs por Processo (migrada do global do kernel)
-
-- [ ] Array de file descriptors por processo (0=stdin, 1=stdout, 2=stderr)
-- [ ] Herança de FDs no spawn
-- [ ] Syscalls `dup`, `dup2`, `pipe`
-
----
-
-## Fase 10: Drivers em User Space
-
-*Objetivo: migrar drivers remanescentes no kernel para userland, completando o modelo microkernel.*
-
-### 10.1 Driver de Dispositivo de Bloco (AHCI → userland)
-
-- [ ] Portar lógica AHCI para processo em user space
-- [ ] Kernel concede `DeviceCap(BDF)` + `IRQCap`
-- [ ] Driver mapeia MMIO do controlador via syscall
-- [ ] Protocolo de requisição/resposta de blocos via IPC
-
-### 10.2 Servidor de Filesystem (userland)
-
-- [ ] Servidor `fs_fat32` lê partições via IPC com driver de bloco
-- [ ] VFS delega operações → IPC → fs_fat32
-- [ ] Apps usam syscalls padrão de forma transparente
-
-### 10.3 Device Manager
-
-- [ ] Serviço `device_manager` — recebe lista de dispositivos PCI do kernel, mantém mapa BDF → driver, faz spawn de drivers sob demanda
-- [ ] Capabilities por dispositivo: kernel cria `DeviceCap(BDF)` por dispositivo PCI, manager delega ao driver correto
-- [ ] Hotplug USB: driver xHCI notifica device_manager, manager identifica tipo do dispositivo, faz spawn do driver apropriado
-
----
-
-## Fase 11: Rede
-
-- [ ] Driver NIC em userland (VirtIO-net para QEMU, Intel E1000 para suporte mais amplo)
-- [ ] Stack TCP/IP como serviço `netd` (portar smoltcp ou lwIP, ou implementar stack mínima)
-- [ ] Interface de sockets para apps via IPC com netd: `socket()`, `bind()`, `connect()`, `send()`, `recv()`
-- [ ] Serviço de resolução DNS
+- [x] Infraestrutura PCI
+- [x] Query de BARs e identidade de dispositivo
+- [x] Binding/listen/ack de IRQ em user space
+- [x] `dma_alloc`
+- [x] `map_mmio`
+- [x] `nic_driver` (e1000)
+- [x] `netd` com ARP, IPv4, ICMP, UDP, TCP e DNS em QEMU user-net
+- [x] Casos funcionais de rede em user space (`ping`, HTTP GET via `timesync`)
 
 ---
 
-## Fase 12: Desktop Multi-Janelas
+## Em consolidação após alpha_5
 
-*Objetivo: desktop multi-janelas real com apps concorrentes.*
+Estas áreas já existem, mas ainda não devem ser tratadas como “fechadas”:
 
-Muito disso já funciona (compositor, superfícies compartilhadas, criação de janela via IPC, Z-order). Trabalho restante:
-
-### 12.1 Gerenciamento de Janelas
-
-- [ ] Minimizar, maximizar, redimensionar, arrastar janelas
-- [ ] Alternador de aplicações (Alt-Tab)
-- [ ] Serviço de clipboard (copiar/colar entre apps)
-
-### 12.2 Expansão da libGUI
-
-- [ ] Biblioteca de widgets: botões, labels, input de texto, scroll bars, menus
-- [ ] Primitivas de layout (empilhamento horizontal/vertical, grid)
-- [ ] Event loop padrão para apps
-
-### 12.3 Threads de Usuário
-
-- [ ] `sys_thread_create` para user space — address space compartilhado, stack separado
-- [ ] `sys_thread_join(tid)` — espera conclusão do thread
-- [ ] Validar: app com thread de UI + thread worker, worker faz computação pesada sem travar a UI
+- [~] modelo de processo consolidado, porém ainda com vestígios thread-centric
+- [~] capability system completo em infraestrutura, mas com enforcement desigual
+- [~] networking funcional, mas ainda limitado ao ambiente QEMU user-net
+- [~] filesystem funcional, porém com dual path (kernel backend + fsd path)
+- [~] desktop funcional, mas ainda com ergonomia e primitives incompletas
+- [~] user pointer validation amplamente melhorada, mas ainda não auditada ponta a ponta
+- [~] threading/process teardown robusto, porém ainda precisando de stress e simplificação
+- [~] infra de drivers userspace boa, mas com lifecycle incompleto de DMA/MMIO/IRQ
 
 ---
 
-## Fase 13: Áudio
+## Fase 7 — Hardening, Coerência e Fechamento de Lacunas
 
-- [ ] Driver de áudio (AC97 ou Intel HDA) em user space
-- [ ] Serviço de mixer (`audiod`) — mistura streams de múltiplos apps, controle de volume por app
-- [ ] API de playback de áudio para apps via IPC
+**Prioridade: CRÍTICA**
+
+Objetivo: transformar a base atual em um sistema coerente, previsível e seguro o suficiente para sustentar SMP, hardware real e perfis de produto.
+
+### 7.1 Enforcement real de capabilities
+
+- [ ] Remover over-provisioning no spawn
+- [ ] Parar de conceder `Framebuffer`, `Keyboard`, `Mouse` e portas PS/2 a todos os processos
+- [ ] Restringir capabilities de input/display apenas aos serviços corretos
+- [ ] Adicionar autoridade explícita para `SYS_SPAWN_FROM_PATH`
+- [ ] Auditar syscalls ainda não protegidas por capability checks consistentes
+- [ ] Revisar `sys_io_port_read` / `sys_io_port_write` para modelo capability-first por recurso
+- [ ] Revisar todas as rotas “MVP/bypass” remanescentes e convertê-las para `EPERM`/`EINVAL` real
+
+### 7.2 Auditoria final de ponteiros de user space
+
+- [ ] Auditar todas as syscalls restantes para dereference de ponteiro de user space
+- [ ] Eliminar caminhos que ainda dependem de validação parcial ou indireta
+- [ ] Padronizar leitura/escrita de memória de user space em helpers únicos
+- [ ] Introduzir estratégia incremental de `copy_from_user` / `copy_to_user` mais forte
+- [ ] Garantir cobertura de testes para ranges canônicos, overflow, alinhamento e janela userspace
+
+### 7.3 Consolidação do modelo processo/thread/capability table
+
+- [ ] Reduzir inconsistência entre capability table do processo e espelhos por thread
+- [ ] Clarificar a autoridade canônica: processo como dono, thread como cache/mirror
+- [ ] Desacoplar gradualmente recursos globais ainda modelados por thread
+- [ ] Revisar o acoplamento entre `ProcessId` e `ThreadId` da thread primária
+- [ ] Preparar terreno para `exec`, grupos de processos e resource limits mais fortes
+
+### 7.4 Coerência da semântica de IPC
+
+- [ ] Corrigir `sys_ipc_send` para enviar payload real
+- [ ] Corrigir `sys_ipc_send_with_cap` para enviar payload real
+- [ ] Uniformizar semântica entre send sync, async e send-with-cap
+- [ ] Garantir testes para payload, capability delegation e ordering
+- [ ] Validar compatibilidade da wire format entre serviços e kernel
+
+### 7.5 Atomicidade do blocking em IPC
+
+- [ ] Tornar `block_receive` + `set_thread_state(Blocked)` atomicamente coerentes
+- [ ] Aplicar mesma correção a `sys_ipc_wait_any`
+- [ ] Revisar wake-up path e janelas de race de `mark_thread_ready`
+- [ ] Formalizar regras de lock ordering no subsistema IPC
+- [ ] Garantir que a solução seja SMP-safe desde o desenho
+
+### 7.6 Robustez de terminação e accounting
+
+- [ ] Stress-test de `terminate_entity` e `terminate_process`
+- [ ] Garantir zero drift de accounting em cenários de fork/exit/shared memory
+- [ ] Validar edge cases: último thread, processos em blocking IPC, OOM kill, cleanup duplicado
+- [ ] Consolidar invariantes de teardown em testes automatizados
+- [ ] Medir vazamentos de páginas, handles, FDs e portas IPC sob carga longa
+
+### 7.7 Sincronização da documentação
+
+- [ ] Alinhar `README.md`, `README-PTBR.md` e `ROADMAP.md` ao estado real do código
+- [ ] Remover itens já implementados do backlog “futuro”
+- [ ] Publicar matriz simples “implementado / parcial / futuro” por subsistema
+- [ ] Documentar explicitamente limitações reais atuais: QEMU-only, single-core, enforcement parcial, hardware real pendente
 
 ---
 
-## Fase 14: OS Composable — Perfis de Sistema
+## Fase 8 — Arquitetura de Filesystem e I/O
 
-*Objetivo: aproveitar o microkernel orientado a serviços para suportar diferentes personalidades de sistema a partir do mesmo kernel.*
+**Prioridade: ALTA**
 
-A arquitetura já suporta isso — o kernel fornece infraestrutura (memória, scheduling, IPC, capabilities), e toda a política vive no user space. Perfis diferentes são composições diferentes de serviços de user space.
+Objetivo: sair do estado híbrido atual e estabilizar o subsistema de arquivos e FDs.
 
-### 14.1 Carregador de Perfis
+### 8.1 Migrar de tabela global de FD para tabela por processo
 
-- [ ] Arquivos de configuração de perfil em `/system/profiles/` (TOML ou similar)
-- [ ] `init` lê o perfil e inicia apenas os serviços/shell especificados
-- [ ] Seleção no boot: `--profile=desktop`, `--profile=tv`, `--profile=kiosk`, `--profile=embedded`
-- [ ] Conjuntos de capabilities definidos por perfil (quais serviços recebem quais capabilities)
+- [ ] Substituir `KERNEL_FD_TABLE` global como autoridade principal
+- [ ] Introduzir tabela de FDs por processo
+- [ ] Manter `stdin/stdout/stderr` por processo
+- [ ] Preservar cleanup no teardown
+- [ ] Eliminar a dependência de um pool global fixo de 128 FDs
+- [ ] Definir semântica de herança/duplicação de FDs
 
-### 14.2 Perfil Desktop
+### 8.2 Desacoplar I/O de disco dos locks globais
 
-O padrão atual — compositor, ui_shell, terminal, gerenciador de arquivos, apps de uso geral.
+- [ ] Refatorar `sys_fs_read` para não manter lock de FD table durante I/O FAT32
+- [ ] Refatorar `sys_fs_seek` e caminhos correlatos com a mesma filosofia
+- [ ] Reduzir tempo de lock em operações de cache e leitura
+- [ ] Medir contenção e concorrência entre processos/apps usando FS
 
-### 14.3 Perfil TV / HTPC (UI 3-foot)
+### 8.3 Escolher e consolidar o caminho arquitetural do FS
 
-- [ ] `tv_shell` — launcher fullscreen com carrosséis horizontais, elementos grandes, texto mínimo
-- [ ] Modo TV do compositor — superfícies fullscreen + overlays de sistema (volume, notificações), sem modo de janelas
-- [ ] Input de D-pad / controle remoto — navegação espacial com árvore de foco, KEY_UP/DOWN/LEFT/RIGHT/OK/BACK/HOME
-- [ ] Serviço de mídia — pipeline de decodificação de vídeo, controles play/pause/seek, saída de superfície para o compositor
-- [ ] Runtime de apps HTML5 (opcional) — web engine leve (WPE WebKit ou Servo) para web apps, com bridge JS↔Rust para APIs do sistema
-- [ ] Formato de manifesto de app para web apps (nome, entry point, permissões, ícone)
+- [ ] Definir se o caminho canônico será `app -> fsd -> backend` ou acesso direto temporário no kernel
+- [ ] Remover duplicação estrutural entre syscalls de backend e syscalls de app
+- [ ] Preservar backend mínimo no kernel apenas quando necessário
+- [ ] Tornar o modelo microkernel de filesystem explícito e consistente
 
-### 14.4 Perfil Kiosk
+### 8.4 Completar a superfície POSIX faltante
 
-- [ ] Modo single-app — boot diretamente em uma aplicação especificada
-- [ ] Conjunto restrito de capabilities — sem acesso a filesystem, sem spawn, sem rede (a menos que explicitamente concedido)
-- [ ] Sem desktop shell, sem launcher
+- [ ] Implementar `truncate`
+- [ ] Implementar `dup`, `dup2`
+- [ ] Implementar `pipe`
+- [ ] Revisar viabilidade de `chmod`, `utimes`, `statvfs`
+- [ ] Decidir sobre `link`, `symlink`, `readlink`
+- [ ] Definir claramente o subconjunto POSIX suportado
 
-### 14.5 Perfil Embedded / Headless
+### 8.5 Maturidade do FAT32 e recuperação
 
-- [ ] Sem display driver, sem compositor, sem UI
-- [ ] Apenas serviços: rede, filesystem, daemons específicos da aplicação
-- [ ] Footprint mínimo de memória
-- [ ] Adequado para roteadores, dispositivos IoT, appliances
+- [ ] Expandir cobertura de replay/recovery
+- [ ] Revisar semântica de flush e durability
+- [ ] Melhorar cache de blocos
+- [ ] Validar comportamento em crash/reboot
+- [ ] Avaliar quando FAT32 deixa de ser suficiente para próximos perfis de sistema
+
+### 8.6 VFS
+
+- [ ] Criar camada VFS com mount table
+- [ ] Suportar múltiplos backends
+- [ ] Resolver paths com mount points
+- [ ] Preparar o sistema para ext2/ext4 ou FS próprio no futuro
 
 ---
 
-## Fase 15: Port para ARM64
+## Fase 9 — Drivers em User Space e Modelo de Dispositivos
+
+**Prioridade: ALTA**
+
+Objetivo: concluir o desenho microkernel para hardware e serviços de dispositivo.
+
+### 9.1 Completar lifecycle de DMA/MMIO/IRQ
+
+- [ ] Implementar `sys_dma_map`
+- [ ] Implementar `sys_dma_free`
+- [ ] Garantir cleanup/revogação de buffers DMA
+- [ ] Consolidar ownership e teardown de regiões MMIO
+- [ ] Testar exaustivamente falhas e revogação durante uso
+
+### 9.2 Device manager
+
+- [ ] Criar serviço `device_manager`
+- [ ] Manter mapa BDF -> driver
+- [ ] Delegar capabilities para drivers corretos
+- [ ] Suportar discovery mais limpo de dispositivos PCI
+- [ ] Preparar caminho para hotplug e enumeração mais sofisticada
+
+### 9.3 Migração progressiva de drivers para userland
+
+- [ ] Definir roadmap de migração de AHCI
+- [ ] Definir roadmap de migração/isolamento mais forte de xHCI
+- [ ] Reduzir TCB do kernel onde fizer sentido
+- [ ] Medir custo de IPC + batching + shared memory nesses caminhos
+
+---
+
+## Fase 10 — Rede: de funcional para produto
+
+**Prioridade: MÉDIA-ALTA**
+
+Objetivo: transformar a stack atual de rede em base robusta para apps, serviços e perfis headless/kiosk.
+
+### 10.1 Estabilização da stack existente
+
+- [ ] Expandir testes de `nic_driver` + `netd`
+- [ ] Cobrir falhas de link, timeouts, resets e recovery
+- [ ] Melhorar tracing e diagnóstico de rede
+- [ ] Medir throughput, latência e consumo de memória
+
+### 10.2 API de rede para apps
+
+- [ ] Consolidar interface de sockets ou IPC-friendly API para apps
+- [ ] Expor bind/connect/send/recv de forma estável
+- [ ] Validar integração com libc e apps C/Rust
+- [ ] Garantir uma história clara para DNS do ponto de vista de app
+
+### 10.3 Produção e portabilidade da rede
+
+- [ ] Validar backends além de QEMU user-net
+- [ ] Melhorar suporte real a e1000
+- [ ] Avaliar suporte a VirtIO-net
+- [ ] Definir estratégia de DHCP, hostname e configuração persistente
+- [ ] Tornar rede utilizável em perfis headless e kiosk
+
+---
+
+## Fase 11 — SMP (Symmetric Multiprocessing)
+
+**Prioridade: ALTA, bloqueada por Fases 7–9**
+
+Objetivo: habilitar execução multi-core com invariantes corretos.
+
+### 11.1 Bootstrap de CPUs
+
+- [ ] Parsing de ACPI MADT
+- [ ] Startup de APs via SIPI
+- [ ] GDT, IDT, TSS e stacks por CPU
+- [ ] Inicialização de `CpuLocal`
+
+### 11.2 Estruturas per-CPU
+
+- [ ] Dados per-CPU via `GS_BASE`
+- [ ] Idle thread por CPU
+- [ ] IST/stacks por CPU
+- [ ] Estratégia inicial: fila global com lock ou ready queues per-CPU
+
+### 11.3 Kernel SMP-safe
+
+- [ ] Auditar todos os locks do kernel
+- [ ] Revisar atomicidade de IPC, scheduler, PMM, FD tables, capabilities, registries
+- [ ] Garantir regras formais de ordering de locks
+- [ ] Revisar timestamps, ticks e timekeeping entre CPUs
+
+### 11.4 Scheduler SMP
+
+- [ ] Load balancing inicial
+- [ ] Migração de threads
+- [ ] Estratégia de afinidade
+- [ ] Medir fairness e starvation
+
+### 11.5 Validação SMP
+
+- [ ] Stress test com N threads / M cores
+- [ ] Rodar user space completo em SMP
+- [ ] Validar que não há races de teardown, IPC ou scheduler
+- [ ] Estabelecer baseline de throughput
+
+---
+
+## Fase 12 — Plataforma de Aplicações e Desktop
+
+**Prioridade: MÉDIA**
+
+Objetivo: tornar o sistema utilizável como plataforma multi-app, sem confundir isso com prioridade antes do hardening.
+
+### 12.1 Window management
+
+- [ ] Minimizar
+- [ ] Maximizar
+- [ ] Redimensionar
+- [ ] Arrastar janelas
+- [ ] Alt-Tab
+- [ ] Clipboard
+
+### 12.2 Expansão da `libgui`
+
+- [ ] Widgets básicos
+- [ ] Inputs de texto
+- [ ] Scrollbars
+- [ ] Menus
+- [ ] Layout horizontal/vertical/grid
+- [ ] Event loop padrão
+
+### 12.3 Threading de user space
+
+- [x] `sys_thread_create` já existe
+- [ ] Definir API estável de criação de threads para apps
+- [ ] Implementar `join`
+- [ ] Revisar stacks e lifecycle para threads userspace
+- [ ] Validar apps com UI thread + worker thread
+
+### 12.4 Empacotamento e UX de apps
+
+- [ ] Melhorar manifestos/metadados de app
+- [ ] Definir convenção de instalação/ícones/categorias
+- [ ] Melhorar integração com launcher/file manager
+- [ ] Preparar terreno para atualização e remoção de apps
+
+---
+
+## Fase 13 — Perfis de Sistema / OS Composable
+
+**Prioridade: MÉDIA**
+
+Objetivo: transformar a arquitetura orientada a serviços em produto configurável por perfil.
+
+### 13.1 Loader de perfil
+
+- [ ] Arquivos de perfil em `/system/profiles/`
+- [ ] Seleção por argumento de boot
+- [ ] `init` carrega apenas os serviços daquele perfil
+- [ ] Capabilities e permissões definidas por perfil
+
+### 13.2 Perfil Desktop
+
+- [ ] Consolidar o perfil atual como baseline oficial
+
+### 13.3 Perfil Kiosk
+
+- [ ] Boot direto em single-app
+- [ ] Conjunto mínimo de capabilities
+- [ ] Sem shell desktop
+- [ ] Política de atualização e recuperação simplificada
+
+### 13.4 Perfil Embedded / Headless
+
+- [ ] Sem display/compositor
+- [ ] Apenas rede/filesystem/daemons
+- [ ] Otimização de footprint
+- [ ] Foco em appliances e IoT
+
+### 13.5 Perfil TV / HTPC
+
+- [ ] `tv_shell`
+- [ ] Navegação por D-pad / foco espacial
+- [ ] Fullscreen surfaces + overlays
+- [ ] Pipeline de mídia
+- [ ] Decisão sobre runtime web opcional
+
+---
+
+## Fase 14 — ARM64
+
+**Prioridade: MÉDIA**
 
 - [ ] Boot UEFI em ARM64
-- [ ] Setup de MMU (TTBR0/TTBR1, páginas de 4KB)
-- [ ] GIC (Generic Interrupt Controller)
-- [ ] Context switching para ARM64
-- [ ] Validação em QEMU aarch64 e Raspberry Pi 4
+- [ ] MMU ARM64
+- [ ] GIC
+- [ ] Context switch ARM64
+- [ ] QEMU aarch64
+- [ ] Raspberry Pi 4 ou plataforma equivalente
 
 ---
 
-## Fase 16: Otimizações Avançadas
+## Fase 15 — Otimização e Performance
 
-- [ ] Huge Pages (2 MiB, 1 GiB) para kernel e apps
-- [ ] PCID (Process Context IDs) para evitar TLB flush em context switch
-- [ ] SMEP/SMAP para hardening do kernel
-- [ ] Upgrade do scheduler (CFS ou BFS para substituir round-robin simples)
-- [ ] Alocação de memória NUMA-aware
+**Prioridade: MÉDIA**
+
+- [ ] Huge pages
+- [ ] PCID
+- [ ] Melhorias de TLB behavior
+- [ ] Revisão do scheduler para além do round-robin por prioridade
+- [ ] Perfilamento de IPC, FS, rede e compositor
+- [ ] Redução de contenção em locks globais remanescentes
+- [ ] Footprint tuning para perfis kiosk/embedded
 
 ---
 
-## Fase 17: Auditoria de Segurança
+## Fase 16 — Auditoria e Segurança Avançada
 
-- [ ] ASLR (Address Space Layout Randomization) para processos de user space
-- [ ] Stack canaries em user space
-- [ ] Auditoria completa de código `unsafe` no kernel
-- [ ] Fuzzing de syscalls (AFL, libFuzzer, ou harness customizado)
-- [ ] Verificação formal de componentes críticos (enforcement de capabilities, invariantes de IPC) via TLA+ ou similar
+**Prioridade: MÉDIA-ALTA**
+
+- [ ] ASLR
+- [ ] Hardening adicional de user space
+- [ ] Auditoria completa de `unsafe`
+- [ ] Fuzzing de syscalls
+- [ ] Fuzzing de parsers e IPC
+- [ ] Verificação formal de invariantes críticas
+- [ ] Política de segurança e threat model documentados
+- [ ] Base para certificação futura, onde fizer sentido
 
 ---
 
 ## Decisões Arquiteturais
 
-### Tomadas
+### Consolidadas
 
-- Microkernel com drivers em user space
-- Controle de acesso baseado em capabilities
-- IPC message-passing com caminhos zero-copy via memória compartilhada
-- Scheduler por prioridade com round-robin por nível
-- SYSCALL/SYSRET para transições rápidas user↔kernel
+- microkernel com user space orientado a serviços
+- capabilities como modelo de autoridade
+- IPC como backbone de composição
+- shared memory para zero-copy
+- scheduler por prioridade
+- `SYSCALL/SYSRET` como caminho principal user↔kernel
 - ATXF como formato binário de user space
-- Crate atom_abi compartilhado para ABI kernel↔userspace
-- User space orientado a serviços (init → service_manager → namesvc → serviços)
+- `atom_abi` como ABI compartilhada
+- `init -> service_manager -> namesvc` como estrutura de boot do user space
 
-### Em Aberto
+### Em aberto
 
-- **Filesystem**: continuar com FAT32 ou portar ext2/ext4?
-- **Stack de rede**: smoltcp vs lwIP vs customizado?
-- **Scheduler SMP**: fila global vs filas per-CPU?
-- **Web runtime para perfil TV**: WPE WebKit vs Servo vs renderer de subconjunto HTML customizado?
-- **Modelo de processos**: processos single-threaded apenas, ou fork/exec estilo POSIX completo?
+- filesystem futuro além de FAT32
+- desenho final da VFS
+- estratégia final de socket API
+- ready queue global vs per-CPU no SMP
+- nível de compatibilidade POSIX desejado
+- alcance do runtime web em perfis de TV/kiosk
+- estratégia de hardware real prioritário
 
 ---
 
 ## Métricas de Sucesso
 
-### Alcançadas
-- [x] Boot em < 5s (QEMU)
-- [x] Latência IPC < 10μs (média)
-- [x] Suporte a aplicações C nativas (libc + crt0)
-- [x] Renderização OpenGL por software (TinyGL)
-- [x] Lançamento de aplicações em runtime a partir do filesystem
-- [x] Troca dinâmica de resolução de display
+### Já alcançadas
 
-### Próximos Alvos
-- [ ] Todas as syscalls enforçam verificações de capabilities
-- [ ] Zero acesso cruzado de FDs entre processos
-- [ ] Todos os ponteiros de usuário validados antes de dereference no kernel
-- [ ] SMP: estável em 2–4 cores
-- [ ] Rede: requisição HTTP a partir de app em user space
-- [ ] 1000+ processos concorrentes sem kernel panic
-- [ ] Teste de stress de 24h com zero panics
+- [x] Boot em QEMU/OVMF
+- [x] User space funcional e isolado
+- [x] Apps C/Rust executando
+- [x] Spawn em runtime via filesystem
+- [x] Desktop funcional
+- [x] TinyGL funcionando
+- [x] Troca dinâmica de resolução
+- [x] Rede funcional em QEMU user-net com `ping`/HTTP
+
+### Próximos alvos técnicos
+
+- [ ] Todas as syscalls sensíveis com enforcement consistente de capabilities
+- [ ] Nenhum payload path quebrado em IPC send
+- [ ] Nenhum lock global mantido durante I/O de disco
+- [ ] Tabela de FDs por processo
+- [ ] FS com caminho arquitetural único
+- [ ] Networking estável fora do caso feliz de QEMU
+- [ ] SMP estável em 2–4 cores
+- [ ] 24h de stress sem panic
+- [ ] Hardware real validado
+
+---
+
+## Prioridade executiva resumida
+
+### Agora
+1. hardening de capabilities  
+2. auditoria final de ponteiros  
+3. corrigir IPC send / send_with_cap  
+4. atomicidade de IPC blocking  
+5. consolidar processo/thread/cap tables  
+
+### Em seguida
+6. refatorar FD table e locks de I/O  
+7. unificar arquitetura do filesystem  
+8. completar lifecycle de DMA/MMIO/IRQ  
+9. estabilizar networking para uso real  
+
+### Depois
+10. SMP  
+11. perfis de produto  
+12. ARM64  
+13. otimizações avançadas  
+14. auditoria de segurança profunda
 
 ---
 
 ## Contribuindo
 
-Contribuições são bem-vindas, especialmente em:
+Contribuições são especialmente valiosas em:
 
-- **Hardening de segurança** — enforcement de capabilities, validação de ponteiros de usuário, isolamento de FDs
-- **Documentação** — protocolo IPC, modelo de capabilities, referência de syscalls, layout de memória, formato ATXF
-- **Testes** — smoke tests automatizados em QEMU, CI, fuzzing de syscalls
-- **Serviços de user space** — novos drivers, melhorias de filesystem, rede
-- **Ferramentas de debugging e tracing**
+- hardening de segurança
+- enforcement de capabilities
+- FS/VFS
+- testes e stress
+- networking
+- SMP foundations
+- documentação arquitetural
+- tracing/debugging/observabilidade
 
 ---
 
-**Mantenedor**: [fpedrolucas95](https://github.com/fpedrolucas95/)  
+**Mantenedor**: `fpedrolucas95`  
 **Licença**: Apache 2.0  
-**Repositório**: [GitHub — Atom OS](https://github.com/fpedrolucas95/atom)
+**Repositório**: Atom OS
