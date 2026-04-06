@@ -608,6 +608,34 @@ impl Framebuffer {
             }
         }
     }
+
+    /// Blit a specific rectangular area from this framebuffer to another.
+    pub fn blit_rect(&self, other: &Framebuffer, x: u32, y: u32, width: u32, height: u32) {
+        let bpp = self.bytes_per_pixel();
+        if bpp != other.bytes_per_pixel() {
+            return;
+        }
+
+        let x_start = x.min(self.width()).min(other.width());
+        let y_start = y.min(self.height()).min(other.height());
+        let x_end = (x + width).min(self.width()).min(other.width());
+        let y_end = (y + height).min(self.height()).min(other.height());
+
+        let copy_width = x_end.saturating_sub(x_start);
+        if copy_width == 0 { return; }
+
+        for sy in y_start..y_end {
+            let src_offset = (sy * self.stride() + x_start) as usize * bpp;
+            let dst_offset = (sy * other.stride() + x_start) as usize * bpp;
+
+            let src_ptr = (self.address() + src_offset) as *const u8;
+            let dst_ptr = (other.address() + dst_offset) as *mut u8;
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize * bpp);
+            }
+        }
+    }
 }
 
 // ============================================================================
