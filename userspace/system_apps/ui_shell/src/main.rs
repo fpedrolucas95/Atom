@@ -13,6 +13,10 @@ struct BumpAllocator {
     start: AtomicUsize,
     size: AtomicUsize,
     next: AtomicUsize,
+    // Support for a "scratch stack" of backing regions.
+    // Index 0 is always the permanent logic heap.
+    regions: [(AtomicUsize, AtomicUsize, AtomicUsize); 2],
+    current_region: AtomicUsize,
 }
 
 unsafe impl Sync for BumpAllocator {}
@@ -23,13 +27,34 @@ impl BumpAllocator {
             start: AtomicUsize::new(0),
             size: AtomicUsize::new(0),
             next: AtomicUsize::new(0),
+            regions: [
+                (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)),
+                (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)),
+            ],
+            current_region: AtomicUsize::new(0),
         }
     }
 
     fn init(&self, start: usize, size: usize) {
+        self.regions[0].0.store(start, Ordering::SeqCst);
+        self.regions[0].1.store(size, Ordering::SeqCst);
+        self.regions[0].2.store(0, Ordering::SeqCst);
         self.start.store(start, Ordering::SeqCst);
         self.size.store(size, Ordering::SeqCst);
         self.next.store(0, Ordering::SeqCst);
+    }
+
+    /// Activate a scratch region. Future allocations come from here.
+    fn push_scratch(&self, start: usize, size: usize) {
+        self.regions[1].0.store(start, Ordering::SeqCst);
+        self.regions[1].1.store(size, Ordering::SeqCst);
+        self.regions[1].2.store(0, Ordering::SeqCst);
+        self.current_region.store(1, Ordering::SeqCst);
+    }
+
+    /// Deactivate the scratch region. Future allocations return to the permanent heap.
+    fn pop_scratch(&self) {
+        self.current_region.store(0, Ordering::SeqCst);
     }
 }
 
@@ -38,15 +63,18 @@ unsafe impl GlobalAlloc for BumpAllocator {
         let size = layout.size();
         let align = layout.align().max(16);
 
-        let heap_start = self.start.load(Ordering::Relaxed);
-        let heap_size = self.size.load(Ordering::Relaxed);
+        let rid = self.current_region.load(Ordering::Relaxed);
+        let (start_atom, size_atom, next_atom) = &self.regions[rid];
+
+        let heap_start = start_atom.load(Ordering::Relaxed);
+        let heap_size = size_atom.load(Ordering::Relaxed);
 
         if heap_start == 0 || heap_size == 0 {
             return core::ptr::null_mut();
         }
 
         loop {
-            let current = self.next.load(Ordering::Relaxed);
+            let current = next_atom.load(Ordering::Relaxed);
             let aligned = (current + align - 1) & !(align - 1);
             let new_next = aligned + size;
 
@@ -54,7 +82,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
                 return core::ptr::null_mut();
             }
 
-            if self.next.compare_exchange_weak(
+            if next_atom.compare_exchange_weak(
                 current, new_next, Ordering::SeqCst, Ordering::Relaxed
             ).is_ok() {
                 return (heap_start as *mut u8).add(aligned);
@@ -64,13 +92,14 @@ unsafe impl GlobalAlloc for BumpAllocator {
 
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // LIFO optimisation: reclaim the most-recently-allocated block so
-        // transient Vec allocations (IPC buffers etc.) don't exhaust the heap.
-        let heap_start = self.start.load(Ordering::Relaxed);
+        let rid = self.current_region.load(Ordering::Relaxed);
+        let (start_atom, _, next_atom) = &self.regions[rid];
+
+        let heap_start = start_atom.load(Ordering::Relaxed);
         let blk_offset = ptr as usize - heap_start;
         let blk_end = blk_offset + layout.size();
 
-        let _ = self.next.compare_exchange(
+        let _ = next_atom.compare_exchange(
             blk_end, blk_offset, Ordering::SeqCst, Ordering::Relaxed,
         );
     }
@@ -90,7 +119,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags, shared_region_create, shared_region_map, get_framebuffer};
+use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags, shared_region_create, shared_region_map, shared_region_unmap, shared_region_destroy, get_framebuffer};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{exit, yield_now};
@@ -566,6 +595,40 @@ struct ContextMenu {
     items: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rect {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+impl Rect {
+    fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    fn union(&self, other: &Rect) -> Rect {
+        let x1 = self.x.min(other.x);
+        let y1 = self.y.min(other.y);
+        let x2 = (self.x + self.w as i32).max(other.x + other.w as i32);
+        let y2 = (self.y + self.h as i32).max(other.y + other.h as i32);
+        Rect {
+            x: x1,
+            y: y1,
+            w: (x2 - x1) as u32,
+            h: (y2 - y1) as u32,
+        }
+    }
+
+    fn intersects(&self, other: &Rect) -> bool {
+        self.x < other.x + other.w as i32 &&
+        self.x + self.w as i32 > other.x &&
+        self.y < other.y + other.h as i32 &&
+        self.y + self.h as i32 > other.y
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CurrentWallpaperSource {
     SolidColor { rgb: u32 },
@@ -1022,7 +1085,8 @@ fn rgb32_to_color(pixel: u32) -> Color {
 struct Compositor {
     fb: Framebuffer,
     backbuffer_fb: Framebuffer,
-    _backbuffer: Vec<u32>,
+    backbuffer_region: SharedRegionId,
+    backbuffer_ptr: *mut u32,
     wm: WindowManager,
     cursor: CursorState,
     event_port: PortId,
@@ -1030,6 +1094,7 @@ struct Compositor {
     pending_windows: Vec<PendingWindow>,
     pending_close: Vec<PendingClose>,
     dirty: bool,
+    dirty_rect: Option<Rect>,
     mouse_left_down: bool,
     mouse_right_down: bool,
     drag_op: DragOperation,
@@ -1047,7 +1112,9 @@ struct Compositor {
     desktop_config: DesktopConfig,
     current_wallpaper_source: CurrentWallpaperSource,
     current_scaling_mode: ScalingMode,
-    scaled_wallpaper: Option<libimage::DecodedImage>,
+    wallpaper_cache_region: Option<SharedRegionId>,
+    wallpaper_cache_ptr: *mut u8,
+    wallpaper_cache_valid: bool,
     wallpaper_recompute_pending: bool,
     config_save_pending: bool,
     image_cache: libimage::ImageCache,
@@ -1092,12 +1159,13 @@ impl Compositor {
 
         let dock_apps = Self::build_dock_apps();
 
-        // Allocate at max mode capacity so VideoModeChanged never needs reallocation.
-        const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
-        let init_pixels = (fb.stride() * fb.height()) as usize;
-        let mut backbuffer = alloc::vec![0u32; MAX_BACKBUFFER_PIXELS.max(init_pixels)];
+        // Backbuffer region: dynamically sized to current resolution.
+        let bb_size = (fb.stride() * fb.height() * 4) as usize;
+        let bb_region = shared_region_create(bb_size).expect("Failed to create backbuffer region");
+        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map backbuffer region") as *mut u32;
+
         let backbuffer_fb = Framebuffer::new_custom(
-            backbuffer.as_mut_ptr() as u64,
+            bb_ptr as u64,
             fb.width(),
             fb.height(),
             fb.stride(),
@@ -1107,7 +1175,8 @@ impl Compositor {
         Self {
             fb,
             backbuffer_fb,
-            _backbuffer: backbuffer,
+            backbuffer_region: bb_region,
+            backbuffer_ptr: bb_ptr,
             wm: WindowManager::new(),
             cursor: CursorState::new(width, height),
             event_port,
@@ -1115,6 +1184,7 @@ impl Compositor {
             pending_windows: Vec::new(),
             pending_close: Vec::new(),
             dirty: true,
+            dirty_rect: None,
             mouse_left_down: false,
             mouse_right_down: false,
             drag_op: DragOperation::None,
@@ -1141,7 +1211,9 @@ impl Compositor {
             desktop_config: DesktopConfig::default_config(width, height),
             current_wallpaper_source: CurrentWallpaperSource::SolidColor { rgb: 0x12141C },
             current_scaling_mode: ScalingMode::Fill,
-            scaled_wallpaper: None,
+            wallpaper_cache_region: None,
+            wallpaper_cache_ptr: core::ptr::null_mut(),
+            wallpaper_cache_valid: false,
             wallpaper_recompute_pending: false,
             config_save_pending: false,
             image_cache: libimage::ImageCache::with_capacity(1),
@@ -1184,8 +1256,14 @@ impl Compositor {
 
     fn poll_input(&mut self) {
         while let Some(event) = self.mouse_driver.poll_event() {
+            let old_x = self.cursor.x;
+            let old_y = self.cursor.y;
             self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
-            self.dirty = true;
+
+            // Mark old and new cursor areas as dirty
+            let r1 = Rect::new(old_x, old_y, 24, 24);
+            let r2 = Rect::new(self.cursor.x, self.cursor.y, 24, 24);
+            self.mark_dirty_rect(r1.union(&r2));
 
             if event.left_button {
                 if !self.mouse_left_down {
@@ -1333,7 +1411,17 @@ impl Compositor {
             _ => {}
         }
 
+        let rect = if let Some(w) = self.wm.get_window(window_id) {
+            Some(Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25))
+        } else {
+            None
+        };
+
         self.wm.close_window(window_id);
+
+        if let Some(r) = rect {
+            self.mark_dirty_rect(r);
+        }
         self.dirty = true;
     }
 
@@ -1555,13 +1643,18 @@ impl Compositor {
                         return;
                     } else if x >= max_x && x < max_x + btn_size {
                         let (wx, wy, ww, wh) = self.get_work_area();
+                        let old_rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         if self.wm.toggle_maximize(id, wx, wy, ww, wh) {
+                            self.mark_dirty_rect(old_rect);
+                            self.mark_dirty_rect(Rect::new(wx - 10, wy - 10, ww + 20, wh + 25));
                             self.reallocate_window_surface(id);
                             self.dirty = true;
                         }
                         return;
                     } else if x >= min_x && x < min_x + btn_size {
+                        let rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         self.wm.minimize_window(id);
+                        self.mark_dirty_rect(rect);
                         self.dirty = true;
                         return;
                     }
@@ -1629,19 +1722,39 @@ impl Compositor {
             DragOperation::Move { window_id, start_mouse_x, start_mouse_y, start_win_x, start_win_y } => {
                 let dx = x - start_mouse_x;
                 let dy = y - start_mouse_y;
+
+                let (old_rect, new_rect) = if let Some(w) = self.wm.get_window(window_id) {
+                    let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
+                    let nw_x = start_win_x + dx;
+                    let nw_y = start_win_y + dy;
+                    let new = Rect::new(nw_x - 4, nw_y - 4, w.width + 8, w.height + 8);
+                    (old, new)
+                } else { return; };
+
                 if let Some(w) = self.wm.get_window_mut(window_id) {
                     w.x = start_win_x + dx;
                     w.y = start_win_y + dy;
-                    self.dirty = true;
                 }
+
+                self.mark_dirty_rect(old_rect);
+                self.mark_dirty_rect(new_rect);
             }
             DragOperation::Resize { window_id, start_mouse_x, start_mouse_y, start_win_w, start_win_h } => {
                 let dx = x - start_mouse_x;
                 let dy = y - start_mouse_y;
                 let new_w = (start_win_w as i32 + dx).max(WINDOW_MIN_WIDTH as i32) as u32;
                 let new_h = (start_win_h as i32 + dy).max(WINDOW_MIN_HEIGHT as i32) as u32;
+
+                let (old_rect, new_rect) = if let Some(w) = self.wm.get_window(window_id) {
+                    let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
+                    let new = Rect::new(w.x - 4, w.y - 4, new_w + 8, new_h + 8);
+                    (old, new)
+                } else { return; };
+
                 self.wm.resize_window(window_id, new_w, new_h);
-                self.dirty = true;
+
+                self.mark_dirty_rect(old_rect);
+                self.mark_dirty_rect(new_rect);
             }
             DragOperation::None => {}
         }
@@ -1649,17 +1762,44 @@ impl Compositor {
 
     /// Called when a `VideoModeChanged` IPC message arrives.
     ///
-    /// Re-acquires the kernel framebuffer (which reflects the new BGA mode) and
-    /// rebuilds `backbuffer_fb` to point at the same pre-allocated buffer with
-    /// the updated stride and dimensions.  No heap allocation is performed here
-    /// because the buffer was sized for the largest supported mode at startup.
+    /// Re-acquires the kernel framebuffer and reallocates the backbuffer
+    /// region to match the new resolution.
+    fn mark_dirty_rect(&mut self, rect: Rect) {
+        let screen = Rect::new(0, 0, self.fb.width(), self.fb.height());
+        // Clamp to screen
+        let x1 = rect.x.max(0);
+        let y1 = rect.y.max(0);
+        let x2 = (rect.x + rect.w as i32).min(screen.w as i32);
+        let y2 = (rect.y + rect.h as i32).min(screen.h as i32);
+
+        if x2 <= x1 || y2 <= y1 { return; }
+        let clamped = Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32);
+
+        if let Some(existing) = self.dirty_rect {
+            self.dirty_rect = Some(existing.union(&clamped));
+        } else {
+            self.dirty_rect = Some(clamped);
+        }
+        self.dirty = true;
+    }
+
     fn handle_video_mode_changed(&mut self) {
         let new_fb = match Framebuffer::new() {
             Some(fb) => fb,
             None => return,
         };
+
+        // 1. Cleanup old backbuffer
+        let _ = shared_region_unmap(self.backbuffer_region);
+        let _ = shared_region_destroy(self.backbuffer_region);
+
+        // 2. Allocate new backbuffer
+        let bb_size = (new_fb.stride() * new_fb.height() * 4) as usize;
+        let bb_region = shared_region_create(bb_size).expect("Failed to realloc backbuffer region");
+        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map new backbuffer") as *mut u32;
+
         let new_backbuffer_fb = match Framebuffer::new_custom(
-            self._backbuffer.as_mut_ptr() as u64,
+            bb_ptr as u64,
             new_fb.width(),
             new_fb.height(),
             new_fb.stride(),
@@ -1668,16 +1808,20 @@ impl Compositor {
             Some(fb) => fb,
             None => return,
         };
-        self.fb           = new_fb;
-        self.backbuffer_fb = new_backbuffer_fb;
+
+        self.fb                = new_fb;
+        self.backbuffer_fb     = new_backbuffer_fb;
+        self.backbuffer_region = bb_region;
+        self.backbuffer_ptr    = bb_ptr;
         // Clamp cursor to new screen extents.
         let w = self.fb.width()  as i32;
         let h = self.fb.height() as i32;
         if self.cursor.x >= w { self.cursor.x = w - 1; }
         if self.cursor.y >= h { self.cursor.y = h - 1; }
         self.desktop_config.resolution = ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
+
+        self.wallpaper_cache_valid = false;
         if matches!(self.current_wallpaper_source, CurrentWallpaperSource::Image { .. }) {
-            self.scaled_wallpaper = None;
             self.wallpaper_recompute_pending = true;
         }
         self.config_save_pending = true;
@@ -1896,14 +2040,14 @@ impl Compositor {
             WallpaperSourceType::SolidColor => {
                 let rgb = config.wallpaper.color_rgb.unwrap_or(0x12141C);
                 self.current_wallpaper_source = CurrentWallpaperSource::SolidColor { rgb };
-                self.scaled_wallpaper = None;
+                self.wallpaper_cache_valid = false;
                 self.wallpaper_recompute_pending = false;
                 self.desktop_bg = Color::new(((rgb >> 16) & 0xFF) as u8, ((rgb >> 8) & 0xFF) as u8, (rgb & 0xFF) as u8);
             }
             WallpaperSourceType::Image => {
                 let path = config.wallpaper.image_path.as_ref().ok_or("Missing image path")?.clone();
                 self.current_wallpaper_source = CurrentWallpaperSource::Image { path };
-                self.scaled_wallpaper = None;
+                self.wallpaper_cache_valid = false;
                 self.wallpaper_recompute_pending = true;
             }
         }
@@ -1941,7 +2085,7 @@ impl Compositor {
         self.desktop_bg = Color::new(((fallback_rgb >> 16) & 0xFF) as u8, ((fallback_rgb >> 8) & 0xFF) as u8, (fallback_rgb & 0xFF) as u8);
         self.current_wallpaper_source = CurrentWallpaperSource::SolidColor { rgb: fallback_rgb };
         self.current_scaling_mode = ScalingMode::Fill;
-        self.scaled_wallpaper = None;
+        self.wallpaper_cache_valid = false;
         self.wallpaper_recompute_pending = false;
         self.desktop_config.wallpaper = WallpaperConfig {
             source_type: WallpaperSourceType::SolidColor,
@@ -1961,16 +2105,50 @@ impl Compositor {
             };
 
             if let Some(path) = image_path {
-                match self.load_and_decode_image(&path) {
-                    Ok(wallpaper) => {
-                        self.scaled_wallpaper = Some(self.scale_wallpaper(&wallpaper, self.current_scaling_mode));
+                // Use a SCRATCH HEAP for large image operations (decode/scale).
+                // 24 MiB provides enough space for raw JPG data + decoded RGBA image + scaled RGBA image.
+                let scratch_size = 24 * 1024 * 1024;
+                let scratch_region = shared_region_create(scratch_size).expect("Failed to create scratch heap");
+                let scratch_start = shared_region_map(scratch_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map scratch heap");
+
+                ALLOCATOR.push_scratch(scratch_start as usize, scratch_size);
+
+                let result = self.load_and_decode_image(&path).and_then(|wallpaper| {
+                    let scaled = self.scale_wallpaper(&wallpaper, self.current_scaling_mode);
+
+                    // Store scaled wallpaper in persistent cache region
+                    let sw = self.fb.width();
+                    let sh = self.fb.height();
+                    let size = (sw * sh * 4) as usize;
+
+                    // Cleanup old cache if size changed or first time
+                    if self.wallpaper_cache_region.is_some() {
+                         let _ = shared_region_unmap(self.wallpaper_cache_region.unwrap());
+                         let _ = shared_region_destroy(self.wallpaper_cache_region.unwrap());
                     }
-                    Err(_) => {
-                        self.revert_to_fallback_wallpaper();
-                    }
+
+                    let region = shared_region_create(size).expect("Failed to create wallpaper cache region");
+                    let ptr = shared_region_map(region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map wallpaper cache") as *mut u8;
+
+                    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
+                    scaled.blit_to(buf, sw, 0, 0);
+
+                    self.wallpaper_cache_region = Some(region);
+                    self.wallpaper_cache_ptr = ptr;
+                    self.wallpaper_cache_valid = true;
+                    Ok(())
+                });
+
+                if result.is_err() {
+                    self.revert_to_fallback_wallpaper();
                 }
+
+                ALLOCATOR.pop_scratch();
+                let _ = shared_region_unmap(scratch_region);
+                let _ = shared_region_destroy(scratch_region);
+
             } else {
-                self.scaled_wallpaper = None;
+                self.wallpaper_cache_valid = false;
             }
             self.wallpaper_recompute_pending = false;
             self.dirty = true;
@@ -2342,8 +2520,18 @@ impl Compositor {
         // but defer actual destruction (which frees the shared surface) so
         // the client process has time to receive the TerminateRequest and
         // stop writing to the shared memory before it is unmapped.
+        let rect = if let Some(w) = self.wm.get_window(id) {
+            Some(Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25))
+        } else {
+            None
+        };
+
         if let Some(w) = self.wm.get_window_mut(id) {
             w.visible = false;
+        }
+
+        if let Some(r) = rect {
+            self.mark_dirty_rect(r);
         }
 
         // Update focus away from the closing window
@@ -2598,35 +2786,76 @@ impl Compositor {
     }
 
     fn draw_all(&mut self) {
-        if self.scaled_wallpaper.is_some() {
+        let draw_rect = self.dirty_rect.take().unwrap_or(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+
+        // 1. Wallpaper / Background
+        if self.wallpaper_cache_valid && !self.wallpaper_cache_ptr.is_null() {
+            let sw = self.fb.width();
             let stride = self.backbuffer_fb.stride();
-            if let Some(ref wp) = self.scaled_wallpaper {
-                let ptr = self._backbuffer.as_mut_ptr() as *mut u8;
-                let len = self._backbuffer.len() * 4;
-                let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-                wp.blit_to(buf, stride, 0, 0);
+            let src_ptr = self.wallpaper_cache_ptr;
+            let dst_ptr = self.backbuffer_ptr as *mut u8;
+
+            let y_start = draw_rect.y as u32;
+            let y_end = (draw_rect.y + draw_rect.h as i32) as u32;
+            let x_start = draw_rect.x as u32;
+            let copy_len = draw_rect.w * 4;
+
+            for row in y_start..y_end {
+                let src_off = (row * sw * 4 + x_start * 4) as usize;
+                let dst_off = (row * stride * 4 + x_start * 4) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_ptr.add(src_off),
+                        dst_ptr.add(dst_off),
+                        copy_len as usize
+                    );
+                }
             }
         } else {
-            self.backbuffer_fb.fill_rect(0, 0, self.backbuffer_fb.width(), self.backbuffer_fb.height(), self.desktop_bg);
+            self.backbuffer_fb.fill_rect(draw_rect.x as u32, draw_rect.y as u32, draw_rect.w, draw_rect.h, self.desktop_bg);
         }
 
-        self.draw_desktop_icons();
-        self.draw_panel();
-
-        for window in self.wm.windows.iter() {
-            if window.visible {
-                self.draw_window(window);
+        // 2. Icons
+        for icon in &self.icons {
+            let icon_rect = Rect::new(icon.x, icon.y, 60, 80);
+            if icon_rect.intersects(&draw_rect) {
+                self.draw_desktop_icon(icon);
             }
         }
 
-        self.draw_dock();
+        // 3. Panel
+        let panel_rect = Rect::new(0, 0, self.fb.width(), PANEL_HEIGHT);
+        if panel_rect.intersects(&draw_rect) {
+             self.draw_panel();
+        }
+
+        // 4. Windows
+        for window in self.wm.windows.iter() {
+            if window.visible {
+                let win_rect = Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12);
+                if win_rect.intersects(&draw_rect) {
+                    self.draw_window(window);
+                }
+            }
+        }
+
+        // 5. Dock
+        if let Some((dx, dy, dw, dh, _, _, _, _)) = self.dock_layout() {
+            let dock_rect = Rect::new(dx, dy, dw, dh);
+            if dock_rect.intersects(&draw_rect) {
+                self.draw_dock();
+            }
+        }
 
         if self.context_menu.visible {
             self.draw_context_menu();
         }
 
+        // 6. Cursor (always drawn)
         self.draw_cursor();
-        self.backbuffer_fb.blit(&self.fb);
+
+        // 7. Final Blit to screen
+        self.backbuffer_fb.blit_rect(&self.fb, draw_rect.x as u32, draw_rect.y as u32, draw_rect.w, draw_rect.h);
     }
 
     fn draw_context_menu(&self) {
@@ -2661,23 +2890,21 @@ impl Compositor {
         None
     }
 
-    fn draw_desktop_icons(&self) {
-        for icon in &self.icons {
-            let ix = icon.x as u32;
-            let iy = icon.y as u32;
-            let size = 60u32;
-            let icon_size = 48u32;
-            let icon_x = ix + (size - icon_size) / 2;
-            let icon_y = iy + (size - icon_size) / 2 - 2;
+    fn draw_desktop_icon(&self, icon: &DesktopIcon) {
+        let ix = icon.x as u32;
+        let iy = icon.y as u32;
+        let size = 60u32;
+        let icon_size = 48u32;
+        let icon_x = ix + (size - icon_size) / 2;
+        let icon_y = iy + (size - icon_size) / 2 - 2;
 
-            self.backbuffer_fb.fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
+        self.backbuffer_fb.fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
 
-            // Label below icon (centered)
-            let label_len = icon.label.len() as u32 * 8;
-            let lx = (ix as i32 + (size as i32 - label_len as i32) / 2).max(0) as u32;
-            let label_y = iy + size + 6;
-            self.backbuffer_fb.draw_string(lx, label_y, &icon.label, theme::ICON_LABEL, self.desktop_bg);
-        }
+        // Label below icon (centered)
+        let label_len = icon.label.len() as u32 * 8;
+        let lx = (ix as i32 + (size as i32 - label_len as i32) / 2).max(0) as u32;
+        let label_y = iy + size + 6;
+        self.backbuffer_fb.draw_string(lx, label_y, &icon.label, theme::ICON_LABEL, self.desktop_bg);
     }
 
     fn draw_panel(&self) {
@@ -2923,8 +3150,8 @@ impl Compositor {
     }
 
     fn _backbuffer_as_u8_mut(&mut self) -> &mut [u8] {
-        let ptr = self._backbuffer.as_mut_ptr() as *mut u8;
-        let len = self._backbuffer.len() * 4;
+        let ptr = self.backbuffer_ptr as *mut u8;
+        let len = (self.backbuffer_fb.stride() * self.backbuffer_fb.height() * 4) as usize;
         unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 
@@ -2981,7 +3208,7 @@ fn main() -> ! {
     log("Atom Desktop Environment v1.0");
     log("ui_shell: startup begin");
 
-    let fb_info = match get_framebuffer() {
+    let _fb_info = match get_framebuffer() {
         Some(info) => info,
         None => {
             log("ui_shell: failed to get framebuffer info");
@@ -2989,18 +3216,11 @@ fn main() -> ! {
         }
     };
 
-    // Reserve enough heap for:
-    // - a backbuffer at the largest supported mode (1920×1080×32bpp)
-    // - decoded wallpaper source images / PNG scratch buffers
-    // - one fully scaled wallpaper plus UI transient allocations
+    // New Memory Model: Logic heap is FIXED and decoupled from graphics.
+    // Graphics buffers (backbuffer, wallpaper) use dedicated shared regions.
     //
-    // The previous 8 MiB headroom was too small for image wallpapers and would
-    // hit `alloc_error`, which traps in an infinite loop and looked like a
-    // compositor freeze immediately after pressing Apply.
-    const MAX_BACKBUFFER_PIXELS: usize = 1920 * 1080;
-    const EXTRA_HEAP_HEADROOM: usize = 32 * 1024 * 1024;
-    let fb_size = fb_info.stride as usize * fb_info.height as usize * fb_info.bytes_per_pixel as usize;
-    let heap_size = (MAX_BACKBUFFER_PIXELS * 4).max(fb_size) + EXTRA_HEAP_HEADROOM;
+    // 8 MiB provides headroom for complex desktop states and window management.
+    let heap_size = 8 * 1024 * 1024;
 
     let region_id = match shared_region_create(heap_size) {
         Ok(id) => id,

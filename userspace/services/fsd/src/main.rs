@@ -25,63 +25,64 @@ mod allocator {
     use core::alloc::{GlobalAlloc, Layout};
     use core::cell::UnsafeCell;
     use core::ptr::null_mut;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
-    const HEAP_SIZE: usize = 512 * 1024; // 512 KB heap for fsd
+    const HEAP_SIZE: usize = 1024 * 1024; // 1 MB heap for fsd
 
     #[repr(align(4096))]
     struct Heap {
         data: UnsafeCell<[u8; HEAP_SIZE]>,
-        next: UnsafeCell<usize>,
+        next: AtomicUsize,
     }
 
     unsafe impl Sync for Heap {}
 
     static HEAP: Heap = Heap {
         data: UnsafeCell::new([0; HEAP_SIZE]),
-        next: UnsafeCell::new(0),
+        next: AtomicUsize::new(0),
     };
 
     pub struct BumpAllocator;
 
     unsafe impl GlobalAlloc for BumpAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let next = HEAP.next.get();
+            let size = layout.size();
+            let align = layout.align().max(16);
             let heap_start = HEAP.data.get() as *mut u8;
 
-            let align = layout.align();
-            let size = layout.size();
+            loop {
+                let current = HEAP.next.load(Ordering::Relaxed);
+                let aligned = (current + align - 1) & !(align - 1);
+                let new_next = aligned + size;
 
-            let current = *next;
-            let aligned = (current + align - 1) & !(align - 1);
+                if new_next > HEAP_SIZE {
+                    atom_syscall::debug::log("fsd: HEAP EXHAUSTED — bump allocator out of memory");
+                    return null_mut();
+                }
 
-            if aligned + size > HEAP_SIZE {
-                // Heap exhausted — log and return null so the caller gets
-                // an allocation failure rather than a silent memory stomp.
-                atom_syscall::debug::log(
-                    "fsd: HEAP EXHAUSTED — bump allocator out of memory"
-                );
-                return null_mut();
+                if HEAP.next.compare_exchange_weak(
+                    current, new_next, Ordering::SeqCst, Ordering::Relaxed
+                ).is_ok() {
+                    // Warn when heap usage crosses 75% so we can catch pressure early.
+                    if new_next > HEAP_SIZE * 3 / 4 && current <= HEAP_SIZE * 3 / 4 {
+                        atom_syscall::debug::log("fsd: HEAP WARNING — usage crossed 75%");
+                    }
+                    return heap_start.add(aligned);
+                }
             }
-
-            *next = aligned + size;
-
-            // Warn when heap usage crosses 75% so we can catch pressure early.
-            let used = aligned + size;
-            if used > HEAP_SIZE * 3 / 4 && current <= HEAP_SIZE * 3 / 4 {
-                atom_syscall::debug::log(
-                    "fsd: HEAP WARNING — usage crossed 75%"
-                );
-            }
-
-            heap_start.add(aligned)
         }
 
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-            // Bump allocator: dealloc is a no-op.
-            // The heap is intentionally never freed because fsd is a long-lived
-            // daemon and all allocations are either permanent (static state) or
-            // short-lived per-request Vecs that are dropped after the reply is sent.
-            // If heap pressure becomes a problem, replace with a proper allocator.
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // LIFO optimisation: reclaim the most-recently-allocated block so
+            // transient Vec allocations (IPC buffers etc.) don't exhaust the heap.
+            let heap_start = HEAP.data.get() as usize;
+            let blk_offset = ptr as usize - heap_start;
+            let blk_end = blk_offset + layout.size();
+
+            // Only attempt to roll back if this was the very last allocation.
+            let _ = HEAP.next.compare_exchange(
+                blk_end, blk_offset, Ordering::SeqCst, Ordering::Relaxed,
+            );
         }
     }
 

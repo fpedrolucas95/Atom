@@ -73,6 +73,24 @@ impl DecodedImage {
     /// Pixels are composited with premultiplied alpha over the destination.
     /// `dst_stride` is the number of **pixels** (not bytes) per row in `dst`.
     pub fn blit_to(&self, dst: &mut [u8], dst_stride: u32, dst_x: u32, dst_y: u32) {
+        // FAST PATH: If the image is fully opaque and spans the whole destination row,
+        // we can skip alpha math and potentially use optimized copies.
+        let mut is_opaque = true;
+        for i in 0..self.height {
+            for j in 0..self.width {
+                if self.pixels[((i * self.width + j) * 4 + 3) as usize] != 255 {
+                    is_opaque = false;
+                    break;
+                }
+            }
+            if !is_opaque { break; }
+        }
+
+        if is_opaque {
+            self.blit_opaque(dst, dst_stride, dst_x, dst_y);
+            return;
+        }
+
         for row in 0..self.height {
             for col in 0..self.width {
                 let src_off = ((row * self.width + col) * 4) as usize;
@@ -93,6 +111,22 @@ impl DecodedImage {
                 dst[dst_off + 2] = ((src_b as u16 * src_a as u16 + dst[dst_off + 2] as u16 * ia) / 255) as u8;
                 dst[dst_off + 3] = src_a.saturating_add(((dst[dst_off + 3] as u16 * ia) / 255) as u8);
             }
+        }
+    }
+
+    /// Optimized blit for fully opaque images (ignores source alpha, uses memcpy).
+    pub fn blit_opaque(&self, dst: &mut [u8], dst_stride: u32, dst_x: u32, dst_y: u32) {
+        for row in 0..self.height {
+            let src_row_off = (row * self.width * 4) as usize;
+            let dst_row_off = (((dst_y + row) * dst_stride + dst_x) * 4) as usize;
+
+            if dst_row_off + (self.width * 4) as usize > dst.len() {
+                continue;
+            }
+
+            let src_slice = &self.pixels[src_row_off..src_row_off + (self.width * 4) as usize];
+            let dst_slice = &mut dst[dst_row_off..dst_row_off + (self.width * 4) as usize];
+            dst_slice.copy_from_slice(src_slice);
         }
     }
 }
