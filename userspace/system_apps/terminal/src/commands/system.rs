@@ -573,22 +573,6 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
         ctx.println(KERNEL_VERSION);
     }
 
-    let pkg_count = ctx.ipc.count_processes();
-    ctx.print("Packages:     ");
-    let mut num_buf = [0u8; 16];
-    let n = format_number(pkg_count as u64, &mut num_buf);
-    ctx.println(unsafe { core::str::from_utf8_unchecked(&num_buf[..n]) });
-
-    if let Some((w, h)) = ctx.ipc.get_resolution() {
-        ctx.print("Resolution:   ");
-        let mut res_buf = [0u8; 32];
-        let mut pos = format_number(w as u64, &mut res_buf);
-        res_buf[pos] = b'x';
-        pos += 1;
-        pos += format_number(h as u64, &mut res_buf[pos..]);
-        ctx.println(unsafe { core::str::from_utf8_unchecked(&res_buf[..pos]) });
-    }
-
     ctx.print("CPU:          ");
     let mut cpu_buf = [0u8; 64];
     let cpu_len = ctx.ipc.get_cpu_brand(&mut cpu_buf);
