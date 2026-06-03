@@ -154,59 +154,8 @@ struct MadtLocalApic {
     flags: u32,
 }
 
-pub fn detect_cpu_apic_ids(rsdp_addr: u64) -> Vec<u32> {
+fn parse_madt(madt_phys: u64) -> Vec<u32> {
     let mut ids = Vec::new();
-
-    if rsdp_addr == 0 {
-        ids.push(apic::local_apic_id());
-        return ids;
-    }
-
-    let rsdp_ptr = crate::mm::vm::phys_to_virt_ptr(rsdp_addr as usize) as *const RsdpV2;
-    let rsdp = unsafe { &*rsdp_ptr };
-
-    if &rsdp.signature != b"RSD PTR " {
-        log_warn!(LOG_ORIGIN, "RSDP signature invalid, fallback to BSP only");
-        ids.push(apic::local_apic_id());
-        return ids;
-    }
-
-    let xsdt_phys = rsdp.xsdt_address;
-    if xsdt_phys == 0 {
-        ids.push(apic::local_apic_id());
-        return ids;
-    }
-
-    let xsdt_ptr = crate::mm::vm::phys_to_virt_ptr(xsdt_phys as usize) as *const SdtHeader;
-    let xsdt = unsafe { &*xsdt_ptr };
-    if &xsdt.signature != b"XSDT" {
-        log_warn!(LOG_ORIGIN, "XSDT not available, fallback to BSP only");
-        ids.push(apic::local_apic_id());
-        return ids;
-    }
-
-    let entries = ((xsdt.length as usize).saturating_sub(size_of::<SdtHeader>())) / 8;
-    let entries_ptr = (xsdt_ptr as usize + size_of::<SdtHeader>()) as *const u64;
-
-    let mut madt_phys = 0u64;
-    for i in 0..entries {
-        let table_phys = unsafe { *entries_ptr.add(i) };
-        if table_phys == 0 {
-            continue;
-        }
-        let hdr_ptr = crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
-        let hdr = unsafe { &*hdr_ptr };
-        if &hdr.signature == b"APIC" {
-            madt_phys = table_phys;
-            break;
-        }
-    }
-
-    if madt_phys == 0 {
-        ids.push(apic::local_apic_id());
-        return ids;
-    }
-
     let madt_ptr = crate::mm::vm::phys_to_virt_ptr(madt_phys as usize) as *const MadtHeader;
     let madt = unsafe { &*madt_ptr };
 
@@ -230,6 +179,78 @@ pub fn detect_cpu_apic_ids(rsdp_addr: u64) -> Vec<u32> {
         }
 
         cursor = unsafe { cursor.add(entry.length as usize) };
+    }
+
+    ids
+}
+
+pub fn detect_cpu_apic_ids(rsdp_addr: u64) -> Vec<u32> {
+    let mut ids = Vec::new();
+
+    if rsdp_addr == 0 {
+        ids.push(apic::local_apic_id());
+        return ids;
+    }
+
+    let rsdp_ptr = crate::mm::vm::phys_to_virt_ptr(rsdp_addr as usize) as *const RsdpV2;
+    let rsdp = unsafe { &*rsdp_ptr };
+
+    if &rsdp.signature != b"RSD PTR " {
+        log_warn!(LOG_ORIGIN, "RSDP signature invalid, fallback to BSP only");
+        ids.push(apic::local_apic_id());
+        return ids;
+    }
+
+    let mut madt_phys = 0u64;
+
+    if rsdp.revision >= 2 && rsdp.xsdt_address != 0 {
+        // Use XSDT (64-bit addresses)
+        let xsdt_phys = rsdp.xsdt_address;
+        let xsdt_ptr = crate::mm::vm::phys_to_virt_ptr(xsdt_phys as usize) as *const SdtHeader;
+        let xsdt = unsafe { &*xsdt_ptr };
+
+        if &xsdt.signature == b"XSDT" {
+            let entries = (xsdt.length as usize).saturating_sub(size_of::<SdtHeader>()) / 8;
+            let entries_ptr = (xsdt_ptr as usize + size_of::<SdtHeader>()) as *const u64;
+
+            for i in 0..entries {
+                let table_phys = unsafe { *entries_ptr.add(i) };
+                if table_phys == 0 { continue; }
+                let hdr_ptr = crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
+                let hdr = unsafe { &*hdr_ptr };
+                if &hdr.signature == b"APIC" {
+                    madt_phys = table_phys;
+                    break;
+                }
+            }
+        }
+    }
+
+    if madt_phys == 0 && rsdp.rsdt_address != 0 {
+        // Use RSDT (32-bit addresses)
+        let rsdt_phys = rsdp.rsdt_address as u64;
+        let rsdt_ptr = crate::mm::vm::phys_to_virt_ptr(rsdt_phys as usize) as *const SdtHeader;
+        let rsdt = unsafe { &*rsdt_ptr };
+
+        if &rsdt.signature == b"RSDT" {
+            let entries = (rsdt.length as usize).saturating_sub(size_of::<SdtHeader>()) / 4;
+            let entries_ptr = (rsdt_ptr as usize + size_of::<SdtHeader>()) as *const u32;
+
+            for i in 0..entries {
+                let table_phys = unsafe { *entries_ptr.add(i) } as u64;
+                if table_phys == 0 { continue; }
+                let hdr_ptr = crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
+                let hdr = unsafe { &*hdr_ptr };
+                if &hdr.signature == b"APIC" {
+                    madt_phys = table_phys;
+                    break;
+                }
+            }
+        }
+    }
+
+    if madt_phys != 0 {
+        ids = parse_madt(madt_phys);
     }
 
     if ids.is_empty() {
