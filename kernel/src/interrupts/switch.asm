@@ -69,6 +69,7 @@ enter_user:
     mov [rsp + 24], rdx         ; RSP
     mov qword [rsp + 32], 0x1B  ; SS = USER_DATA_SELECTOR (GDT[0x18]|3)
 
+    swapgs
     iretq
 
 ; =================================================
@@ -99,6 +100,8 @@ enter_user_first_time:
     mov [rsp + 16], rax
     mov [rsp + 24], rdx
     mov qword [rsp + 32], 0x1B
+
+    swapgs
 
     ; Zero all GPRs for clean state
     xor rax, rax
@@ -234,6 +237,8 @@ switch_to_context_internal:
     mov rbx, [r15 + OFF_RSP]
     mov [rsp + 24], rbx
     mov qword [rsp + 32], 0x1B  ; SS = USER_DATA_SELECTOR
+
+    swapgs
 
     ; Restore registers
     mov rax, [r15 + OFF_RAX]

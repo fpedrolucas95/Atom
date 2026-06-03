@@ -112,7 +112,8 @@ pub fn init_for_cpu(cpu_id: usize, tss_rsp0: u64) {
 }
 
 unsafe fn write_tss_descriptor(cpu: usize) {
-    let tss_addr = core::ptr::addr_of!(TSS_TABLE[cpu]) as u64;
+    // Use higher-half mirror address for TSS to ensure it is accessible in all address spaces
+    let tss_addr = crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(TSS_TABLE[cpu]) as usize) as u64;
     let limit = (size_of::<Tss>() - 1) as u64;
 
     let low = limit & 0xFFFF
@@ -128,9 +129,10 @@ unsafe fn write_tss_descriptor(cpu: usize) {
 }
 
 unsafe fn load_gdt_and_segments(cpu: usize) {
+    // Use higher-half mirror address for GDT to ensure it is accessible in all address spaces
     let ptr = DescriptorTablePointer {
         limit: (size_of::<Gdt>() - 1) as u16,
-        base: core::ptr::addr_of!(GDT_TABLE[cpu]) as u64,
+        base: crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(GDT_TABLE[cpu]) as usize) as u64,
     };
 
     core::arch::asm!(
@@ -168,8 +170,9 @@ pub fn set_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
 }
 
 unsafe fn double_fault_stack_top(cpu: usize) -> u64 {
-    // DOUBLE_FAULT_STACKS is a static in BSS, already at a higher-half virtual address.
-    // Adding HIGHER_HALF_BASE again would produce a non-canonical address → #GP.
-    let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as u64;
+    // Use higher-half mirror address for the IST stack.
+    // The kernel binary is identity-mapped, so its physical address is equal to its
+    // load-time virtual address. phys_to_virt_ptr converts this to the shared higher-half mirror.
+    let stack_ptr = crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as usize) as u64;
     stack_ptr + DOUBLE_FAULT_STACK_SIZE as u64
 }

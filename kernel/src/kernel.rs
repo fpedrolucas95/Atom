@@ -292,7 +292,7 @@ fn launch_smp_smoke_threads() {
 
         let stack_top = mm::vm::HIGHER_HALF_BASE + stack_phys + (4 * mm::pmm::PAGE_SIZE);
         let thread = thread::Thread::new(
-            smp_smoke_thread_entry as usize as u64,
+            smp_smoke_thread_entry as *const () as usize as u64,
             stack_top as u64,
             4 * mm::pmm::PAGE_SIZE,
             cr3,
