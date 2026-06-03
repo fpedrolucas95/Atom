@@ -367,10 +367,6 @@ impl Scheduler {
         }
 
         if let Some(prev) = previous {
-            if Some(prev) != chosen {
-                cpu.context_switches = cpu.context_switches.saturating_add(1);
-            }
-
             if matches!(thread::get_thread_state(prev), Some(ThreadState::Running)) {
                 thread::set_thread_state(prev, ThreadState::Ready);
                 self.ownership.lock().insert(prev, NO_CPU_OWNER);
