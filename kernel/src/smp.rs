@@ -431,7 +431,8 @@ fn prepare_trampoline(stack_top: u64, entry: u64) {
     page[..AP_TRAMPOLINE.len()].copy_from_slice(AP_TRAMPOLINE);
 
     let cr3 = crate::arch::read_cr3();
-    let pml4_phys = (cr3 & crate::arch::CR3_PML4_ADDR_MASK) as u32;
+    let pml4_phys_full = (cr3 & crate::arch::CR3_PML4_ADDR_MASK) as usize;
+    let pml4_phys = pml4_phys_full as u32;
 
     patch_u32(&mut page, TRAMPOLINE_PML4_MAGIC, pml4_phys);
     patch_u64(&mut page, TRAMPOLINE_STACK_MAGIC, stack_top);
@@ -441,6 +442,18 @@ fn prepare_trampoline(stack_top: u64, entry: u64) {
     unsafe {
         core::ptr::copy_nonoverlapping(page.as_ptr(), dst, page.len());
     }
+
+    // Conventional-memory identity mappings carry the NX bit. The AP executes
+    // this page after enabling paging, so the identity mapping must be
+    // executable. remap_page_in_pml4 creates the entry if absent (e.g. when
+    // the firmware did not report 0x8000 as a usable RAM region).
+    crate::mm::vm::remap_page_in_pml4(
+        pml4_phys_full,
+        TRAMPOLINE_PHYS,
+        TRAMPOLINE_PHYS,
+        crate::mm::vm::PageFlags::kernel_rw(),
+    )
+    .expect("failed to make AP trampoline page executable");
 }
 
 fn alloc_stack_top(pages: usize) -> Option<u64> {

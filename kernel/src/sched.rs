@@ -371,12 +371,12 @@ impl Scheduler {
                 thread::set_thread_state(prev, ThreadState::Ready);
                 self.ownership.lock().insert(prev, NO_CPU_OWNER);
             }
-        }
 
-        // INVARIANT: A thread transitioning to Running must not be in any run queue.
-        #[cfg(debug_assertions)]
-        if self.is_in_any_ready_queue(prev) {
-            panic!("SMP INVARIANT VIOLATION: thread {:?} Running but still in ready queue", prev);
+            // INVARIANT: A thread transitioning to Running must not be in any run queue.
+            #[cfg(debug_assertions)]
+            if self.is_in_any_ready_queue(prev) {
+                panic!("SMP INVARIANT VIOLATION: thread {:?} Running but still in ready queue", prev);
+            }
         }
 
         if let Some(next) = chosen {
