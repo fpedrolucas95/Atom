@@ -773,6 +773,32 @@ pub fn alloc_page() -> Option<usize> {
     None
 }
 
+/// Reserve a specific physical page so it cannot be allocated later.
+/// Returns true if the page is now reserved/allocated.
+pub fn reserve_page(addr: usize) -> bool {
+    if (addr & (PAGE_SIZE - 1)) != 0 {
+        return false;
+    }
+
+    let page = addr / PAGE_SIZE;
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total {
+        return false;
+    }
+
+    let _lock = BITMAP_LOCK.lock();
+
+    unsafe {
+        if is_page_free(page) {
+            set_page_allocated(page);
+            FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
+            PHYS_REFCOUNTS.lock().remove(&addr);
+        }
+    }
+
+    true
+}
+
 /// Fast free-page search using word-at-a-time scanning.
 /// Scans bitmap from `start_page` to `end_page` (exclusive).
 /// Returns the first free page index, or None.

@@ -235,6 +235,8 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
 
         // Non-sensitive system information — public.
         SYS_GET_TICKS | SYS_GET_MEMORY_INFO | SYS_GET_CPU_BRAND
+        | SYS_GET_CPU_ID | SYS_GET_CPU_COUNT
+        | SYS_SET_THREAD_AFFINITY | SYS_GET_THREAD_AFFINITY
             => ExplicitlyUnrestricted,
 
         // Debug log — no cap required (process names its own output).

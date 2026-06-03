@@ -1,42 +1,12 @@
-// Global Descriptor Table (GDT) and Task State Segment (TSS)
-//
-// Provides x86_64 segmentation and task-state initialization for the kernel.
-// Although segmentation is largely unused in long mode, the GDT remains
-// mandatory for defining privilege levels and loading the TSS.
-//
-// Key responsibilities:
-// - Define kernel and user code/data segments with correct privilege levels
-// - Set up a 64-bit Task State Segment (TSS) for stack switching on interrupts
-// - Install the GDT in the CPU using `lgdt` and reload segment registers
-// - Load the TSS selector into the task register (`ltr`)
-//
-// Design and implementation details:
-// - Uses `#[repr(C, packed)]` to match the exact hardware-defined layouts
-// - GDT entries are raw 64-bit descriptors encoded manually
-// - TSS descriptor spans two GDT entries (low/high), as required in x86_64
-// - Static mutable GDT and TSS are used, requiring careful `unsafe` access
-// - Kernel and user selectors are predefined and reused across the kernel
-//
-// Security and correctness notes:
-// - User segments are marked with DPL=3, kernel segments with DPL=0
-// - The TSS defines `rsp0`, ensuring safe stack switching on privilege changes
-// - The I/O permission bitmap is disabled by setting `iomap_base` past the TSS
-// - Correct GDT/TSS setup is critical for interrupt handling and isolation
-
 #![allow(dead_code)]
 
 use core::mem::size_of;
 
 const DOUBLE_FAULT_IST_INDEX: usize = 0;
-/// 16 KiB stack for the double-fault handler.
-///
-/// The previous 4 KiB was borderline: a #DF handler that logs register state
-/// through the serial driver can easily consume >2 KiB of stack.  On systems
-/// with large RAM the exception diagnostics (PMM stats, VA dump) push deeper.
-/// 16 KiB provides ample headroom and costs negligible BSS.
 const DOUBLE_FAULT_STACK_SIZE: usize = 16384;
 
 #[repr(align(16))]
+#[derive(Clone, Copy)]
 struct AlignedStack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
 #[repr(C, packed)]
@@ -46,7 +16,7 @@ struct DescriptorTablePointer {
 }
 
 #[repr(C, packed)]
-#[derive(Default)]
+#[derive(Clone, Copy)]
 struct Tss {
     _reserved_0: u32,
     pub rsp0: u64,
@@ -59,62 +29,90 @@ struct Tss {
     pub iomap_base: u16,
 }
 
+impl Tss {
+    const fn new() -> Self {
+        Self {
+            _reserved_0: 0,
+            rsp0: 0,
+            rsp1: 0,
+            rsp2: 0,
+            _reserved_1: 0,
+            ist: [0; 7],
+            _reserved_2: 0,
+            _reserved_3: 0,
+            iomap_base: 0,
+        }
+    }
+}
+
 const GDT_KERNEL_CODE: u64 = 0x00AF9A000000FFFF;
 const GDT_KERNEL_DATA: u64 = 0x00AF92000000FFFF;
-const GDT_USER_CODE: u64   = 0x00AFFA000000FFFF;
-const GDT_USER_DATA: u64   = 0x00AFF2000000FFFF;
+const GDT_USER_CODE: u64 = 0x00AFFA000000FFFF;
+const GDT_USER_DATA: u64 = 0x00AFF2000000FFFF;
 
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
-pub const USER_CODE_SELECTOR: u16   = 0x18 | 3;
-pub const USER_DATA_SELECTOR: u16   = 0x20 | 3;
-pub const TSS_SELECTOR: u16         = 0x28;
+pub const USER_CODE_SELECTOR: u16 = 0x18 | 3;
+pub const USER_DATA_SELECTOR: u16 = 0x20 | 3;
+pub const TSS_SELECTOR: u16 = 0x28;
 
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 struct Gdt {
     entries: [u64; 7],
 }
 
-static mut GDT: Gdt = Gdt {
-    entries: [
-        0,
-        GDT_KERNEL_CODE,
-        GDT_KERNEL_DATA,
-        GDT_USER_CODE,
-        GDT_USER_DATA,
-        0,
-        0,
-    ],
-};
+impl Gdt {
+    const fn new() -> Self {
+        Self {
+            entries: [
+                0,
+                GDT_KERNEL_CODE,
+                GDT_KERNEL_DATA,
+                GDT_USER_CODE,
+                GDT_USER_DATA,
+                0,
+                0,
+            ],
+        }
+    }
+}
 
-static mut DOUBLE_FAULT_STACK: AlignedStack = AlignedStack([0; DOUBLE_FAULT_STACK_SIZE]);
-static mut TSS: Tss = Tss {
-    _reserved_0: 0,
-    rsp0: 0,
-    rsp1: 0,
-    rsp2: 0,
-    _reserved_1: 0,
-    ist: [0; 7],
-    _reserved_2: 0,
-    _reserved_3: 0,
-    iomap_base: 0,
-};
+const MAX_CPUS: usize = crate::smp::MAX_CPUS;
+
+static mut GDT_TABLE: [Gdt; MAX_CPUS] = [Gdt::new(); MAX_CPUS];
+static mut DOUBLE_FAULT_STACKS: [AlignedStack; MAX_CPUS] =
+    [AlignedStack([0; DOUBLE_FAULT_STACK_SIZE]); MAX_CPUS];
+static mut TSS_TABLE: [Tss; MAX_CPUS] = [Tss::new(); MAX_CPUS];
+
+#[inline]
+fn current_cpu_index() -> usize {
+    let cpu = crate::smp::current_cpu_id();
+    if cpu < MAX_CPUS { cpu } else { 0 }
+}
 
 pub fn init(tss_rsp0: u64) {
+    let cpu = current_cpu_index();
+    init_for_cpu(cpu, tss_rsp0);
+}
+
+pub fn init_for_cpu(cpu_id: usize, tss_rsp0: u64) {
+    let cpu = cpu_id.min(MAX_CPUS - 1);
+
     unsafe {
-        TSS.rsp0 = tss_rsp0 & !0xF;
+        let tss = &mut TSS_TABLE[cpu];
+        tss.rsp0 = tss_rsp0 & !0xF;
+        tss.ist[DOUBLE_FAULT_IST_INDEX] = double_fault_stack_top(cpu);
+        tss.iomap_base = size_of::<Tss>() as u16;
 
-        TSS.ist[DOUBLE_FAULT_IST_INDEX] = double_fault_stack_top();
-        TSS.iomap_base = size_of::<Tss>() as u16;
-
-        write_tss_descriptor();
-        load_gdt_and_segments();
+        write_tss_descriptor(cpu);
+        load_gdt_and_segments(cpu);
         load_tr();
     }
 }
 
-unsafe fn write_tss_descriptor() {
-    let tss_addr = core::ptr::addr_of!(TSS) as u64;
+unsafe fn write_tss_descriptor(cpu: usize) {
+    let tss_addr = core::ptr::addr_of!(TSS_TABLE[cpu]) as u64;
     let limit = (size_of::<Tss>() - 1) as u64;
 
     let low = limit & 0xFFFF
@@ -125,32 +123,32 @@ unsafe fn write_tss_descriptor() {
 
     let high = tss_addr >> 32;
 
-    GDT.entries[5] = low;
-    GDT.entries[6] = high;
+    GDT_TABLE[cpu].entries[5] = low;
+    GDT_TABLE[cpu].entries[6] = high;
 }
 
-unsafe fn load_gdt_and_segments() {
+unsafe fn load_gdt_and_segments(cpu: usize) {
     let ptr = DescriptorTablePointer {
         limit: (size_of::<Gdt>() - 1) as u16,
-        base: (&raw const GDT) as u64,
+        base: core::ptr::addr_of!(GDT_TABLE[cpu]) as u64,
     };
 
     core::arch::asm!(
-    "lgdt [{gdt_ptr}]",
-    "push {code}",
-    "lea {tmp}, [rip + 2f]",
-    "push {tmp}",
-    "retfq",
-    "2:",
-    "mov ax, {data}",
-    "mov ds, ax",
-    "mov es, ax",
-    "mov ss, ax",
-    gdt_ptr = in(reg) &ptr,
-    code = const KERNEL_CODE_SELECTOR,
-    data = const KERNEL_DATA_SELECTOR,
-    tmp = lateout(reg) _,
-    options(preserves_flags)
+        "lgdt [{gdt_ptr}]",
+        "push {code}",
+        "lea {tmp}, [rip + 2f]",
+        "push {tmp}",
+        "retfq",
+        "2:",
+        "mov ax, {data}",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov ss, ax",
+        gdt_ptr = in(reg) &ptr,
+        code = const KERNEL_CODE_SELECTOR,
+        data = const KERNEL_DATA_SELECTOR,
+        tmp = lateout(reg) _,
+        options(preserves_flags)
     );
 }
 
@@ -159,22 +157,17 @@ unsafe fn load_tr() {
 }
 
 pub fn set_rsp0(rsp0: u64) {
+    set_rsp0_for_cpu(current_cpu_index(), rsp0);
+}
+
+pub fn set_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
+    let cpu = cpu_id.min(MAX_CPUS - 1);
     unsafe {
-        TSS.rsp0 = rsp0 & !0xF;
+        TSS_TABLE[cpu].rsp0 = rsp0 & !0xF;
     }
 }
 
-/// Return the top of the double-fault IST stack as a higher-half virtual address.
-///
-/// The static `DOUBLE_FAULT_STACK` lives in BSS at an identity-mapped (lower-half)
-/// address.  When a double fault fires inside a child process's address space the
-/// CPU loads RSP from TSS.IST[0].  If that address is in the lower half it relies
-/// on the deep-copied identity mapping, which may have been partially overwritten
-/// by user-page remaps.  Converting to the higher-half mirror guarantees the IST
-/// stack is reachable regardless of which PML4 is active, because higher-half
-/// entries (256-511) are shared across all address spaces.
-unsafe fn double_fault_stack_top() -> u64 {
-    let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACK) as u64;
-    let higher_half_base: u64 = 0xFFFF_8000_0000_0000;
-    stack_ptr + higher_half_base + DOUBLE_FAULT_STACK_SIZE as u64
+unsafe fn double_fault_stack_top(cpu: usize) -> u64 {
+    let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as u64;
+    stack_ptr + crate::mm::vm::HIGHER_HALF_BASE as u64 + DOUBLE_FAULT_STACK_SIZE as u64
 }

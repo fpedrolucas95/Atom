@@ -4,7 +4,12 @@
 // This module configures and operates the Local APIC and I/O APIC when
 // available, falling back to the legacy PIC and PIT when necessary.
 
-use super::{KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, TIMER_INTERRUPT_VECTOR};
+use super::{
+    KEYBOARD_INTERRUPT_VECTOR,
+    MOUSE_INTERRUPT_VECTOR,
+    RESCHEDULE_INTERRUPT_VECTOR,
+    TIMER_INTERRUPT_VECTOR,
+};
 use crate::{log_debug, log_info, log_warn};
 
 #[allow(dead_code)]
@@ -15,6 +20,8 @@ const APIC_TPR: u32 = 0x80;
 const APIC_EOI: u32 = 0xB0;
 const APIC_SPURIOUS: u32 = 0xF0;
 const APIC_LVT_TIMER: u32 = 0x320;
+const APIC_ICR_LOW: u32 = 0x300;
+const APIC_ICR_HIGH: u32 = 0x310;
 const APIC_TIMER_INIT: u32 = 0x380;
 const APIC_TIMER_CURRENT: u32 = 0x390;
 const APIC_TIMER_DIV: u32 = 0x3E0;
@@ -30,6 +37,7 @@ static mut APIC_VIRT_BASE: u64 = APIC_BASE;
 static mut IOAPIC_VIRT_BASE: u64 = IOAPIC_BASE;
 static mut APIC_ENABLED: bool = false;
 static mut PIC_ACTIVE: bool = false;
+static mut APIC_TIMER_CALIBRATED_COUNT: u32 = 0;
 
 /* ---------------- APIC MMIO helpers ---------------- */
 
@@ -136,24 +144,8 @@ pub fn init() {
         return;
     }
 
-    log_info!(LOG_ORIGIN, "Initializing Local APIC");
+    init_local_current_cpu();
 
-    let apic_base = get_apic_base() & 0xFFFFFF000;
-
-    unsafe {
-        APIC_VIRT_BASE = apic_base;
-        enable_apic();
-
-        let id = apic_read(APIC_ID) >> 24;
-        let version = apic_read(APIC_VERSION) & 0xFF;
-
-        log_debug!(LOG_ORIGIN, "APIC ID: {}", id);
-        log_debug!(LOG_ORIGIN, "APIC version: {:#X}", version);
-
-        APIC_ENABLED = true;
-    }
-
-    log_info!(LOG_ORIGIN, "Local APIC initialized");
     log_info!(LOG_ORIGIN, "Initializing I/O APIC");
 
     unsafe {
@@ -196,7 +188,7 @@ pub fn init() {
         } else {
             log_info!(LOG_ORIGIN, "IRQ12 (mouse) NOT masked, vector={}", redtbl_low & 0xFF);
         }
-        
+
         ioapic_write(0x14, 0x0001_0000);
         ioapic_write(0x15, 0x0000_0000);
     }
@@ -204,6 +196,27 @@ pub fn init() {
     unsafe { disable_legacy_pic(); }
 
     log_info!(LOG_ORIGIN, "APIC subsystem initialized (PIC disabled)");
+}
+
+pub fn init_local_current_cpu() {
+    const LOG_ORIGIN: &str = "apic";
+
+    let apic_base = get_apic_base() & 0xFFFF_FFFF_F000;
+
+    unsafe {
+        APIC_VIRT_BASE = apic_base;
+        enable_apic();
+
+        let id = apic_read(APIC_ID) >> 24;
+        let version = apic_read(APIC_VERSION) & 0xFF;
+
+        log_debug!(LOG_ORIGIN, "APIC ID: {}", id);
+        log_debug!(LOG_ORIGIN, "APIC version: {:#X}", version);
+
+        APIC_ENABLED = true;
+    }
+
+    log_info!(LOG_ORIGIN, "Local APIC initialized on LAPIC ID {}", local_apic_id());
 }
 
 #[allow(dead_code)]
@@ -256,6 +269,43 @@ unsafe fn disable_legacy_pic() {
     );
 }
 
+#[inline]
+pub fn local_apic_id() -> u32 {
+    unsafe { apic_read(APIC_ID) >> 24 }
+}
+
+#[inline]
+fn wait_icr_idle() {
+    while unsafe { (apic_read(APIC_ICR_LOW) & (1 << 12)) != 0 } {
+        core::hint::spin_loop();
+    }
+}
+
+fn send_ipi(apic_id: u32, icr_low: u32) {
+    unsafe {
+        wait_icr_idle();
+        apic_write(APIC_ICR_HIGH, apic_id << 24);
+        apic_write(APIC_ICR_LOW, icr_low);
+        wait_icr_idle();
+    }
+}
+
+pub fn send_init_ipi(apic_id: u32) {
+    // Delivery mode INIT, level assert, edge trigger.
+    send_ipi(apic_id, 0x0000_4500);
+}
+
+pub fn send_startup_ipi(apic_id: u32, vector: u8) {
+    let vector = (vector as u32) & 0xFF;
+    // Delivery mode STARTUP with target vector.
+    send_ipi(apic_id, 0x0000_4600 | vector);
+}
+
+pub fn send_reschedule_ipi(apic_id: u32) {
+    let vector = RESCHEDULE_INTERRUPT_VECTOR as u32;
+    send_ipi(apic_id, 0x0000_4000 | vector);
+}
+
 /* ---------------- EOI handling ---------------- */
 
 pub fn send_eoi() {
@@ -291,10 +341,28 @@ unsafe fn init_apic_timer(frequency_hz: u32) {
     const PIT_FREQ: u32 = 1_193_182; // PIT oscillator frequency in Hz
     const CALIBRATE_MS: u32 = 10;    // calibration window
 
-    let pit_count: u16 = (PIT_FREQ * CALIBRATE_MS / 1000) as u16; // ~11 932
+    let freq = frequency_hz.max(1);
 
     // --- Set APIC timer divider (divide-by-16) ---
     apic_write(APIC_TIMER_DIV, 0x3);
+
+    if APIC_TIMER_CALIBRATED_COUNT != 0 {
+        let count = APIC_TIMER_CALIBRATED_COUNT;
+        apic_write(
+            APIC_LVT_TIMER,
+            (TIMER_INTERRUPT_VECTOR as u32) | TIMER_MODE_PERIODIC,
+        );
+        apic_write(APIC_TIMER_INIT, count);
+        log_debug!(
+            LOG_ORIGIN,
+            "APIC timer armed from cached calibration: init_count={} for {}Hz",
+            count,
+            freq
+        );
+        return;
+    }
+
+    let pit_count: u16 = (PIT_FREQ * CALIBRATE_MS / 1000) as u16; // ~11 932
 
     // Mask the timer LVT so it does not fire during calibration.
     apic_write(APIC_LVT_TIMER, 0x0001_0000); // masked, one-shot
@@ -325,10 +393,11 @@ unsafe fn init_apic_timer(frequency_hz: u32) {
 
     // Compute the initial count for the requested frequency.
     // elapsed counts happened in CALIBRATE_MS ms.
-    let freq = frequency_hz.max(1);
     let ticks_per_sec = (elapsed as u64) * 1000 / CALIBRATE_MS as u64;
     let initial_count = (ticks_per_sec / freq as u64) as u32;
     let final_count = if initial_count == 0 { 1 } else { initial_count };
+
+    APIC_TIMER_CALIBRATED_COUNT = final_count;
 
     log_info!(
         LOG_ORIGIN,

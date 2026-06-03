@@ -17,6 +17,7 @@ extern rust_unexpected_interrupt_handler
 extern rust_timer_interrupt_handler
 extern rust_keyboard_interrupt_handler
 extern rust_mouse_interrupt_handler
+extern rust_reschedule_interrupt_handler
 extern rust_user_trap_interrupt_handler
 
 %macro PUSH_ALL 0
@@ -176,6 +177,16 @@ irq_handler_44:
     PUSH_ALL
     mov rcx, rsp
     CALL_RUST_HANDLER rust_mouse_interrupt_handler
+    POP_ALL
+    iretq
+
+global irq_handler_45
+irq_handler_45:
+    push qword 0
+    push qword RESCHEDULE_INTERRUPT_VECTOR
+    PUSH_ALL
+    mov rcx, rsp
+    CALL_RUST_HANDLER rust_reschedule_interrupt_handler
     POP_ALL
     iretq
 

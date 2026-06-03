@@ -46,9 +46,7 @@
 //   intended as a lightweight post-mortem aid (best-effort, not symbolic).
 //
 // Safety and correctness notes:
-// - `TICKS` is `static mut` and updated without atomics; safe only if interrupts
-//   are the sole writer and reads tolerate races, or if called with interrupts
-//   disabled when required.
+// - `TICKS` is atomic and incremented from timer IRQs on all CPUs.
 // - `stack_ptr` is trusted as pointing to a valid `InterruptFrame`; mismatches
 //   between the assembly stub layout and this struct will corrupt diagnostics.
 // - `halt()` inside an infinite loop ensures the CPU stays quiescent after a
@@ -62,7 +60,7 @@ use crate::sched;
 #[allow(unused_imports)]
 use crate::util::UI_DIRTY;
 use crate::{log_debug, log_error, log_info, log_panic, log_warn};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::interrupts::LOG_ORIGIN;
 
 // ---------------------------------------------------------------------------
@@ -782,7 +780,7 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
     }
 }
 
-static mut TICKS: u64 = 0;
+static TICKS: AtomicU64 = AtomicU64::new(0);
 static USER_MODE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -1052,9 +1050,7 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
         );
     }
 
-    unsafe {
-        TICKS += 1;
-    }
+    TICKS.fetch_add(1, Ordering::Relaxed);
 
     ipc::on_timer_tick(get_ticks());
 
@@ -1069,6 +1065,14 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
     if coming_from_user {
         sched::drive_cooperative_tick();
     }
+}
+
+
+#[no_mangle]
+pub extern "C" fn rust_reschedule_interrupt_handler(_frame: *const InterruptFrame) {
+    crate::sched::on_reschedule_interrupt();
+    super::apic::send_eoi();
+    crate::sched::drive_cooperative_tick();
 }
 
 #[no_mangle]
@@ -1117,7 +1121,7 @@ pub extern "C" fn rust_user_trap_interrupt_handler(
 }
 
 pub fn get_ticks() -> u64 {
-    unsafe { TICKS }
+    TICKS.load(Ordering::Relaxed)
 }
 
 #[allow(dead_code)]

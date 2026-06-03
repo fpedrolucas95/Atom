@@ -12,26 +12,20 @@ default rel
 
 section .text
 extern rust_syscall_dispatcher
-extern CURRENT_THREAD_KSTACK
-
-section .bss align=16
-; Temporary storage used ONLY during the RSP swap while interrupts are disabled.
-; Since interrupts are disabled by the SYSCALL instruction itself (via SFMASK),
-; this is safe on a uniprocessor system. For SMP, this must be per-CPU (GS).
-temp_user_rsp: resq 1
 
 section .text
 global syscall_entry
 syscall_entry:
-    ; SYSCALL disables interrupts.
-    ; We must not enable them until we are on a safe stack.
-    mov     [rel temp_user_rsp], rsp
-    mov     rsp, [rel CURRENT_THREAD_KSTACK]
-    and     rsp, -16 ; ABI alignment
+    ; SYSCALL enters Ring 0 with interrupts masked by SFMASK.
+    ; swapgs switches to per-CPU kernel GS base configured by smp::init_cpu_local_syscall_state.
+    swapgs
+    mov     [gs:8], rsp              ; temp_user_rsp
+    mov     rsp, [gs:0]              ; current kernel stack top
+    and     rsp, -16                 ; ABI alignment
 
     ; Build IRET frame (SS, RSP, RFLAGS, CS, RIP)
     push    qword 0x23               ; SS
-    push    qword [rel temp_user_rsp] ; RSP
+    push    qword [gs:8]             ; RSP
     push    r11                      ; RFLAGS
     push    qword 0x1B               ; CS
     push    rcx                      ; RIP
@@ -85,6 +79,7 @@ syscall_entry:
     pop     rbx
 
     ; The stack now points to the IRET frame (RIP, CS, RFLAGS, RSP, SS)
-    ; Ensure IF=1 in restored RFLAGS
+    ; Ensure IF=1 in restored RFLAGS and restore user GS base.
     or      qword [rsp + 16], 0x200
+    swapgs
     iretq

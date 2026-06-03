@@ -246,6 +246,8 @@ pub struct BootInfo {
     pub verbose: bool,
     pub boot_method: BootMethod,
     pub cpu: CpuInfo,
+    /// Physical address of ACPI RSDP (0 when unavailable).
+    pub rsdp_addr: u64,
     pub init_payload: ExecutableImage,
     /// Additional drivers loaded from \drivers\ directory
     pub drivers: DriverList,
@@ -271,6 +273,7 @@ impl BootInfo {
                 brand: [0; 48],
                 architecture: CpuArchitecture::Unknown,
             },
+            rsdp_addr: 0,
             init_payload: ExecutableImage::empty(),
             drivers: DriverList::empty(),
         }

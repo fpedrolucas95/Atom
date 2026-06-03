@@ -72,7 +72,13 @@
 
 use core::mem::size_of;
 use crate::{log_debug, log_info};
-use super::{KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, TIMER_INTERRUPT_VECTOR, USER_TRAP_INTERRUPT_VECTOR};
+use super::{
+    KEYBOARD_INTERRUPT_VECTOR,
+    MOUSE_INTERRUPT_VECTOR,
+    RESCHEDULE_INTERRUPT_VECTOR,
+    TIMER_INTERRUPT_VECTOR,
+    USER_TRAP_INTERRUPT_VECTOR,
+};
 
 // ── Compile-time vector safety assertions ────────────────────────────────────
 //
@@ -109,6 +115,13 @@ const _: () = assert!(
 const _: () = assert!(
     MOUSE_INTERRUPT_VECTOR >= 0x20,
     "MOUSE_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
+     for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
+     Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
+);
+// INVARIANT: RESCHEDULE_INTERRUPT_VECTOR must be >= 0x20 — structural, not operational.
+const _: () = assert!(
+    RESCHEDULE_INTERRUPT_VECTOR >= 0x20,
+    "RESCHEDULE_INTERRUPT_VECTOR must be >= 0x20: x86_64 reserves vectors 0x00-0x1F \
      for CPU-defined exceptions. Fix the assignment in kernel/build.rs. \
      Ref: Intel SDM Vol. 3A §6.3, Table 6-1.",
 );
@@ -207,6 +220,7 @@ extern "C" {
     fn irq_handler_32();
     fn irq_handler_33();
     fn irq_handler_44();
+    fn irq_handler_45();
     fn irq_handler_104();
 
     static unexpected_interrupt_table: [u64; IDT_SIZE];
@@ -245,6 +259,7 @@ pub fn init() {
         assert!(TIMER_INTERRUPT_VECTOR >= 0x20);
         assert!(KEYBOARD_INTERRUPT_VECTOR >= 0x20);
         assert!(MOUSE_INTERRUPT_VECTOR >= 0x20);
+        assert!(RESCHEDULE_INTERRUPT_VECTOR >= 0x20);
         assert!(USER_TRAP_INTERRUPT_VECTOR >= 0x20);
     };
 
@@ -297,6 +312,8 @@ pub fn init() {
             .set_handler(irq_handler_33 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
         IDT.entries[MOUSE_INTERRUPT_VECTOR as usize]
             .set_handler(irq_handler_44 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
+        IDT.entries[RESCHEDULE_INTERRUPT_VECTOR as usize]
+            .set_handler(irq_handler_45 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_INTERRUPT);
 
         IDT.entries[USER_TRAP_INTERRUPT_VECTOR as usize]
             .set_handler(irq_handler_104 as *const () as usize, KERNEL_CS, 0, GATE_TYPE_TRAP | DPL_RING3);
@@ -309,6 +326,19 @@ pub fn init() {
         load_idt(&idt_ptr);
 
         log_info!(LOG_ORIGIN, "IDT initialized with {} entries", IDT_SIZE);
+    }
+
+/// Reload the already-populated global IDT on the current CPU.
+///
+/// AP cores call this during SMP bring-up to install the same descriptor table
+/// prepared by BSP without rebuilding the entries.
+pub fn load_current_cpu() {
+    unsafe {
+        let idt_ptr = IdtPointer {
+            limit: (size_of::<Idt>() - 1) as u16,
+            base: core::ptr::addr_of!(IDT) as u64,
+        };
+        load_idt(&idt_ptr);
     }
 }
 

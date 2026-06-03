@@ -123,6 +123,10 @@ pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
 pub const SYS_GET_CPU_BRAND: u64 = 52;
+pub const SYS_GET_CPU_ID: u64 = 90;
+pub const SYS_GET_CPU_COUNT: u64 = 91;
+pub const SYS_SET_THREAD_AFFINITY: u64 = 92;
+pub const SYS_GET_THREAD_AFFINITY: u64 = 93;
 
 // ---------------------------------------------------------------------------
 // Infrastructure / Networking Phase 1 syscalls
@@ -821,6 +825,10 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0, arg1 as usize),
+        SYS_GET_CPU_ID => sys_get_cpu_id(),
+        SYS_GET_CPU_COUNT => sys_get_cpu_count(),
+        SYS_SET_THREAD_AFFINITY => sys_set_thread_affinity(arg0, arg1),
+        SYS_GET_THREAD_AFFINITY => sys_get_thread_affinity(arg0),
 
         // Virtual memory management syscalls
         SYS_MMAP => sys_mmap(arg0, arg1, arg2, arg3),
@@ -5048,6 +5056,49 @@ fn sys_get_cpu_brand(buffer: u64, max_len: usize) -> u64 {
     }
 
     copy_len as u64
+}
+
+
+fn resolve_target_thread_id(raw_tid: u64) -> Option<crate::thread::ThreadId> {
+    let tid = if raw_tid == 0 {
+        crate::sched::current_thread()?
+    } else {
+        crate::thread::ThreadId::from_raw(raw_tid)
+    };
+
+    if crate::thread::get_thread_state(tid).is_some() {
+        Some(tid)
+    } else {
+        None
+    }
+}
+
+fn sys_get_cpu_id() -> u64 {
+    crate::smp::current_cpu_id() as u64
+}
+
+fn sys_get_cpu_count() -> u64 {
+    crate::smp::online_cpu_count() as u64
+}
+
+fn sys_set_thread_affinity(thread_id: u64, mask: u64) -> u64 {
+    let Some(tid) = resolve_target_thread_id(thread_id) else {
+        return EINVAL;
+    };
+
+    if crate::sched::set_thread_affinity(tid, mask) {
+        ESUCCESS
+    } else {
+        EINVAL
+    }
+}
+
+fn sys_get_thread_affinity(thread_id: u64) -> u64 {
+    let Some(tid) = resolve_target_thread_id(thread_id) else {
+        return EINVAL;
+    };
+
+    crate::sched::get_thread_affinity(tid)
 }
 
 // ---------------------------------------------------------------------------

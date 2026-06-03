@@ -802,10 +802,10 @@ pub struct ThreadStats {
 static THREAD_LIST: ThreadList = ThreadList::new();
 static USERMODE_ENTRIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
 
-/// Global pointer to the current thread's kernel stack top.
-/// Used by syscall_entry in assembly to switch to the correct stack.
+/// Legacy exported pointer for current kernel stack top.
+/// Syscall entry now uses per-CPU GS state; this is kept for diagnostics.
 #[no_mangle]
-pub static mut CURRENT_THREAD_KSTACK: u64 = 0;
+pub static CURRENT_THREAD_KSTACK: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
     log_info!(
@@ -1328,6 +1328,8 @@ pub fn jump_to_thread(thread_id: ThreadId) -> ! {
     };
 
     gdt::set_rsp0(kernel_stack);
+    CURRENT_THREAD_KSTACK.store(kernel_stack, Ordering::Relaxed);
+    crate::smp::update_current_kstack(kernel_stack);
 
     if (ctx_copy.cs & 0x3) == 0x3 {
         log_user_entry_once(thread_id, &ctx_copy);
@@ -1593,9 +1595,18 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     // Update TSS.RSP0 and CURRENT_THREAD_KSTACK for the new thread
     // This ensures interrupt/syscall frames from usermode go to the correct kernel stack
     gdt::set_rsp0(to_kernel_stack);
-    unsafe {
-        CURRENT_THREAD_KSTACK = to_kernel_stack;
-    }
+    CURRENT_THREAD_KSTACK.store(to_kernel_stack, Ordering::Relaxed);
+    crate::smp::update_current_kstack(to_kernel_stack);
+
+    log_debug!(
+        "thread",
+        "cpu={} context switch {} -> {} (cr3={:#X})",
+        crate::smp::current_cpu_id(),
+        from_id,
+        to_id,
+        to_cr3
+    );
+
 
     // Unified context switch: ALWAYS use switch_context to preserve kernel state.
     // This fixes the issue where kernel threads (like idle) would be restarted

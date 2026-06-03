@@ -1,6 +1,6 @@
 // Thread management syscalls
 
-use crate::raw::{syscall0, syscall1, numbers::*};
+use crate::raw::{syscall0, syscall1, syscall2, numbers::*};
 
 /// Yield CPU to scheduler
 /// 
@@ -55,3 +55,31 @@ pub fn get_ticks() -> u64 {
 pub fn get_time_ms() -> u64 {
     get_ticks() * 10  // Assuming 100Hz timer (10ms per tick)
 }
+
+
+/// Return the logical CPU id currently executing this thread.
+#[inline]
+pub fn get_cpu_id() -> u64 {
+    unsafe { syscall0(SYS_GET_CPU_ID) }
+}
+
+/// Return the number of online logical CPUs.
+#[inline]
+pub fn get_cpu_count() -> u64 {
+    unsafe { syscall0(SYS_GET_CPU_COUNT) }
+}
+
+/// Set affinity mask for the current thread.
+///
+/// Bit N in `mask` allows execution on CPU N.
+#[inline]
+pub fn set_affinity(mask: u64) -> bool {
+    unsafe { syscall2(SYS_SET_THREAD_AFFINITY, 0, mask) == 0 }
+}
+
+/// Query affinity mask for the current thread.
+#[inline]
+pub fn get_affinity() -> u64 {
+    unsafe { syscall1(SYS_GET_THREAD_AFFINITY, 0) }
+}
+

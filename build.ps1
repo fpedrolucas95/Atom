@@ -4,6 +4,7 @@
 #   .\build.ps1                    # Build completo (kernel + userspace)
 #   .\build.ps1 --clean            # Limpar e rebuildar
 #   .\build.ps1 --run              # Build e executar no QEMU
+#   .\build.ps1 --run --Smp 4      # Build + QEMU com 4 CPUs
 #   .\build.ps1 --userspace        # Build apenas drivers + services userspace
 #   .\build.ps1 --kernel           # Build apenas kernel
 #   .\build.ps1 --rust-only        # Apenas compilar Rust (sem assembly/linking)
@@ -15,7 +16,8 @@ param(
     [switch]$Userspace,
     [switch]$Kernel,
     [switch]$RustOnly,
-    [switch]$Setup
+    [switch]$Setup,
+    [int]$Smp = 1
 )
 
 # -------------------------------------------------------------------------
@@ -579,12 +581,17 @@ if ($Run) {
         Write-Warning "Instale QEMU: https://www.qemu.org/download/"
     }
 
-    Write-Step "Iniciando QEMU..."
+    if ($Smp -lt 1) {
+        Write-ErrorMsg "Valor inválido para --Smp: $Smp"
+    }
+
+    Write-Step "Iniciando QEMU (smp=$Smp)..."
     Write-Host "Pressione Ctrl+C para sair" -ForegroundColor Yellow
 
     qemu-system-x86_64 `
         -machine q35 `
         -cpu qemu64 `
+        -smp $Smp `
         -m 512M `
         -bios "$OVMF_PATH" `
         -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `

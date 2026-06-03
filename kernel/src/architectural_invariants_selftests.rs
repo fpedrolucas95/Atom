@@ -13,6 +13,7 @@ use crate::cap::{
 };
 use crate::mm::{oom, pmm, vm, vma};
 use crate::process::{self, ProcessId, ProcessTerminationError, TerminationReason};
+use crate::sched;
 use crate::thread::{self, CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 use crate::log_info;
 
@@ -515,6 +516,37 @@ fn test_multithread_teardown_consistency_under_repeated_kill() {
     cleanup_process_fixture(&fixture);
 }
 
+
+fn test_smp_affinity_contracts() {
+    let Some(current) = sched::current_thread() else {
+        return;
+    };
+
+    let online = crate::smp::online_cpu_count();
+    let all_mask = if online >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << online) - 1
+    };
+
+    assert!(
+        sched::set_thread_affinity(current, all_mask.max(1)),
+        "arch_invariants: set_thread_affinity must accept non-empty mask"
+    );
+
+    let readback = sched::get_thread_affinity(current);
+    assert_eq!(
+        readback,
+        all_mask.max(1),
+        "arch_invariants: affinity readback must match last write"
+    );
+
+    assert!(
+        !sched::set_thread_affinity(current, 0),
+        "arch_invariants: affinity mask 0 must be rejected"
+    );
+}
+
 pub fn run_architectural_invariants_self_tests() {
     let _serial = ARCH_INVARIANTS_SERIAL.lock();
 
@@ -525,9 +557,10 @@ pub fn run_architectural_invariants_self_tests() {
     test_revoke_two_phase_callbacks_and_reports();
     test_oom_semantics_single_and_multithread();
     test_multithread_teardown_consistency_under_repeated_kill();
+    test_smp_affinity_contracts();
 
     log_info!(
         LOG_ORIGIN,
-        "Phase 8 integration self-tests passed (locking/oom/revoke/fault admission)"
+        "Phase 8 integration self-tests passed (locking/oom/revoke/fault admission/smp-affinity)"
     );
 }

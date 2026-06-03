@@ -5,6 +5,7 @@
 #   ./build.sh              # Build completo (kernel + userspace)
 #   ./build.sh --clean      # Limpar e rebuildar
 #   ./build.sh --run        # Build e executar no QEMU
+#   ./build.sh --run --smp=4 # Build + QEMU com 4 CPUs
 #   ./build.sh --userspace  # Build apenas drivers userspace
 #   ./build.sh --kernel     # Build apenas kernel
 #   ./build.sh --rust-only  # Apenas validar código Rust
@@ -65,6 +66,7 @@ RUST_ONLY=false
 SETUP=false
 USERSPACE_ONLY=false
 KERNEL_ONLY=false
+SMP_CPUS=1
 
 for arg in "$@"; do
     case $arg in
@@ -74,12 +76,14 @@ for arg in "$@"; do
         --setup)    SETUP=true ;;
         --userspace) USERSPACE_ONLY=true ;;
         --kernel)   KERNEL_ONLY=true ;;
+        --smp=*)    SMP_CPUS="${arg#*=}" ;;
         --help|-h)
             echo "Uso: ./build.sh [opções]"
             echo ""
             echo "Opções:"
             echo "  --clean       Limpar arquivos de build antes de compilar"
             echo "  --run         Executar no QEMU após build"
+            echo "  --smp=N       Executar QEMU com N CPUs (padrão: 1)"
             echo "  --userspace   Build apenas drivers userspace"
             echo "  --kernel      Build apenas kernel"
             echo "  --rust-only   Apenas validar código Rust (sem NASM/linker)"
@@ -771,11 +775,17 @@ if [ "$RUN" = true ]; then
         OVMF_PATH="ovmf/OVMF.fd" 
     fi
 
-    step "Iniciando QEMU com imagem real..."
+    if ! [[ "$SMP_CPUS" =~ ^[0-9]+$ ]] || [ "$SMP_CPUS" -lt 1 ]; then
+        error "Valor inválido para --smp: $SMP_CPUS"
+        exit 1
+    fi
+
+    step "Iniciando QEMU com imagem real (smp=$SMP_CPUS)..."
     
     qemu-system-x86_64 \
         -machine q35 \
         -cpu qemu64 \
+        -smp "$SMP_CPUS" \
         -m 512M \
         -bios "$OVMF_PATH" \
         -drive format=raw,file=$DISK_IMG,cache=writeback \
