@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::interrupts::apic;
@@ -61,6 +62,7 @@ const LOG_ORIGIN: &str = "smp";
 static CPU_TABLE: Mutex<[CpuRecord; MAX_CPUS]> = Mutex::new([CpuRecord::empty(); MAX_CPUS]);
 static APIC_TO_CPU: Mutex<[u16; 256]> = Mutex::new([u16::MAX; 256]);
 static CPU_COUNT: Mutex<usize> = Mutex::new(1);
+static AP_STARTED_MASK: AtomicUsize = AtomicUsize::new(0);
 
 #[no_mangle]
 pub static mut CPU_LOCAL_ASM_STATE: [CpuLocalAsm; MAX_CPUS] = [CpuLocalAsm::new(); MAX_CPUS];
@@ -378,6 +380,23 @@ pub fn is_cpu_online(cpu_id: usize) -> bool {
     table.get(cpu_id).map(|c| c.online).unwrap_or(false)
 }
 
+fn clear_ap_started(cpu_id: usize) {
+    if cpu_id < usize::BITS as usize {
+        AP_STARTED_MASK.fetch_and(!(1usize << cpu_id), Ordering::Release);
+    }
+}
+
+fn mark_ap_started(cpu_id: usize) {
+    if cpu_id < usize::BITS as usize {
+        AP_STARTED_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
+    }
+}
+
+fn has_ap_started(cpu_id: usize) -> bool {
+    cpu_id < usize::BITS as usize
+        && (AP_STARTED_MASK.load(Ordering::Acquire) & (1usize << cpu_id)) != 0
+}
+
 pub fn online_cpu_count() -> usize {
     let table = CPU_TABLE.lock();
     table.iter().filter(|c| c.online).count()
@@ -398,24 +417,26 @@ fn delay_spin(iterations: usize) {
     }
 }
 
-fn patch_u32(blob: &mut [u8], marker: u32, value: u32) {
+fn patch_u32(blob: &mut [u8], marker: u32, value: u32) -> bool {
     let marker_bytes = marker.to_le_bytes();
     for i in 0..=blob.len().saturating_sub(4) {
         if blob[i..i + 4] == marker_bytes {
             blob[i..i + 4].copy_from_slice(&value.to_le_bytes());
-            break;
+            return true;
         }
     }
+    false
 }
 
-fn patch_u64(blob: &mut [u8], marker: u64, value: u64) {
+fn patch_u64(blob: &mut [u8], marker: u64, value: u64) -> bool {
     let marker_bytes = marker.to_le_bytes();
     for i in 0..=blob.len().saturating_sub(8) {
         if blob[i..i + 8] == marker_bytes {
             blob[i..i + 8].copy_from_slice(&value.to_le_bytes());
-            break;
+            return true;
         }
     }
+    false
 }
 
 fn prepare_trampoline(stack_top: u64, entry: u64) {
@@ -434,9 +455,18 @@ fn prepare_trampoline(stack_top: u64, entry: u64) {
     let pml4_phys_full = (cr3 & crate::arch::CR3_PML4_ADDR_MASK) as usize;
     let pml4_phys = pml4_phys_full as u32;
 
-    patch_u32(&mut page, TRAMPOLINE_PML4_MAGIC, pml4_phys);
-    patch_u64(&mut page, TRAMPOLINE_STACK_MAGIC, stack_top);
-    patch_u64(&mut page, TRAMPOLINE_ENTRY_MAGIC, entry);
+    assert!(
+        patch_u32(&mut page, TRAMPOLINE_PML4_MAGIC, pml4_phys),
+        "AP trampoline PML4 marker missing"
+    );
+    assert!(
+        patch_u64(&mut page, TRAMPOLINE_STACK_MAGIC, stack_top),
+        "AP trampoline stack marker missing"
+    );
+    assert!(
+        patch_u64(&mut page, TRAMPOLINE_ENTRY_MAGIC, entry),
+        "AP trampoline entry marker missing"
+    );
 
     let dst = crate::mm::vm::phys_to_virt_ptr(TRAMPOLINE_PHYS) as *mut u8;
     unsafe {
@@ -492,6 +522,7 @@ pub fn bringup_aps() {
         };
 
         set_cpu_state(cpu_id, CpuState::Booting);
+        clear_ap_started(cpu_id);
 
         prepare_trampoline(bootstrap_stack, smp_ap_entry as *const () as usize as u64);
 
@@ -500,6 +531,26 @@ pub fn bringup_aps() {
         apic::send_startup_ipi(apic_id, TRAMPOLINE_VECTOR);
         delay_spin(20_000);
         apic::send_startup_ipi(apic_id, TRAMPOLINE_VECTOR);
+
+        let mut started = false;
+        for _ in 0..AP_BOOT_TIMEOUT_SPINS {
+            if has_ap_started(cpu_id) {
+                started = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        if !started {
+            log_warn!(
+                LOG_ORIGIN,
+                "AP cpu_id={} apic_id={} did not enter Rust entry",
+                cpu_id,
+                apic_id
+            );
+            set_cpu_state(cpu_id, CpuState::Offline);
+            continue;
+        }
 
         let mut online = false;
         for _ in 0..AP_BOOT_TIMEOUT_SPINS {
@@ -513,7 +564,12 @@ pub fn bringup_aps() {
         if online {
             log_info!(LOG_ORIGIN, "AP cpu_id={} apic_id={} online", cpu_id, apic_id);
         } else {
-            log_warn!(LOG_ORIGIN, "AP cpu_id={} apic_id={} failed to start", cpu_id, apic_id);
+            log_warn!(
+                LOG_ORIGIN,
+                "AP cpu_id={} apic_id={} entered Rust but failed to finish init",
+                cpu_id,
+                apic_id
+            );
             set_cpu_state(cpu_id, CpuState::Offline);
         }
     }
@@ -532,6 +588,7 @@ pub extern "C" fn smp_ap_entry() -> ! {
 
     let apic_id = apic::local_apic_id();
     let cpu_id = current_cpu_id();
+    mark_ap_started(cpu_id);
 
     crate::arch::gdt::init_for_cpu(cpu_id, crate::arch::current_rsp());
     crate::interrupts::idt::load_current_cpu();

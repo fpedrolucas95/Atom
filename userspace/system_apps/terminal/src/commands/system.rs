@@ -7,7 +7,7 @@ use super::{CommandContext, CommandResult, get_all_commands, get_command_help};
 use super::filesystem;
 use crate::parser::ParsedCommand;
 use crate::window::Theme;
-use atom_syscall::thread::get_ticks;
+use atom_syscall::thread::{get_cpu_count, get_ticks};
 
 /// Version information
 const OS_NAME: &str = "Atom OS";
@@ -581,6 +581,18 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     } else {
         ctx.println("x86_64 (Atom Core)");
     }
+
+    let cpu_count = get_cpu_count();
+    let mut cores_buf = [0u8; 32];
+    let mut cores_pos = format_number(cpu_count, &mut cores_buf);
+    let suffix = if cpu_count == 1 { " core" } else { " cores" };
+    for byte in suffix.bytes() {
+        cores_buf[cores_pos] = byte;
+        cores_pos += 1;
+    }
+    let cores_str = unsafe { core::str::from_utf8_unchecked(&cores_buf[..cores_pos]) };
+    ctx.print("CPU Cores:    ");
+    ctx.println(cores_str);
 
     // Memory
     let (total, used, _) = ctx.ipc.query_memory();

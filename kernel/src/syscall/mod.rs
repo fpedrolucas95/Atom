@@ -2187,7 +2187,7 @@ fn sys_ipc_send_async(
                 "ipc_send_async failed: invalid port_id={}",
                 port_id
             );
-            EINVAL
+            ENOTFOUND
         }
 
         Err(crate::ipc::IpcError::MessageTooLarge) => {

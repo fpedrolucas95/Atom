@@ -328,6 +328,7 @@ impl Scheduler {
         let cpu_id = self.local_cpu_id();
         let previous;
         let mut chosen;
+        let mut stole_thread = false;
 
         {
             let mut cpu = self.cpus[cpu_id].lock();
@@ -345,12 +346,25 @@ impl Scheduler {
             }
 
             chosen = cpu.ready.pop_next();
+            cpu.resched_pending = false;
+        }
+
+        // Do not attempt cross-CPU stealing while holding the local CPU lock:
+        // simultaneous idle/timer paths can otherwise deadlock lock(A)->lock(B)
+        // against lock(B)->lock(A) on 4+ CPU systems.
+        if chosen.is_none() {
+            chosen = self.try_steal(cpu_id);
+            stole_thread = chosen.is_some();
+        }
+
+        {
+            let mut cpu = self.cpus[cpu_id].lock();
+            if stole_thread {
+                cpu.steals = cpu.steals.saturating_add(1);
+            }
 
             if chosen.is_none() {
-                chosen = self.try_steal(cpu_id);
-                if chosen.is_some() {
-                    cpu.steals = cpu.steals.saturating_add(1);
-                }
+                chosen = cpu.ready.pop_next();
             }
             if chosen.is_none() {
                 chosen = previous.filter(|id| self.is_runnable(*id) && self.affinity_allows_cpu(*id, cpu_id));
@@ -363,7 +377,6 @@ impl Scheduler {
             if previous != chosen {
                 cpu.context_switches = cpu.context_switches.saturating_add(1);
             }
-            cpu.resched_pending = false;
         }
 
         if let Some(prev) = previous {

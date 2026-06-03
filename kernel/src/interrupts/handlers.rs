@@ -28,9 +28,10 @@
 // Timer handling:
 // - `TICKS` is a global tick counter incremented on each timer interrupt.
 // - The low-level timer ISR is `rust_timer_interrupt_handler`.
-// - It calls `sched::drive_cooperative_tick()` to drive cooperative scheduling
-//   (time accounting and voluntary yields) instead of preemptive time slicing
-//   via `sched::on_timer_tick()`.
+// - It wakes sleeping threads and advances IPC timers, but does not context
+//   switch directly from the timer ISR. Context switches happen at cooperative
+//   yield/syscall/idle boundaries where `thread::perform_context_switch` can
+//   save a normal call frame instead of an interrupt frame.
 // - It calls `ipc::on_timer_tick(get_ticks())` to advance IPC timeouts/timers.
 // - It always signals EOI via `apic::send_eoi()` to re-arm the interrupt line.
 //
@@ -1060,10 +1061,12 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
     // This allows other interrupts to fire even if we switch away from this thread.
     super::apic::send_eoi();
 
-    // Drive preemptive scheduling if we interrupted a userspace thread.
-    if coming_from_user {
-        sched::drive_cooperative_tick();
-    }
+    // Do not context-switch directly from the interrupt frame.  The current
+    // switch_context path saves a normal function-call return address, not the
+    // interrupted userspace RIP from this InterruptFrame.  Switching here can
+    // therefore resume a thread inside the ISR path and becomes unstable under
+    // SMP load.  Syscalls, explicit yields, sleeps and idle wakeups remain the
+    // safe scheduler handoff points.
 }
 
 
@@ -1071,7 +1074,12 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
 pub extern "C" fn rust_reschedule_interrupt_handler(_frame: *const InterruptFrame) {
     crate::sched::on_reschedule_interrupt();
     super::apic::send_eoi();
-    crate::sched::drive_cooperative_tick();
+
+    // A reschedule IPI may interrupt arbitrary kernel/idle code. Switching
+    // directly from that interrupt frame would save the thread context at the
+    // ISR return point instead of at a normal yield boundary. The interrupted
+    // thread observes the pending flag and reschedules on its next cooperative
+    // yield/syscall/idle boundary.
 }
 
 #[no_mangle]

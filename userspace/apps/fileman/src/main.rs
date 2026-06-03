@@ -713,7 +713,11 @@ fn main() -> ! {
             let mut buf = [0u8; 64];
             buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
             buf[MessageHeader::SIZE..MessageHeader::SIZE + SurfacePresentMsg::SIZE].copy_from_slice(&pres.to_bytes());
-            send(compositor_port, &buf).unwrap();
+            let total = MessageHeader::SIZE + SurfacePresentMsg::SIZE;
+            if send(compositor_port, &buf[..total]).is_err() {
+                yield_now();
+                continue;
+            }
         } else {
             let mut buf = [0u8; 1024];
             if let Ok(Some(_)) = try_recv(local_port, &mut buf) {

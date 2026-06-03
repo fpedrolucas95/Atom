@@ -1,6 +1,6 @@
 // IPC (Inter-Process Communication) syscalls
 
-use crate::error::{ESUCCESS, EPERM, EINVAL, EWOULDBLOCK, EMSGSIZE, ETIMEDOUT, SyscallError, SyscallResult};
+use crate::error::{ESUCCESS, EPERM, EINVAL, ENOTFOUND, EWOULDBLOCK, EMSGSIZE, ETIMEDOUT, SyscallError, SyscallResult};
 use crate::raw::{syscall0, syscall1, syscall4, numbers::*};
 
 /// Port identifier
@@ -59,7 +59,9 @@ pub fn send(port: PortId, data: &[u8]) -> SyscallResult<()> {
         x if x == ESUCCESS => Ok(()),
         x if x == EPERM => Err(SyscallError::PermissionDenied),
         x if x == EINVAL => Err(SyscallError::InvalidArgument),
+        x if x == ENOTFOUND => Err(SyscallError::NotFound),
         x if x == EMSGSIZE => Err(SyscallError::MessageTooLarge),
+        x if x == EWOULDBLOCK => Err(SyscallError::WouldBlock),
         _ => Err(SyscallError::Unknown(result)),
     }
 }
@@ -140,7 +142,9 @@ pub fn send_async(port: PortId, data: &[u8]) -> SyscallResult<()> {
 
     match result {
         x if x == ESUCCESS => Ok(()),
+        x if x == EPERM => Err(SyscallError::PermissionDenied),
         x if x == EINVAL => Err(SyscallError::InvalidArgument),
+        x if x == ENOTFOUND => Err(SyscallError::NotFound),
         x if x == EMSGSIZE => Err(SyscallError::MessageTooLarge),
         x if x == EWOULDBLOCK => Err(SyscallError::WouldBlock),
         _ => Err(SyscallError::Unknown(result)),

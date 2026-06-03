@@ -88,6 +88,8 @@ const ENTRIES_PER_TABLE: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 /// Higher-half kernel virtual memory base address
 pub const HIGHER_HALF_BASE: usize = 0xFFFF_8000_0000_0000;
+const LOW_MEMORY_BASE: usize = 0;
+const LOW_MEMORY_SIZE: usize = 0x10_0000;
 /// Higher-half mirror covers up to 16 GiB of physical RAM.
 /// This must be >= the PMM's static bitmap coverage (16 GiB)
 /// to ensure all tracked physical memory is accessible via the
@@ -351,7 +353,9 @@ pub fn init(memory_map: &MemoryMap) {
     ACTIVE_PML4.store(pml4_phys, Ordering::Relaxed);
     log_info!(LOG_ORIGIN, "PML4 allocated at 0x{:X}", pml4_phys);
     log_info!(LOG_ORIGIN, "Starting identity mapping of RAM regions...");
-    let mut max_physical_addr = 0usize;
+    let mut max_physical_addr = LOW_MEMORY_SIZE;
+    force_map_low_memory(pml4_phys);
+
     for desc in memory_map.descriptors() {
         if !is_mappable_ram(desc.typ) {
             continue;
@@ -1172,6 +1176,43 @@ fn walk_to_entry(virt: usize, create: bool) -> Result<(&'static mut PageTableEnt
 
     // para query/translate/unmap não precisa user
     walk_to_entry_with_root_user(pml4_phys, virt, create, false)
+}
+
+fn force_map_low_memory(pml4_phys: usize) {
+    let flags = PageFlags::kernel_rw();
+
+    log_info!(
+        LOG_ORIGIN,
+        "Force-mapping low memory 0x{:X}-0x{:X} in identity and higher-half mirrors",
+        LOW_MEMORY_BASE,
+        LOW_MEMORY_BASE + LOW_MEMORY_SIZE
+    );
+
+    for phys in (LOW_MEMORY_BASE..LOW_MEMORY_BASE + LOW_MEMORY_SIZE).step_by(pmm::PAGE_SIZE) {
+        if let Err(err) = map_page_internal(pml4_phys, phys, phys, flags) {
+            if err != VmError::AlreadyMapped {
+                log_error!(
+                    LOG_ORIGIN,
+                    "Failed to force-map low identity page 0x{:X} (err: {:?})",
+                    phys,
+                    err
+                );
+            }
+        }
+
+        let higher_half = HIGHER_HALF_BASE + phys;
+        if let Err(err) = map_page_internal(pml4_phys, higher_half, phys, flags) {
+            if err != VmError::AlreadyMapped {
+                log_error!(
+                    LOG_ORIGIN,
+                    "Failed to force-map low higher-half page 0x{:X} -> 0x{:X} (err: {:?})",
+                    phys,
+                    higher_half,
+                    err
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

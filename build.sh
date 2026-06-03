@@ -795,7 +795,7 @@ if [ "$RUN" = true ]; then
         -serial file:serial.log \
         -debugcon file:serial_log.txt \
         -global isa-debugcon.iobase=0xE9 \
-        -d int,pcall,guest_errors,unimp \
+        -d cpu_reset,int,pcall,guest_errors,unimp \
         -D qemu_execution.log \
         -netdev user,id=net0,net=10.0.2.0/24,host=10.0.2.2,dns=10.0.2.3,hostfwd=tcp::12222-:22 \
         -device e1000,netdev=net0,mac=52:54:00:12:34:56 \

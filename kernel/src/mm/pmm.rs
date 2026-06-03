@@ -43,6 +43,9 @@ use crate::{log_info, log_debug, log_warn};
 /// Page size: 4 KiB
 pub const PAGE_SIZE: usize = 4096;
 
+const AP_TRAMPOLINE_RESERVED_START: usize = 0x8000 / PAGE_SIZE;
+const AP_TRAMPOLINE_RESERVED_PAGES: usize = 2;
+
 /// Static bitmap covers up to 16 GiB (4,194,304 pages).
 /// This is 512 KiB in .bss — acceptable for a kernel.
 const MAX_STATIC_PAGES: usize = 4 * 1024 * 1024;
@@ -528,6 +531,18 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     if is_page_free(0) {
         set_page_allocated(0);
         free_pages = free_pages.saturating_sub(1);
+    }
+
+    // The SMP AP trampoline is copied to physical 0x8000 during bring-up.
+    // Keep the trampoline page and one guard page out of the allocator so
+    // early page-table allocations cannot be overwritten by trampoline code.
+    for page in AP_TRAMPOLINE_RESERVED_START
+        ..(AP_TRAMPOLINE_RESERVED_START + AP_TRAMPOLINE_RESERVED_PAGES)
+    {
+        if is_page_free(page) {
+            set_page_allocated(page);
+            free_pages = free_pages.saturating_sub(1);
+        }
     }
 
     FREE_PAGES.store(free_pages, Ordering::Relaxed);

@@ -31,16 +31,24 @@ protected_mode_entry:
     mov cr3, eax
 
     mov eax, cr4
-    or eax, (1 << 5)
+    ; PAE is required for long mode. OSFXSR/OSXMMEXCPT make SSE/FPU
+    ; state legal before entering compiler-generated x86_64 Rust code.
+    or eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov cr4, eax
 
     mov ecx, 0xC0000080
     rdmsr
-    or eax, (1 << 8)
+    ; Enable Long Mode (LME) and NX support (NXE). The kernel page
+    ; tables use NX on data/stack pages, and without NXE those bits are
+    ; reserved, causing an immediate #PF(RSVD) on the AP's first stack push.
+    or eax, (1 << 8) | (1 << 11)
     wrmsr
 
     mov eax, cr0
-    or eax, 0x80000001
+    ; APs start with CD/NW set after INIT. Clear those cache-disable bits
+    ; and enable paging with the same core protection bits expected by Rust.
+    and eax, 0x9FFFFFFF
+    or eax, 0x80010023
     mov cr0, eax
 
     jmp 0x18:long_mode_entry
