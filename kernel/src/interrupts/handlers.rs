@@ -724,10 +724,10 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
                                 *val,
                                 match i {
                                     0 => " (should be RIP if this is IRET frame)",
-                                    1 => " (should be CS=0x1B if IRET frame)",
+                                    1 => " (should be CS=0x23 if IRET frame)",
                                     2 => " (should be RFLAGS if IRET frame)",
                                     3 => " (should be user RSP if IRET frame)",
-                                    4 => " (should be SS=0x23 if IRET frame)",
+                                    4 => " (should be SS=0x1B if IRET frame)",
                                     _ => ""
                                 }
                             );

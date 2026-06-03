@@ -24,10 +24,10 @@ syscall_entry:
     and     rsp, -16                 ; ABI alignment
 
     ; Build IRET frame (SS, RSP, RFLAGS, CS, RIP)
-    push    qword 0x23               ; SS
+    push    qword 0x1B               ; SS = USER_DATA_SELECTOR (GDT[0x18] | 3)
     push    qword [gs:8]             ; RSP
     push    r11                      ; RFLAGS
-    push    qword 0x1B               ; CS
+    push    qword 0x23               ; CS = USER_CODE_SELECTOR (GDT[0x20] | 3)
     push    rcx                      ; RIP
 
     ; Save ALL user GPRs so we can restore them on return.

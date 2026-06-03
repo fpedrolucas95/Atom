@@ -52,8 +52,8 @@ const GDT_USER_DATA: u64 = 0x00AFF2000000FFFF;
 
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
-pub const USER_CODE_SELECTOR: u16 = 0x18 | 3;
-pub const USER_DATA_SELECTOR: u16 = 0x20 | 3;
+pub const USER_DATA_SELECTOR: u16 = 0x18 | 3;
+pub const USER_CODE_SELECTOR: u16 = 0x20 | 3;
 pub const TSS_SELECTOR: u16 = 0x28;
 
 #[repr(C, align(16))]
@@ -69,8 +69,8 @@ impl Gdt {
                 0,
                 GDT_KERNEL_CODE,
                 GDT_KERNEL_DATA,
-                GDT_USER_CODE,
-                GDT_USER_DATA,
+                GDT_USER_DATA,  // 0x18 → USER_DATA_SELECTOR = 0x1B (must precede code for SYSRETQ)
+                GDT_USER_CODE,  // 0x20 → USER_CODE_SELECTOR = 0x23
                 0,
                 0,
             ],
@@ -168,6 +168,8 @@ pub fn set_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
 }
 
 unsafe fn double_fault_stack_top(cpu: usize) -> u64 {
+    // DOUBLE_FAULT_STACKS is a static in BSS, already at a higher-half virtual address.
+    // Adding HIGHER_HALF_BASE again would produce a non-canonical address → #GP.
     let stack_ptr = core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as u64;
-    stack_ptr + crate::mm::vm::HIGHER_HALF_BASE as u64 + DOUBLE_FAULT_STACK_SIZE as u64
+    stack_ptr + DOUBLE_FAULT_STACK_SIZE as u64
 }

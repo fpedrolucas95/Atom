@@ -63,7 +63,7 @@
 mod policy;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::arch::gdt::{KERNEL_CODE_SELECTOR, USER_CODE_SELECTOR};
+use crate::arch::gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
 use crate::{log_debug, log_info, log_warn, log_error, log_panic};
 
 const MSR_STAR: u32 = 0xC000_0081;
@@ -579,8 +579,12 @@ pub fn init() {
     const LOG_ORIGIN: &str = "syscall";
 
     unsafe {
+        // STAR[63:48] must equal (USER_DATA_base - 8) so SYSRETQ loads:
+        //   SS  = (STAR[63:48] + 8)  | 3 = USER_DATA_SELECTOR (GDT[0x18]|3 = 0x1B)
+        //   CS  = (STAR[63:48] + 16) | 3 = USER_CODE_SELECTOR (GDT[0x20]|3 = 0x23)
+        // KERNEL_DATA_SELECTOR (0x10) satisfies: 0x10+8=0x18 and 0x10+16=0x20.
         let star_value =
-            ((USER_CODE_SELECTOR as u64 & !3) << 48) |
+            ((KERNEL_DATA_SELECTOR as u64) << 48) |
             ((KERNEL_CODE_SELECTOR as u64) << 32);
         wrmsr(MSR_STAR, star_value);
 
@@ -603,8 +607,8 @@ pub fn init() {
 
     log_debug!(
         LOG_ORIGIN,
-        "STAR configured: user_cs=0x{:02X}, kernel_cs=0x{:02X}",
-        USER_CODE_SELECTOR & !3,
+        "STAR configured: sysretq_base=0x{:02X} kernel_cs=0x{:02X}",
+        KERNEL_DATA_SELECTOR,
         KERNEL_CODE_SELECTOR
     );
 

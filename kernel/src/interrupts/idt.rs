@@ -327,6 +327,7 @@ pub fn init() {
 
         log_info!(LOG_ORIGIN, "IDT initialized with {} entries", IDT_SIZE);
     }
+}
 
 /// Reload the already-populated global IDT on the current CPU.
 ///

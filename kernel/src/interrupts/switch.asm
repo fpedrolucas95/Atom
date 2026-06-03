@@ -49,15 +49,15 @@ enter_user:
     mov cr3, r8
 .skip_cr3:
 
-    ; Set user data segments
-    mov ax, 0x23
+    ; Set user data segments (USER_DATA_SELECTOR = 0x1B = GDT[0x18]|3)
+    mov ax, 0x1B
     mov ds, ax
     mov es, ax
 
     ; Build IRET frame on current kernel stack
     sub rsp, 40
     mov [rsp + 0], rcx          ; RIP
-    mov qword [rsp + 8], 0x1B   ; CS = USER_CODE_SELECTOR
+    mov qword [rsp + 8], 0x23   ; CS = USER_CODE_SELECTOR (GDT[0x20]|3)
 
     ; RFLAGS: enable interrupts (IF=1)
     pushfq
@@ -67,7 +67,7 @@ enter_user:
     mov [rsp + 16], rax         ; RFLAGS
 
     mov [rsp + 24], rdx         ; RSP
-    mov qword [rsp + 32], 0x23  ; SS = USER_DATA_SELECTOR
+    mov qword [rsp + 32], 0x1B  ; SS = USER_DATA_SELECTOR (GDT[0x18]|3)
 
     iretq
 
@@ -85,20 +85,20 @@ enter_user_first_time:
     mov cr3, r8
 .skip_cr3_first:
 
-    mov ax, 0x23
+    mov ax, 0x1B
     mov ds, ax
     mov es, ax
 
     sub rsp, 40
     mov [rsp + 0], rcx
-    mov qword [rsp + 8], 0x1B
+    mov qword [rsp + 8], 0x23
     pushfq
     pop rax
     and rax, 0x3C7FD7
     or rax, 0x202
     mov [rsp + 16], rax
     mov [rsp + 24], rdx
-    mov qword [rsp + 32], 0x23
+    mov qword [rsp + 32], 0x1B
 
     ; Zero all GPRs for clean state
     xor rax, rax
@@ -219,21 +219,21 @@ switch_to_context_internal:
 
     ; ========== IRET to USER ==========
 .iret_to_user:
-    mov cx, 0x23
+    mov cx, 0x1B
     mov ds, cx
     mov es, cx
 
     sub rsp, 40
     mov rbx, [r15 + OFF_RIP]
     mov [rsp + 0], rbx
-    mov qword [rsp + 8], 0x1B
+    mov qword [rsp + 8], 0x23   ; CS = USER_CODE_SELECTOR
     mov rax, [r15 + OFF_RFLAGS]
     and rax, 0x3C7FD7
     or  rax, 0x202
     mov [rsp + 16], rax
     mov rbx, [r15 + OFF_RSP]
     mov [rsp + 24], rbx
-    mov qword [rsp + 32], 0x23
+    mov qword [rsp + 32], 0x1B  ; SS = USER_DATA_SELECTOR
 
     ; Restore registers
     mov rax, [r15 + OFF_RAX]
