@@ -376,31 +376,30 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
 
     log_panic!(LOG_ORIGIN, "Error code: {:#X}", error_code);
 
-    log_debug!(
+    log_panic!(
         LOG_ORIGIN,
-        "Registers: RAX={:#016X} RBX={:#016X} RCX={:#016X} RDX={:#016X}",
+        "RIP={:#018X}  CS={:#06X}  RFLAGS={:#018X}  RSP={:#018X}  SS={:#06X}",
+        frame.rip, frame.cs, frame.rflags, frame.rsp, frame.ss
+    );
+    log_panic!(
+        LOG_ORIGIN,
+        "RAX={:#018X}  RBX={:#018X}  RCX={:#018X}  RDX={:#018X}",
         frame.rax, frame.rbx, frame.rcx, frame.rdx
     );
-    log_debug!(
+    log_panic!(
         LOG_ORIGIN,
-        "Registers: RSI={:#016X} RDI={:#016X} RBP={:#016X} RSP={:#016X}",
-        frame.rsi, frame.rdi, frame.rbp, frame.rsp
+        "RSI={:#018X}  RDI={:#018X}  RBP={:#018X}",
+        frame.rsi, frame.rdi, frame.rbp
     );
-    log_debug!(
+    log_panic!(
         LOG_ORIGIN,
-        "Registers: R8={:#016X} R9={:#016X} R10={:#016X} R11={:#016X}",
+        "R8={:#018X}   R9={:#018X}   R10={:#018X}  R11={:#018X}",
         frame.r8, frame.r9, frame.r10, frame.r11
     );
-    log_debug!(
+    log_panic!(
         LOG_ORIGIN,
-        "Registers: R12={:#016X} R13={:#016X} R14={:#016X} R15={:#016X}",
+        "R12={:#018X}  R13={:#018X}  R14={:#018X}  R15={:#018X}",
         frame.r12, frame.r13, frame.r14, frame.r15
-    );
-
-    log_debug!(
-        LOG_ORIGIN,
-        "Execution state: RIP={:#016X} CS={:#04X} RFLAGS={:#016X} SS={:#04X}",
-        frame.rip, frame.cs, frame.rflags, frame.ss
     );
 
     match exception_number {
