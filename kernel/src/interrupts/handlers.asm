@@ -108,12 +108,40 @@ UNEXPECTED_INTERRUPT_HANDLER vec
 %endrep
 
 ; ---------------------------------------------------------------------------
+; Interrupt Entry/Exit Helpers (GS Management)
+; ---------------------------------------------------------------------------
+
+; Macro: INTERRUPT_ENTRY
+; Logic:
+; 1. Check CS RPL (bit 0-1 of the pushed CS)
+; 2. If RPL == 3 (from usermode), swapgs to use kernel GS base
+%macro INTERRUPT_ENTRY 0
+    test qword [rsp + 144], 0x3   ; Check RPL of pushed CS (at offset 18*8 after PUSH_ALL)
+    jz .skip_swap_entry
+    swapgs
+.skip_swap_entry:
+%endmacro
+
+; Macro: INTERRUPT_EXIT
+; Logic:
+; 1. Check CS RPL (bit 0-1 of the pushed CS)
+; 2. If RPL == 3 (returning to usermode), swapgs back to user GS base
+%macro INTERRUPT_EXIT 0
+    test qword [rsp + 144], 0x3   ; Check RPL of pushed CS (at offset 18*8 before POP_ALL)
+    jz .skip_swap_exit
+    swapgs
+.skip_swap_exit:
+%endmacro
+
+; ---------------------------------------------------------------------------
 ; Common handler for unexpected interrupts (vectors without a dedicated stub)
 ; ---------------------------------------------------------------------------
 unexpected_common:
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp           ; arg0 = InterruptFrame*
     CALL_RUST_HANDLER rust_unexpected_interrupt_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq
 
@@ -145,8 +173,10 @@ irq_handler_32:
     push qword 0
     push qword TIMER_INTERRUPT_VECTOR
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp
     CALL_RUST_HANDLER rust_timer_interrupt_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq
 
@@ -155,8 +185,10 @@ irq_handler_104:
     push qword 0
     push qword USER_TRAP_INTERRUPT_VECTOR
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp
     CALL_RUST_HANDLER rust_user_trap_interrupt_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq
 
@@ -165,8 +197,10 @@ irq_handler_33:
     push qword 0
     push qword KEYBOARD_INTERRUPT_VECTOR
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp
     CALL_RUST_HANDLER rust_keyboard_interrupt_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq
 
@@ -175,8 +209,10 @@ irq_handler_44:
     push qword 0
     push qword MOUSE_INTERRUPT_VECTOR
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp
     CALL_RUST_HANDLER rust_mouse_interrupt_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq
 
@@ -185,8 +221,10 @@ irq_handler_45:
     push qword 0
     push qword RESCHEDULE_INTERRUPT_VECTOR
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp
     CALL_RUST_HANDLER rust_reschedule_interrupt_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq
 
@@ -222,7 +260,9 @@ EXCEPTION_HANDLER_ERR    21   ; #CP Control Protection
 
 exception_common:
     PUSH_ALL
+    INTERRUPT_ENTRY
     mov rcx, rsp           ; arg0 = InterruptFrame*
     CALL_RUST_HANDLER rust_exception_handler
+    INTERRUPT_EXIT
     POP_ALL
     iretq

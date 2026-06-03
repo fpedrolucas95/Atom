@@ -65,6 +65,7 @@ static CPU_COUNT: Mutex<usize> = Mutex::new(1);
 #[no_mangle]
 pub static mut CPU_LOCAL_ASM_STATE: [CpuLocalAsm; MAX_CPUS] = [CpuLocalAsm::new(); MAX_CPUS];
 
+const IA32_GS_BASE: u32 = 0xC000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 #[inline]
@@ -94,8 +95,13 @@ pub fn init_cpu_local_syscall_state(cpu_id: usize, initial_kstack: u64) {
         CPU_LOCAL_ASM_STATE[cpu].temp_user_rsp = 0;
         CPU_LOCAL_ASM_STATE[cpu].cpu_id = cpu as u64;
 
-        let ptr = core::ptr::addr_of!(CPU_LOCAL_ASM_STATE[cpu]) as u64;
-        set_kernel_gs_base(ptr);
+        // Use higher-half mirror address for the per-CPU data structure
+        let ptr = crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(CPU_LOCAL_ASM_STATE[cpu]) as usize) as u64;
+
+        // When in kernel mode (now), IA32_GS_BASE is the active GS base.
+        // IA32_KERNEL_GS_BASE is the one used by SWAPGS when entering from Ring 3.
+        write_msr(IA32_GS_BASE, ptr);
+        write_msr(IA32_KERNEL_GS_BASE, ptr);
     }
 }
 
@@ -474,7 +480,7 @@ pub fn bringup_aps() {
 
         set_cpu_state(cpu_id, CpuState::Booting);
 
-        prepare_trampoline(bootstrap_stack, smp_ap_entry as usize as u64);
+        prepare_trampoline(bootstrap_stack, smp_ap_entry as *const () as usize as u64);
 
         apic::send_init_ipi(apic_id);
         delay_spin(100_000);
