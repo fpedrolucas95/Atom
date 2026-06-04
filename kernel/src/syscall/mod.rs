@@ -3900,14 +3900,14 @@ pub fn notify_irq_handler(irq: u8) {
 
         let port_id = crate::ipc::PortId::from_raw(binding.port);
 
-        // Create a libipc-compatible IrqNotification message (MessageType 20)
-        // Header: [msg_type (4 bytes), payload_size (4 bytes), sequence (4 bytes)]
+        // libipc MessageHeader layout (16 bytes): [version u32][msg_type u32][payload_size u32][sequence u32]
         // Followed by 1 byte for the IRQ number.
-        let mut payload = alloc::vec![0u8; 13];
-        payload[0..4].copy_from_slice(&20u32.to_le_bytes()); // IrqNotification
-        payload[4..8].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
-        // sequence = 0 at [8..12]
-        payload[12] = irq;
+        let mut payload = alloc::vec![0u8; 17];
+        payload[0..4].copy_from_slice(&1u32.to_le_bytes());   // version = 1
+        payload[4..8].copy_from_slice(&20u32.to_le_bytes());  // msg_type = IrqNotification (20)
+        payload[8..12].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
+        // sequence [12..16] = 0
+        payload[16] = irq;
 
         let msg = crate::ipc::Message::new(
             crate::thread::ThreadId::from_raw(0), // Kernel sender
