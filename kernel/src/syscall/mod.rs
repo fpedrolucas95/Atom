@@ -8260,6 +8260,17 @@ fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
         None => return EINVAL,
     };
 
+    if bar.is_mmio {
+        // Userspace device drivers program MMIO registers and descriptor rings
+        // through this BAR. Make the standard PCI command bits explicit here so
+        // DMA-backed devices keep working regardless of firmware defaults.
+        let command_status = crate::drivers::pci::read_config_dword(bus, dev, func, 0x04);
+        let command = command_status | 0x6; // Memory Space Enable | Bus Master Enable
+        if command != command_status {
+            crate::drivers::pci::write_config_dword(bus, dev, func, 0x04, command);
+        }
+    }
+
     let info_ptr = match validate_user_addr(info_ptr) {
         Ok(ptr) => ptr,
         Err(e) => return e,

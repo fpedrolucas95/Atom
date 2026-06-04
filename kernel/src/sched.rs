@@ -530,6 +530,9 @@ impl Scheduler {
 
         let mut inner = self.inner.lock();
         let cpu_id = self.local_cpu_id(&inner);
+
+        self.finish_pending_switch_locked(&mut inner, cpu_id);
+
         let previous = inner.cpus[cpu_id].current;
         let had_resched_pending = inner.cpus[cpu_id].resched_pending;
 
@@ -657,9 +660,15 @@ impl Scheduler {
         }
 
         if inner.thread_is_pending_switch_from(id) {
-            // The low-level switch is still saving this context.  Do not publish
-            // it twice.  The existing ready queue entry, if any, will become
-            // valid after `clear_pending_switch_from`.
+            // The low-level switch is still saving this context.  Record the
+            // wakeup as Ready, but leave queue publication to
+            // clear_pending_switch_from() after the save has completed.  This
+            // prevents a lost wake if another CPU observes the pending marker
+            // and drops a stale ready-queue entry in the meantime.
+            let old_state = thread::get_thread_state(id);
+            thread::set_thread_state(id, ThreadState::Ready);
+            inner.ownership.insert(id, NO_CPU_OWNER);
+            self.log_thread_state(id, old_state, ThreadState::Ready, None);
             return;
         }
 
@@ -732,6 +741,20 @@ impl Scheduler {
         self.log_thread_state(id, old_state, ThreadState::Running, Some(cpu_id));
     }
 
+    fn finish_pending_switch_locked(&self, inner: &mut SchedulerInner, cpu_id: usize) {
+        let completed = inner.cpus[cpu_id].pending_switch_from.take();
+
+        if let Some(id) = completed {
+            if matches!(thread::get_thread_state(id), Some(ThreadState::Ready))
+                && !inner.thread_is_current(id)
+            {
+                let target = inner.enqueue_ready_locked(id, None);
+                let priority = inner.effective_priority(id);
+                self.maybe_send_reschedule_ipi_locked(inner, target, priority);
+            }
+        }
+    }
+
     fn deschedule_thread(&self, id: ThreadId) {
         let mut inner = self.inner.lock();
         inner.unregister_thread_locked(id);
@@ -746,7 +769,7 @@ impl Scheduler {
     fn clear_pending_switch_from(&self) {
         let mut inner = self.inner.lock();
         let cpu_id = self.local_cpu_id(&inner);
-        inner.cpus[cpu_id].pending_switch_from = None;
+        self.finish_pending_switch_locked(&mut inner, cpu_id);
     }
 
     fn is_pending_switch_from(&self, id: ThreadId) -> bool {
