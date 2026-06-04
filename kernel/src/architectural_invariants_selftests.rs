@@ -437,6 +437,9 @@ fn test_oom_semantics_single_and_multithread() {
         }
     }
 
+    // With deferred zombie reaping, terminated threads stay in THREAD_LIST with
+    // state=Exited until reap_zombies runs.  Simulate what the idle thread does.
+    thread::reap_zombies();
     assert!(thread::find_thread(heavy.threads[0]).is_none());
     assert!(process::get_process_memory_usage(heavy.pid).is_none());
     let _ = process::collect_process_memory_snapshot();
@@ -462,6 +465,7 @@ fn test_oom_semantics_single_and_multithread() {
         }
     }
 
+    thread::reap_zombies();
     for tid in multi.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
@@ -504,6 +508,7 @@ fn test_multithread_teardown_consistency_under_repeated_kill() {
         "arch_invariants: repeated kill request must not resurrect process state"
     );
 
+    thread::reap_zombies();
     for tid in fixture.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
