@@ -1247,7 +1247,7 @@ where
     )
 }
 
-extern "C" {
+extern "win64" {
     fn switch_context(old_context: *mut CpuContext, new_context: *const CpuContext);
     pub(crate) fn switch_to_context(new_context: *const CpuContext) -> !;
     pub(crate) fn enter_user(rip: u64, rsp: u64, cr3: u64) -> !;
@@ -1544,7 +1544,12 @@ fn is_canonical(addr: u64) -> bool {
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
-    // Disable interrupts during the critical section
+    // Preserve the caller's interrupt state. Syscall entry runs with IF masked
+    // until the final iretq; enabling IRQs in that return path can interrupt
+    // after swapgs has prepared the user GS base and corrupt per-CPU state.
+    let interrupts_were_enabled = (crate::arch::rflags() & (1 << 9)) != 0;
+
+    // Disable interrupts during the critical section.
     crate::interrupts::disable();
 
     // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
@@ -1638,8 +1643,9 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     // per-CPU marker so reap_zombies knows it is now safe to free that Box.
     crate::sched::clear_pending_switch_from();
 
-    // Re-enable interrupts when we resume
-    crate::interrupts::enable();
+    if interrupts_were_enabled {
+        crate::interrupts::enable();
+    }
 }
 
 /// Walk through page tables and free all mapped physical frames
@@ -2113,39 +2119,45 @@ fn perform_final_cleanup(
 }
 
 pub fn reap_zombies() {
-    let zombies = {
-        let mut list = ZOMBIE_THREADS.lock();
-        core::mem::take(&mut *list)
-    };
+    loop {
+        let zombies = {
+            let mut list = ZOMBIE_THREADS.lock();
+            core::mem::take(&mut *list)
+        };
 
-    for zombie in zombies {
-        log_info!(LOG_ORIGIN, "Reaping zombie thread {} ('{}')", zombie.id, zombie.name);
-
-        perform_final_cleanup(
-            zombie.id,
-            zombie.process_id,
-            zombie.pml4,
-            zombie.stack,
-            zombie.stack_size,
-        );
-
-        // Spin until no CPU is mid-switch away from this zombie.  The window
-        // between perform_context_switch releasing THREAD_LIST.threads.lock()
-        // and the assembly saving from's registers to its CpuContext Box is
-        // ~200 ns; in practice perform_final_cleanup above takes far longer,
-        // so this loop almost never iterates.  The spinloop is a correctness
-        // backstop for the theoretical SMP race.
-        while crate::sched::is_pending_switch_from(zombie.id) {
-            core::hint::spin_loop();
+        if zombies.is_empty() {
+            break;
         }
 
-        // Only now remove from the global thread list
-        if let Some(_removed) = THREAD_LIST.remove(zombie.id) {
-            log_debug!(LOG_ORIGIN, "Zombie thread {} removed from global list", zombie.id);
-        }
+        for zombie in zombies {
+            log_info!(LOG_ORIGIN, "Reaping zombie thread {} ('{}')", zombie.id, zombie.name);
 
-        RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
-        RESOURCE_COUNTERS.log_stats();
+            perform_final_cleanup(
+                zombie.id,
+                zombie.process_id,
+                zombie.pml4,
+                zombie.stack,
+                zombie.stack_size,
+            );
+
+            // Spin until no CPU is mid-switch away from this zombie.  The window
+            // between perform_context_switch releasing THREAD_LIST.threads.lock()
+            // and the assembly saving from's registers to its CpuContext Box is
+            // ~200 ns; in practice perform_final_cleanup above takes far longer,
+            // so this loop almost never iterates.  The spinloop is a correctness
+            // backstop for the theoretical SMP race.
+            while crate::sched::is_pending_switch_from(zombie.id) {
+                core::hint::spin_loop();
+            }
+
+            // Only now remove from the global thread list
+            if let Some(_removed) = THREAD_LIST.remove(zombie.id) {
+                log_debug!(LOG_ORIGIN, "Zombie thread {} removed from global list", zombie.id);
+            }
+
+            RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
+            RESOURCE_COUNTERS.log_stats();
+        }
     }
 
     CLEANED_ADDRESS_SPACES.lock().clear();

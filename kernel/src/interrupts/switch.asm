@@ -258,19 +258,17 @@ switch_to_context_internal:
     mov r15, [r15 + OFF_R15]
     iretq
 
-    ; ========== IRET to KERNEL ==========
+    ; ========== Return to KERNEL ==========
+    ;
+    ; IRETQ only pops RSP/SS on a privilege-level change. For Ring 0 -> Ring 0
+    ; resumes, using IRETQ would keep executing on the outgoing thread's stack
+    ; and leave the saved RSP ignored on the synthetic frame. Restore RSP
+    ; explicitly and RET to the saved continuation instead.
 .iret_to_kernel:
-    sub rsp, 40
+    mov rsp, [r15 + OFF_RSP]
+
     mov rax, [r15 + OFF_RIP]
-    mov [rsp + 0], rax
-    movzx eax, word [r15 + OFF_CS]
-    mov [rsp + 8], rax
-    mov rax, [r15 + OFF_RFLAGS]
-    mov [rsp + 16], rax
-    mov rax, [r15 + OFF_RSP]
-    mov [rsp + 24], rax
-    movzx eax, word [r15 + OFF_SS]
-    mov [rsp + 32], rax
+    push rax
 
     ; Restore registers
     mov rax, [r15 + OFF_RAX]
@@ -288,4 +286,4 @@ switch_to_context_internal:
     mov r13, [r15 + OFF_R13]
     mov r14, [r15 + OFF_R14]
     mov r15, [r15 + OFF_R15]
-    iretq
+    ret

@@ -7,6 +7,7 @@ use spin::{Mutex, Once};
 
 use crate::interrupts::apic;
 use crate::thread::{self, Thread, ThreadId, ThreadPriority, ThreadState};
+use crate::util::without_interrupts;
 use crate::{log_debug, log_error, log_info};
 
 const PRIORITY_LEVELS: usize = 4;
@@ -262,6 +263,26 @@ impl Scheduler {
         false
     }
 
+    fn current_cpu_for(&self, id: ThreadId) -> Option<usize> {
+        for (cpu_id, cpu) in self.cpus.iter().enumerate() {
+            let cpu = cpu.lock();
+            if cpu.current == Some(id) {
+                return Some(cpu_id);
+            }
+        }
+        None
+    }
+
+    fn pending_switch_cpu_for(&self, id: ThreadId) -> Option<usize> {
+        for (cpu_id, cpu) in self.cpus.iter().enumerate() {
+            let cpu = cpu.lock();
+            if cpu.pending_switch_from == Some(id) {
+                return Some(cpu_id);
+            }
+        }
+        None
+    }
+
 
     fn affinity_allows_cpu(&self, id: ThreadId, cpu_id: usize) -> bool {
         ((self.affinity_of(id) >> cpu_id) & 1) != 0
@@ -299,7 +320,15 @@ impl Scheduler {
             return;
         }
 
-        let target_current = self.cpus[target_cpu].lock().current;
+        let (target_current, already_pending) = {
+            let cpu = self.cpus[target_cpu].lock();
+            (cpu.current, cpu.resched_pending)
+        };
+
+        if already_pending {
+            return;
+        }
+
         let should_ipi = match target_current {
             Some(cur) => incoming_priority > self.get_priority(cur),
             None => true,
@@ -307,6 +336,7 @@ impl Scheduler {
 
         if should_ipi {
             if let Some(apic_id) = crate::smp::cpu_apic_id(target_cpu) {
+                self.cpus[target_cpu].lock().resched_pending = true;
                 log_debug!(
                     LOG_ORIGIN,
                     "send resched IPI: target_cpu={} apic_id={} incoming_prio={:?}",
@@ -401,6 +431,12 @@ impl Scheduler {
 
             let candidate = { self.cpus[cpu_id].lock().ready.steal_next() };
             if let Some(id) = candidate {
+                if self.current_cpu_for(id).is_some() || self.pending_switch_cpu_for(id).is_some() {
+                    let prio = self.get_priority(id);
+                    self.cpus[cpu_id].lock().ready.push(id, prio);
+                    continue;
+                }
+
                 if self.affinity_allows_cpu(id, thief_cpu) {
                     log_debug!(
                         LOG_ORIGIN,
@@ -411,7 +447,8 @@ impl Scheduler {
                     );
                     return Some(id);
                 }
-                self.enqueue_ready(id, Some(cpu_id));
+                let prio = self.get_priority(id);
+                self.cpus[cpu_id].lock().ready.push(id, prio);
             }
         }
 
@@ -518,7 +555,7 @@ impl Scheduler {
 
             let log_count = SCHED_SWITCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             if (previous != Some(next) || had_resched_pending)
-                && (had_resched_pending || should_log_irq_count(log_count))
+                && should_log_irq_count(log_count)
             {
                 log_info!(
                     LOG_ORIGIN,
@@ -592,6 +629,18 @@ impl Scheduler {
     }
 
     fn mark_ready(&self, id: ThreadId) {
+        if let Some(owner_cpu) = self.current_cpu_for(id) {
+            self.ownership.lock().insert(id, owner_cpu);
+            thread::set_thread_state(id, ThreadState::Running);
+            log_debug!(
+                LOG_ORIGIN,
+                "mark_ready: tid={} is still current on cpu={}, restored Running state",
+                id,
+                owner_cpu
+            );
+            return;
+        }
+
         match thread::get_thread_state(id) {
             Some(ThreadState::Blocked) | Some(ThreadState::Ready) => self.enqueue_ready(id, None),
             Some(ThreadState::Running) => {
@@ -713,9 +762,17 @@ pub fn init_secondary_cpu(cpu_id: usize, idle_thread: Thread) -> ThreadId {
     scheduler().init_cpu(cpu_id, idle_thread)
 }
 
-pub fn add_thread(thread: Thread) -> ThreadId { scheduler().add_thread(thread) }
-pub fn schedule() -> Option<ThreadId> { scheduler_opt().and_then(|s| s.schedule()) }
-pub fn on_timer_tick() -> (Option<ThreadId>, Option<ThreadId>) { scheduler_opt().map(|s| s.on_timer_tick()).unwrap_or((None, None)) }
+pub fn add_thread(thread: Thread) -> ThreadId {
+    without_interrupts(|| scheduler().add_thread(thread))
+}
+
+pub fn schedule() -> Option<ThreadId> {
+    without_interrupts(|| scheduler_opt().and_then(|s| s.schedule()))
+}
+
+pub fn on_timer_tick() -> (Option<ThreadId>, Option<ThreadId>) {
+    without_interrupts(|| scheduler_opt().map(|s| s.on_timer_tick()).unwrap_or((None, None)))
+}
 
 pub fn drive_cooperative_tick() {
     let (prev, next) = on_timer_tick();
@@ -726,22 +783,61 @@ pub fn drive_cooperative_tick() {
     }
 }
 
-pub fn mark_thread_ready(id: ThreadId) { if let Some(s) = scheduler_opt() { s.mark_ready(id); } }
-pub fn deschedule_thread(id: ThreadId) { if let Some(s) = scheduler_opt() { s.deschedule_thread(id); } }
-pub fn sleep_thread(id: ThreadId, wake_tick: u64) { if let Some(s) = scheduler_opt() { s.sleep_thread(id, wake_tick); } }
-pub fn cancel_sleep(id: ThreadId) { if let Some(s) = scheduler_opt() { s.sleep_queue.lock().retain(|(tid, _)| *tid != id); } }
-pub fn wake_sleeping_threads() { if let Some(s) = scheduler_opt() { s.wake_sleeping_threads(); } }
-pub fn current_thread() -> Option<ThreadId> { scheduler_opt().and_then(|s| s.current_thread()) }
+pub fn mark_thread_ready(id: ThreadId) {
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.mark_ready(id);
+        }
+    })
+}
+
+pub fn deschedule_thread(id: ThreadId) {
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.deschedule_thread(id);
+        }
+    })
+}
+
+pub fn sleep_thread(id: ThreadId, wake_tick: u64) {
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.sleep_thread(id, wake_tick);
+        }
+    })
+}
+
+pub fn cancel_sleep(id: ThreadId) {
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.sleep_queue.lock().retain(|(tid, _)| *tid != id);
+        }
+    })
+}
+
+pub fn wake_sleeping_threads() {
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.wake_sleeping_threads();
+        }
+    })
+}
+
+pub fn current_thread() -> Option<ThreadId> {
+    without_interrupts(|| scheduler_opt().and_then(|s| s.current_thread()))
+}
 
 /// Clear the pending-switch-from marker for the current CPU.
 /// Called by perform_context_switch immediately after switch_context returns,
 /// signalling that the assembly save of the outgoing thread is complete and
 /// its CpuContext Box may safely be freed by reap_zombies.
 pub fn clear_pending_switch_from() {
-    if let Some(s) = scheduler_opt() {
-        let cpu_id = s.local_cpu_id();
-        s.cpus[cpu_id].lock().pending_switch_from = None;
-    }
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            let cpu_id = s.local_cpu_id();
+            s.cpus[cpu_id].lock().pending_switch_from = None;
+        }
+    })
 }
 
 /// Return true if any CPU is currently mid-switch away from `id`.
@@ -759,9 +855,11 @@ pub fn is_pending_switch_from(id: ThreadId) -> bool {
 }
 
 pub fn restore_current_after_block(id: ThreadId) {
-    if let Some(s) = scheduler_opt() {
-        s.restore_current_after_block(id);
-    }
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.restore_current_after_block(id);
+        }
+    })
 }
 
 pub fn owner_cpu_for_logging(id: ThreadId) -> Option<usize> {
@@ -772,9 +870,21 @@ pub fn boost_thread_priority(id: ThreadId, new_priority: ThreadPriority) -> bool
     scheduler_opt().map(|s| s.boost_priority(id, new_priority)).unwrap_or(false)
 }
 
-pub fn restore_original_priority(id: ThreadId) { if let Some(s) = scheduler_opt() { s.restore_original_priority(id); } }
-pub fn get_thread_priority(id: ThreadId) -> ThreadPriority { scheduler_opt().map(|s| s.get_priority(id)).unwrap_or(ThreadPriority::Normal) }
-pub fn get_base_priority(id: ThreadId) -> ThreadPriority { scheduler_opt().map(|s| s.get_base_priority(id)).unwrap_or(ThreadPriority::Normal) }
+pub fn restore_original_priority(id: ThreadId) {
+    without_interrupts(|| {
+        if let Some(s) = scheduler_opt() {
+            s.restore_original_priority(id);
+        }
+    })
+}
+
+pub fn get_thread_priority(id: ThreadId) -> ThreadPriority {
+    without_interrupts(|| scheduler_opt().map(|s| s.get_priority(id)).unwrap_or(ThreadPriority::Normal))
+}
+
+pub fn get_base_priority(id: ThreadId) -> ThreadPriority {
+    without_interrupts(|| scheduler_opt().map(|s| s.get_base_priority(id)).unwrap_or(ThreadPriority::Normal))
+}
 
 pub fn yield_current() {
     let current = match current_thread() { Some(id) => id, None => return };
@@ -787,11 +897,11 @@ pub fn yield_current() {
 }
 
 pub fn set_thread_affinity(id: ThreadId, mask: u64) -> bool {
-    scheduler_opt().map(|s| s.set_affinity(id, mask)).unwrap_or(false)
+    without_interrupts(|| scheduler_opt().map(|s| s.set_affinity(id, mask)).unwrap_or(false))
 }
 
 pub fn get_thread_affinity(id: ThreadId) -> u64 {
-    scheduler_opt().map(|s| s.get_affinity(id)).unwrap_or(1)
+    without_interrupts(|| scheduler_opt().map(|s| s.get_affinity(id)).unwrap_or(1))
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {

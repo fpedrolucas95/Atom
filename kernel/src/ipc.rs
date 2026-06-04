@@ -591,16 +591,41 @@ impl IpcManager {
     fn close_port(&self, port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
         let mut ports = self.ports.lock();
 
-        if let Some(port) = ports.get(&port_id) {
-            if !can_thread_exercise_port_authority(caller, port) {
-                return Err(IpcError::PermissionDenied);
-            }
+        let Some(port) = ports.get(&port_id) else {
+            return Err(IpcError::InvalidPort);
+        };
 
-            ports.remove(&port_id);
-            Ok(())
-        } else {
-            Err(IpcError::InvalidPort)
+        if !can_thread_exercise_port_authority(caller, port) {
+            return Err(IpcError::PermissionDenied);
         }
+
+        let Some(port) = ports.remove(&port_id) else {
+            return Err(IpcError::InvalidPort);
+        };
+
+        let receiver = port.receiver_blocked;
+        let wait_queue = port.wait_queue;
+        let wait_any_waiters = port.wait_any_waiters;
+        drop(ports);
+
+        if let Some(receiver_id) = receiver {
+            log_debug!(LOG_ORIGIN, "Waking blocked receiver {} on closed port {}", receiver_id, port_id);
+            self.waiting_threads.lock().remove(&receiver_id);
+            crate::sched::mark_thread_ready(receiver_id);
+            self.restore_priority(receiver_id);
+        }
+
+        for waiter_id in wait_queue {
+            log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on closed port {}", waiter_id, port_id);
+            crate::sched::mark_thread_ready(waiter_id);
+        }
+
+        for waiter_id in wait_any_waiters {
+            log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on closed port {}", waiter_id, port_id);
+            crate::sched::mark_thread_ready(waiter_id);
+        }
+
+        Ok(())
     }
     
     fn validate_payload_and_size(&self, message: &Message) -> Result<usize, IpcError> {
