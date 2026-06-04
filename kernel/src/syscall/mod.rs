@@ -1113,6 +1113,21 @@ fn sys_keyboard_poll(out_ptr: u64) -> u64 {
     EWOULDBLOCK
 }
 
+fn current_thread_name_for_log() -> &'static str {
+    crate::sched::current_thread()
+        .and_then(crate::thread::get_thread_name)
+        .unwrap_or("unknown")
+}
+
+fn framebuffer_op_for_process(process_name: &'static str) -> &'static str {
+    match process_name {
+        "ui_shell" => "compositor",
+        "display" => "display",
+        "terminal" => "console",
+        _ => "console",
+    }
+}
+
 /// Get framebuffer information for userspace graphics
 fn sys_get_framebuffer(info_ptr: u64) -> u64 {
     let info_ptr = match validate_user_addr(info_ptr) {
@@ -1125,15 +1140,28 @@ fn sys_get_framebuffer(info_ptr: u64) -> u64 {
     
     if let Some((width, height)) = crate::graphics::get_dimensions() {
         if let Some(addr) = crate::graphics::get_framebuffer_address() {
+            let stride = crate::graphics::get_stride();
+            let bpp = crate::graphics::get_bytes_per_pixel();
+            let len = stride as usize * height as usize * bpp as usize;
+            let proc_name = current_thread_name_for_log();
             let info_ptr = info_ptr.as_mut_ptr::<u64>();
             unsafe {
                 // Write: [address, width, height, stride, bytes_per_pixel]
                 *info_ptr = addr as u64;
                 *info_ptr.add(1) = width as u64;
                 *info_ptr.add(2) = height as u64;
-                *info_ptr.add(3) = crate::graphics::get_stride() as u64;
-                *info_ptr.add(4) = crate::graphics::get_bytes_per_pixel() as u64;
+                *info_ptr.add(3) = stride as u64;
+                *info_ptr.add(4) = bpp as u64;
             }
+            log_info!(
+                "fb",
+                "[fb] cpu={} proc={} op={} addr={:#X} len={}",
+                crate::smp::current_cpu_id(),
+                proc_name,
+                framebuffer_op_for_process(proc_name),
+                addr,
+                len
+            );
             return ESUCCESS;
         }
     }
@@ -3988,6 +4016,7 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
     };
 
     let (address, width, height, stride, bpp) = fb_info;
+    let proc_name = crate::thread::get_thread_name(caller).unwrap_or("unknown");
 
     // Calculate framebuffer size
     let fb_size = (stride as usize) * (height as usize) * bpp;
@@ -4018,14 +4047,12 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
     }
 
     log_info!(
-        "syscall",
-        "Thread {} mapped framebuffer: addr={:#X} {}x{} stride={} bpp={} size={}",
-        caller,
+        "fb",
+        "[fb] cpu={} proc={} op={} addr={:#X} len={}",
+        crate::smp::current_cpu_id(),
+        proc_name,
+        framebuffer_op_for_process(proc_name),
         address,
-        width,
-        height,
-        stride,
-        bpp,
         fb_size
     );
 
@@ -4138,6 +4165,29 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         crate::sched::sleep_thread(caller, deadline);
     } else {
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
+    }
+
+    // SMP TOCTOU guard: a sender may deliver to one of these ports after
+    // register_wait_any() but before the caller is fully blocked.  In that
+    // window mark_thread_ready can see the waiter as Running and only set a
+    // reschedule hint.  Recheck after the Blocked transition so a pending
+    // message cannot leave the waiter asleep forever.
+    for (idx, port_id) in ports.iter().enumerate() {
+        if let Ok(true) = crate::ipc::has_message(*port_id) {
+            if deadline_tick.is_some() {
+                crate::sched::cancel_sleep(caller);
+            }
+            crate::ipc::unregister_wait_any(caller, &ports);
+            crate::sched::restore_current_after_block(caller);
+            log_info!(
+                "syscall",
+                "ipc_wait_any TOCTOU: message found after Blocked transition, \
+                 returning without sleep (caller={}, port_id={})",
+                caller,
+                port_id
+            );
+            return idx as u64;
+        }
     }
 
     // Single context switch — returns when the scheduler picks us again

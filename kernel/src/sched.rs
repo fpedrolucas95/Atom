@@ -2,16 +2,36 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
 use crate::interrupts::apic;
 use crate::thread::{self, Thread, ThreadId, ThreadPriority, ThreadState};
-use crate::{log_debug, log_info};
+use crate::{log_debug, log_error, log_info};
 
 const PRIORITY_LEVELS: usize = 4;
 const LOG_ORIGIN: &str = "sched";
 const NO_CPU_OWNER: usize = usize::MAX;
+static LAST_LOGGED_MOUSE_IRQ: AtomicU64 = AtomicU64::new(0);
+static LAST_LOGGED_RESCHEDULE_IRQ: AtomicU64 = AtomicU64::new(0);
+static SCHED_SWITCH_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static THREAD_STATE_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn should_log_irq_count(count: u64) -> bool {
+    count <= 64 || count.is_power_of_two()
+}
+
+fn thread_state_name(state: Option<ThreadState>) -> &'static str {
+    match state {
+        Some(ThreadState::Ready) => "Ready",
+        Some(ThreadState::Running) => "Running",
+        Some(ThreadState::Blocked) => "Blocked",
+        Some(ThreadState::WaitingIpc) => "WaitingIpc",
+        Some(ThreadState::Exited) => "Exited",
+        None => "none",
+    }
+}
 
 struct ReadyQueues {
     queues: [VecDeque<ThreadId>; PRIORITY_LEVELS],
@@ -139,10 +159,82 @@ impl Scheduler {
         self.base_priorities.lock().get(&id).copied().unwrap_or(ThreadPriority::Normal)
     }
 
+    fn thread_name(&self, id: ThreadId) -> &'static str {
+        thread::get_thread_name(id).unwrap_or("?")
+    }
+
     fn is_runnable(&self, id: ThreadId) -> bool {
         thread::get_thread_state(id)
             .map(|s| matches!(s, ThreadState::Ready | ThreadState::Running))
             .unwrap_or(false)
+    }
+
+    fn log_thread_state(
+        &self,
+        id: ThreadId,
+        old_state: Option<ThreadState>,
+        new_state: ThreadState,
+        owner_cpu: Option<usize>,
+    ) {
+        let count = THREAD_STATE_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if new_state != ThreadState::Running && !should_log_irq_count(count) {
+            return;
+        }
+
+        if let Some(owner_cpu) = owner_cpu {
+            log_info!(
+                "thread",
+                "[thread] tid={} proc={} old_state={} new_state={:?} owner_cpu={}",
+                id.raw(),
+                self.thread_name(id),
+                thread_state_name(old_state),
+                new_state,
+                owner_cpu
+            );
+        } else {
+            log_info!(
+                "thread",
+                "[thread] tid={} proc={} old_state={} new_state={:?} owner_cpu=none",
+                id.raw(),
+                self.thread_name(id),
+                thread_state_name(old_state),
+                new_state
+            );
+        }
+    }
+
+    fn maybe_log_irq_snapshot(&self, cpu_id: usize) {
+        let snap = crate::interrupts::handlers::irq_snapshot();
+
+        let reschedule_count = snap.reschedule;
+        let last_reschedule = LAST_LOGGED_RESCHEDULE_IRQ.load(Ordering::Relaxed);
+        if reschedule_count != last_reschedule
+            && snap.reschedule_eoi >= reschedule_count
+            && should_log_irq_count(reschedule_count)
+        {
+            LAST_LOGGED_RESCHEDULE_IRQ.store(reschedule_count, Ordering::Relaxed);
+            log_info!(
+                "irq",
+                "[irq] cpu={} vector=0x2d irq=ipi handler=reschedule eoi=yes count={}",
+                cpu_id,
+                reschedule_count
+            );
+        }
+
+        let mouse_count = snap.mouse;
+        let last_mouse = LAST_LOGGED_MOUSE_IRQ.load(Ordering::Relaxed);
+        if mouse_count != last_mouse
+            && snap.mouse_eoi >= mouse_count
+            && should_log_irq_count(mouse_count)
+        {
+            LAST_LOGGED_MOUSE_IRQ.store(mouse_count, Ordering::Relaxed);
+            log_info!(
+                "irq",
+                "[irq] cpu={} vector=0x2c irq=12 handler=mouse eoi=yes count={}",
+                cpu_id,
+                mouse_count
+            );
+        }
     }
 
     fn remove_from_all_ready_queues(&self, id: ThreadId) {
@@ -329,11 +421,13 @@ impl Scheduler {
         let previous;
         let mut chosen;
         let mut stole_thread = false;
+        let had_resched_pending;
 
         {
             let mut cpu = self.cpus[cpu_id].lock();
             cpu.local_ticks = cpu.local_ticks.saturating_add(1);
             previous = cpu.current;
+            had_resched_pending = cpu.resched_pending;
 
             if requeue_current {
                 if let Some(cur) = previous {
@@ -394,17 +488,39 @@ impl Scheduler {
 
         if let Some(next) = chosen {
             thread::set_thread_state(next, ThreadState::Running);
-            self.ownership.lock().insert(next, cpu_id);
+            let previous_owner = self.ownership.lock().insert(next, cpu_id);
 
-            if previous != Some(next) {
-                log_debug!(
+            if let Some(owner) = previous_owner {
+                if owner != NO_CPU_OWNER && owner != cpu_id {
+                    log_error!(
+                        LOG_ORIGIN,
+                        "[sched] duplicate-running-thread tid={}/{} prev_owner={} new_owner={}",
+                        next,
+                        self.thread_name(next),
+                        owner,
+                        cpu_id
+                    );
+                }
+            }
+
+            let log_count = SCHED_SWITCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if (previous != Some(next) || had_resched_pending)
+                && (had_resched_pending || should_log_irq_count(log_count))
+            {
+                log_info!(
                     LOG_ORIGIN,
-                    "[smp] cpu={} sched: {:?} → {:?}",
+                    "[sched] cpu={} prev={}/{} next={}/{} state={:?} resched_pending={}",
                     cpu_id,
-                    previous,
-                    next
+                    previous.map(|id| id.raw()).unwrap_or(0),
+                    previous.map(|id| self.thread_name(id)).unwrap_or("none"),
+                    next.raw(),
+                    self.thread_name(next),
+                    thread::get_thread_state(next).unwrap_or(ThreadState::Exited),
+                    if had_resched_pending { "yes" } else { "no" }
                 );
             }
+
+            self.maybe_log_irq_snapshot(cpu_id);
 
             // INVARIANT: A thread cannot be both Running and in a ready queue.
             #[cfg(debug_assertions)]
@@ -422,8 +538,24 @@ impl Scheduler {
     fn sleep_thread(&self, id: ThreadId, wake_tick: u64) {
         self.remove_from_all_ready_queues(id);
         self.ownership.lock().insert(id, NO_CPU_OWNER);
+        let old_state = thread::get_thread_state(id);
         thread::set_thread_state(id, ThreadState::Blocked);
+        self.log_thread_state(id, old_state, ThreadState::Blocked, None);
         self.sleep_queue.lock().push((id, wake_tick));
+    }
+
+    fn restore_current_after_block(&self, id: ThreadId) {
+        let cpu_id = self.local_cpu_id();
+        self.remove_from_all_ready_queues(id);
+        self.sleep_queue.lock().retain(|(thread_id, _)| *thread_id != id);
+        {
+            let mut cpu = self.cpus[cpu_id].lock();
+            cpu.current = Some(id);
+        }
+        self.ownership.lock().insert(id, cpu_id);
+        let old_state = thread::get_thread_state(id);
+        thread::set_thread_state(id, ThreadState::Running);
+        self.log_thread_state(id, old_state, ThreadState::Running, Some(cpu_id));
     }
 
     fn wake_sleeping_threads(&self) {
@@ -458,13 +590,18 @@ impl Scheduler {
                 if let Some(owner_cpu) = self.ownership.lock().get(&id).copied() {
                     if owner_cpu != NO_CPU_OWNER && owner_cpu < self.cpus.len() {
                         self.cpus[owner_cpu].lock().resched_pending = true;
-                        log_debug!(
+                        log_info!(
                             LOG_ORIGIN,
                             "mark_ready: tid={} Running on cpu={}, set resched_pending \
                              (block_recv TOCTOU — message in queue, TOCTOU guard will catch it)",
                             id,
                             owner_cpu
                         );
+                        if owner_cpu != self.local_cpu_id() {
+                            if let Some(apic_id) = crate::smp::cpu_apic_id(owner_cpu) {
+                                apic::send_reschedule_ipi(apic_id);
+                            }
+                        }
                     }
                 }
             }
@@ -538,6 +675,13 @@ impl Scheduler {
     fn flag_reschedule_local(&self) {
         self.cpus[self.local_cpu_id()].lock().resched_pending = true;
     }
+
+    fn owner_cpu_for_logging(&self, id: ThreadId) -> Option<usize> {
+        match self.ownership.lock().get(&id).copied() {
+            Some(owner) if owner != NO_CPU_OWNER => Some(owner),
+            _ => None,
+        }
+    }
 }
 
 static SCHEDULER: Once<Scheduler> = Once::new();
@@ -575,6 +719,16 @@ pub fn sleep_thread(id: ThreadId, wake_tick: u64) { if let Some(s) = scheduler_o
 pub fn cancel_sleep(id: ThreadId) { if let Some(s) = scheduler_opt() { s.sleep_queue.lock().retain(|(tid, _)| *tid != id); } }
 pub fn wake_sleeping_threads() { if let Some(s) = scheduler_opt() { s.wake_sleeping_threads(); } }
 pub fn current_thread() -> Option<ThreadId> { scheduler_opt().and_then(|s| s.current_thread()) }
+
+pub fn restore_current_after_block(id: ThreadId) {
+    if let Some(s) = scheduler_opt() {
+        s.restore_current_after_block(id);
+    }
+}
+
+pub fn owner_cpu_for_logging(id: ThreadId) -> Option<usize> {
+    scheduler_opt().and_then(|s| s.owner_cpu_for_logging(id))
+}
 
 pub fn boost_thread_priority(id: ThreadId, new_priority: ThreadPriority) -> bool {
     scheduler_opt().map(|s| s.boost_priority(id, new_priority)).unwrap_or(false)

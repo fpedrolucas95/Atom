@@ -784,6 +784,40 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 static USER_MODE_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static INTERRUPT_SWITCH_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
+static IRQ_TIMER_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_TIMER_EOI_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_KEYBOARD_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_KEYBOARD_EOI_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_MOUSE_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_MOUSE_EOI_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_RESCHEDULE_COUNT: AtomicU64 = AtomicU64::new(0);
+static IRQ_RESCHEDULE_EOI_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub struct IrqSnapshot {
+    pub timer: u64,
+    pub timer_eoi: u64,
+    pub keyboard: u64,
+    pub keyboard_eoi: u64,
+    pub mouse: u64,
+    pub mouse_eoi: u64,
+    pub reschedule: u64,
+    pub reschedule_eoi: u64,
+}
+
+pub fn irq_snapshot() -> IrqSnapshot {
+    IrqSnapshot {
+        timer: IRQ_TIMER_COUNT.load(Ordering::Relaxed),
+        timer_eoi: IRQ_TIMER_EOI_COUNT.load(Ordering::Relaxed),
+        keyboard: IRQ_KEYBOARD_COUNT.load(Ordering::Relaxed),
+        keyboard_eoi: IRQ_KEYBOARD_EOI_COUNT.load(Ordering::Relaxed),
+        mouse: IRQ_MOUSE_COUNT.load(Ordering::Relaxed),
+        mouse_eoi: IRQ_MOUSE_EOI_COUNT.load(Ordering::Relaxed),
+        reschedule: IRQ_RESCHEDULE_COUNT.load(Ordering::Relaxed),
+        reschedule_eoi: IRQ_RESCHEDULE_EOI_COUNT.load(Ordering::Relaxed),
+    }
+}
 
 #[inline]
 fn read_cr2() -> u64 {
@@ -1050,6 +1084,7 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
         );
     }
 
+    IRQ_TIMER_COUNT.fetch_add(1, Ordering::Relaxed);
     TICKS.fetch_add(1, Ordering::Relaxed);
 
     ipc::on_timer_tick(get_ticks());
@@ -1060,6 +1095,7 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
     // CRITICAL: EOI must be sent BEFORE driving preemption/scheduling.
     // This allows other interrupts to fire even if we switch away from this thread.
     super::apic::send_eoi();
+    IRQ_TIMER_EOI_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Do not context-switch directly from the interrupt frame.  The current
     // switch_context path saves a normal function-call return address, not the
@@ -1072,8 +1108,10 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
 
 #[no_mangle]
 pub extern "C" fn rust_reschedule_interrupt_handler(_frame: *const InterruptFrame) {
+    IRQ_RESCHEDULE_COUNT.fetch_add(1, Ordering::Relaxed);
     crate::sched::on_reschedule_interrupt();
     super::apic::send_eoi();
+    IRQ_RESCHEDULE_EOI_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // A reschedule IPI may interrupt arbitrary kernel/idle code. Switching
     // directly from that interrupt frame would save the thread context at the
@@ -1084,6 +1122,7 @@ pub extern "C" fn rust_reschedule_interrupt_handler(_frame: *const InterruptFram
 
 #[no_mangle]
 pub extern "C" fn rust_keyboard_interrupt_handler(_frame: *const InterruptFrame) {
+    IRQ_KEYBOARD_COUNT.fetch_add(1, Ordering::Relaxed);
     // Buffer raw keyboard data for userspace driver
     input::on_keyboard_irq();
 
@@ -1093,10 +1132,12 @@ pub extern "C" fn rust_keyboard_interrupt_handler(_frame: *const InterruptFrame)
     }
 
     super::apic::send_eoi();
+    IRQ_KEYBOARD_EOI_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 #[no_mangle]
 pub extern "C" fn rust_mouse_interrupt_handler(_frame: *const InterruptFrame) {
+    IRQ_MOUSE_COUNT.fetch_add(1, Ordering::Relaxed);
     // Buffer raw mouse data for userspace driver
     input::on_mouse_irq();
 
@@ -1106,6 +1147,7 @@ pub extern "C" fn rust_mouse_interrupt_handler(_frame: *const InterruptFrame) {
     }
 
     super::apic::send_eoi();
+    IRQ_MOUSE_EOI_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 #[no_mangle]

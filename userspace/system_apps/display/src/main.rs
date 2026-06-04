@@ -15,7 +15,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use atom_syscall::graphics::{Color, Framebuffer};
+use atom_syscall::graphics::Framebuffer;
 use atom_syscall::ipc::create_port;
 use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
@@ -63,45 +63,6 @@ static ALLOCATOR: BumpAllocator = BumpAllocator::new();
 fn alloc_error(_: Layout) -> ! { loop {} }
 
 // ============================================================================
-// Display Driver State
-// ============================================================================
-
-struct DisplayDriver {
-    framebuffer: Framebuffer,
-    width: u32,
-    height: u32,
-}
-
-impl DisplayDriver {
-    fn new(fb: Framebuffer) -> Self {
-        let width = fb.width();
-        let height = fb.height();
-        
-        Self {
-            framebuffer: fb,
-            width,
-            height,
-        }
-    }
-
-    fn clear(&self, color: Color) {
-        self.framebuffer.fill_rect(0, 0, self.width, self.height, color);
-    }
-
-    fn fill_rect(&self, x: u32, y: u32, w: u32, h: u32, color: Color) {
-        self.framebuffer.fill_rect(x, y, w, h, color);
-    }
-
-    fn draw_text(&self, x: u32, y: u32, text: &str, fg: Color, bg: Color) {
-        self.framebuffer.draw_string(x, y, text, fg, bg);
-    }
-
-    fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
-
-// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -128,14 +89,8 @@ fn main() -> ! {
         }
     };
 
-    let driver = DisplayDriver::new(fb);
+    let _fb = fb;
     log("Display Driver: Framebuffer acquired");
-
-    let (width, _) = driver.dimensions();
-    driver.clear(Color::new(46, 52, 64));
-    driver.fill_rect(0, 0, width, 24, Color::new(36, 41, 51));
-    driver.draw_text(8, 4, "Atom Display Driver", Color::new(136, 192, 208), Color::new(36, 41, 51));
-    driver.draw_text(16, 40, "Display Driver Active", Color::WHITE, Color::new(46, 52, 64));
 
     log("Display Driver: Ready");
 
