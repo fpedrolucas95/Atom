@@ -1046,6 +1046,11 @@ pub fn get_thread_process_id(thread_id: ThreadId) -> Option<ProcessId> {
     threads.iter().find(|t| t.id == thread_id).and_then(|t| t.process_id)
 }
 
+pub fn get_thread_name(thread_id: ThreadId) -> Option<&'static str> {
+    let threads = THREAD_LIST.threads.lock();
+    threads.iter().find(|t| t.id == thread_id).map(|t| t.name)
+}
+
 pub fn get_thread_user_stack(thread_id: ThreadId) -> Option<UserStackMetadata> {
     let threads = THREAD_LIST.threads.lock();
     threads

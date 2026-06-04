@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use atom_syscall::graphics::{Color, Framebuffer};
 use atom_syscall::ipc::create_port;
-use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
 
 use libipc::protocol::register_service;
@@ -113,8 +113,10 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     log("Display Driver: Starting...");
 
-    if let Ok(port) = create_port() {
-        let _ = register_service("display", port);
+    // Keep port in scope so the idle loop can block on it instead of spinning.
+    let port = create_port().ok();
+    if let Some(p) = port {
+        let _ = register_service("display", p);
     }
 
     // Acquire framebuffer from kernel
@@ -137,8 +139,15 @@ fn main() -> ! {
 
     log("Display Driver: Ready");
 
+    // Block on the IPC port (infinite wait) so this thread does not spin.
+    // Any incoming message (e.g. from a future compositor) will wake it up.
+    // If port creation failed fall back to an indefinite sleep.
     loop {
-        yield_now();
+        if let Some(p) = port {
+            atom_syscall::ipc::wait_any(&[p], u64::MAX).ok();
+        } else {
+            atom_syscall::thread::sleep_ms(u64::MAX);
+        }
     }
 }
 

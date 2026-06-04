@@ -913,6 +913,40 @@ extern "win64" fn rust_syscall_dispatcher(
     };
 
     // ----------------------------------------------------------------
+    // [hotloop] instrumentation: log busy-poll syscalls so the serial
+    // log shows which process is spinning and what it got back.
+    // Covers: SYS_THREAD_YIELD, SYS_IPC_WAIT_ANY, SYS_IPC_TRY_RECV.
+    // Only SYS_IPC_TRY_RECV is filtered to EWOULDBLOCK returns so that
+    // normal message-delivery calls are not spammed.
+    // ----------------------------------------------------------------
+    if syscall_num == SYS_THREAD_YIELD
+        || syscall_num == SYS_IPC_WAIT_ANY
+        || (syscall_num == SYS_IPC_TRY_RECV && result == EWOULDBLOCK)
+    {
+        let tid = crate::sched::current_thread();
+        let (pid_raw, proc_name) = if let Some(t) = tid {
+            let pid = crate::thread::get_thread_process_id(t)
+                .map(|p| p.raw())
+                .unwrap_or(0);
+            let name = crate::thread::get_thread_name(t).unwrap_or("?");
+            (pid, name)
+        } else {
+            (0, "?")
+        };
+        let syscall_name = match syscall_num {
+            SYS_THREAD_YIELD    => "yield",
+            SYS_IPC_WAIT_ANY    => "ipc_wait_any",
+            SYS_IPC_TRY_RECV    => "ipc_try_recv",
+            _                   => "?",
+        };
+        log_debug!(
+            "hotloop",
+            "[hotloop] tid={:?} pid={} proc={} cr3={:#x} syscall={} rip={:#x} ret={:#x}",
+            tid, pid_raw, proc_name, entry_cr3, syscall_name, frame.user_rip, result
+        );
+    }
+
+    // ----------------------------------------------------------------
     // Subsystem error normalization (Phase 6 — Syscall Hardening)
     //
     // Classify the result into a SyscallError variant for structured
