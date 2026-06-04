@@ -1,65 +1,30 @@
-// Thread Management Subsystem
+// kernel/src/thread.rs
 //
-// Implements the core thread abstraction for the Atom kernel, including
-// thread creation, lifecycle management, CPU context handling, and
-// capability association. This module forms the foundation on which
-// scheduling, IPC, and syscall execution are built.
+// Atom kernel thread subsystem for x86_64.
 //
-// Key responsibilities:
-// - Define thread identity, state, and priority
-// - Maintain the Thread Control Block (TCB) and CPU execution context
-// - Manage a global list of all threads in the system
-// - Integrate per-thread capability tables for security enforcement
-// - Provide low-level context switching primitives
+// This file is intentionally conservative.  A thread control block (TCB) is a
+// kernel-owned object whose architectural CpuContext may be referenced by the
+// low-level switch assembly after the scheduler has dropped the global thread
+// lock.  For that reason CpuContext is heap allocated and the reaper follows a
+// strict two-phase lifetime protocol:
 //
-// Thread model:
-// - Each thread has a unique `ThreadId`, state, priority, and name
-// - Threads transition through: Ready → Running → Blocked / Exited
-// - An explicit idle thread is supported by the scheduler
-// - Threads are kernel-managed (no user-level threading yet)
+//   1. terminate_entity() marks a thread Exited and performs only logical
+//      teardown that is safe while the TCB remains published.
+//   2. reap_zombies() waits until no CPU can still be saving into the TCB,
+//      removes the TCB from THREAD_LIST, drops the THREAD_LIST lock, and only
+//      then frees stacks, address spaces, VMA state and process registry state.
 //
-// CPU context handling:
-// - `CpuContext` mirrors the full architectural register set (x86_64)
-// - Context includes general-purpose registers, segment selectors, flags,
-//   instruction pointer, stack pointer, and CR3 (address space)
-// - Context switch is performed by architecture-specific assembly stubs
-// - `capture_current_context` snapshots the live CPU state for preemption
+// In OSDev terms, THREAD_LIST is only the scheduler-visible registry.  It is
+// not a global teardown lock.  The reaper must never hold it while calling IPC,
+// VMM, PMM, shared memory, process, capability or filesystem paths.  This avoids
+// lock inversion and matches the hardware rule that a context switch owns the
+// outgoing context until the assembly save has completed.
 //
-// Scheduling integration:
-// - Thread state is manipulated by the scheduler (`sched` module)
-// - Runnable threads are discovered via state inspection
-// - Priority information is consumed by the scheduler’s ready queues
-//
-// Capability integration:
-// - Every thread owns a `CapabilityTable`
-// - Capability validation is enforced at the thread level
-// - Helpers exist to add, remove, query, and validate capabilities
-// - Enables capability-based security to be thread-centric
-//
-// Global thread management:
-// - All threads are stored in a global `ThreadList` protected by a spinlock
-// - Provides thread lookup, removal, statistics, and state updates
-// - Designed for simplicity and correctness over scalability
-//
-// Correctness and safety notes:
-// - Global mutable state relies on spinlocks and careful sequencing
-// - Context switching and register capture use `unsafe` inline assembly
-// - Assumes uniprocessor (single-core) execution for now
-// - No stack guards or user/kernel stack separation yet
-//
-// Design intent and future evolution:
-// - Intended as a minimal kernel thread layer
-// - Will later support:
-//   - User-space threads/processes
-//   - Separate user and kernel stacks
-//   - Stronger isolation and per-process address spaces
-//   - SMP-aware scheduling and per-CPU data
-//
-// This module is a critical low-level component and is intentionally
-// explicit, conservative, and closely aligned with the underlying hardware.
+// Public API compatibility with the previous thread.rs is preserved.
 
 #![allow(dead_code)]
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -364,7 +329,11 @@ pub struct Thread {
     pub id: ThreadId,
     pub process_id: Option<ProcessId>,
     pub state: ThreadState,
-    pub context: CpuContext,
+    // Box-allocated so its address is stable when Vec<Thread> reallocates on SMP.
+    // perform_context_switch keeps raw *mut CpuContext across the THREAD_LIST lock
+    // release; without Box, a concurrent add_thread() can realloc the Vec and
+    // dangle those pointers → crash.
+    pub context: Box<CpuContext>,
     pub kernel_stack: u64,
     pub kernel_stack_size: usize,
     /// Compatibility cache of the owning process PML4.
@@ -396,7 +365,7 @@ impl Thread {
         name: &'static str,
     ) -> Self {
         let id = ThreadId::new();
-        let context = CpuContext::new(entry_point, kernel_stack, address_space);
+        let context = Box::new(CpuContext::new(entry_point, kernel_stack, address_space));
         let capability_table = crate::cap::create_capability_table(id);
         
         // Write canary and immediately verify it
@@ -616,7 +585,7 @@ impl ThreadList {
             let (left, right) = threads.split_at_mut(from_idx);
             Some(f(&mut right[0].context, &left[to_idx].context))
         } else {
-            let ctx_copy = threads[from_idx].context;
+            let ctx_copy = *threads[from_idx].context;
             Some(f(&mut threads[from_idx].context, &ctx_copy))
         }
     }
@@ -627,7 +596,7 @@ impl ThreadList {
             id: t.id,
             process_id: t.process_id,
             state: t.state,
-            context: t.context,
+            context: t.context.clone(),
             kernel_stack: t.kernel_stack,
             kernel_stack_size: t.kernel_stack_size,
             address_space: t.address_space,
@@ -802,10 +771,10 @@ pub struct ThreadStats {
 static THREAD_LIST: ThreadList = ThreadList::new();
 static USERMODE_ENTRIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
 
-/// Global pointer to the current thread's kernel stack top.
-/// Used by syscall_entry in assembly to switch to the correct stack.
+/// Legacy exported pointer for current kernel stack top.
+/// Syscall entry now uses per-CPU GS state; this is kept for diagnostics.
 #[no_mangle]
-pub static mut CURRENT_THREAD_KSTACK: u64 = 0;
+pub static CURRENT_THREAD_KSTACK: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
     log_info!(
@@ -989,6 +958,16 @@ pub fn add_thread(thread: Thread) {
     let mut thread = thread;
     track_thread_process(&thread);
     sync_thread_capability_mirror_from_process(&mut thread);
+
+    if thread.kernel_stack != 0 && thread.kernel_stack_size != 0 {
+        RESOURCE_COUNTERS
+            .kernel_stacks_allocated
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    RESOURCE_COUNTERS
+        .threads_created
+        .fetch_add(1, Ordering::Relaxed);
+
     THREAD_LIST.add(thread);
 }
 
@@ -1044,6 +1023,11 @@ pub fn get_thread_address_space(thread_id: ThreadId) -> Option<u64> {
 pub fn get_thread_process_id(thread_id: ThreadId) -> Option<ProcessId> {
     let threads = THREAD_LIST.threads.lock();
     threads.iter().find(|t| t.id == thread_id).and_then(|t| t.process_id)
+}
+
+pub fn get_thread_name(thread_id: ThreadId) -> Option<&'static str> {
+    let threads = THREAD_LIST.threads.lock();
+    threads.iter().find(|t| t.id == thread_id).map(|t| t.name)
 }
 
 pub fn get_thread_user_stack(thread_id: ThreadId) -> Option<UserStackMetadata> {
@@ -1237,7 +1221,7 @@ where
     )
 }
 
-extern "C" {
+extern "win64" {
     fn switch_context(old_context: *mut CpuContext, new_context: *const CpuContext);
     pub(crate) fn switch_to_context(new_context: *const CpuContext) -> !;
     pub(crate) fn enter_user(rip: u64, rsp: u64, cr3: u64) -> !;
@@ -1324,10 +1308,12 @@ pub fn jump_to_thread(thread_id: ThreadId) -> ! {
             .find(|t| t.id == thread_id)
             .expect("Thread not found");
 
-        (thread.context, thread.kernel_stack)
+        (*thread.context, thread.kernel_stack)
     };
 
     gdt::set_rsp0(kernel_stack);
+    CURRENT_THREAD_KSTACK.store(kernel_stack, Ordering::Relaxed);
+    crate::smp::update_current_kstack(kernel_stack);
 
     if (ctx_copy.cs & 0x3) == 0x3 {
         log_user_entry_once(thread_id, &ctx_copy);
@@ -1421,7 +1407,7 @@ pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
     threads
         .iter()
         .find(|t| t.id == thread_id)
-        .map(|t| t.context)
+        .map(|t| *t.context)
 }
 
 /// Returns true if the thread executes in Ring 3 (userspace).
@@ -1532,7 +1518,12 @@ fn is_canonical(addr: u64) -> bool {
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
-    // Disable interrupts during the critical section
+    // Preserve the caller's interrupt state. Syscall entry runs with IF masked
+    // until the final iretq; enabling IRQs in that return path can interrupt
+    // after swapgs has prepared the user GS base and corrupt per-CPU state.
+    let interrupts_were_enabled = (crate::arch::rflags() & (1 << 9)) != 0;
+
+    // Disable interrupts during the critical section.
     crate::interrupts::disable();
 
     // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
@@ -1573,12 +1564,16 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         threads[to_idx].context.cr3 = to_cr3;
 
         let to_is_userspace = threads[to_idx].is_userspace;
-        let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
-        let to_ptr = &threads[to_idx].context as *const CpuContext;
+        // Dereference the Box to get a raw pointer into the heap allocation.
+        // The Box's inner CpuContext lives at a stable heap address even when
+        // Vec<Thread> reallocates after we release the lock below — that is the
+        // point of storing context as Box<CpuContext> instead of inline.
+        let from_ptr = &mut *threads[from_idx].context as *mut CpuContext;
+        let to_ptr = &*threads[to_idx].context as *const CpuContext;
         let to_kernel_stack = threads[to_idx].kernel_stack;
 
         if to_is_userspace {
-            log_user_entry_once(to_id, &threads[to_idx].context);
+            log_user_entry_once(to_id, &*threads[to_idx].context);
         }
 
         (from_ptr, to_ptr, to_kernel_stack, to_cr3)
@@ -1593,9 +1588,18 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     // Update TSS.RSP0 and CURRENT_THREAD_KSTACK for the new thread
     // This ensures interrupt/syscall frames from usermode go to the correct kernel stack
     gdt::set_rsp0(to_kernel_stack);
-    unsafe {
-        CURRENT_THREAD_KSTACK = to_kernel_stack;
-    }
+    CURRENT_THREAD_KSTACK.store(to_kernel_stack, Ordering::Relaxed);
+    crate::smp::update_current_kstack(to_kernel_stack);
+
+    log_debug!(
+        "thread",
+        "cpu={} context switch {} -> {} (cr3={:#X})",
+        crate::smp::current_cpu_id(),
+        from_id,
+        to_id,
+        to_cr3
+    );
+
 
     // Unified context switch: ALWAYS use switch_context to preserve kernel state.
     // This fixes the issue where kernel threads (like idle) would be restarted
@@ -1609,8 +1613,13 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         switch_context(from_ctx_ptr, to_ctx_ptr);
     }
 
-    // Re-enable interrupts when we resume
-    crate::interrupts::enable();
+    // from's registers have been saved to its CpuContext Box.  Clear the
+    // per-CPU marker so reap_zombies knows it is now safe to free that Box.
+    crate::sched::clear_pending_switch_from();
+
+    if interrupts_were_enabled {
+        crate::interrupts::enable();
+    }
 }
 
 /// Walk through page tables and free all mapped physical frames
@@ -1820,7 +1829,18 @@ fn get_pt_entry(pt_phys: usize, index: usize) -> Result<u64, ()> {
 ///
 /// After this function completes, the entity is completely gone from the system.
 /// All memory is reclaimed, all handles are invalid, and all waiters are unblocked.
+#[derive(Debug, Clone, Copy)]
 struct ZombieInfo {
+    id: ThreadId,
+    process_id: Option<ProcessId>,
+    pml4: u64,
+    stack: u64,
+    stack_size: usize,
+    name: &'static str,
+}
+
+#[derive(Debug)]
+struct ReapTicket {
     id: ThreadId,
     process_id: Option<ProcessId>,
     pml4: u64,
@@ -1833,282 +1853,287 @@ static ZOMBIE_THREADS: Mutex<Vec<ZombieInfo>> = Mutex::new(Vec::new());
 static CLEANED_ADDRESS_SPACES: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
 #[inline]
-fn threads_share_process_or_address_space(a: &Thread, b: &Thread) -> bool {
-    if let (Some(a_process_id), Some(b_process_id)) = (a.process_id, b.process_id) {
-        if a_process_id == b_process_id {
-            debug_assert_eq!(
-                a.address_space,
-                b.address_space,
-                "Threads {} and {} share process {} but diverge on address_space: 0x{:X} != 0x{:X}",
-                a.id,
-                b.id,
-                a_process_id,
-                a.address_space,
-                b.address_space
-            );
-            return true;
-        }
-
-        return false;
+fn userspace_address_space_is_teardown_claimed(process_id: Option<ProcessId>) -> bool {
+    match process_id {
+        Some(pid) => process::is_process_cleaned(pid),
+        None => true,
     }
-
-    a.address_space != 0 && a.address_space == b.address_space
 }
 
 #[inline]
-fn other_threads_share_teardown_group_locked(
-    current_tid: ThreadId,
-    address_space_cr3: u64,
-    threads: &[Thread],
-) -> bool {
-    if address_space_cr3 == 0 {
+fn mark_address_space_cleanup_started(pml4: u64) -> bool {
+    if pml4 == 0 {
         return false;
     }
 
-    let Some(current_thread) = threads.iter().find(|t| t.id == current_tid) else {
-        return false;
-    };
+    let current_cr3 = crate::arch::read_cr3();
+    if pml4 == current_cr3 {
+        log_panic!(
+            LOG_ORIGIN,
+            "REAPER ERROR: refusing to free active PML4 0x{:X}",
+            pml4
+        );
+    }
 
-    debug_assert_eq!(
-        current_thread.address_space,
-        address_space_cr3,
-        "Thread {} teardown CR3 mismatch: thread cache 0x{:X} != teardown CR3 0x{:X}",
-        current_tid,
-        current_thread.address_space,
-        address_space_cr3
-    );
-
-    threads.iter().any(|t| {
-        t.id != current_tid
-            && t.state != ThreadState::Exited
-            && threads_share_process_or_address_space(current_thread, t)
-    })
+    let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
+    if cleaned.contains(&pml4) {
+        false
+    } else {
+        cleaned.insert(pml4);
+        true
+    }
 }
 
 /// Performs the final, dangerous cleanup operations (freeing stack and PML4)
 /// that cannot be done while the thread is still running.
-fn perform_final_cleanup(
-    thread_id: ThreadId,
-    process_id: Option<ProcessId>,
-    address_space_cr3: u64,
-    kernel_stack: u64,
-    kernel_stack_size: usize,
-) {
-    // Step 5-7: Complete page table walk and physical memory cleanup
-    log_debug!(LOG_ORIGIN, "Final Step: Walking page tables and freeing physical frames for TID {}", thread_id);
+fn perform_final_cleanup(ticket: &ReapTicket) {
+    log_debug!(
+        LOG_ORIGIN,
+        "[reaper] tid={} step=1 begin resource cleanup name='{}' pml4=0x{:X} stack=0x{:X}/{}",
+        ticket.id,
+        ticket.name,
+        ticket.pml4,
+        ticket.stack,
+        ticket.stack_size
+    );
 
-    let primary_address_space_cr3 = if let Some(process_id) = process_id {
-        let process_pml4 = process::get_process_pml4(process_id).expect(
-            "primary userspace address-space teardown requires a registered process PML4",
-        );
-        debug_assert_eq!(
-            process_pml4,
-            address_space_cr3,
-            "primary userspace address-space teardown must use the process-owned PML4: process {} has 0x{:X}, thread {} cached 0x{:X}",
+    cleanup_reaped_address_space(ticket);
+    cleanup_reaped_kernel_stack(ticket);
+
+    if let Some(process_id) = ticket.process_id {
+        let finalized = process::try_finalize_process_after_reap(process_id);
+        log_debug!(
+            LOG_ORIGIN,
+            "[reaper] tid={} process={} finalization_attempt={}",
+            ticket.id,
             process_id,
-            process_pml4,
-            thread_id,
-            address_space_cr3
+            finalized
         );
-        process_pml4
-    } else {
-        address_space_cr3
-    };
-
-    // We must ensure we are NOT using the PML4 we are about to free.
-    // If we are currently on this PML4, this is a fatal logic error in the reaper.
-    let current_cr3 = crate::arch::read_cr3();
-    if primary_address_space_cr3 != 0 && primary_address_space_cr3 == current_cr3 {
-        log_panic!(LOG_ORIGIN, "REAPER ERROR: Attempting to free active PML4 0x{:X}", primary_address_space_cr3);
     }
+}
 
-    let should_cleanup_address_space = if primary_address_space_cr3 != 0 && primary_address_space_cr3 != current_cr3 {
-        let threads = THREAD_LIST.threads.lock();
-        let shared = other_threads_share_teardown_group_locked(thread_id, primary_address_space_cr3, &threads);
-
-        if shared {
-            log_debug!(
-                LOG_ORIGIN,
-                "Skipping address-space teardown for TID {} (PML4 0x{:X}) - other active threads still share it",
-                thread_id,
-                primary_address_space_cr3
-            );
-            false
-        } else if let Some(process_id) = process_id {
-            if !process::is_process_cleaned(process_id) {
-                log_debug!(
-                    LOG_ORIGIN,
-                    "Skipping address-space teardown for TID {} (process {} / PML4 0x{:X}) until final process cleanup is claimed",
-                    thread_id,
-                    process_id,
-                    primary_address_space_cr3
-                );
-                false
-            } else {
-                let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
-                if cleaned.contains(&primary_address_space_cr3) {
-                    log_debug!(
+fn cleanup_reaped_address_space(ticket: &ReapTicket) {
+    let pml4 = if let Some(process_id) = ticket.process_id {
+        match process::get_process_pml4(process_id) {
+            Some(process_pml4) => {
+                if process_pml4 != ticket.pml4 {
+                    log_error!(
                         LOG_ORIGIN,
-                        "Address-space teardown already completed for PML4 0x{:X} - skipping duplicate cleanup",
-                        primary_address_space_cr3
+                        "[reaper] tid={} process={} PML4 mismatch: ticket=0x{:X} process=0x{:X}; using process PML4",
+                        ticket.id,
+                        process_id,
+                        ticket.pml4,
+                        process_pml4
                     );
-                    false
-                } else {
-                    cleaned.insert(primary_address_space_cr3);
-                    true
                 }
+                process_pml4
             }
-        } else {
-            let mut cleaned = CLEANED_ADDRESS_SPACES.lock();
-            if cleaned.contains(&primary_address_space_cr3) {
+            None => {
                 log_debug!(
                     LOG_ORIGIN,
-                    "Address-space teardown already completed for PML4 0x{:X} - skipping duplicate cleanup",
-                    primary_address_space_cr3
+                    "[reaper] tid={} process {:?} already finalized before address-space cleanup",
+                    ticket.id,
+                    ticket.process_id
                 );
-                false
-            } else {
-                cleaned.insert(primary_address_space_cr3);
-                true
+                ticket.pml4
             }
         }
     } else {
-        false
+        ticket.pml4
     };
 
-    let _pages_freed = if should_cleanup_address_space {
-        let threads = THREAD_LIST.threads.lock();
-        if other_threads_share_teardown_group_locked(thread_id, primary_address_space_cr3, &threads) {
-            log_error!(
-                LOG_ORIGIN,
-                "Refusing to destroy VMA/PML4 0x{:X} for TID {} because it is still shared",
-                primary_address_space_cr3,
-                thread_id
-            );
-            CLEANED_ADDRESS_SPACES.lock().remove(&primary_address_space_cr3);
-            0
-        } else {
-            if let Some(process_id) = process_id {
-                debug_assert!(
-                    process::is_process_cleaned(process_id),
-                    "Process {} must be marked cleaned before freeing PML4 0x{:X}",
-                    process_id,
-                    primary_address_space_cr3
-                );
-            }
-
-            crate::mm::vma::with_address_space_ops_lock(primary_address_space_cr3 as usize, || {
-                // Free all tracked materialized pages first (VMA-authoritative accounting).
-                let tracked_pages =
-                    crate::mm::vma::drain_materialized_pages(primary_address_space_cr3 as usize);
-                let mut tracked_pages_freed = 0usize;
-                for account in tracked_pages {
-                    let _ = crate::mm::vm::unmap_page_in_pml4(
-                        primary_address_space_cr3 as usize,
-                        account.vaddr.as_usize(),
-                    );
-                    if crate::mm::vma::free_page_account(account) {
-                        tracked_pages_freed += 1;
-                    }
-                }
-
-                // Thread has its own PML4 (userspace thread)
-                let user_pages = free_user_space_pages(primary_address_space_cr3 as usize);
-                record_physical_pages_freed(user_pages);
-                log_debug!(
-                    LOG_ORIGIN,
-                    "Freed {} tracked pages + {} user-space pages from PML4 0x{:X}",
-                    tracked_pages_freed,
-                    user_pages,
-                    primary_address_space_cr3
-                );
-
-                // Destroy VMA map after tearing down tracked and mapped pages.
-                if let Some(process_id) = process_id {
-                    if let Err(err) = crate::mm::vma::destroy_process_vma_map(process_id) {
-                        log_panic!(
-                            LOG_ORIGIN,
-                            "Primary userspace address-space teardown must be Process-owned: failed to destroy VMA map for process {} on PML4 0x{:X}: {:?}",
-                            process_id,
-                            primary_address_space_cr3,
-                            err
-                        );
-                    }
-                } else {
-                    crate::mm::vma::destroy_vma_map(primary_address_space_cr3 as usize);
-                }
-
-                // Unregister the PML4 before freeing (Req 2.5)
-                let _ =
-                    crate::mm::pmm::unregister_active_pml4(primary_address_space_cr3 as usize);
-
-                // Free the PML4 itself
-                let _ = crate::mm::pmm::free_page(primary_address_space_cr3 as usize);
-                log_debug!(LOG_ORIGIN, "Freed PML4 page at 0x{:X}", primary_address_space_cr3);
-
-                tracked_pages_freed + user_pages
-            })
-        }
-    } else {
-        0
-    };
-
-    if should_cleanup_address_space {
-        if let Some(process_id) = process_id {
-            let _ = process::verify_process_accounting_fail_fast(
-                process_id,
-                "post_process_teardown",
-            );
-        }
+    if pml4 == 0 {
+        return;
     }
 
-    // Step 7: Free kernel stack
-    log_debug!(LOG_ORIGIN, "Final Step: Freeing kernel stack for TID {}", thread_id);
-    let kernel_stack_bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
-    let num_stack_pages = kernel_stack_size / crate::mm::pmm::PAGE_SIZE;
+    if !userspace_address_space_is_teardown_claimed(ticket.process_id) {
+        log_debug!(
+            LOG_ORIGIN,
+            "[reaper] tid={} skipping PML4 0x{:X}: process cleanup not claimed yet",
+            ticket.id,
+            pml4
+        );
+        return;
+    }
 
-    let current_pml4 = current_cr3 as usize;
-    let mut stack_pages_freed = 0;
+    if !mark_address_space_cleanup_started(pml4) {
+        log_debug!(
+            LOG_ORIGIN,
+            "[reaper] tid={} PML4 0x{:X} already cleaned or in progress",
+            ticket.id,
+            pml4
+        );
+        return;
+    }
+
+    log_debug!(
+        LOG_ORIGIN,
+        "[reaper] tid={} step=2 destroy address space PML4=0x{:X}",
+        ticket.id,
+        pml4
+    );
+
+    let cleanup_result = crate::mm::vma::with_address_space_ops_lock(pml4 as usize, || {
+        let tracked_pages = crate::mm::vma::drain_materialized_pages(pml4 as usize);
+        let mut tracked_pages_freed = 0usize;
+
+        for account in tracked_pages {
+            let _ = crate::mm::vm::unmap_page_in_pml4(
+                pml4 as usize,
+                account.vaddr.as_usize(),
+            );
+            if crate::mm::vma::free_page_account(account) {
+                tracked_pages_freed = tracked_pages_freed.saturating_add(1);
+            }
+        }
+
+        let user_pages = free_user_space_pages(pml4 as usize);
+        record_physical_pages_freed(user_pages);
+
+        if let Some(process_id) = ticket.process_id {
+            if let Err(err) = crate::mm::vma::destroy_process_vma_map(process_id) {
+                log_error!(
+                    LOG_ORIGIN,
+                    "[reaper] failed to destroy process VMA map for process {} PML4 0x{:X}: {:?}",
+                    process_id,
+                    pml4,
+                    err
+                );
+            }
+        } else {
+            crate::mm::vma::destroy_vma_map(pml4 as usize);
+        }
+
+        let _ = crate::mm::pmm::unregister_active_pml4(pml4 as usize);
+        let _ = crate::mm::pmm::free_page(pml4 as usize);
+
+        tracked_pages_freed.saturating_add(user_pages)
+    });
+
+    log_debug!(
+        LOG_ORIGIN,
+        "[reaper] tid={} PML4 0x{:X} cleanup complete pages_freed={}",
+        ticket.id,
+        pml4,
+        cleanup_result
+    );
+
+    // The PML4 has been physically released.  Do not call accounting verification
+    // here: it walks the process PML4 and can touch freed page tables.  Accounting
+    // checks belong before teardown or in process-level tests with a live PML4.
+}
+
+fn cleanup_reaped_kernel_stack(ticket: &ReapTicket) {
+    if ticket.stack == 0 || ticket.stack_size == 0 {
+        return;
+    }
+
+    log_debug!(
+        LOG_ORIGIN,
+        "[reaper] tid={} step=3 free kernel stack top=0x{:X} size={}",
+        ticket.id,
+        ticket.stack,
+        ticket.stack_size
+    );
+
+    let kernel_stack_bottom = ticket.stack.wrapping_sub(ticket.stack_size as u64);
+    let num_stack_pages = ticket.stack_size / crate::mm::pmm::PAGE_SIZE;
+    let current_pml4 = crate::arch::read_cr3() as usize;
+    let mut stack_pages_freed = 0usize;
 
     for i in 0..num_stack_pages {
         let page_addr = kernel_stack_bottom + (i * crate::mm::pmm::PAGE_SIZE) as u64;
-
-        if let Ok((phys_addr, _)) = crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize) {
+        if let Ok((phys_addr, _)) =
+            crate::mm::vm::query_mapping_in_pml4(current_pml4, page_addr as usize)
+        {
             let _ = crate::mm::pmm::free_page(phys_addr);
-            stack_pages_freed += 1;
+            stack_pages_freed = stack_pages_freed.saturating_add(1);
         }
     }
 
-    log_debug!(LOG_ORIGIN, "Freed {} kernel stack pages for TID {}", stack_pages_freed, thread_id);
-    RESOURCE_COUNTERS.kernel_stacks_freed.fetch_add(1, Ordering::Relaxed);
+    log_debug!(
+        LOG_ORIGIN,
+        "[reaper] tid={} freed {} kernel-stack pages",
+        ticket.id,
+        stack_pages_freed
+    );
+
+    RESOURCE_COUNTERS
+        .kernel_stacks_freed
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+fn take_zombie_batch() -> Vec<ZombieInfo> {
+    let mut list = ZOMBIE_THREADS.lock();
+    core::mem::take(&mut *list)
+}
+
+fn wait_until_switch_save_is_complete(thread_id: ThreadId) {
+    while crate::sched::is_pending_switch_from(thread_id) {
+        core::hint::spin_loop();
+    }
+}
+
+fn detach_zombie_tcb(zombie: ZombieInfo) -> Option<ReapTicket> {
+    wait_until_switch_save_is_complete(zombie.id);
+
+    let removed = THREAD_LIST.remove(zombie.id);
+    let Some(thread) = removed else {
+        log_warn!(
+            LOG_ORIGIN,
+            "[reaper] zombie thread {} ('{}') was already absent from THREAD_LIST",
+            zombie.id,
+            zombie.name
+        );
+        return None;
+    };
+
+    Some(ReapTicket {
+        id: thread.id,
+        process_id: thread.process_id.or(zombie.process_id),
+        pml4: if thread.address_space != 0 { thread.address_space } else { zombie.pml4 },
+        stack: if thread.kernel_stack != 0 { thread.kernel_stack } else { zombie.stack },
+        stack_size: if thread.kernel_stack_size != 0 {
+            thread.kernel_stack_size
+        } else {
+            zombie.stack_size
+        },
+        name: thread.name,
+    })
 }
 
 pub fn reap_zombies() {
-    let zombies = {
-        let mut list = ZOMBIE_THREADS.lock();
-        core::mem::take(&mut *list)
-    };
-
-    for zombie in zombies {
-        log_info!(LOG_ORIGIN, "Reaping zombie thread {} ('{}')", zombie.id, zombie.name);
-
-        perform_final_cleanup(
-            zombie.id,
-            zombie.process_id,
-            zombie.pml4,
-            zombie.stack,
-            zombie.stack_size,
-        );
-
-        // Only now remove from the global thread list
-        if let Some(_removed) = THREAD_LIST.remove(zombie.id) {
-            log_debug!(LOG_ORIGIN, "Zombie thread {} removed from global list", zombie.id);
+    loop {
+        let zombies = take_zombie_batch();
+        if zombies.is_empty() {
+            break;
         }
 
-        RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
-        RESOURCE_COUNTERS.log_stats();
+        for zombie in zombies {
+            log_info!(
+                LOG_ORIGIN,
+                "Reaping zombie thread {} ('{}')",
+                zombie.id,
+                zombie.name
+            );
+
+            let Some(ticket) = detach_zombie_tcb(zombie) else {
+                continue;
+            };
+
+            // From this point onward THREAD_LIST is not held and the scheduler can no
+            // longer observe this TCB.  Heavy teardown may take PMM/VMM/process locks.
+            perform_final_cleanup(&ticket);
+
+            RESOURCE_COUNTERS
+                .threads_terminated
+                .fetch_add(1, Ordering::Relaxed);
+            RESOURCE_COUNTERS.log_stats();
+        }
     }
 
+    // Only a deduplication cache: after each complete reap pass, allow a future
+    // process that reuses a PML4 frame number to be cleaned normally.
     CLEANED_ADDRESS_SPACES.lock().clear();
 }
 
@@ -2202,54 +2227,35 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     // Step 8: Remove from scheduler (handled automatically when thread is removed or state is Exited)
     log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will skip this thread from now on");
 
-    let is_current = crate::sched::current_thread() == Some(thread_id);
+    // Always defer final cleanup to the idle thread's reaper.
+    //
+    // Immediately removing a thread from THREAD_LIST is unsafe: there is a
+    // window between schedule_local setting cpu.current = chosen (making
+    // prev_id no longer "current" on any CPU) and perform_context_switch
+    // completing the assembly save of prev_id's registers.  If another CPU
+    // calls terminate_entity during that window and removes the thread,
+    // perform_context_switch cannot find it and panics.
+    //
+    // Deferring to ZOMBIE_THREADS means the thread stays in THREAD_LIST until
+    // reap_zombies runs.  reap_zombies additionally waits for any in-flight
+    // context switch away from the zombie to complete (via is_pending_switch_from)
+    // before dropping the CpuContext Box, preventing a use-after-free.
+    log_info!(
+        LOG_ORIGIN,
+        "Deferring final cleanup of thread {} ('{}') to reaper",
+        thread_id,
+        thread_name
+    );
+    ZOMBIE_THREADS.lock().push(ZombieInfo {
+        id: thread_id,
+        process_id: thread_process_id,
+        pml4: address_space_cr3,
+        stack: kernel_stack,
+        stack_size: kernel_stack_size,
+        name: thread_name,
+    });
 
-    if is_current {
-        log_info!(LOG_ORIGIN, "Current thread {} exiting - deferring final cleanup to reaper", thread_id);
-        ZOMBIE_THREADS.lock().push(ZombieInfo {
-            id: thread_id,
-            process_id: thread_process_id,
-            pml4: address_space_cr3,
-            stack: kernel_stack,
-            stack_size: kernel_stack_size,
-            name: thread_name,
-        });
-    } else {
-        perform_final_cleanup(
-            thread_id,
-            thread_process_id,
-            address_space_cr3,
-            kernel_stack,
-            kernel_stack_size,
-        );
-
-        // Step 9: Remove from global thread list
-        log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
-        if let Some(_removed) = THREAD_LIST.remove(thread_id) {
-            log_debug!(LOG_ORIGIN, "Thread removed from global list");
-        }
-
-        // Step 10: Update counters and log final report
-        log_debug!(LOG_ORIGIN, "Step 10/10: Updating resource counters");
-        RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
-
-        log_info!(
-            LOG_ORIGIN,
-            "=== ENTITY {} ('{}') TERMINATED SUCCESSFULLY ===",
-            thread_id,
-            thread_name
-        );
-    }
-
-    if !is_current {
-        RESOURCE_COUNTERS.log_stats();
-    } else {
-        log_debug!(
-            LOG_ORIGIN,
-            "Resource stats deferred until zombie reaping for TID {}",
-            thread_id
-        );
-    }
+    RESOURCE_COUNTERS.log_stats();
 }
 
 /// Legacy function - redirects to terminate_entity

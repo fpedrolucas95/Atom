@@ -1385,11 +1385,12 @@ impl Compositor {
 
         if let Err(err) = send_message_async(port, msg_type, payload) {
             // Only treat NotFound (port closed / process exited) as a
-            // definitive sign the process is dead.  Transient errors such
-            // as WouldBlock (queue full) or InvalidArgument must NOT
-            // destroy the window — the client may still be alive and
-            // rendering into the shared surface.
-            if matches!(err, SyscallError::NotFound) {
+            // definitive sign the process is dead. Older kernels returned
+            // InvalidArgument for the same closed-port condition, so keep
+            // that path until all boot images have the ENOTFOUND mapping.
+            // Transient errors such as WouldBlock (queue full) must not
+            // destroy the window.
+            if matches!(err, SyscallError::NotFound | SyscallError::InvalidArgument) {
                 self.drop_dead_window(window_id);
             }
         }

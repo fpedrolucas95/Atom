@@ -19,7 +19,7 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 - **Strong isolation** — separate address spaces with per-process page tables, higher-half kernel mapping, and validated memory operations.
 - **IPC as the composition backbone** — ports and messages with support for zero-copy via shared memory regions, deadlock detection, priority inheritance, and batch operations.
 - **Service-oriented user space** — init, service manager, and name service form a service bus that discovers and manages all system components at runtime.
-- **Preemptive scheduling** — priority-based scheduler with round-robin within priority levels and timer-driven preemption.
+- **SMP preemptive scheduling** — per-CPU run queues with priority-based round-robin, local timer preemption, cross-core wakeups, and reschedule IPIs.
 
 ---
 
@@ -33,8 +33,10 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 - Physical memory manager with two-phase bootstrap (static bitmap at boot, dynamic bitmap from RAM) supporting up to 16 GiB
 - Virtual memory manager with 4-level paging, deep-copy page tables with verification pass, VMA tracking with guard pages, and demand paging infrastructure
 - Kernel heap allocator (slab-based small allocations + page fallback)
-- Interrupts via IDT + Local APIC with timer preemption
-- Context switching in x86-64 assembly with higher-half trampoline, stack canary validation, and canonical address checks
+- Interrupts via IDT + Local APIC with timer preemption and cross-core reschedule IPI
+- SMP boot via ACPI MADT (BSP/AP discovery, AP startup trampoline, per-CPU online tracking)
+- Context switching in x86-64 assembly with higher-half trampoline, stack canary validation, canonical address checks, and per-CPU syscall stack state (swapgs)
+- Per-CPU scheduler (idle thread/current thread/run queue per CPU) with work stealing, remote wakeups, and affinity masks
 - ~80 syscalls covering threads, IPC, capabilities, shared memory, filesystem, video modes, and process spawning
 - IPC subsystem with ports, messages, deadlock cycle detection, priority inheritance, wait queues, and batch send/receive
 - Capability system with handle-based access, permission bitflags, derivation, transitive revocation, and audit logging
@@ -61,6 +63,8 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 
 - Compositor with shared-surface windowing, Z-order management, and graceful window shutdown (PendingClose state)
 - Pill-shaped dock, circular window controls, centered window titles, active application indicator dots
+
+For SMP internals (bootstrap, per-CPU structures, scheduler model, locking rules), see `docs/smp.md`.
 
 ---
 
@@ -181,13 +185,16 @@ Atom runs under **QEMU** with **OVMF** (UEFI firmware). The build scripts handle
 **Linux / macOS:**
 
 ```bash
-./build.sh --clean --run
+./build.sh --clean --run           # single-core
+./build.sh --run --smp=2           # dual-core SMP
+./build.sh --run --smp=4           # quad-core SMP
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
 .\build.ps1 --clean --run
+.\build.ps1 --run --Smp 4
 ```
 
 ### Debugging
@@ -200,7 +207,7 @@ Serial output via QEMU console is the primary debugging channel. The kernel incl
 
 Atom is an experimental system in active development. Current known limitations include:
 
-- **Single-core only** — no SMP support yet; scheduler and IPC are designed for single-core execution
+- **SMP is currently validated on QEMU x86-64** — production hardening for real hardware (broader APIC/ACPI variations) is still in progress
 - **Networking requires QEMU `user` netdev** — the e1000 NIC driver and TCP/IP stack (`netd`) use QEMU's built-in user-mode networking (`-netdev user,id=net0 -device e1000,netdev=net0`). Both build scripts include these flags automatically when running with `--run`. Real hardware or other QEMU netdev backends are not yet supported.
 - **Journal replay integration for userspace FAT32 is still maturing** — normal read/write path is userspace-owned in fsd, but crash-recovery replay coverage is still being expanded
 - **Capability enforcement is partial** — the capability infrastructure (handles, permissions, derivation, revocation) is implemented, but not all syscalls enforce capability checks before execution
@@ -217,9 +224,9 @@ See **`ROADMAP.md`** for the detailed phased plan. Near-term priorities include:
 - Full capability enforcement across all syscalls
 - User pointer validation in legacy syscalls
 - Process abstraction (consolidating thread/address-space/resource ownership)
-- SMP foundations (per-CPU structures, atomic IPC blocking)
+- SMP hardening for non-QEMU hardware paths and deeper scheduler telemetry
 
-Longer-term goals include networking, SMP scheduling, ARM64 support, and expanded driver coverage.
+Longer-term goals include ARM64 support, deeper networking feature coverage, and expanded driver coverage.
 
 ---
 

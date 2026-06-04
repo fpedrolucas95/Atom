@@ -63,7 +63,7 @@
 mod policy;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::arch::gdt::{KERNEL_CODE_SELECTOR, USER_CODE_SELECTOR};
+use crate::arch::gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
 use crate::{log_debug, log_info, log_warn, log_error, log_panic};
 
 const MSR_STAR: u32 = 0xC000_0081;
@@ -123,6 +123,10 @@ pub const SYS_READ_KLOG: u64 = 49; // Read kernel log buffer
 pub const SYS_MOUSE_GET_ID: u64 = 50; // Get detected PS/2 mouseID (0, 3, or 4)
 pub const SYS_IPC_CREATE_PORT_WITH_ID: u64 = 51; // Create IPC port with specific reserved ID
 pub const SYS_GET_CPU_BRAND: u64 = 52;
+pub const SYS_GET_CPU_ID: u64 = 90;
+pub const SYS_GET_CPU_COUNT: u64 = 91;
+pub const SYS_SET_THREAD_AFFINITY: u64 = 92;
+pub const SYS_GET_THREAD_AFFINITY: u64 = 93;
 
 // ---------------------------------------------------------------------------
 // Infrastructure / Networking Phase 1 syscalls
@@ -575,8 +579,12 @@ pub fn init() {
     const LOG_ORIGIN: &str = "syscall";
 
     unsafe {
+        // STAR[63:48] must equal (USER_DATA_base - 8) so SYSRETQ loads:
+        //   SS  = (STAR[63:48] + 8)  | 3 = USER_DATA_SELECTOR (GDT[0x18]|3 = 0x1B)
+        //   CS  = (STAR[63:48] + 16) | 3 = USER_CODE_SELECTOR (GDT[0x20]|3 = 0x23)
+        // KERNEL_DATA_SELECTOR (0x10) satisfies: 0x10+8=0x18 and 0x10+16=0x20.
         let star_value =
-            ((USER_CODE_SELECTOR as u64 & !3) << 48) |
+            ((KERNEL_DATA_SELECTOR as u64) << 48) |
             ((KERNEL_CODE_SELECTOR as u64) << 32);
         wrmsr(MSR_STAR, star_value);
 
@@ -599,8 +607,8 @@ pub fn init() {
 
     log_debug!(
         LOG_ORIGIN,
-        "STAR configured: user_cs=0x{:02X}, kernel_cs=0x{:02X}",
-        USER_CODE_SELECTOR & !3,
+        "STAR configured: sysretq_base=0x{:02X} kernel_cs=0x{:02X}",
+        KERNEL_DATA_SELECTOR,
         KERNEL_CODE_SELECTOR
     );
 
@@ -821,6 +829,10 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0, arg1 as usize),
+        SYS_GET_CPU_ID => sys_get_cpu_id(),
+        SYS_GET_CPU_COUNT => sys_get_cpu_count(),
+        SYS_SET_THREAD_AFFINITY => sys_set_thread_affinity(arg0, arg1),
+        SYS_GET_THREAD_AFFINITY => sys_get_thread_affinity(arg0),
 
         // Virtual memory management syscalls
         SYS_MMAP => sys_mmap(arg0, arg1, arg2, arg3),
@@ -899,6 +911,40 @@ extern "win64" fn rust_syscall_dispatcher(
             ENOSYS
         }
     };
+
+    // ----------------------------------------------------------------
+    // [hotloop] instrumentation: log busy-poll syscalls so the serial
+    // log shows which process is spinning and what it got back.
+    // Covers: SYS_THREAD_YIELD, SYS_IPC_WAIT_ANY, SYS_IPC_TRY_RECV.
+    // Only SYS_IPC_TRY_RECV is filtered to EWOULDBLOCK returns so that
+    // normal message-delivery calls are not spammed.
+    // ----------------------------------------------------------------
+    if syscall_num == SYS_THREAD_YIELD
+        || syscall_num == SYS_IPC_WAIT_ANY
+        || (syscall_num == SYS_IPC_TRY_RECV && result == EWOULDBLOCK)
+    {
+        let tid = crate::sched::current_thread();
+        let (pid_raw, proc_name) = if let Some(t) = tid {
+            let pid = crate::thread::get_thread_process_id(t)
+                .map(|p| p.raw())
+                .unwrap_or(0);
+            let name = crate::thread::get_thread_name(t).unwrap_or("?");
+            (pid, name)
+        } else {
+            (0, "?")
+        };
+        let syscall_name = match syscall_num {
+            SYS_THREAD_YIELD    => "yield",
+            SYS_IPC_WAIT_ANY    => "ipc_wait_any",
+            SYS_IPC_TRY_RECV    => "ipc_try_recv",
+            _                   => "?",
+        };
+        log_debug!(
+            "hotloop",
+            "[hotloop] tid={:?} pid={} proc={} cr3={:#x} syscall={} rip={:#x} ret={:#x}",
+            tid, pid_raw, proc_name, entry_cr3, syscall_name, frame.user_rip, result
+        );
+    }
 
     // ----------------------------------------------------------------
     // Subsystem error normalization (Phase 6 — Syscall Hardening)
@@ -1067,6 +1113,21 @@ fn sys_keyboard_poll(out_ptr: u64) -> u64 {
     EWOULDBLOCK
 }
 
+fn current_thread_name_for_log() -> &'static str {
+    crate::sched::current_thread()
+        .and_then(crate::thread::get_thread_name)
+        .unwrap_or("unknown")
+}
+
+fn framebuffer_op_for_process(process_name: &'static str) -> &'static str {
+    match process_name {
+        "ui_shell" => "compositor",
+        "display" => "display",
+        "terminal" => "console",
+        _ => "console",
+    }
+}
+
 /// Get framebuffer information for userspace graphics
 fn sys_get_framebuffer(info_ptr: u64) -> u64 {
     let info_ptr = match validate_user_addr(info_ptr) {
@@ -1079,15 +1140,28 @@ fn sys_get_framebuffer(info_ptr: u64) -> u64 {
     
     if let Some((width, height)) = crate::graphics::get_dimensions() {
         if let Some(addr) = crate::graphics::get_framebuffer_address() {
+            let stride = crate::graphics::get_stride();
+            let bpp = crate::graphics::get_bytes_per_pixel();
+            let len = stride as usize * height as usize * bpp as usize;
+            let proc_name = current_thread_name_for_log();
             let info_ptr = info_ptr.as_mut_ptr::<u64>();
             unsafe {
                 // Write: [address, width, height, stride, bytes_per_pixel]
                 *info_ptr = addr as u64;
                 *info_ptr.add(1) = width as u64;
                 *info_ptr.add(2) = height as u64;
-                *info_ptr.add(3) = crate::graphics::get_stride() as u64;
-                *info_ptr.add(4) = crate::graphics::get_bytes_per_pixel() as u64;
+                *info_ptr.add(3) = stride as u64;
+                *info_ptr.add(4) = bpp as u64;
             }
+            log_info!(
+                "fb",
+                "[fb] cpu={} proc={} op={} addr={:#X} len={}",
+                crate::smp::current_cpu_id(),
+                proc_name,
+                framebuffer_op_for_process(proc_name),
+                addr,
+                len
+            );
             return ESUCCESS;
         }
     }
@@ -1377,7 +1451,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         id: tid,
         process_id: Some(caller_process_id),
         state: crate::thread::ThreadState::Ready,
-        context,
+        context: alloc::boxed::Box::new(context),
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_SIZE,
         address_space: caller_addr_space,
@@ -1534,7 +1608,7 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
         id: child_tid,
         process_id: Some(child_pid),
         state: ThreadState::Ready,
-        context: child_context,
+        context: alloc::boxed::Box::new(child_context),
         kernel_stack: child_kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_SIZE,
         address_space: child_pml4 as u64,
@@ -1990,7 +2064,8 @@ fn sys_ipc_recv(
 
             log_debug!(
                 LOG_ORIGIN,
-                "ipc_recv blocking (caller={}, port_id={}, timeout_ms={})",
+                "[ipc] cpu={} ipc_recv blocking (caller={}, port_id={}, timeout_ms={})",
+                crate::smp::current_cpu_id(),
                 caller,
                 port_id,
                 timeout_ms
@@ -2002,6 +2077,28 @@ fn sys_ipc_recv(
                         caller,
                         crate::thread::ThreadState::Blocked
                     );
+
+                    // SMP TOCTOU guard: a sender on another CPU may have fired between
+                    // block_receive() (which set receiver_blocked while caller was Running)
+                    // and set_thread_state(Blocked) above.  In that window, mark_thread_ready
+                    // was called with caller still Running → it was a no-op.  The message is
+                    // in the queue but nobody will wake us.  Check now and short-circuit.
+                    if let Ok(Some(msg)) = crate::ipc::try_receive_message(port_id, caller) {
+                        crate::thread::set_thread_state(
+                            caller,
+                            crate::thread::ThreadState::Running,
+                        );
+                        crate::ipc::cancel_blocked_receiver(port_id, caller);
+                        log_debug!(
+                            LOG_ORIGIN,
+                            "ipc_recv TOCTOU: message found after Blocked transition, \
+                             returning without sleep (caller={}, port_id={})",
+                            caller,
+                            port_id
+                        );
+                        return copy_message(msg);
+                    }
+
                     let (prev, next) = crate::sched::on_timer_tick();
 
                     if let (Some(prev_id), Some(next_id)) = (prev, next) {
@@ -2175,7 +2272,7 @@ fn sys_ipc_send_async(
                 "ipc_send_async failed: invalid port_id={}",
                 port_id
             );
-            EINVAL
+            ENOTFOUND
         }
 
         Err(crate::ipc::IpcError::MessageTooLarge) => {
@@ -3833,54 +3930,78 @@ fn sys_unregister_irq_handler(irq: u8) -> u64 {
 /// Delivery semantics depend on `IrqBinding::requires_ack`:
 ///
 /// - `requires_ack = false` (legacy SYS_REGISTER_IRQ_HANDLER, PS/2):
-///   Every IRQ is delivered unconditionally. The consumer does not call
-///   SYS_IRQ_ACK, so `pending` is never used as a gate here.
+///   Wakes the registered thread directly via the scheduler. No heap
+///   allocation and no IPC port mutex are touched in interrupt context.
+///   The consumer polls input data from the kernel ring buffer on each
+///   wakeup rather than reading it from the IPC message.
 ///
 /// - `requires_ack = true` (SYS_IRQ_LISTEN, NIC/device drivers):
-///   Coalesced delivery — suppressed while `pending` is set. The consumer
-///   must call SYS_IRQ_ACK to clear `pending` and re-arm delivery.
+///   Coalesced IPC delivery — suppressed while `pending` is set. The
+///   consumer must call SYS_IRQ_ACK to clear `pending` and re-arm.
 pub fn notify_irq_handler(irq: u8) {
-    let bindings = IRQ_BINDINGS.lock();
-
-    if let Some(binding) = bindings.get(&irq) {
-        // For requires_ack bindings: coalesced delivery — skip if already pending.
-        // For legacy bindings: always deliver, never gate on pending.
-        if binding.requires_ack {
-            if binding.pending.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                // Already pending, coalesced — drop this IRQ notification.
-                return;
-            }
-        }
-
-        let port_id = crate::ipc::PortId::from_raw(binding.port);
-
-        // Create a libipc-compatible IrqNotification message (MessageType 20)
-        // Header: [msg_type (4 bytes), payload_size (4 bytes), sequence (4 bytes)]
-        // Followed by 1 byte for the IRQ number.
-        let mut payload = alloc::vec![0u8; 13];
-        payload[0..4].copy_from_slice(&20u32.to_le_bytes()); // IrqNotification
-        payload[4..8].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
-        // sequence = 0 at [8..12]
-        payload[12] = irq;
-
-        let msg = crate::ipc::Message::new(
-            crate::thread::ThreadId::from_raw(0), // Kernel sender
-            20u32, // Message type is IrqNotification
-            payload,
-        );
-
-        // Non-blocking send — we're in interrupt context.
-        if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
-            log_debug!(
-                "syscall",
-                "Failed to notify IRQ {} handler: {:?}",
-                irq,
-                e
-            );
-            // For requires_ack bindings: reset pending so the next IRQ can be delivered.
+    // Hold the bindings lock only long enough to read the relevant fields,
+    // then drop it before any operation that could acquire a different lock.
+    let (owner, requires_ack, port_id) = {
+        let bindings = IRQ_BINDINGS.lock();
+        if let Some(binding) = bindings.get(&irq) {
             if binding.requires_ack {
-                binding.pending.store(false, Ordering::SeqCst);
+                // Coalesced delivery: skip if a notification is already in flight.
+                if binding.pending.compare_exchange(
+                    false, true, Ordering::SeqCst, Ordering::SeqCst,
+                ).is_err() {
+                    return;
+                }
             }
+            (
+                binding.owner,
+                binding.requires_ack,
+                crate::ipc::PortId::from_raw(binding.port),
+            )
+        } else {
+            return;
+        }
+        // IRQ_BINDINGS lock drops here — before any allocator or IPC call.
+    };
+
+    if !requires_ack {
+        // Legacy PS/2 path (keyboard IRQ1, mouse IRQ12): wake the thread
+        // directly.  This avoids heap allocation and the IPC port mutex
+        // entirely in interrupt context.  The thread calls poll_input() on
+        // every event-loop iteration and drains the kernel ring buffer there.
+        crate::sched::mark_thread_ready(owner);
+        return;
+    }
+
+    // ACK-gated path (NIC / device drivers): deliver an IPC notification so
+    // the driver knows to call irq_ack() and re-arm the binding.
+    //
+    // libipc MessageHeader layout (16 bytes):
+    //   [version u32][msg_type u32][payload_size u32][sequence u32]
+    // followed by 1 byte carrying the IRQ number.
+    let mut payload = alloc::vec![0u8; 17];
+    payload[0..4].copy_from_slice(&1u32.to_le_bytes());   // version = 1
+    payload[4..8].copy_from_slice(&20u32.to_le_bytes());  // IrqNotification
+    payload[8..12].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
+    // sequence [12..16] = 0
+    payload[16] = irq;
+
+    let msg = crate::ipc::Message::new(
+        crate::thread::ThreadId::from_raw(0),
+        20u32,
+        payload,
+    );
+
+    if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
+        log_debug!(
+            "syscall",
+            "Failed to notify IRQ {} handler: {:?}",
+            irq,
+            e
+        );
+        // Reset pending so the next IRQ can be delivered.
+        let bindings = IRQ_BINDINGS.lock();
+        if let Some(binding) = bindings.get(&irq) {
+            binding.pending.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -3919,6 +4040,7 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
     };
 
     let (address, width, height, stride, bpp) = fb_info;
+    let proc_name = crate::thread::get_thread_name(caller).unwrap_or("unknown");
 
     // Calculate framebuffer size
     let fb_size = (stride as usize) * (height as usize) * bpp;
@@ -3949,14 +4071,12 @@ fn sys_map_framebuffer_to_user(user_buffer: u64) -> u64 {
     }
 
     log_info!(
-        "syscall",
-        "Thread {} mapped framebuffer: addr={:#X} {}x{} stride={} bpp={} size={}",
-        caller,
+        "fb",
+        "[fb] cpu={} proc={} op={} addr={:#X} len={}",
+        crate::smp::current_cpu_id(),
+        proc_name,
+        framebuffer_op_for_process(proc_name),
         address,
-        width,
-        height,
-        stride,
-        bpp,
         fb_size
     );
 
@@ -4007,8 +4127,6 @@ fn sys_get_irq_count(irq: u8) -> u64 {
 /// Returns:
 ///   Index of the port with data (0-based), or error code
 fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
-    const LOG_ORIGIN: &str = "syscall";
-
     if count == 0 || count > 64 {
         return EINVAL;
     }
@@ -4041,92 +4159,81 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         }
     }
 
-    // Calculate deadline
-    let deadline = if timeout_ms == u64::MAX {
+    // Fast path: check all ports for an immediately available message
+    for (idx, port_id) in ports.iter().enumerate() {
+        if let Ok(true) = crate::ipc::has_message(*port_id) {
+            return idx as u64;
+        }
+    }
+
+    // Non-blocking call with no message available
+    if timeout_ms == 0 {
+        return EWOULDBLOCK;
+    }
+
+    // Calculate deadline tick for finite timeouts
+    let deadline_tick = if timeout_ms == u64::MAX {
         None
-    } else if timeout_ms == 0 {
-        Some(crate::interrupts::get_ticks()) // Immediate check only
     } else {
         let ticks = timeout_ms.div_ceil(10);
         Some(crate::interrupts::get_ticks() + ticks)
     };
 
-    // Polling loop - check each port for messages (peek without consuming)
-    loop {
-        for (idx, port_id) in ports.iter().enumerate() {
-            // Use has_message to check without consuming the message
-            // This allows userspace to receive the message via try_recv after wait_any returns
-            match crate::ipc::has_message(*port_id) {
-                Ok(true) => {
-                    // Found a message! Unregister and return the port index
-                    crate::ipc::unregister_wait_any(caller, &ports);
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "ipc_wait_any: port {} (index {}) has message",
-                        port_id,
-                        idx
-                    );
-                    return idx as u64;
-                }
-                Ok(false) => continue,
-                Err(_) => continue, // Skip invalid ports
-            }
-        }
+    // Register as waiter on all ports before blocking so senders can wake us
+    crate::ipc::register_wait_any(caller, &ports);
 
-        // Check timeout
-        if let Some(deadline_tick) = deadline {
-            if crate::interrupts::get_ticks() >= deadline_tick {
-                crate::ipc::unregister_wait_any(caller, &ports);
-                if timeout_ms == 0 {
-                    return EWOULDBLOCK;
-                } else {
-                    return ETIMEDOUT;
-                }
-            }
-        }
-
-        // Register as waiting on all ports BEFORE blocking
-        // This allows senders to wake us up
-        crate::ipc::register_wait_any(caller, &ports);
-
-        // Block this thread and yield to scheduler
-        // Mark as blocked so scheduler won't immediately pick us
+    // Block: use the scheduler sleep queue for finite timeouts so the timer
+    // interrupt can expire us via wake_sleeping_threads(); for infinite waits
+    // simply mark Blocked and wait for a sender to call mark_thread_ready.
+    if let Some(deadline) = deadline_tick {
+        crate::sched::sleep_thread(caller, deadline);
+    } else {
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
-
-        // Try to switch to another thread
-        let (prev, next) = crate::sched::on_timer_tick();
-        if let (Some(prev_id), Some(next_id)) = (prev, next) {
-            if prev_id != next_id {
-                // Switch to different thread
-                crate::sched::perform_context_switch(prev_id, next_id);
-            } else {
-                // No other thread to run - wait for interrupt (avoid busy-loop)
-                // Enable interrupts and halt until next interrupt
-                unsafe {
-                    core::arch::asm!(
-                        "sti",      // Enable interrupts
-                        "hlt",      // Halt until interrupt
-                        "cli",      // Disable interrupts again
-                        options(nomem, nostack)
-                    );
-                }
-            }
-        } else {
-            // No threads available - halt and wait
-            unsafe {
-                core::arch::asm!(
-                    "sti",
-                    "hlt",
-                    "cli",
-                    options(nomem, nostack)
-                );
-            }
-        }
-
-        // Back from blocking - mark as ready and unregister
-        crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
-        // Note: We'll re-register on the next iteration if we loop again
     }
+
+    // SMP TOCTOU guard: a sender may deliver to one of these ports after
+    // register_wait_any() but before the caller is fully blocked.  In that
+    // window mark_thread_ready can see the waiter as Running and only set a
+    // reschedule hint.  Recheck after the Blocked transition so a pending
+    // message cannot leave the waiter asleep forever.
+    for (idx, port_id) in ports.iter().enumerate() {
+        if let Ok(true) = crate::ipc::has_message(*port_id) {
+            if deadline_tick.is_some() {
+                crate::sched::cancel_sleep(caller);
+            }
+            crate::ipc::unregister_wait_any(caller, &ports);
+            crate::sched::restore_current_after_block(caller);
+            log_info!(
+                "syscall",
+                "ipc_wait_any TOCTOU: message found after Blocked transition, \
+                 returning without sleep (caller={}, port_id={})",
+                caller,
+                port_id
+            );
+            return idx as u64;
+        }
+    }
+
+    // Single context switch — returns when the scheduler picks us again
+    crate::sched::drive_cooperative_tick();
+
+    // Remove any pending sleep-queue entry to prevent a spurious second wakeup
+    // if a message arrived before the deadline expired.
+    if deadline_tick.is_some() {
+        crate::sched::cancel_sleep(caller);
+    }
+
+    // Clean up port wait registrations
+    crate::ipc::unregister_wait_any(caller, &ports);
+
+    // Check which port has a message (message wakeup) or return timeout
+    for (idx, port_id) in ports.iter().enumerate() {
+        if let Ok(true) = crate::ipc::has_message(*port_id) {
+            return idx as u64;
+        }
+    }
+
+    ETIMEDOUT
 }
 
 /// Spawn a new process from a registered driver
@@ -4619,7 +4726,7 @@ fn spawn_process_internal(
         id: pid,
         process_id: Some(process_id),
         state: ThreadState::Ready,
-        context,
+        context: alloc::boxed::Box::new(context),
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
         address_space: new_pml4_phys as u64,
@@ -5048,6 +5155,49 @@ fn sys_get_cpu_brand(buffer: u64, max_len: usize) -> u64 {
     }
 
     copy_len as u64
+}
+
+
+fn resolve_target_thread_id(raw_tid: u64) -> Option<crate::thread::ThreadId> {
+    let tid = if raw_tid == 0 {
+        crate::sched::current_thread()?
+    } else {
+        crate::thread::ThreadId::from_raw(raw_tid)
+    };
+
+    if crate::thread::get_thread_state(tid).is_some() {
+        Some(tid)
+    } else {
+        None
+    }
+}
+
+fn sys_get_cpu_id() -> u64 {
+    crate::smp::current_cpu_id() as u64
+}
+
+fn sys_get_cpu_count() -> u64 {
+    crate::smp::online_cpu_count() as u64
+}
+
+fn sys_set_thread_affinity(thread_id: u64, mask: u64) -> u64 {
+    let Some(tid) = resolve_target_thread_id(thread_id) else {
+        return EINVAL;
+    };
+
+    if crate::sched::set_thread_affinity(tid, mask) {
+        ESUCCESS
+    } else {
+        EINVAL
+    }
+}
+
+fn sys_get_thread_affinity(thread_id: u64) -> u64 {
+    let Some(tid) = resolve_target_thread_id(thread_id) else {
+        return EINVAL;
+    };
+
+    crate::sched::get_thread_affinity(tid)
 }
 
 // ---------------------------------------------------------------------------

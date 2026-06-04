@@ -13,6 +13,7 @@ use crate::cap::{
 };
 use crate::mm::{oom, pmm, vm, vma};
 use crate::process::{self, ProcessId, ProcessTerminationError, TerminationReason};
+use crate::sched;
 use crate::thread::{self, CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 use crate::log_info;
 
@@ -92,7 +93,7 @@ fn make_userspace_thread(tid: ThreadId, pid: ProcessId, pml4: usize) -> Thread {
         id: tid,
         process_id: Some(pid),
         state: ThreadState::Ready,
-        context: CpuContext::zero(),
+        context: alloc::boxed::Box::new(CpuContext::zero()),
         kernel_stack: 0,
         kernel_stack_size: 0,
         address_space: pml4 as u64,
@@ -149,6 +150,74 @@ fn cleanup_process_fixture(fixture: &ProcessFixture) {
     let _ = pmm::unregister_active_pml4(fixture.pml4);
     let _ = pmm::free_page(fixture.pml4);
 }
+
+/// Run the same two-phase finalization that production performs through the
+/// idle/reaper path:
+///
+///   1. repeatedly give the reaper a chance to consume exited TCBs;
+///   2. confirm every fixture thread has disappeared from THREAD_LIST;
+///   3. detach each member from its Process membership list idempotently;
+///   4. finalize the Process only after all members are gone.
+///
+/// SMP note:
+/// `thread::reap_zombies()` may be serialized internally or another CPU may be
+/// in the middle of consuming the zombie list. Therefore a single call is not a
+/// stable synchronization point. The bounded retry loop below keeps the
+/// invariant deterministic without requiring a scheduler-specific barrier.
+fn reap_fixture_zombies_and_finalize(fixture: &ProcessFixture) {
+    const MAX_REAP_ROUNDS: usize = 65536;
+
+    for round in 0..MAX_REAP_ROUNDS {
+        thread::reap_zombies();
+
+        let all_threads_reaped = fixture
+            .threads
+            .iter()
+            .copied()
+            .all(|tid| thread::find_thread(tid).is_none());
+
+        if all_threads_reaped {
+            for tid in fixture.threads.iter().copied() {
+                // Idempotent by design: production reaper may already have
+                // detached this member. Calling it here makes the test model
+                // robust across both serialized and opportunistic reapers.
+                process::detach_thread_from_process(fixture.pid, tid);
+            }
+
+            let finalized = process::try_finalize_process_after_reap(fixture.pid);
+            assert!(
+                finalized || process::get_process(fixture.pid).is_none(),
+                "arch_invariants: process {} should finalize after all zombie threads are reaped",
+                fixture.pid
+            );
+            return;
+        }
+
+        // Yield occasionally to allow reaper to run on another CPU in SMP
+        if round % 256 == 0 {
+            for _ in 0..100 {
+                core::hint::spin_loop();
+            }
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+
+    for tid in fixture.threads.iter().copied() {
+        assert!(
+            thread::find_thread(tid).is_none(),
+            "arch_invariants: thread {} should have been reaped after bounded SMP reap wait",
+            tid
+        );
+    }
+
+    panic!(
+        "arch_invariants: process {} still had unreaped zombie threads after {} reap rounds",
+        fixture.pid,
+        MAX_REAP_ROUNDS
+    );
+}
+
 
 fn install_revoke_tree(owner_tid: ThreadId, resource_port: u64) -> CapHandle {
     let root_perms = CapPermissions::READ
@@ -436,7 +505,10 @@ fn test_oom_semantics_single_and_multithread() {
         }
     }
 
-    assert!(thread::find_thread(heavy.threads[0]).is_none());
+    // With deferred zombie reaping, terminated threads stay in THREAD_LIST with
+    // state=Exited until the idle/reaper path runs. Simulate that complete
+    // two-phase teardown here.
+    reap_fixture_zombies_and_finalize(&heavy);
     assert!(process::get_process_memory_usage(heavy.pid).is_none());
     let _ = process::collect_process_memory_snapshot();
 
@@ -461,6 +533,7 @@ fn test_oom_semantics_single_and_multithread() {
         }
     }
 
+    reap_fixture_zombies_and_finalize(&multi);
     for tid in multi.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
@@ -503,6 +576,7 @@ fn test_multithread_teardown_consistency_under_repeated_kill() {
         "arch_invariants: repeated kill request must not resurrect process state"
     );
 
+    reap_fixture_zombies_and_finalize(&fixture);
     for tid in fixture.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
@@ -515,6 +589,37 @@ fn test_multithread_teardown_consistency_under_repeated_kill() {
     cleanup_process_fixture(&fixture);
 }
 
+
+fn test_smp_affinity_contracts() {
+    let Some(current) = sched::current_thread() else {
+        return;
+    };
+
+    let online = crate::smp::online_cpu_count();
+    let all_mask = if online >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << online) - 1
+    };
+
+    assert!(
+        sched::set_thread_affinity(current, all_mask.max(1)),
+        "arch_invariants: set_thread_affinity must accept non-empty mask"
+    );
+
+    let readback = sched::get_thread_affinity(current);
+    assert_eq!(
+        readback,
+        all_mask.max(1),
+        "arch_invariants: affinity readback must match last write"
+    );
+
+    assert!(
+        !sched::set_thread_affinity(current, 0),
+        "arch_invariants: affinity mask 0 must be rejected"
+    );
+}
+
 pub fn run_architectural_invariants_self_tests() {
     let _serial = ARCH_INVARIANTS_SERIAL.lock();
 
@@ -525,9 +630,10 @@ pub fn run_architectural_invariants_self_tests() {
     test_revoke_two_phase_callbacks_and_reports();
     test_oom_semantics_single_and_multithread();
     test_multithread_teardown_consistency_under_repeated_kill();
+    test_smp_affinity_contracts();
 
     log_info!(
         LOG_ORIGIN,
-        "Phase 8 integration self-tests passed (locking/oom/revoke/fault admission)"
+        "Phase 8 integration self-tests passed (locking/oom/revoke/fault admission/smp-affinity)"
     );
 }

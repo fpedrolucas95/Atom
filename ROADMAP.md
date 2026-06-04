@@ -335,36 +335,36 @@ Objetivo: habilitar execução multi-core com invariantes corretos.
 
 ### 11.1 Bootstrap de CPUs
 
-- [ ] Parsing de ACPI MADT
-- [ ] Startup de APs via SIPI
-- [ ] GDT, IDT, TSS e stacks por CPU
-- [ ] Inicialização de `CpuLocal`
+- [x] Parsing de ACPI MADT
+- [x] Startup de APs via SIPI
+- [x] GDT, IDT, TSS e stacks por CPU
+- [x] Inicialização de `CpuLocal`
 
 ### 11.2 Estruturas per-CPU
 
-- [ ] Dados per-CPU via `GS_BASE`
-- [ ] Idle thread por CPU
-- [ ] IST/stacks por CPU
-- [ ] Estratégia inicial: fila global com lock ou ready queues per-CPU
+- [x] Dados per-CPU via `GS_BASE` (syscall stack state)
+- [x] Idle thread por CPU
+- [x] IST/stacks por CPU
+- [x] Ready queues per-CPU
 
 ### 11.3 Kernel SMP-safe
 
 - [ ] Auditar todos os locks do kernel
-- [ ] Revisar atomicidade de IPC, scheduler, PMM, FD tables, capabilities, registries
+- [x] Revisar atomicidade de IPC, scheduler, PMM, e registries críticos para execução multicore
 - [ ] Garantir regras formais de ordering de locks
-- [ ] Revisar timestamps, ticks e timekeeping entre CPUs
+- [x] Revisar ticks/time slice em contexto per-CPU
 
 ### 11.4 Scheduler SMP
 
-- [ ] Load balancing inicial
-- [ ] Migração de threads
-- [ ] Estratégia de afinidade
+- [x] Load balancing inicial
+- [x] Migração de threads
+- [x] Estratégia de afinidade
 - [ ] Medir fairness e starvation
 
 ### 11.5 Validação SMP
 
 - [ ] Stress test com N threads / M cores
-- [ ] Rodar user space completo em SMP
+- [x] Rodar user space completo em SMP
 - [ ] Validar que não há races de teardown, IPC ou scheduler
 - [ ] Estabelecer baseline de throughput
 
@@ -541,7 +541,7 @@ Objetivo: transformar a arquitetura orientada a serviços em produto configuráv
 - [ ] Tabela de FDs por processo
 - [ ] FS com caminho arquitetural único
 - [ ] Networking estável fora do caso feliz de QEMU
-- [ ] SMP estável em 2–4 cores
+- [x] SMP funcional em 2–4 cores (QEMU)
 - [ ] 24h de stress sem panic
 - [ ] Hardware real validado
 
@@ -580,7 +580,7 @@ Contribuições são especialmente valiosas em:
 - FS/VFS
 - testes e stress
 - networking
-- SMP foundations
+- SMP hardening e stress testing
 - documentação arquitetural
 - tracing/debugging/observabilidade
 

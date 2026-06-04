@@ -41,6 +41,13 @@ typedef uint64_t atom_user_offset_t;
 /* Spawn */
 #define SYS_SPAWN_PROCESS    45
 
+
+/* SMP / scheduler topology */
+#define SYS_GET_CPU_ID       90
+#define SYS_GET_CPU_COUNT    91
+#define SYS_SET_THREAD_AFFINITY 92
+#define SYS_GET_THREAD_AFFINITY 93
+
 /* Filesystem (53–76) */
 #define SYS_FS_OPEN          53
 #define SYS_FS_CLOSE         54

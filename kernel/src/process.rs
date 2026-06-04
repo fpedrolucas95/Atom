@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+// Process registry and deterministic process lifetime management.
+//
+// The process record intentionally outlives logical termination. Termination
+// closes IPC/caps/shared mappings and marks all threads exited, but the record
+// remains in PROCESS_REGISTRY until the thread reaper removes the final zombie
+// and calls try_finalize_process_after_reap(). This prevents use-after-removal
+// of the process -> PML4 association during final stack/address-space cleanup.
+
+
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -300,42 +309,24 @@ fn finalize_removed_process(process_id: ProcessId, pml4_phys: u64) {
 }
 
 pub fn detach_thread_from_process(process_id: ProcessId, thread_id: ThreadId) {
-    let mut removed_pml4 = None;
+    let mut registry = PROCESS_REGISTRY.lock();
+    let Some(process) = registry.get_mut(&process_id) else {
+        return;
+    };
 
-    {
-        let mut registry = PROCESS_REGISTRY.lock();
-        let Some(process) = registry.get_mut(&process_id) else {
-            return;
-        };
+    process.threads.retain(|existing| *existing != thread_id);
 
-        process.threads.retain(|existing| *existing != thread_id);
-        if process.threads.is_empty() {
-            if !process.cleaned {
-                // Operational: process reached zero threads before cleanup was claimed.
-                log_warn!(
-                    LOG_ORIGIN,
-                    "Process {} reached zero threads before final cleanup was claimed",
-                    process_id
-                );
-            }
-        }
-
-        if process.cleaned
-            && process.threads.is_empty()
-            && (!process.terminating || process.terminated)
-        {
-            // Final teardown step: clear canonical accounting before removing
-            // the process entry from the registry.
-            process.resident_private_pages = 0;
-            process.resident_shared_pages = 0;
-            process.reserved_bytes = 0;
-            removed_pml4 = Some(process.pml4_phys);
-            registry.remove(&process_id);
-        }
-    }
-
-    if let Some(pml4_phys) = removed_pml4 {
-        finalize_removed_process(process_id, pml4_phys);
+    if process.threads.is_empty() && !process.cleaned {
+        // Operational: process reached zero threads before the owner path
+        // explicitly claimed final cleanup. Keep the process record alive until
+        // the reaper calls `try_finalize_process_after_reap`; other subsystems
+        // may still need the process -> PML4 association while the zombie thread
+        // is being physically removed.
+        log_warn!(
+            LOG_ORIGIN,
+            "Process {} reached zero threads before final cleanup was claimed",
+            process_id
+        );
     }
 }
 
@@ -387,30 +378,64 @@ pub fn pml4_allows_memory_operations(pml4_phys: u64) -> bool {
 }
 
 fn mark_process_terminated(process_id: ProcessId) {
-    let mut removed_pml4 = None;
+    let mut registry = PROCESS_REGISTRY.lock();
+    let Some(process) = registry.get_mut(&process_id) else {
+        return;
+    };
 
-    {
+    process.terminated = true;
+    process.terminating = false;
+    process.cleaned = true;
+    process.resident_private_pages = 0;
+    process.resident_shared_pages = 0;
+    process.reserved_bytes = 0;
+
+    // Do not remove the registry entry here. The thread reaper may still need
+    // process metadata and the PML4 association while it releases the zombie
+    // thread's final physical resources.
+}
+
+/// Finalize a process after its last zombie thread was physically reaped.
+///
+/// This is the only normal path that removes a process record from
+/// `PROCESS_REGISTRY`. It must be called by the thread reaper after:
+///
+/// 1. the zombie thread has been removed from the thread list;
+/// 2. `detach_thread_from_process(process_id, tid)` has updated membership;
+/// 3. the reaper no longer needs the process metadata for stack/address-space
+///    cleanup.
+///
+/// The two-phase lifetime is intentional:
+/// - `terminate_process` performs logical teardown and blocks new operations;
+/// - `thread::reap_zombies` performs physical thread teardown;
+/// - this function removes the process registry/PML4 mapping once both sides
+///   agree there are no remaining threads.
+pub fn try_finalize_process_after_reap(process_id: ProcessId) -> bool {
+    let removed_pml4 = {
         let mut registry = PROCESS_REGISTRY.lock();
-        let Some(process) = registry.get_mut(&process_id) else {
-            return;
+
+        let Some(process) = registry.get(&process_id) else {
+            return false;
         };
 
-        process.terminated = true;
-        process.terminating = false;
-        process.cleaned = true;
-        process.resident_private_pages = 0;
-        process.resident_shared_pages = 0;
-        process.reserved_bytes = 0;
-
-        if process.threads.is_empty() {
-            removed_pml4 = Some(process.pml4_phys);
-            registry.remove(&process_id);
+        if !(process.cleaned && process.terminated && process.threads.is_empty()) {
+            return false;
         }
-    }
 
-    if let Some(pml4_phys) = removed_pml4 {
-        finalize_removed_process(process_id, pml4_phys);
-    }
+        let pml4_phys = process.pml4_phys;
+        registry.remove(&process_id);
+        pml4_phys
+    };
+
+    finalize_removed_process(process_id, removed_pml4);
+
+    log_debug!(
+        LOG_ORIGIN,
+        "[finalize] pid={} removed after zombie reap",
+        process_id
+    );
+
+    true
 }
 
 /// Canonical deterministic process termination path.

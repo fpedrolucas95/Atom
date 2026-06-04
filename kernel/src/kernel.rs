@@ -33,7 +33,7 @@
 // - Panic handler halts the CPU to avoid undefined behavior
 //
 // Limitations and future considerations:
-// - Initialization is single-core and non-parallel
+// - BSP executes initialization serially, then brings APs online via SMP bootstrap
 // - Assumes UEFI-based boot on supported architectures
 // - No late reinitialization or recovery paths
 // - Early boot logging is verbose and not optimized for production
@@ -61,6 +61,7 @@ mod graphics;
 mod process;
 mod thread;
 mod sched;
+mod smp;
 mod syscall;
 mod ipc;
 mod cap;
@@ -92,6 +93,7 @@ const LOG_KERNEL_INIT: &str = "kernel:init";
 const LOG_MM: &str = "vmm";
 const LOG_APIC: &str = "apic";
 const LOG_SCHED: &str = "sched";
+const LOG_SMP: &str = "smp";
 const LOG_INIT_PROC: &str = "init";
 
 #[global_allocator]
@@ -146,11 +148,14 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     display_memory_stats();
 
     thread::init();
-    init_scheduler();
     cap::init();
 
     interrupts::init();
+    let detected_apics = smp::detect_cpu_apic_ids(boot_info.rsdp_addr);
+    smp::initialize_cpu_registry(&detected_apics);
+    init_scheduler();
     interrupts::init_timer(100);
+    smp::bringup_aps();
 
     // Initialize input subsystem (minimal kernel-side buffer for userspace drivers)
     // Note: PS/2 init must happen BEFORE enabling interrupts to avoid IRQ handlers
@@ -167,6 +172,9 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     ipc::init();
     shared_mem::init();
     architectural_invariants_selftests::run_architectural_invariants_self_tests();
+    if boot_info.verbose {
+        launch_smp_smoke_threads();
+    }
 
     // Initialize driver registry with boot-loaded drivers
     driver_registry::init(&boot_info.drivers);
@@ -233,25 +241,80 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 
 }
 
-fn init_scheduler() {
-    extern "C" fn idle_thread_entry() -> ! {
-        loop {
-            // Reap any exited threads that are pending final cleanup.
-            // This is safe because the idle thread runs on its own stack
-            // and uses the kernel PML4.
-            crate::thread::reap_zombies();
+pub extern "C" fn idle_thread_entry() -> ! {
+    loop {
+        // Reap any exited threads that are pending final cleanup.
+        // This is safe because the idle thread runs on its own stack
+        // and uses the kernel PML4.
+        crate::thread::reap_zombies();
 
-            unsafe {
-                // STI followed by HLT is an atomic operation that enables interrupts
-                // and puts the CPU to sleep until the next interrupt.
-                core::arch::asm!("sti", "hlt");
-            }
-
-            // After an interrupt wakes us up, yield to see if any other thread is now ready.
-            crate::sched::yield_current();
+        unsafe {
+            // STI followed by HLT is an atomic operation that enables interrupts
+            // and puts the CPU to sleep until the next interrupt.
+            core::arch::asm!("sti", "hlt");
         }
+
+        // After an interrupt wakes us up, yield to see if any other thread is now ready.
+        crate::sched::yield_current();
+    }
+}
+
+extern "C" fn smp_smoke_thread_entry() -> ! {
+    let mut iter: u64 = 0;
+    loop {
+        if (iter & 0x3FF) == 0 {
+            log_info!(
+                LOG_SMP,
+                "smoke thread tid={:?} running on cpu={} iter={}",
+                sched::current_thread(),
+                smp::current_cpu_id(),
+                iter
+            );
+        }
+        iter = iter.wrapping_add(1);
+        sched::yield_current();
+    }
+}
+
+fn launch_smp_smoke_threads() {
+    let online = smp::online_cpu_count();
+    if online <= 1 {
+        log_info!(LOG_SMP, "SMP smoke disabled (single-core mode)");
+        return;
     }
 
+    let cr3 = read_cr3();
+    for cpu in 0..online {
+        let Some(stack_phys) = mm::pmm::alloc_pages(4) else {
+            log_warn!(LOG_SMP, "failed to allocate stack for SMP smoke cpu={}", cpu);
+            break;
+        };
+
+        let stack_top = mm::vm::HIGHER_HALF_BASE + stack_phys + (4 * mm::pmm::PAGE_SIZE);
+        let thread = thread::Thread::new(
+            smp_smoke_thread_entry as *const () as usize as u64,
+            stack_top as u64,
+            4 * mm::pmm::PAGE_SIZE,
+            cr3,
+            thread::ThreadPriority::Low,
+            "smp_smoke",
+        );
+        let tid = sched::add_thread(thread);
+        let affinity = 1u64 << cpu.min(63);
+        let _ = sched::set_thread_affinity(tid, affinity);
+
+        log_info!(
+            LOG_SMP,
+            "spawned SMP smoke thread tid={} affinity_mask={:#X} target_cpu={}",
+            tid,
+            affinity,
+            cpu
+        );
+    }
+}
+
+
+fn init_scheduler() {
     let idle_stack_phys = mm::pmm::alloc_pages(4).expect("Failed to allocate idle stack");
     // Use higher-half virtual address for the idle thread's kernel stack.
     // During context switches from idle to a userspace thread, the switch
@@ -271,6 +334,7 @@ fn init_scheduler() {
     );
 
     sched::init(idle_thread);
+    smp::init_cpu_local_syscall_state(smp::current_cpu_id(), idle_stack_top as u64);
     log_info!(LOG_SCHED, "Scheduler initialized with idle thread");
 }
 
@@ -279,9 +343,9 @@ fn start_scheduling() -> ! {
     if let Some(first) = sched::schedule() {
         if let Some(stack) = thread::kernel_stack_top(first) {
             gdt::set_rsp0(stack);
-            unsafe {
-                crate::thread::CURRENT_THREAD_KSTACK = stack;
-            }
+            crate::thread::CURRENT_THREAD_KSTACK
+                .store(stack, core::sync::atomic::Ordering::Relaxed);
+            smp::update_current_kstack(stack);
         }
 
         thread::jump_to_thread(first);

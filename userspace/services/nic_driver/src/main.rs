@@ -498,9 +498,11 @@ fn main() -> ! {
     let mut rx_check_counter = 0u32;
 
     loop {
-        // Handle IPC (ring assignment from netd, IRQ notifications)
+        // Handle IPC (ring assignment from netd, IRQ notifications).
+        // timeout=5ms: block until a message arrives or rings need servicing.
+        // IRQ notifications wake this up immediately when a packet arrives.
         let ports = [port];
-        if atom_syscall::ipc::wait_any(&ports, 0).is_ok() {
+        if atom_syscall::ipc::wait_any(&ports, 5).is_ok() {
             while let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
                 if header.msg_type == MessageType::NetAssignRings {
                     let payload = get_payload(&ipc_buf, len);

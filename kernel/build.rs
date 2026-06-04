@@ -55,7 +55,7 @@
 //              Exceptions", Table 6-1 "Protected-Mode Exceptions and
 //              Interrupts".
 
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
 
 /// Minimum legal IDT vector for hardware interrupts on x86_64.
 ///
@@ -70,10 +70,11 @@ fn main() {
     // Values must fit in a u8 (0–255).
     // -----------------------------------------------------------------------
     let vectors: &[(&str, u8)] = &[
-        ("TIMER_INTERRUPT_VECTOR",    32),
-        ("KEYBOARD_INTERRUPT_VECTOR", 33),
-        ("MOUSE_INTERRUPT_VECTOR",    44),
-        ("USER_TRAP_INTERRUPT_VECTOR", 0x68),
+        ("TIMER_INTERRUPT_VECTOR",      32),
+        ("KEYBOARD_INTERRUPT_VECTOR",   33),
+        ("MOUSE_INTERRUPT_VECTOR",      44),
+        ("RESCHEDULE_INTERRUPT_VECTOR", 45),
+        ("USER_TRAP_INTERRUPT_VECTOR",  0x68),
     ];
 
     // -----------------------------------------------------------------------
@@ -136,6 +137,31 @@ fn main() {
         inc.push_str(&format!("%define {:<28} {}\n", name, val));
     }
     fs::write(&inc_path, &inc).unwrap();
+
+    // -----------------------------------------------------------------------
+    // AP trampoline (flat binary) used for INIT/SIPI startup.
+    // -----------------------------------------------------------------------
+    let trampoline_src = manifest_dir.join("src").join("ap_trampoline.asm");
+    let trampoline_out = out_dir.join("ap_trampoline.bin");
+
+    let status = Command::new("nasm")
+        .arg("-f")
+        .arg("bin")
+        .arg(&trampoline_src)
+        .arg("-o")
+        .arg(&trampoline_out)
+        .status()
+        .expect("failed to execute nasm for AP trampoline");
+
+    if !status.success() {
+        panic!(
+            "nasm failed while assembling AP trampoline: {}",
+            trampoline_src.display()
+        );
+    }
+
+    println!("cargo:rerun-if-changed={}", trampoline_src.display());
+
 
     println!("cargo:rerun-if-changed=build.rs");
 }

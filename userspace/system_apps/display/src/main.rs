@@ -15,9 +15,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use atom_syscall::graphics::{Color, Framebuffer};
+use atom_syscall::graphics::Framebuffer;
 use atom_syscall::ipc::create_port;
-use atom_syscall::thread::{yield_now, exit};
+use atom_syscall::thread::exit;
 use atom_syscall::debug::log;
 
 use libipc::protocol::register_service;
@@ -63,45 +63,6 @@ static ALLOCATOR: BumpAllocator = BumpAllocator::new();
 fn alloc_error(_: Layout) -> ! { loop {} }
 
 // ============================================================================
-// Display Driver State
-// ============================================================================
-
-struct DisplayDriver {
-    framebuffer: Framebuffer,
-    width: u32,
-    height: u32,
-}
-
-impl DisplayDriver {
-    fn new(fb: Framebuffer) -> Self {
-        let width = fb.width();
-        let height = fb.height();
-        
-        Self {
-            framebuffer: fb,
-            width,
-            height,
-        }
-    }
-
-    fn clear(&self, color: Color) {
-        self.framebuffer.fill_rect(0, 0, self.width, self.height, color);
-    }
-
-    fn fill_rect(&self, x: u32, y: u32, w: u32, h: u32, color: Color) {
-        self.framebuffer.fill_rect(x, y, w, h, color);
-    }
-
-    fn draw_text(&self, x: u32, y: u32, text: &str, fg: Color, bg: Color) {
-        self.framebuffer.draw_string(x, y, text, fg, bg);
-    }
-
-    fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
-
-// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -113,8 +74,10 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     log("Display Driver: Starting...");
 
-    if let Ok(port) = create_port() {
-        let _ = register_service("display", port);
+    // Keep port in scope so the idle loop can block on it instead of spinning.
+    let port = create_port().ok();
+    if let Some(p) = port {
+        let _ = register_service("display", p);
     }
 
     // Acquire framebuffer from kernel
@@ -126,19 +89,20 @@ fn main() -> ! {
         }
     };
 
-    let driver = DisplayDriver::new(fb);
+    let _fb = fb;
     log("Display Driver: Framebuffer acquired");
-
-    let (width, _) = driver.dimensions();
-    driver.clear(Color::new(46, 52, 64));
-    driver.fill_rect(0, 0, width, 24, Color::new(36, 41, 51));
-    driver.draw_text(8, 4, "Atom Display Driver", Color::new(136, 192, 208), Color::new(36, 41, 51));
-    driver.draw_text(16, 40, "Display Driver Active", Color::WHITE, Color::new(46, 52, 64));
 
     log("Display Driver: Ready");
 
+    // Block on the IPC port (infinite wait) so this thread does not spin.
+    // Any incoming message (e.g. from a future compositor) will wake it up.
+    // If port creation failed fall back to an indefinite sleep.
     loop {
-        yield_now();
+        if let Some(p) = port {
+            atom_syscall::ipc::wait_any(&[p], u64::MAX).ok();
+        } else {
+            atom_syscall::thread::sleep_ms(u64::MAX);
+        }
     }
 }
 

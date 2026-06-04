@@ -251,8 +251,9 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
     log("fsd: entering main loop");
 
     loop {
-        // Block until a message arrives
-        match atom_syscall::ipc::recv(fs_port, &mut buffer) {
+        // Block until a request arrives (u64::MAX = no deadline).
+        // The kernel wakes this thread the moment a message is queued to fs_port.
+        match atom_syscall::ipc::recv_with_timeout(fs_port, &mut buffer, u64::MAX) {
             Ok(bytes_received) => {
                 if bytes_received < libipc::messages::MessageHeader::SIZE {
                     log("fsd: received message too small, ignoring");
@@ -305,12 +306,6 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
                         }
                     }
                 }
-            }
-            Err(atom_syscall::SyscallError::WouldBlock) => {
-                atom_syscall::thread::yield_now();
-            }
-            Err(atom_syscall::SyscallError::TimedOut) => {
-                atom_syscall::thread::yield_now();
             }
             Err(_e) => {
                 log("fsd: FATAL recv error, terminating");

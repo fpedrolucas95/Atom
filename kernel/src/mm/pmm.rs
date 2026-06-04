@@ -43,6 +43,9 @@ use crate::{log_info, log_debug, log_warn};
 /// Page size: 4 KiB
 pub const PAGE_SIZE: usize = 4096;
 
+const AP_TRAMPOLINE_RESERVED_START: usize = 0x8000 / PAGE_SIZE;
+const AP_TRAMPOLINE_RESERVED_PAGES: usize = 2;
+
 /// Static bitmap covers up to 16 GiB (4,194,304 pages).
 /// This is 512 KiB in .bss — acceptable for a kernel.
 const MAX_STATIC_PAGES: usize = 4 * 1024 * 1024;
@@ -530,6 +533,18 @@ pub unsafe fn init(memory_map: &MemoryMap) {
         free_pages = free_pages.saturating_sub(1);
     }
 
+    // The SMP AP trampoline is copied to physical 0x8000 during bring-up.
+    // Keep the trampoline page and one guard page out of the allocator so
+    // early page-table allocations cannot be overwritten by trampoline code.
+    for page in AP_TRAMPOLINE_RESERVED_START
+        ..(AP_TRAMPOLINE_RESERVED_START + AP_TRAMPOLINE_RESERVED_PAGES)
+    {
+        if is_page_free(page) {
+            set_page_allocated(page);
+            free_pages = free_pages.saturating_sub(1);
+        }
+    }
+
     FREE_PAGES.store(free_pages, Ordering::Relaxed);
 
     // -----------------------------------------------------------------------
@@ -771,6 +786,32 @@ pub fn alloc_page() -> Option<usize> {
     }
 
     None
+}
+
+/// Reserve a specific physical page so it cannot be allocated later.
+/// Returns true if the page is now reserved/allocated.
+pub fn reserve_page(addr: usize) -> bool {
+    if (addr & (PAGE_SIZE - 1)) != 0 {
+        return false;
+    }
+
+    let page = addr / PAGE_SIZE;
+    let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    if page >= total {
+        return false;
+    }
+
+    let _lock = BITMAP_LOCK.lock();
+
+    unsafe {
+        if is_page_free(page) {
+            set_page_allocated(page);
+            FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
+            PHYS_REFCOUNTS.lock().remove(&addr);
+        }
+    }
+
+    true
 }
 
 /// Fast free-page search using word-at-a-time scanning.

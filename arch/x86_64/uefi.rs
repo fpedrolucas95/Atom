@@ -84,6 +84,12 @@ struct EfiGuid {
 }
 
 #[repr(C)]
+struct EfiConfigurationTable {
+    vendor_guid: EfiGuid,
+    vendor_table: *mut c_void,
+}
+
+#[repr(C)]
 struct EfiSystemTable {
     hdr: EfiTableHeader,
     firmware_vendor: *const u16,
@@ -97,7 +103,7 @@ struct EfiSystemTable {
     runtime_services: *mut c_void,
     boot_services: *mut EfiBootServices,
     number_of_table_entries: usize,
-    configuration_table: *mut c_void,
+    configuration_table: *mut EfiConfigurationTable,
 }
 
 #[repr(C)]
@@ -176,6 +182,20 @@ const GOP_GUID: EfiGuid = EfiGuid {
     data2: 0x23DC,
     data3: 0x4A38,
     data4: [0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A],
+};
+
+const ACPI_20_TABLE_GUID: EfiGuid = EfiGuid {
+    data1: 0x8868E871,
+    data2: 0xE4F1,
+    data3: 0x11D3,
+    data4: [0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81],
+};
+
+const ACPI_10_TABLE_GUID: EfiGuid = EfiGuid {
+    data1: 0xEB9D2D30,
+    data2: 0x2D88,
+    data3: 0x11D3,
+    data4: [0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D],
 };
 
 // Simple File System Protocol GUID
@@ -360,6 +380,35 @@ fn cpu_info() -> CpuInfo {
         architecture,
     }
 }
+
+#[inline]
+fn guid_eq(a: &EfiGuid, b: &EfiGuid) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
+fn find_rsdp(system_table: &EfiSystemTable) -> u64 {
+    if system_table.configuration_table.is_null() || system_table.number_of_table_entries == 0 {
+        return 0;
+    }
+
+    let tables = unsafe {
+        core::slice::from_raw_parts(
+            system_table.configuration_table,
+            system_table.number_of_table_entries,
+        )
+    };
+
+    for entry in tables.iter() {
+        if guid_eq(&entry.vendor_guid, &ACPI_20_TABLE_GUID)
+            || guid_eq(&entry.vendor_guid, &ACPI_10_TABLE_GUID)
+        {
+            return entry.vendor_table as u64;
+        }
+    }
+
+    0
+}
+
 
 fn setup_framebuffer(bs: &mut EfiBootServices) -> Option<FramebufferInfo> {
     let mut gop_ptr: *mut c_void = ptr::null_mut();
@@ -880,6 +929,8 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
         None => return EFI_INVALID_PARAMETER,
     };
 
+    let rsdp_addr = find_rsdp(st);
+
     disable_watchdog(bs);
 
     let framebuffer_info = setup_framebuffer(bs);
@@ -979,6 +1030,7 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
             verbose: false,
             boot_method: BootMethod::Uefi,
             cpu: cpu_info(),
+            rsdp_addr,
             init_payload,
             drivers,
         });
