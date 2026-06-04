@@ -543,6 +543,7 @@ pub fn drive_cooperative_tick() {
 pub fn mark_thread_ready(id: ThreadId) { if let Some(s) = scheduler_opt() { s.mark_ready(id); } }
 pub fn deschedule_thread(id: ThreadId) { if let Some(s) = scheduler_opt() { s.deschedule_thread(id); } }
 pub fn sleep_thread(id: ThreadId, wake_tick: u64) { if let Some(s) = scheduler_opt() { s.sleep_thread(id, wake_tick); } }
+pub fn cancel_sleep(id: ThreadId) { if let Some(s) = scheduler_opt() { s.sleep_queue.lock().retain(|(tid, _)| *tid != id); } }
 pub fn wake_sleeping_threads() { if let Some(s) = scheduler_opt() { s.wake_sleeping_threads(); } }
 pub fn current_thread() -> Option<ThreadId> { scheduler_opt().and_then(|s| s.current_thread()) }
 
