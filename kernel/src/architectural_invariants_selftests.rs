@@ -154,33 +154,67 @@ fn cleanup_process_fixture(fixture: &ProcessFixture) {
 /// Run the same two-phase finalization that production performs through the
 /// idle/reaper path:
 ///
-///   1. reap zombie thread objects from THREAD_LIST;
-///   2. detach every reaped thread from its Process membership list;
-///   3. finalize the Process only after all members are gone.
+///   1. repeatedly give the reaper a chance to consume exited TCBs;
+///   2. confirm every fixture thread has disappeared from THREAD_LIST;
+///   3. detach each member from its Process membership list idempotently;
+///   4. finalize the Process only after all members are gone.
 ///
-/// The explicit detach calls are intentionally idempotent. They make the
-/// architectural self-tests independent of whether `thread::reap_zombies()`
-/// already performed the detach internally, while still asserting the external
-/// contract: after this helper returns, every fixture thread and the owning
-/// process must be gone.
+/// SMP note:
+/// `thread::reap_zombies()` may be serialized internally or another CPU may be
+/// in the middle of consuming the zombie list. Therefore a single call is not a
+/// stable synchronization point. The bounded retry loop below keeps the
+/// invariant deterministic without requiring a scheduler-specific barrier.
 fn reap_fixture_zombies_and_finalize(fixture: &ProcessFixture) {
-    thread::reap_zombies();
+    const MAX_REAP_ROUNDS: usize = 65536;
+
+    for round in 0..MAX_REAP_ROUNDS {
+        thread::reap_zombies();
+
+        let all_threads_reaped = fixture
+            .threads
+            .iter()
+            .copied()
+            .all(|tid| thread::find_thread(tid).is_none());
+
+        if all_threads_reaped {
+            for tid in fixture.threads.iter().copied() {
+                // Idempotent by design: production reaper may already have
+                // detached this member. Calling it here makes the test model
+                // robust across both serialized and opportunistic reapers.
+                process::detach_thread_from_process(fixture.pid, tid);
+            }
+
+            let finalized = process::try_finalize_process_after_reap(fixture.pid);
+            assert!(
+                finalized || process::get_process(fixture.pid).is_none(),
+                "arch_invariants: process {} should finalize after all zombie threads are reaped",
+                fixture.pid
+            );
+            return;
+        }
+
+        // Yield occasionally to allow reaper to run on another CPU in SMP
+        if round % 256 == 0 {
+            for _ in 0..100 {
+                core::hint::spin_loop();
+            }
+        } else {
+            core::hint::spin_loop();
+        }
+    }
 
     for tid in fixture.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
-            "arch_invariants: thread {} should have been reaped",
+            "arch_invariants: thread {} should have been reaped after bounded SMP reap wait",
             tid
         );
-
-        process::detach_thread_from_process(fixture.pid, tid);
     }
 
-    let finalized = process::try_finalize_process_after_reap(fixture.pid);
-    assert!(
-        finalized || process::get_process(fixture.pid).is_none(),
-        "arch_invariants: process {} should finalize after all zombie threads are reaped",
-        fixture.pid
+    panic!(
+        "arch_invariants: process {} still had unreaped zombie threads after {} reap rounds",
+        fixture.pid,
+        MAX_REAP_ROUNDS
     );
 }
 

@@ -618,14 +618,6 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     ctx.print("Uptime:       ");
     ctx.println(uptime);
 
-    // Network
-    if let Ok(netd_port) = libipc::protocol::lookup_service("netd") {
-        if let Ok(config) = libnet::net_get_config(netd_port) {
-            ctx.print("Network:      ");
-            ctx.println(&alloc::format!("{}", config.ip));
-        }
-    }
-
     ctx.println("");
 
     CommandResult::Ok

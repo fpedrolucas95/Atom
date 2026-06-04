@@ -10,17 +10,23 @@ use crate::thread::{self, Thread, ThreadId, ThreadPriority, ThreadState};
 use crate::util::without_interrupts;
 use crate::{log_debug, log_error, log_info};
 
-const PRIORITY_LEVELS: usize = 4;
 const LOG_ORIGIN: &str = "sched";
+const PRIORITY_LEVELS: usize = 4;
 const NO_CPU_OWNER: usize = usize::MAX;
+
 static LAST_LOGGED_MOUSE_IRQ: AtomicU64 = AtomicU64::new(0);
 static LAST_LOGGED_RESCHEDULE_IRQ: AtomicU64 = AtomicU64::new(0);
 static SCHED_SWITCH_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static THREAD_STATE_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
-fn should_log_irq_count(count: u64) -> bool {
+fn should_log_count(count: u64) -> bool {
     count <= 64 || count.is_power_of_two()
+}
+
+#[inline]
+fn priority_index(priority: ThreadPriority) -> usize {
+    (priority as usize).min(PRIORITY_LEVELS - 1)
 }
 
 fn thread_state_name(state: Option<ThreadState>) -> &'static str {
@@ -34,55 +40,61 @@ fn thread_state_name(state: Option<ThreadState>) -> &'static str {
     }
 }
 
+#[derive(Debug)]
 struct ReadyQueues {
     queues: [VecDeque<ThreadId>; PRIORITY_LEVELS],
 }
 
 impl ReadyQueues {
     fn new() -> Self {
-        Self { queues: [(); PRIORITY_LEVELS].map(|_| VecDeque::new()) }
+        Self {
+            queues: [(); PRIORITY_LEVELS].map(|_| VecDeque::new()),
+        }
     }
 
-    fn push(&mut self, id: ThreadId, priority: ThreadPriority) {
-        let idx = priority as usize;
-        if idx < PRIORITY_LEVELS && !self.queues[idx].iter().any(|it| *it == id) {
+    fn push_back(&mut self, id: ThreadId, priority: ThreadPriority) {
+        let idx = priority_index(priority);
+        if !self.queues[idx].iter().any(|existing| *existing == id) {
             self.queues[idx].push_back(id);
         }
     }
 
     fn remove(&mut self, id: ThreadId) {
-        for q in self.queues.iter_mut() {
-            q.retain(|it| *it != id);
+        for queue in self.queues.iter_mut() {
+            queue.retain(|existing| *existing != id);
         }
     }
 
-    fn pop_next(&mut self) -> Option<ThreadId> {
-        for idx in (0..PRIORITY_LEVELS).rev() {
-            while let Some(id) = self.queues[idx].pop_front() {
-                if matches!(thread::get_thread_state(id), Some(ThreadState::Ready)) {
-                    return Some(id);
-                }
-            }
-        }
-        None
-    }
-
-    fn steal_next(&mut self) -> Option<ThreadId> {
-        for idx in (0..PRIORITY_LEVELS).rev() {
-            while let Some(id) = self.queues[idx].pop_back() {
-                if matches!(thread::get_thread_state(id), Some(ThreadState::Ready)) {
-                    return Some(id);
-                }
-            }
-        }
-        None
+    fn contains(&self, id: ThreadId) -> bool {
+        self.queues
+            .iter()
+            .any(|queue| queue.iter().any(|existing| *existing == id))
     }
 
     fn len(&self) -> usize {
         self.queues.iter().map(VecDeque::len).sum()
     }
+
+    fn pop_front_raw(&mut self) -> Option<ThreadId> {
+        for idx in (0..PRIORITY_LEVELS).rev() {
+            if let Some(id) = self.queues[idx].pop_front() {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn pop_back_raw(&mut self) -> Option<ThreadId> {
+        for idx in (0..PRIORITY_LEVELS).rev() {
+            if let Some(id) = self.queues[idx].pop_back() {
+                return Some(id);
+            }
+        }
+        None
+    }
 }
 
+#[derive(Debug)]
 struct CpuSchedulerState {
     ready: ReadyQueues,
     current: Option<ThreadId>,
@@ -91,10 +103,10 @@ struct CpuSchedulerState {
     resched_pending: bool,
     context_switches: u64,
     steals: u64,
-    /// The thread being switched away from in a context switch that is currently
-    /// in flight on this CPU.  Set in schedule_local when a new thread is chosen;
-    /// cleared in perform_context_switch after the assembly save is complete.
-    /// reap_zombies spin-waits on this before freeing a zombie's CpuContext Box.
+    /// Thread whose saved context is currently being overwritten by the low-level
+    /// switch routine on this CPU.  The marker is set before publishing the
+    /// outgoing thread as runnable and is cleared by the newly-landed context via
+    /// `clear_pending_switch_from()`.
     pending_switch_from: Option<ThreadId>,
 }
 
@@ -113,67 +125,257 @@ impl CpuSchedulerState {
     }
 }
 
+#[derive(Debug)]
+struct SchedulerInner {
+    cpus: Vec<CpuSchedulerState>,
+    base_priorities: BTreeMap<ThreadId, ThreadPriority>,
+    effective_priorities: BTreeMap<ThreadId, ThreadPriority>,
+    affinity_masks: BTreeMap<ThreadId, u64>,
+    ownership: BTreeMap<ThreadId, usize>,
+    sleep_queue: Vec<(ThreadId, u64)>,
+}
+
+impl SchedulerInner {
+    fn new(cpu_count: usize) -> Self {
+        let cpu_count = cpu_count.max(1);
+        let mut cpus = Vec::with_capacity(cpu_count);
+        for _ in 0..cpu_count {
+            cpus.push(CpuSchedulerState::new());
+        }
+
+        Self {
+            cpus,
+            base_priorities: BTreeMap::new(),
+            effective_priorities: BTreeMap::new(),
+            affinity_masks: BTreeMap::new(),
+            ownership: BTreeMap::new(),
+            sleep_queue: Vec::new(),
+        }
+    }
+
+    fn cpu_count(&self) -> usize {
+        self.cpus.len()
+    }
+
+    fn all_cpu_mask(&self) -> u64 {
+        let n = self.cpu_count().min(64);
+        if n == 64 {
+            u64::MAX
+        } else {
+            (1u64 << n) - 1
+        }
+    }
+
+    fn affinity_of(&self, id: ThreadId) -> u64 {
+        self.affinity_masks
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| self.all_cpu_mask())
+            & self.all_cpu_mask()
+    }
+
+    fn affinity_allows_cpu(&self, id: ThreadId, cpu_id: usize) -> bool {
+        cpu_id < 64 && ((self.affinity_of(id) >> cpu_id) & 1) != 0
+    }
+
+    fn effective_priority(&self, id: ThreadId) -> ThreadPriority {
+        self.effective_priorities
+            .get(&id)
+            .copied()
+            .unwrap_or(ThreadPriority::Normal)
+    }
+
+    fn base_priority(&self, id: ThreadId) -> ThreadPriority {
+        self.base_priorities
+            .get(&id)
+            .copied()
+            .unwrap_or(ThreadPriority::Normal)
+    }
+
+    fn thread_is_current(&self, id: ThreadId) -> bool {
+        self.cpus.iter().any(|cpu| cpu.current == Some(id))
+    }
+
+    fn thread_is_pending_switch_from(&self, id: ThreadId) -> bool {
+        self.cpus
+            .iter()
+            .any(|cpu| cpu.pending_switch_from == Some(id))
+    }
+
+    fn current_cpu_for(&self, id: ThreadId) -> Option<usize> {
+        self.cpus
+            .iter()
+            .enumerate()
+            .find_map(|(cpu_id, cpu)| (cpu.current == Some(id)).then_some(cpu_id))
+    }
+
+    fn remove_from_all_ready_queues(&mut self, id: ThreadId) {
+        for cpu in self.cpus.iter_mut() {
+            cpu.ready.remove(id);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn is_in_any_ready_queue(&self, id: ThreadId) -> bool {
+        self.cpus.iter().any(|cpu| cpu.ready.contains(id))
+    }
+
+    fn is_valid_ready_candidate(&self, id: ThreadId, target_cpu: usize) -> bool {
+        if !self.affinity_allows_cpu(id, target_cpu) {
+            return false;
+        }
+
+        if !matches!(thread::get_thread_state(id), Some(ThreadState::Ready)) {
+            return false;
+        }
+
+        if self.thread_is_current(id) || self.thread_is_pending_switch_from(id) {
+            return false;
+        }
+
+        match self.ownership.get(&id).copied() {
+            Some(owner) if owner != NO_CPU_OWNER => false,
+            _ => true,
+        }
+    }
+
+    fn pop_local_candidate(&mut self, cpu_id: usize) -> Option<ThreadId> {
+        loop {
+            let id = self.cpus[cpu_id].ready.pop_front_raw()?;
+            if self.is_valid_ready_candidate(id, cpu_id) {
+                return Some(id);
+            }
+            self.ownership.insert(id, NO_CPU_OWNER);
+        }
+    }
+
+    fn steal_candidate(&mut self, thief_cpu: usize) -> Option<ThreadId> {
+        for victim_cpu in 0..self.cpu_count() {
+            if victim_cpu == thief_cpu || !crate::smp::is_cpu_online(victim_cpu) {
+                continue;
+            }
+
+            loop {
+                let Some(id) = self.cpus[victim_cpu].ready.pop_back_raw() else {
+                    break;
+                };
+
+                if self.is_valid_ready_candidate(id, thief_cpu) {
+                    self.cpus[thief_cpu].steals = self.cpus[thief_cpu].steals.saturating_add(1);
+                    log_debug!(
+                        LOG_ORIGIN,
+                        "work steal: tid={} from_cpu={} to_cpu={}",
+                        id,
+                        victim_cpu,
+                        thief_cpu
+                    );
+                    return Some(id);
+                }
+
+                // Stale or ineligible entry.  Do not push it back blindly: if it
+                // is Running/in-flight, requeueing can resurrect a duplicate CPU
+                // owner.  A future mark_ready/enqueue will publish it again if
+                // appropriate.
+                self.ownership.insert(id, NO_CPU_OWNER);
+            }
+        }
+
+        None
+    }
+
+    fn select_target_cpu(&self, id: ThreadId, preferred_cpu: Option<usize>) -> usize {
+        let affinity = self.affinity_of(id);
+
+        if let Some(cpu_id) = preferred_cpu {
+            if cpu_id < self.cpu_count()
+                && ((affinity >> cpu_id) & 1) != 0
+                && crate::smp::is_cpu_online(cpu_id)
+            {
+                return cpu_id;
+            }
+        }
+
+        let mut best_cpu = 0usize;
+        let mut best_len = usize::MAX;
+
+        for cpu_id in 0..self.cpu_count() {
+            if ((affinity >> cpu_id) & 1) == 0 || !crate::smp::is_cpu_online(cpu_id) {
+                continue;
+            }
+
+            let len = self.cpus[cpu_id].ready.len();
+            if len < best_len {
+                best_cpu = cpu_id;
+                best_len = len;
+            }
+        }
+
+        best_cpu
+    }
+
+    fn enqueue_ready_locked(&mut self, id: ThreadId, preferred_cpu: Option<usize>) -> usize {
+        self.remove_from_all_ready_queues(id);
+
+        if matches!(thread::get_thread_state(id), Some(ThreadState::Exited) | None) {
+            self.ownership.remove(&id);
+            return self.select_target_cpu(id, preferred_cpu);
+        }
+
+        let target_cpu = self.select_target_cpu(id, preferred_cpu);
+        let priority = self.effective_priority(id);
+        self.ownership.insert(id, NO_CPU_OWNER);
+        thread::set_thread_state(id, ThreadState::Ready);
+        self.cpus[target_cpu].ready.push_back(id, priority);
+        target_cpu
+    }
+
+    fn unregister_thread_locked(&mut self, id: ThreadId) {
+        self.remove_from_all_ready_queues(id);
+        self.sleep_queue.retain(|(tid, _)| *tid != id);
+        self.base_priorities.remove(&id);
+        self.effective_priorities.remove(&id);
+        self.affinity_masks.remove(&id);
+        self.ownership.remove(&id);
+
+        for cpu in self.cpus.iter_mut() {
+            if cpu.current == Some(id) {
+                cpu.current = cpu.idle;
+            }
+            if cpu.pending_switch_from == Some(id) {
+                cpu.pending_switch_from = None;
+            }
+        }
+    }
+}
+
 struct Scheduler {
-    cpus: Vec<Mutex<CpuSchedulerState>>,
-    base_priorities: Mutex<BTreeMap<ThreadId, ThreadPriority>>,
-    effective_priorities: Mutex<BTreeMap<ThreadId, ThreadPriority>>,
-    affinity_masks: Mutex<BTreeMap<ThreadId, u64>>,
-    ownership: Mutex<BTreeMap<ThreadId, usize>>,
-    sleep_queue: Mutex<Vec<(ThreadId, u64)>>,
+    inner: Mutex<SchedulerInner>,
     initialized: AtomicBool,
 }
 
 impl Scheduler {
     fn new(cpu_count: usize) -> Self {
-        let mut cpus = Vec::with_capacity(cpu_count.max(1));
-        for _ in 0..cpu_count.max(1) {
-            cpus.push(Mutex::new(CpuSchedulerState::new()));
-        }
-
         Self {
-            cpus,
-            base_priorities: Mutex::new(BTreeMap::new()),
-            effective_priorities: Mutex::new(BTreeMap::new()),
-            affinity_masks: Mutex::new(BTreeMap::new()),
-            ownership: Mutex::new(BTreeMap::new()),
-            sleep_queue: Mutex::new(Vec::new()),
+            inner: Mutex::new(SchedulerInner::new(cpu_count)),
             initialized: AtomicBool::new(false),
         }
     }
 
-    fn cpu_count(&self) -> usize { self.cpus.len() }
-
-    fn local_cpu_id(&self) -> usize {
-        let cpu = crate::smp::current_cpu_id();
-        if cpu < self.cpus.len() { cpu } else { 0 }
+    fn cpu_count(&self) -> usize {
+        self.inner.lock().cpu_count()
     }
 
-    fn all_cpu_mask(&self) -> u64 {
-        let n = self.cpu_count().min(64);
-        if n == 64 { u64::MAX } else { (1u64 << n) - 1 }
-    }
-
-    fn affinity_of(&self, id: ThreadId) -> u64 {
-        let all = self.all_cpu_mask();
-        self.affinity_masks.lock().get(&id).copied().unwrap_or(all) & all
-    }
-
-    fn get_priority(&self, id: ThreadId) -> ThreadPriority {
-        self.effective_priorities.lock().get(&id).copied().unwrap_or(ThreadPriority::Normal)
-    }
-
-    fn get_base_priority(&self, id: ThreadId) -> ThreadPriority {
-        self.base_priorities.lock().get(&id).copied().unwrap_or(ThreadPriority::Normal)
+    fn local_cpu_id(&self, inner: &SchedulerInner) -> usize {
+        let cpu_id = crate::smp::current_cpu_id();
+        if cpu_id < inner.cpu_count() {
+            cpu_id
+        } else {
+            0
+        }
     }
 
     fn thread_name(&self, id: ThreadId) -> &'static str {
         thread::get_thread_name(id).unwrap_or("?")
-    }
-
-    fn is_runnable(&self, id: ThreadId) -> bool {
-        thread::get_thread_state(id)
-            .map(|s| matches!(s, ThreadState::Ready | ThreadState::Running))
-            .unwrap_or(false)
     }
 
     fn log_thread_state(
@@ -184,7 +386,7 @@ impl Scheduler {
         owner_cpu: Option<usize>,
     ) {
         let count = THREAD_STATE_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if new_state != ThreadState::Running && !should_log_irq_count(count) {
+        if new_state != ThreadState::Running && !should_log_count(count) {
             return;
         }
 
@@ -217,7 +419,7 @@ impl Scheduler {
         let last_reschedule = LAST_LOGGED_RESCHEDULE_IRQ.load(Ordering::Relaxed);
         if reschedule_count != last_reschedule
             && snap.reschedule_eoi >= reschedule_count
-            && should_log_irq_count(reschedule_count)
+            && should_log_count(reschedule_count)
         {
             LAST_LOGGED_RESCHEDULE_IRQ.store(reschedule_count, Ordering::Relaxed);
             log_info!(
@@ -232,7 +434,7 @@ impl Scheduler {
         let last_mouse = LAST_LOGGED_MOUSE_IRQ.load(Ordering::Relaxed);
         if mouse_count != last_mouse
             && snap.mouse_eoi >= mouse_count
-            && should_log_irq_count(mouse_count)
+            && should_log_count(mouse_count)
         {
             LAST_LOGGED_MOUSE_IRQ.store(mouse_count, Ordering::Relaxed);
             log_info!(
@@ -244,215 +446,81 @@ impl Scheduler {
         }
     }
 
-    fn remove_from_all_ready_queues(&self, id: ThreadId) {
-        for cpu in self.cpus.iter() {
-            cpu.lock().ready.remove(id);
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn is_in_any_ready_queue(&self, id: ThreadId) -> bool {
-        for cpu in self.cpus.iter() {
-            let cpu = cpu.lock();
-            for queue in cpu.ready.queues.iter() {
-                if queue.iter().any(|it| *it == id) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn current_cpu_for(&self, id: ThreadId) -> Option<usize> {
-        for (cpu_id, cpu) in self.cpus.iter().enumerate() {
-            let cpu = cpu.lock();
-            if cpu.current == Some(id) {
-                return Some(cpu_id);
-            }
-        }
-        None
-    }
-
-    fn pending_switch_cpu_for(&self, id: ThreadId) -> Option<usize> {
-        for (cpu_id, cpu) in self.cpus.iter().enumerate() {
-            let cpu = cpu.lock();
-            if cpu.pending_switch_from == Some(id) {
-                return Some(cpu_id);
-            }
-        }
-        None
-    }
-
-
-    fn affinity_allows_cpu(&self, id: ThreadId, cpu_id: usize) -> bool {
-        ((self.affinity_of(id) >> cpu_id) & 1) != 0
-    }
-
-    fn select_target_cpu(&self, id: ThreadId, preferred_cpu: Option<usize>) -> usize {
-        let affinity = self.affinity_of(id);
-
-        if let Some(cpu) = preferred_cpu {
-            if cpu < self.cpu_count() && ((affinity >> cpu) & 1) != 0 && crate::smp::is_cpu_online(cpu) {
-                return cpu;
-            }
-        }
-
-        let mut best = 0usize;
-        let mut best_len = usize::MAX;
-
-        for cpu_id in 0..self.cpu_count() {
-            if ((affinity >> cpu_id) & 1) == 0 || !crate::smp::is_cpu_online(cpu_id) {
-                continue;
-            }
-            let len = self.cpus[cpu_id].lock().ready.len();
-            if len < best_len {
-                best = cpu_id;
-                best_len = len;
-            }
-        }
-
-        best
-    }
-
-    fn maybe_send_reschedule_ipi(&self, target_cpu: usize, incoming_priority: ThreadPriority) {
-        let local_cpu = self.local_cpu_id();
-        if target_cpu == local_cpu {
+    fn maybe_send_reschedule_ipi_locked(
+        &self,
+        inner: &mut SchedulerInner,
+        target_cpu: usize,
+        incoming_priority: ThreadPriority,
+    ) {
+        let local_cpu = self.local_cpu_id(inner);
+        if target_cpu == local_cpu || target_cpu >= inner.cpu_count() {
             return;
         }
 
-        let (target_current, already_pending) = {
-            let cpu = self.cpus[target_cpu].lock();
-            (cpu.current, cpu.resched_pending)
-        };
-
-        if already_pending {
-            return;
-        }
-
-        let should_ipi = match target_current {
-            Some(cur) => incoming_priority > self.get_priority(cur),
+        let should_ipi = match inner.cpus[target_cpu].current {
+            Some(current) => incoming_priority > inner.effective_priority(current),
             None => true,
         };
 
-        if should_ipi {
-            if let Some(apic_id) = crate::smp::cpu_apic_id(target_cpu) {
-                self.cpus[target_cpu].lock().resched_pending = true;
-                log_debug!(
-                    LOG_ORIGIN,
-                    "send resched IPI: target_cpu={} apic_id={} incoming_prio={:?}",
-                    target_cpu,
-                    apic_id,
-                    incoming_priority
-                );
-                apic::send_reschedule_ipi(apic_id);
-            }
-        }
-    }
-
-    fn enqueue_ready(&self, id: ThreadId, preferred_cpu: Option<usize>) {
-        let target = self.select_target_cpu(id, preferred_cpu);
-        let prio = self.get_priority(id);
-
-        self.remove_from_all_ready_queues(id);
-        let previous_owner = self.ownership.lock().insert(id, NO_CPU_OWNER);
-        thread::set_thread_state(id, ThreadState::Ready);
-
-        if let Some(owner) = previous_owner {
-            if owner != NO_CPU_OWNER && owner != target {
-                log_debug!(
-                    LOG_ORIGIN,
-                    "migration: tid={} from_cpu={} to_cpu={} prio={:?}",
-                    id,
-                    owner,
-                    target,
-                    prio
-                );
-            }
+        if !should_ipi || inner.cpus[target_cpu].resched_pending {
+            return;
         }
 
-        self.cpus[target].lock().ready.push(id, prio);
-        if target != self.local_cpu_id() {
+        inner.cpus[target_cpu].resched_pending = true;
+        if let Some(apic_id) = crate::smp::cpu_apic_id(target_cpu) {
             log_debug!(
                 LOG_ORIGIN,
-                "remote enqueue: tid={} target_cpu={} prio={:?}",
-                id,
-                target,
-                prio
+                "send resched IPI: target_cpu={} apic_id={} incoming_prio={:?}",
+                target_cpu,
+                apic_id,
+                incoming_priority
             );
+            apic::send_reschedule_ipi(apic_id);
         }
-        self.maybe_send_reschedule_ipi(target, prio);
     }
 
     fn init_cpu(&self, cpu_id: usize, idle_thread: Thread) -> ThreadId {
         let idle_id = idle_thread.id();
         thread::add_thread(idle_thread);
 
-        self.base_priorities.lock().insert(idle_id, ThreadPriority::Idle);
-        self.effective_priorities.lock().insert(idle_id, ThreadPriority::Idle);
-        self.affinity_masks.lock().insert(idle_id, 1u64 << cpu_id.min(63));
-        self.ownership.lock().insert(idle_id, cpu_id);
+        let mut inner = self.inner.lock();
+        let cpu_id = cpu_id.min(inner.cpu_count().saturating_sub(1));
 
-        let mut cpu = self.cpus[cpu_id].lock();
-        cpu.idle = Some(idle_id);
-        cpu.current = Some(idle_id);
+        inner.base_priorities.insert(idle_id, ThreadPriority::Idle);
+        inner.effective_priorities.insert(idle_id, ThreadPriority::Idle);
+        inner.affinity_masks.insert(idle_id, 1u64 << cpu_id.min(63));
+        inner.ownership.insert(idle_id, cpu_id);
+        inner.remove_from_all_ready_queues(idle_id);
 
+        inner.cpus[cpu_id].idle = Some(idle_id);
+        inner.cpus[cpu_id].current = Some(idle_id);
+        inner.cpus[cpu_id].pending_switch_from = None;
         thread::set_thread_state(idle_id, ThreadState::Running);
+
         self.initialized.store(true, Ordering::SeqCst);
         idle_id
     }
 
-    fn init_bsp(&self, idle_thread: Thread) -> ThreadId {
-        self.init_cpu(self.local_cpu_id(), idle_thread)
-    }
-
     fn add_thread(&self, thread: Thread) -> ThreadId {
         let id = thread.id();
-        let prio = thread.priority;
-        let state = thread.state;
+        let priority = thread.priority;
+        let initial_state = thread.state;
 
         thread::add_thread(thread);
-        self.base_priorities.lock().insert(id, prio);
-        self.effective_priorities.lock().insert(id, prio);
-        self.affinity_masks.lock().insert(id, self.all_cpu_mask());
-        self.ownership.lock().insert(id, NO_CPU_OWNER);
 
-        if matches!(state, ThreadState::Ready) {
-            self.enqueue_ready(id, None);
+        let mut inner = self.inner.lock();
+        inner.base_priorities.insert(id, priority);
+        inner.effective_priorities.insert(id, priority);
+        let all_cpu_mask = inner.all_cpu_mask();
+        inner.affinity_masks.insert(id, all_cpu_mask);
+        inner.ownership.insert(id, NO_CPU_OWNER);
+
+        if matches!(initial_state, ThreadState::Ready) {
+            let target_cpu = inner.enqueue_ready_locked(id, None);
+            self.maybe_send_reschedule_ipi_locked(&mut inner, target_cpu, priority);
         }
 
         id
-    }
-
-    fn try_steal(&self, thief_cpu: usize) -> Option<ThreadId> {
-        for cpu_id in 0..self.cpu_count() {
-            if cpu_id == thief_cpu || !crate::smp::is_cpu_online(cpu_id) {
-                continue;
-            }
-
-            let candidate = { self.cpus[cpu_id].lock().ready.steal_next() };
-            if let Some(id) = candidate {
-                if self.current_cpu_for(id).is_some() || self.pending_switch_cpu_for(id).is_some() {
-                    let prio = self.get_priority(id);
-                    self.cpus[cpu_id].lock().ready.push(id, prio);
-                    continue;
-                }
-
-                if self.affinity_allows_cpu(id, thief_cpu) {
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "work steal: tid={} from_cpu={} to_cpu={}",
-                        id,
-                        cpu_id,
-                        thief_cpu
-                    );
-                    return Some(id);
-                }
-                let prio = self.get_priority(id);
-                self.cpus[cpu_id].lock().ready.push(id, prio);
-            }
-        }
-
-        None
     }
 
     fn schedule_local(&self, requeue_current: bool) -> (Option<ThreadId>, Option<ThreadId>) {
@@ -460,85 +528,71 @@ impl Scheduler {
             return (None, None);
         }
 
-        let cpu_id = self.local_cpu_id();
-        let previous;
-        let mut chosen;
-        let mut stole_thread = false;
-        let had_resched_pending;
+        let mut inner = self.inner.lock();
+        let cpu_id = self.local_cpu_id(&inner);
+        let previous = inner.cpus[cpu_id].current;
+        let had_resched_pending = inner.cpus[cpu_id].resched_pending;
 
-        {
-            let mut cpu = self.cpus[cpu_id].lock();
-            cpu.local_ticks = cpu.local_ticks.saturating_add(1);
-            previous = cpu.current;
-            had_resched_pending = cpu.resched_pending;
+        inner.cpus[cpu_id].local_ticks = inner.cpus[cpu_id].local_ticks.saturating_add(1);
+        inner.cpus[cpu_id].resched_pending = false;
 
-            if requeue_current {
-                if let Some(cur) = previous {
-                    if Some(cur) != cpu.idle && self.is_runnable(cur) && self.affinity_allows_cpu(cur, cpu_id) {
-                        cpu.ready.push(cur, self.get_priority(cur));
-                        thread::set_thread_state(cur, ThreadState::Ready);
-                        self.ownership.lock().insert(cur, NO_CPU_OWNER);
-                    }
+        let mut chosen = inner.pop_local_candidate(cpu_id);
+        let mut stole = false;
+
+        if chosen.is_none() {
+            chosen = inner.steal_candidate(cpu_id);
+            stole = chosen.is_some();
+        }
+
+        if chosen.is_none() {
+            if let Some(prev) = previous {
+                if matches!(thread::get_thread_state(prev), Some(ThreadState::Running) | Some(ThreadState::Ready))
+                    && inner.affinity_allows_cpu(prev, cpu_id)
+                {
+                    chosen = Some(prev);
                 }
             }
-
-            chosen = cpu.ready.pop_next();
-            cpu.resched_pending = false;
         }
 
-        // Do not attempt cross-CPU stealing while holding the local CPU lock:
-        // simultaneous idle/timer paths can otherwise deadlock lock(A)->lock(B)
-        // against lock(B)->lock(A) on 4+ CPU systems.
         if chosen.is_none() {
-            chosen = self.try_steal(cpu_id);
-            stole_thread = chosen.is_some();
+            chosen = inner.cpus[cpu_id].idle;
         }
 
-        {
-            let mut cpu = self.cpus[cpu_id].lock();
-            if stole_thread {
-                cpu.steals = cpu.steals.saturating_add(1);
-            }
+        let switching = previous != chosen;
 
-            if chosen.is_none() {
-                chosen = cpu.ready.pop_next();
+        if switching {
+            inner.cpus[cpu_id].context_switches = inner.cpus[cpu_id].context_switches.saturating_add(1);
+            inner.cpus[cpu_id].pending_switch_from = previous;
+            if stole {
+                inner.cpus[cpu_id].steals = inner.cpus[cpu_id].steals.saturating_add(1);
             }
-            if chosen.is_none() {
-                chosen = previous.filter(|id| self.is_runnable(*id) && self.affinity_allows_cpu(*id, cpu_id));
-            }
-            if chosen.is_none() {
-                chosen = cpu.idle;
-            }
+        } else {
+            inner.cpus[cpu_id].pending_switch_from = None;
+        }
 
-            cpu.current = chosen;
-            if previous != chosen {
-                cpu.context_switches = cpu.context_switches.saturating_add(1);
-                // Record the outgoing thread so reap_zombies can wait for the
-                // assembly save in perform_context_switch to finish before it
-                // drops the thread's CpuContext Box.
-                cpu.pending_switch_from = previous;
-            } else {
-                // No switch — clear any stale marker from a previous tick.
-                cpu.pending_switch_from = None;
+        if switching && requeue_current {
+            if let Some(prev) = previous {
+                let prev_state = thread::get_thread_state(prev);
+                let prev_is_idle = inner.cpus[cpu_id].idle == Some(prev);
+                if !prev_is_idle
+                    && matches!(prev_state, Some(ThreadState::Running) | Some(ThreadState::Ready))
+                    && inner.affinity_allows_cpu(prev, cpu_id)
+                {
+                    inner.remove_from_all_ready_queues(prev);
+                    thread::set_thread_state(prev, ThreadState::Ready);
+                    inner.ownership.insert(prev, NO_CPU_OWNER);
+                    let prio = inner.effective_priority(prev);
+                    inner.cpus[cpu_id].ready.push_back(prev, prio);
+                }
             }
         }
 
-        if let Some(prev) = previous {
-            if matches!(thread::get_thread_state(prev), Some(ThreadState::Running)) {
-                thread::set_thread_state(prev, ThreadState::Ready);
-                self.ownership.lock().insert(prev, NO_CPU_OWNER);
-            }
-
-            // INVARIANT: A thread transitioning to Running must not be in any run queue.
-            #[cfg(debug_assertions)]
-            if self.is_in_any_ready_queue(prev) {
-                panic!("SMP INVARIANT VIOLATION: thread {:?} Running but still in ready queue", prev);
-            }
-        }
+        inner.cpus[cpu_id].current = chosen;
 
         if let Some(next) = chosen {
+            inner.remove_from_all_ready_queues(next);
             thread::set_thread_state(next, ThreadState::Running);
-            let previous_owner = self.ownership.lock().insert(next, cpu_id);
+            let previous_owner = inner.ownership.insert(next, cpu_id);
 
             if let Some(owner) = previous_owner {
                 if owner != NO_CPU_OWNER && owner != cpu_id {
@@ -553,10 +607,18 @@ impl Scheduler {
                 }
             }
 
-            let log_count = SCHED_SWITCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if (previous != Some(next) || had_resched_pending)
-                && should_log_irq_count(log_count)
-            {
+            #[cfg(debug_assertions)]
+            if inner.is_in_any_ready_queue(next) {
+                panic!(
+                    "SMP INVARIANT VIOLATION: thread {:?} is Running but still in a ready queue",
+                    next
+                );
+            }
+        }
+
+        let log_count = SCHED_SWITCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(next) = chosen {
+            if (switching || had_resched_pending) && should_log_count(log_count) {
                 log_info!(
                     LOG_ORIGIN,
                     "[sched] cpu={} prev={}/{} next={}/{} state={:?} resched_pending={}",
@@ -569,101 +631,50 @@ impl Scheduler {
                     if had_resched_pending { "yes" } else { "no" }
                 );
             }
-
-            self.maybe_log_irq_snapshot(cpu_id);
-
-            // INVARIANT: A thread cannot be both Running and in a ready queue.
-            #[cfg(debug_assertions)]
-            if self.is_in_any_ready_queue(next) {
-                panic!("SMP INVARIANT VIOLATION: thread {:?} Ready but already in queue", next);
-            }
         }
+
+        drop(inner);
+        self.maybe_log_irq_snapshot(cpu_id);
 
         (previous, chosen)
     }
 
-    fn schedule(&self) -> Option<ThreadId> { self.schedule_local(false).1 }
-    fn on_timer_tick(&self) -> (Option<ThreadId>, Option<ThreadId>) { self.schedule_local(true) }
-
-    fn sleep_thread(&self, id: ThreadId, wake_tick: u64) {
-        self.remove_from_all_ready_queues(id);
-        self.ownership.lock().insert(id, NO_CPU_OWNER);
-        let old_state = thread::get_thread_state(id);
-        thread::set_thread_state(id, ThreadState::Blocked);
-        self.log_thread_state(id, old_state, ThreadState::Blocked, None);
-        self.sleep_queue.lock().push((id, wake_tick));
-    }
-
-    fn restore_current_after_block(&self, id: ThreadId) {
-        let cpu_id = self.local_cpu_id();
-        self.remove_from_all_ready_queues(id);
-        self.sleep_queue.lock().retain(|(thread_id, _)| *thread_id != id);
-        {
-            let mut cpu = self.cpus[cpu_id].lock();
-            cpu.current = Some(id);
-        }
-        self.ownership.lock().insert(id, cpu_id);
-        let old_state = thread::get_thread_state(id);
-        thread::set_thread_state(id, ThreadState::Running);
-        self.log_thread_state(id, old_state, ThreadState::Running, Some(cpu_id));
-    }
-
-    fn wake_sleeping_threads(&self) {
-        let current_tick = crate::interrupts::get_ticks();
-
-        loop {
-            let due_thread = {
-                let mut q = self.sleep_queue.lock();
-                if let Some(pos) = q.iter().position(|&(_, wake_tick)| current_tick >= wake_tick) {
-                    Some(q.swap_remove(pos).0)
-                } else {
-                    None
-                }
-            };
-
-            let Some(id) = due_thread else {
-                break;
-            };
-            self.enqueue_ready(id, None);
-        }
-    }
-
     fn mark_ready(&self, id: ThreadId) {
-        if let Some(owner_cpu) = self.current_cpu_for(id) {
-            self.ownership.lock().insert(id, owner_cpu);
-            thread::set_thread_state(id, ThreadState::Running);
-            log_debug!(
-                LOG_ORIGIN,
-                "mark_ready: tid={} is still current on cpu={}, restored Running state",
-                id,
-                owner_cpu
-            );
+        let mut inner = self.inner.lock();
+
+        if let Some(owner_cpu) = inner.current_cpu_for(id) {
+            // The thread is still executing.  Never enqueue a Running thread;
+            // just request that its CPU re-enters the scheduler soon.
+            if owner_cpu < inner.cpu_count() {
+                inner.cpus[owner_cpu].resched_pending = true;
+                if owner_cpu != self.local_cpu_id(&inner) {
+                    if let Some(apic_id) = crate::smp::cpu_apic_id(owner_cpu) {
+                        apic::send_reschedule_ipi(apic_id);
+                    }
+                }
+            }
+            return;
+        }
+
+        if inner.thread_is_pending_switch_from(id) {
+            // The low-level switch is still saving this context.  Do not publish
+            // it twice.  The existing ready queue entry, if any, will become
+            // valid after `clear_pending_switch_from`.
             return;
         }
 
         match thread::get_thread_state(id) {
-            Some(ThreadState::Blocked) | Some(ThreadState::Ready) => self.enqueue_ready(id, None),
+            Some(ThreadState::Ready) | Some(ThreadState::Blocked) | Some(ThreadState::WaitingIpc) => {
+                let old_state = thread::get_thread_state(id);
+                let target = inner.enqueue_ready_locked(id, None);
+                let priority = inner.effective_priority(id);
+                self.log_thread_state(id, old_state, ThreadState::Ready, None);
+                self.maybe_send_reschedule_ipi_locked(&mut inner, target, priority);
+            }
             Some(ThreadState::Running) => {
-                // Thread registered as a receiver (via block_recv) but has not yet
-                // transitioned to Blocked.  We cannot enqueue a Running thread — that
-                // would let two CPUs execute the same thread simultaneously.
-                // Instead flag a reschedule on the owning CPU so the thread returns
-                // promptly to try_receive_message and finds the waiting message.
-                if let Some(owner_cpu) = self.ownership.lock().get(&id).copied() {
-                    if owner_cpu != NO_CPU_OWNER && owner_cpu < self.cpus.len() {
-                        self.cpus[owner_cpu].lock().resched_pending = true;
-                        log_info!(
-                            LOG_ORIGIN,
-                            "mark_ready: tid={} Running on cpu={}, set resched_pending \
-                             (block_recv TOCTOU — message in queue, TOCTOU guard will catch it)",
-                            id,
-                            owner_cpu
-                        );
-                        if owner_cpu != self.local_cpu_id() {
-                            if let Some(apic_id) = crate::smp::cpu_apic_id(owner_cpu) {
-                                apic::send_reschedule_ipi(apic_id);
-                            }
-                        }
+                if let Some(owner_cpu) = inner.ownership.get(&id).copied() {
+                    if owner_cpu != NO_CPU_OWNER && owner_cpu < inner.cpu_count() {
+                        inner.cpus[owner_cpu].resched_pending = true;
                     }
                 }
             }
@@ -671,58 +682,131 @@ impl Scheduler {
         }
     }
 
-    fn deschedule_thread(&self, id: ThreadId) {
-        self.remove_from_all_ready_queues(id);
-        self.sleep_queue.lock().retain(|(thread_id, _)| *thread_id != id);
-        self.ownership.lock().remove(&id);
+    fn sleep_thread(&self, id: ThreadId, wake_tick: u64) {
+        let mut inner = self.inner.lock();
+        inner.remove_from_all_ready_queues(id);
+        inner.ownership.insert(id, NO_CPU_OWNER);
+        inner.sleep_queue.retain(|(tid, _)| *tid != id);
+        inner.sleep_queue.push((id, wake_tick));
+        let old_state = thread::get_thread_state(id);
+        thread::set_thread_state(id, ThreadState::Blocked);
+        self.log_thread_state(id, old_state, ThreadState::Blocked, None);
+    }
 
-        for cpu in self.cpus.iter() {
-            let mut cpu = cpu.lock();
-            if cpu.current == Some(id) {
-                cpu.current = cpu.idle;
+    fn cancel_sleep(&self, id: ThreadId) {
+        self.inner.lock().sleep_queue.retain(|(tid, _)| *tid != id);
+    }
+
+    fn wake_sleeping_threads(&self) {
+        let current_tick = crate::interrupts::get_ticks();
+        let mut to_wake = Vec::new();
+
+        {
+            let mut inner = self.inner.lock();
+            let mut index = 0;
+            while index < inner.sleep_queue.len() {
+                if current_tick >= inner.sleep_queue[index].1 {
+                    to_wake.push(inner.sleep_queue.swap_remove(index).0);
+                } else {
+                    index += 1;
+                }
+            }
+
+            for id in to_wake.iter().copied() {
+                let target = inner.enqueue_ready_locked(id, None);
+                let priority = inner.effective_priority(id);
+                self.maybe_send_reschedule_ipi_locked(&mut inner, target, priority);
             }
         }
+    }
 
-        self.base_priorities.lock().remove(&id);
-        self.effective_priorities.lock().remove(&id);
-        self.affinity_masks.lock().remove(&id);
+    fn restore_current_after_block(&self, id: ThreadId) {
+        let mut inner = self.inner.lock();
+        let cpu_id = self.local_cpu_id(&inner);
+        inner.remove_from_all_ready_queues(id);
+        inner.sleep_queue.retain(|(tid, _)| *tid != id);
+        inner.cpus[cpu_id].current = Some(id);
+        inner.ownership.insert(id, cpu_id);
+        let old_state = thread::get_thread_state(id);
+        thread::set_thread_state(id, ThreadState::Running);
+        self.log_thread_state(id, old_state, ThreadState::Running, Some(cpu_id));
+    }
+
+    fn deschedule_thread(&self, id: ThreadId) {
+        let mut inner = self.inner.lock();
+        inner.unregister_thread_locked(id);
     }
 
     fn current_thread(&self) -> Option<ThreadId> {
-        self.cpus[self.local_cpu_id()].lock().current
+        let inner = self.inner.lock();
+        let cpu_id = self.local_cpu_id(&inner);
+        inner.cpus[cpu_id].current
+    }
+
+    fn clear_pending_switch_from(&self) {
+        let mut inner = self.inner.lock();
+        let cpu_id = self.local_cpu_id(&inner);
+        inner.cpus[cpu_id].pending_switch_from = None;
+    }
+
+    fn is_pending_switch_from(&self, id: ThreadId) -> bool {
+        self.inner.lock().thread_is_pending_switch_from(id)
     }
 
     fn boost_priority(&self, id: ThreadId, new_priority: ThreadPriority) -> bool {
-        let mut effective = self.effective_priorities.lock();
-        let current = effective.get(&id).copied().unwrap_or(ThreadPriority::Normal);
-        if new_priority > current {
-            effective.insert(id, new_priority);
-            true
-        } else {
-            false
+        let mut inner = self.inner.lock();
+        let current = inner.effective_priority(id);
+        if new_priority <= current {
+            return false;
         }
+        inner.effective_priorities.insert(id, new_priority);
+        if matches!(thread::get_thread_state(id), Some(ThreadState::Ready)) {
+            let target = inner.enqueue_ready_locked(id, None);
+            self.maybe_send_reschedule_ipi_locked(&mut inner, target, new_priority);
+        }
+        true
     }
 
     fn restore_original_priority(&self, id: ThreadId) {
-        let base = self.get_base_priority(id);
-        self.effective_priorities.lock().insert(id, base);
+        let mut inner = self.inner.lock();
+        let base = inner.base_priority(id);
+        inner.effective_priorities.insert(id, base);
+        if matches!(thread::get_thread_state(id), Some(ThreadState::Ready)) {
+            let target = inner.enqueue_ready_locked(id, None);
+            self.maybe_send_reschedule_ipi_locked(&mut inner, target, base);
+        }
+    }
+
+    fn get_priority(&self, id: ThreadId) -> ThreadPriority {
+        self.inner.lock().effective_priority(id)
+    }
+
+    fn get_base_priority(&self, id: ThreadId) -> ThreadPriority {
+        self.inner.lock().base_priority(id)
     }
 
     fn set_affinity(&self, id: ThreadId, mask: u64) -> bool {
-        let valid = mask & self.all_cpu_mask();
+        let mut inner = self.inner.lock();
+        let valid = mask & inner.all_cpu_mask();
         if valid == 0 {
             return false;
         }
-        self.affinity_masks.lock().insert(id, valid);
+
+        inner.affinity_masks.insert(id, valid);
 
         if matches!(thread::get_thread_state(id), Some(ThreadState::Ready)) {
-            self.enqueue_ready(id, None);
+            let target = inner.enqueue_ready_locked(id, None);
+            let priority = inner.effective_priority(id);
+            self.maybe_send_reschedule_ipi_locked(&mut inner, target, priority);
         }
 
-        if let Some(owner_cpu) = self.ownership.lock().get(&id).copied() {
-            if owner_cpu != NO_CPU_OWNER && !self.affinity_allows_cpu(id, owner_cpu) {
-                if let Some(apic_id) = crate::smp::cpu_apic_id(owner_cpu) {
-                    apic::send_reschedule_ipi(apic_id);
+        if let Some(owner_cpu) = inner.ownership.get(&id).copied() {
+            if owner_cpu != NO_CPU_OWNER && owner_cpu < inner.cpu_count() && !inner.affinity_allows_cpu(id, owner_cpu) {
+                inner.cpus[owner_cpu].resched_pending = true;
+                if owner_cpu != self.local_cpu_id(&inner) {
+                    if let Some(apic_id) = crate::smp::cpu_apic_id(owner_cpu) {
+                        apic::send_reschedule_ipi(apic_id);
+                    }
                 }
             }
         }
@@ -731,15 +815,18 @@ impl Scheduler {
     }
 
     fn get_affinity(&self, id: ThreadId) -> u64 {
-        self.affinity_of(id)
+        self.inner.lock().affinity_of(id)
     }
 
     fn flag_reschedule_local(&self) {
-        self.cpus[self.local_cpu_id()].lock().resched_pending = true;
+        let mut inner = self.inner.lock();
+        let cpu_id = self.local_cpu_id(&inner);
+        inner.cpus[cpu_id].resched_pending = true;
     }
 
     fn owner_cpu_for_logging(&self, id: ThreadId) -> Option<usize> {
-        match self.ownership.lock().get(&id).copied() {
+        let inner = self.inner.lock();
+        match inner.ownership.get(&id).copied() {
             Some(owner) if owner != NO_CPU_OWNER => Some(owner),
             _ => None,
         }
@@ -748,13 +835,18 @@ impl Scheduler {
 
 static SCHEDULER: Once<Scheduler> = Once::new();
 
-fn scheduler_opt() -> Option<&'static Scheduler> { SCHEDULER.get() }
-fn scheduler() -> &'static Scheduler { SCHEDULER.get().expect("scheduler not initialized") }
+fn scheduler_opt() -> Option<&'static Scheduler> {
+    SCHEDULER.get()
+}
+
+fn scheduler() -> &'static Scheduler {
+    SCHEDULER.get().expect("scheduler not initialized")
+}
 
 pub fn init(idle_thread: Thread) -> ThreadId {
-    let sched = SCHEDULER.call_once(|| Scheduler::new(crate::smp::cpu_count().max(1)));
-    let idle = sched.init_bsp(idle_thread);
-    log_info!(LOG_ORIGIN, "scheduler initialized for {} CPUs", sched.cpu_count());
+    let scheduler = SCHEDULER.call_once(|| Scheduler::new(crate::smp::cpu_count().max(1)));
+    let idle = scheduler.init_cpu(crate::smp::current_cpu_id(), idle_thread);
+    log_info!(LOG_ORIGIN, "scheduler initialized for {} CPUs", scheduler.cpu_count());
     idle
 }
 
@@ -767,141 +859,155 @@ pub fn add_thread(thread: Thread) -> ThreadId {
 }
 
 pub fn schedule() -> Option<ThreadId> {
-    without_interrupts(|| scheduler_opt().and_then(|s| s.schedule()))
+    without_interrupts(|| scheduler_opt().and_then(|sched| sched.schedule_local(false).1))
 }
 
 pub fn on_timer_tick() -> (Option<ThreadId>, Option<ThreadId>) {
-    without_interrupts(|| scheduler_opt().map(|s| s.on_timer_tick()).unwrap_or((None, None)))
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.schedule_local(true))
+            .unwrap_or((None, None))
+    })
 }
 
 pub fn drive_cooperative_tick() {
-    let (prev, next) = on_timer_tick();
-    if let (Some(prev_id), Some(next_id)) = (prev, next) {
-        if prev_id != next_id {
-            perform_context_switch(prev_id, next_id);
+    let (previous, next) = on_timer_tick();
+    if let (Some(previous), Some(next)) = (previous, next) {
+        if previous != next {
+            perform_context_switch(previous, next);
         }
     }
 }
 
 pub fn mark_thread_ready(id: ThreadId) {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.mark_ready(id);
+        if let Some(sched) = scheduler_opt() {
+            sched.mark_ready(id);
         }
     })
 }
 
 pub fn deschedule_thread(id: ThreadId) {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.deschedule_thread(id);
+        if let Some(sched) = scheduler_opt() {
+            sched.deschedule_thread(id);
         }
     })
 }
 
 pub fn sleep_thread(id: ThreadId, wake_tick: u64) {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.sleep_thread(id, wake_tick);
+        if let Some(sched) = scheduler_opt() {
+            sched.sleep_thread(id, wake_tick);
         }
     })
 }
 
 pub fn cancel_sleep(id: ThreadId) {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.sleep_queue.lock().retain(|(tid, _)| *tid != id);
+        if let Some(sched) = scheduler_opt() {
+            sched.cancel_sleep(id);
         }
     })
 }
 
 pub fn wake_sleeping_threads() {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.wake_sleeping_threads();
+        if let Some(sched) = scheduler_opt() {
+            sched.wake_sleeping_threads();
         }
     })
 }
 
 pub fn current_thread() -> Option<ThreadId> {
-    without_interrupts(|| scheduler_opt().and_then(|s| s.current_thread()))
+    without_interrupts(|| scheduler_opt().and_then(|sched| sched.current_thread()))
 }
 
-/// Clear the pending-switch-from marker for the current CPU.
-/// Called by perform_context_switch immediately after switch_context returns,
-/// signalling that the assembly save of the outgoing thread is complete and
-/// its CpuContext Box may safely be freed by reap_zombies.
 pub fn clear_pending_switch_from() {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            let cpu_id = s.local_cpu_id();
-            s.cpus[cpu_id].lock().pending_switch_from = None;
+        if let Some(sched) = scheduler_opt() {
+            sched.clear_pending_switch_from();
         }
     })
 }
 
-/// Return true if any CPU is currently mid-switch away from `id`.
-/// reap_zombies uses this to defer freeing the thread's CpuContext Box until
-/// the assembly save on the other CPU completes.
 pub fn is_pending_switch_from(id: ThreadId) -> bool {
-    if let Some(s) = scheduler_opt() {
-        for cpu in s.cpus.iter() {
-            if cpu.lock().pending_switch_from == Some(id) {
-                return true;
-            }
-        }
-    }
-    false
+    scheduler_opt()
+        .map(|sched| sched.is_pending_switch_from(id))
+        .unwrap_or(false)
 }
 
 pub fn restore_current_after_block(id: ThreadId) {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.restore_current_after_block(id);
+        if let Some(sched) = scheduler_opt() {
+            sched.restore_current_after_block(id);
         }
     })
 }
 
 pub fn owner_cpu_for_logging(id: ThreadId) -> Option<usize> {
-    scheduler_opt().and_then(|s| s.owner_cpu_for_logging(id))
+    scheduler_opt().and_then(|sched| sched.owner_cpu_for_logging(id))
 }
 
 pub fn boost_thread_priority(id: ThreadId, new_priority: ThreadPriority) -> bool {
-    scheduler_opt().map(|s| s.boost_priority(id, new_priority)).unwrap_or(false)
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.boost_priority(id, new_priority))
+            .unwrap_or(false)
+    })
 }
 
 pub fn restore_original_priority(id: ThreadId) {
     without_interrupts(|| {
-        if let Some(s) = scheduler_opt() {
-            s.restore_original_priority(id);
+        if let Some(sched) = scheduler_opt() {
+            sched.restore_original_priority(id);
         }
     })
 }
 
 pub fn get_thread_priority(id: ThreadId) -> ThreadPriority {
-    without_interrupts(|| scheduler_opt().map(|s| s.get_priority(id)).unwrap_or(ThreadPriority::Normal))
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.get_priority(id))
+            .unwrap_or(ThreadPriority::Normal)
+    })
 }
 
 pub fn get_base_priority(id: ThreadId) -> ThreadPriority {
-    without_interrupts(|| scheduler_opt().map(|s| s.get_base_priority(id)).unwrap_or(ThreadPriority::Normal))
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.get_base_priority(id))
+            .unwrap_or(ThreadPriority::Normal)
+    })
 }
 
 pub fn yield_current() {
-    let current = match current_thread() { Some(id) => id, None => return };
+    let Some(current) = current_thread() else {
+        return;
+    };
+
     let (_, next) = on_timer_tick();
-    if let Some(next_id) = next {
-        if next_id != current {
-            perform_context_switch(current, next_id);
+    if let Some(next) = next {
+        if next != current {
+            perform_context_switch(current, next);
         }
     }
 }
 
 pub fn set_thread_affinity(id: ThreadId, mask: u64) -> bool {
-    without_interrupts(|| scheduler_opt().map(|s| s.set_affinity(id, mask)).unwrap_or(false))
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.set_affinity(id, mask))
+            .unwrap_or(false)
+    })
 }
 
 pub fn get_thread_affinity(id: ThreadId) -> u64 {
-    without_interrupts(|| scheduler_opt().map(|s| s.get_affinity(id)).unwrap_or(1))
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.get_affinity(id))
+            .unwrap_or(1)
+    })
 }
 
 pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
@@ -909,7 +1015,7 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
 }
 
 pub fn on_reschedule_interrupt() {
-    if let Some(s) = scheduler_opt() {
-        s.flag_reschedule_local();
+    if let Some(sched) = scheduler_opt() {
+        sched.flag_reschedule_local();
     }
 }
