@@ -3930,54 +3930,78 @@ fn sys_unregister_irq_handler(irq: u8) -> u64 {
 /// Delivery semantics depend on `IrqBinding::requires_ack`:
 ///
 /// - `requires_ack = false` (legacy SYS_REGISTER_IRQ_HANDLER, PS/2):
-///   Every IRQ is delivered unconditionally. The consumer does not call
-///   SYS_IRQ_ACK, so `pending` is never used as a gate here.
+///   Wakes the registered thread directly via the scheduler. No heap
+///   allocation and no IPC port mutex are touched in interrupt context.
+///   The consumer polls input data from the kernel ring buffer on each
+///   wakeup rather than reading it from the IPC message.
 ///
 /// - `requires_ack = true` (SYS_IRQ_LISTEN, NIC/device drivers):
-///   Coalesced delivery — suppressed while `pending` is set. The consumer
-///   must call SYS_IRQ_ACK to clear `pending` and re-arm delivery.
+///   Coalesced IPC delivery — suppressed while `pending` is set. The
+///   consumer must call SYS_IRQ_ACK to clear `pending` and re-arm.
 pub fn notify_irq_handler(irq: u8) {
-    let bindings = IRQ_BINDINGS.lock();
-
-    if let Some(binding) = bindings.get(&irq) {
-        // For requires_ack bindings: coalesced delivery — skip if already pending.
-        // For legacy bindings: always deliver, never gate on pending.
-        if binding.requires_ack {
-            if binding.pending.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                // Already pending, coalesced — drop this IRQ notification.
-                return;
-            }
-        }
-
-        let port_id = crate::ipc::PortId::from_raw(binding.port);
-
-        // libipc MessageHeader layout (16 bytes): [version u32][msg_type u32][payload_size u32][sequence u32]
-        // Followed by 1 byte for the IRQ number.
-        let mut payload = alloc::vec![0u8; 17];
-        payload[0..4].copy_from_slice(&1u32.to_le_bytes());   // version = 1
-        payload[4..8].copy_from_slice(&20u32.to_le_bytes());  // msg_type = IrqNotification (20)
-        payload[8..12].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
-        // sequence [12..16] = 0
-        payload[16] = irq;
-
-        let msg = crate::ipc::Message::new(
-            crate::thread::ThreadId::from_raw(0), // Kernel sender
-            20u32, // Message type is IrqNotification
-            payload,
-        );
-
-        // Non-blocking send — we're in interrupt context.
-        if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
-            log_debug!(
-                "syscall",
-                "Failed to notify IRQ {} handler: {:?}",
-                irq,
-                e
-            );
-            // For requires_ack bindings: reset pending so the next IRQ can be delivered.
+    // Hold the bindings lock only long enough to read the relevant fields,
+    // then drop it before any operation that could acquire a different lock.
+    let (owner, requires_ack, port_id) = {
+        let bindings = IRQ_BINDINGS.lock();
+        if let Some(binding) = bindings.get(&irq) {
             if binding.requires_ack {
-                binding.pending.store(false, Ordering::SeqCst);
+                // Coalesced delivery: skip if a notification is already in flight.
+                if binding.pending.compare_exchange(
+                    false, true, Ordering::SeqCst, Ordering::SeqCst,
+                ).is_err() {
+                    return;
+                }
             }
+            (
+                binding.owner,
+                binding.requires_ack,
+                crate::ipc::PortId::from_raw(binding.port),
+            )
+        } else {
+            return;
+        }
+        // IRQ_BINDINGS lock drops here — before any allocator or IPC call.
+    };
+
+    if !requires_ack {
+        // Legacy PS/2 path (keyboard IRQ1, mouse IRQ12): wake the thread
+        // directly.  This avoids heap allocation and the IPC port mutex
+        // entirely in interrupt context.  The thread calls poll_input() on
+        // every event-loop iteration and drains the kernel ring buffer there.
+        crate::sched::mark_thread_ready(owner);
+        return;
+    }
+
+    // ACK-gated path (NIC / device drivers): deliver an IPC notification so
+    // the driver knows to call irq_ack() and re-arm the binding.
+    //
+    // libipc MessageHeader layout (16 bytes):
+    //   [version u32][msg_type u32][payload_size u32][sequence u32]
+    // followed by 1 byte carrying the IRQ number.
+    let mut payload = alloc::vec![0u8; 17];
+    payload[0..4].copy_from_slice(&1u32.to_le_bytes());   // version = 1
+    payload[4..8].copy_from_slice(&20u32.to_le_bytes());  // IrqNotification
+    payload[8..12].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
+    // sequence [12..16] = 0
+    payload[16] = irq;
+
+    let msg = crate::ipc::Message::new(
+        crate::thread::ThreadId::from_raw(0),
+        20u32,
+        payload,
+    );
+
+    if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
+        log_debug!(
+            "syscall",
+            "Failed to notify IRQ {} handler: {:?}",
+            irq,
+            e
+        );
+        // Reset pending so the next IRQ can be delivered.
+        let bindings = IRQ_BINDINGS.lock();
+        if let Some(binding) = bindings.get(&irq) {
+            binding.pending.store(false, Ordering::SeqCst);
         }
     }
 }
