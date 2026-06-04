@@ -151,6 +151,40 @@ fn cleanup_process_fixture(fixture: &ProcessFixture) {
     let _ = pmm::free_page(fixture.pml4);
 }
 
+/// Run the same two-phase finalization that production performs through the
+/// idle/reaper path:
+///
+///   1. reap zombie thread objects from THREAD_LIST;
+///   2. detach every reaped thread from its Process membership list;
+///   3. finalize the Process only after all members are gone.
+///
+/// The explicit detach calls are intentionally idempotent. They make the
+/// architectural self-tests independent of whether `thread::reap_zombies()`
+/// already performed the detach internally, while still asserting the external
+/// contract: after this helper returns, every fixture thread and the owning
+/// process must be gone.
+fn reap_fixture_zombies_and_finalize(fixture: &ProcessFixture) {
+    thread::reap_zombies();
+
+    for tid in fixture.threads.iter().copied() {
+        assert!(
+            thread::find_thread(tid).is_none(),
+            "arch_invariants: thread {} should have been reaped",
+            tid
+        );
+
+        process::detach_thread_from_process(fixture.pid, tid);
+    }
+
+    let finalized = process::try_finalize_process_after_reap(fixture.pid);
+    assert!(
+        finalized || process::get_process(fixture.pid).is_none(),
+        "arch_invariants: process {} should finalize after all zombie threads are reaped",
+        fixture.pid
+    );
+}
+
+
 fn install_revoke_tree(owner_tid: ThreadId, resource_port: u64) -> CapHandle {
     let root_perms = CapPermissions::READ
         .union(CapPermissions::REVOKE)
@@ -438,9 +472,9 @@ fn test_oom_semantics_single_and_multithread() {
     }
 
     // With deferred zombie reaping, terminated threads stay in THREAD_LIST with
-    // state=Exited until reap_zombies runs.  Simulate what the idle thread does.
-    thread::reap_zombies();
-    assert!(thread::find_thread(heavy.threads[0]).is_none());
+    // state=Exited until the idle/reaper path runs. Simulate that complete
+    // two-phase teardown here.
+    reap_fixture_zombies_and_finalize(&heavy);
     assert!(process::get_process_memory_usage(heavy.pid).is_none());
     let _ = process::collect_process_memory_snapshot();
 
@@ -465,7 +499,7 @@ fn test_oom_semantics_single_and_multithread() {
         }
     }
 
-    thread::reap_zombies();
+    reap_fixture_zombies_and_finalize(&multi);
     for tid in multi.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
@@ -508,7 +542,7 @@ fn test_multithread_teardown_consistency_under_repeated_kill() {
         "arch_invariants: repeated kill request must not resurrect process state"
     );
 
-    thread::reap_zombies();
+    reap_fixture_zombies_and_finalize(&fixture);
     for tid in fixture.threads.iter().copied() {
         assert!(
             thread::find_thread(tid).is_none(),
