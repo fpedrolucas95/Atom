@@ -63,8 +63,8 @@ macro_rules! define_build_meta {
 
 define_build_meta!(
     "Atom Kernel",
-    "0.1.0",
+    "0.2.0",
     "6.3",
     "Service Manager & Declarative Boot",
-    "2025-12-22"
+    "2026-06-04"
 );

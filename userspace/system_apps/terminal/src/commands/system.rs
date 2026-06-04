@@ -8,12 +8,14 @@ use super::filesystem;
 use crate::parser::ParsedCommand;
 use crate::window::Theme;
 use atom_syscall::thread::{get_cpu_count, get_ticks};
+use libnet::net_get_config;
+use libipc::protocol::lookup_service;
 
 /// Version information
 const OS_NAME: &str = "Atom OS";
-const OS_VERSION: &str = "0.1.0";
-const OS_CODENAME: &str = "Helium";
-const KERNEL_VERSION: &str = "0.1.0-microkernel";
+const OS_VERSION: &str = "0.2.0";
+const OS_CODENAME: &str = "Beryllium";
+const KERNEL_VERSION: &str = "0.2.0-smp-microkernel";
 
 const ASCII_LOGO: &str = r#"
                           vmiddirv
@@ -617,6 +619,13 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     let uptime = unsafe { core::str::from_utf8_unchecked(&uptime_buf[..len]) };
     ctx.print("Uptime:       ");
     ctx.println(uptime);
+
+    if let Ok(netd_port) = lookup_service("netd") {
+        if let Ok(cfg) = net_get_config(netd_port) {
+            ctx.print("IP:           ");
+            ctx.println(&alloc::format!("{}", cfg.ip));
+        }
+    }
 
     ctx.println("");
 

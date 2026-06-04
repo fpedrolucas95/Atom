@@ -267,7 +267,7 @@ impl Terminal {
 
     fn show_welcome(&mut self) {
         self.display.writeln("", Theme::TEXT_NORMAL);
-        self.display.writeln("  Atom Terminal v0.1.0", Theme::TEXT_INFO);
+        self.display.writeln("  Atom Terminal v0.2.0", Theme::TEXT_INFO);
         self.display.writeln("  Type 'help' for available commands.", Theme::TEXT_DIM);
         self.display.writeln("", Theme::TEXT_NORMAL);
         self.display_dirty = true;

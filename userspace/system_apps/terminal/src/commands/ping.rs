@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 pub fn cmd_ping(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    if cmd.args.is_empty() {
+    if cmd.arg_count == 0 {
         ctx.error("Usage: ping <host> [-c count] [-i interval_ms] [-t timeout_ms]");
         return CommandResult::Error;
     }
@@ -18,7 +18,7 @@ pub fn cmd_ping(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
 
     // Simple arg parsing
     let mut i = 1;
-    while i < cmd.args.len() {
+    while i < cmd.arg_count {
         match cmd.args[i] {
             "-c" if i + 1 < cmd.args.len() => {
                 if let Ok(val) = cmd.args[i + 1].parse::<u32>() {

@@ -368,7 +368,7 @@ impl IpcClient {
     fn read_virtual_file(&self, path: &str, buffer: &mut [u8]) -> Option<usize> {
         match path {
             "/proc/version" | "/etc/version" => {
-                let content = b"OS:           Atom OS 0.1.0 (Helium)\nKernel:       0.1.0-microkernel\n";
+                let content = b"OS:           Atom OS 0.2.0 (Beryllium)\nKernel:       0.2.0-smp-microkernel\n";
                 let copy_len = content.len().min(buffer.len());
                 buffer[..copy_len].copy_from_slice(&content[..copy_len]);
                 return Some(copy_len);

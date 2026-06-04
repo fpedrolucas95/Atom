@@ -9,9 +9,49 @@ fn ipc_err(_e: atom_syscall::SyscallError) -> NetError {
 
 use crate::IpAddr;
 
+/// Try to parse a dotted-decimal IPv4 string. Returns the 4 octets on success.
+fn try_parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut idx = 0;
+    let mut cur: u16 = 0;
+    let mut has_digits = false;
+
+    for b in s.bytes() {
+        if b == b'.' {
+            if !has_digits || idx >= 3 || cur > 255 {
+                return None;
+            }
+            octets[idx] = cur as u8;
+            idx += 1;
+            cur = 0;
+            has_digits = false;
+        } else if b.is_ascii_digit() {
+            cur = cur * 10 + (b - b'0') as u16;
+            if cur > 255 {
+                return None;
+            }
+            has_digits = true;
+        } else {
+            return None;
+        }
+    }
+
+    if idx != 3 || !has_digits {
+        return None;
+    }
+    octets[3] = cur as u8;
+    Some(octets)
+}
+
 /// Resolve a hostname to an IP address.
-/// hostname must be <= 255 bytes.
+/// If hostname is already a dotted-decimal IPv4 address, it is returned directly
+/// without a DNS query. hostname must be <= 255 bytes.
 pub fn net_resolve(netd_port: PortId, hostname: &str) -> Result<IpAddr, NetError> {
+    // Short-circuit: if the input is already an IPv4 address, return it directly.
+    if let Some(octets) = try_parse_ipv4(hostname) {
+        return Ok(IpAddr::V4(octets));
+    }
+
     let hostname_bytes = hostname.as_bytes();
     if hostname_bytes.len() > 255 {
         return Err(NetError::InvalidArgument);
