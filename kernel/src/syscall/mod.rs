@@ -4019,8 +4019,6 @@ fn sys_get_irq_count(irq: u8) -> u64 {
 /// Returns:
 ///   Index of the port with data (0-based), or error code
 fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
-    const LOG_ORIGIN: &str = "syscall";
-
     if count == 0 || count > 64 {
         return EINVAL;
     }
@@ -4053,92 +4051,58 @@ fn sys_ipc_wait_any(ports_ptr: u64, count: u64, timeout_ms: u64) -> u64 {
         }
     }
 
-    // Calculate deadline
-    let deadline = if timeout_ms == u64::MAX {
+    // Fast path: check all ports for an immediately available message
+    for (idx, port_id) in ports.iter().enumerate() {
+        if let Ok(true) = crate::ipc::has_message(*port_id) {
+            return idx as u64;
+        }
+    }
+
+    // Non-blocking call with no message available
+    if timeout_ms == 0 {
+        return EWOULDBLOCK;
+    }
+
+    // Calculate deadline tick for finite timeouts
+    let deadline_tick = if timeout_ms == u64::MAX {
         None
-    } else if timeout_ms == 0 {
-        Some(crate::interrupts::get_ticks()) // Immediate check only
     } else {
         let ticks = timeout_ms.div_ceil(10);
         Some(crate::interrupts::get_ticks() + ticks)
     };
 
-    // Polling loop - check each port for messages (peek without consuming)
-    loop {
-        for (idx, port_id) in ports.iter().enumerate() {
-            // Use has_message to check without consuming the message
-            // This allows userspace to receive the message via try_recv after wait_any returns
-            match crate::ipc::has_message(*port_id) {
-                Ok(true) => {
-                    // Found a message! Unregister and return the port index
-                    crate::ipc::unregister_wait_any(caller, &ports);
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "ipc_wait_any: port {} (index {}) has message",
-                        port_id,
-                        idx
-                    );
-                    return idx as u64;
-                }
-                Ok(false) => continue,
-                Err(_) => continue, // Skip invalid ports
-            }
-        }
+    // Register as waiter on all ports before blocking so senders can wake us
+    crate::ipc::register_wait_any(caller, &ports);
 
-        // Check timeout
-        if let Some(deadline_tick) = deadline {
-            if crate::interrupts::get_ticks() >= deadline_tick {
-                crate::ipc::unregister_wait_any(caller, &ports);
-                if timeout_ms == 0 {
-                    return EWOULDBLOCK;
-                } else {
-                    return ETIMEDOUT;
-                }
-            }
-        }
-
-        // Register as waiting on all ports BEFORE blocking
-        // This allows senders to wake us up
-        crate::ipc::register_wait_any(caller, &ports);
-
-        // Block this thread and yield to scheduler
-        // Mark as blocked so scheduler won't immediately pick us
+    // Block: use the scheduler sleep queue for finite timeouts so the timer
+    // interrupt can expire us via wake_sleeping_threads(); for infinite waits
+    // simply mark Blocked and wait for a sender to call mark_thread_ready.
+    if let Some(deadline) = deadline_tick {
+        crate::sched::sleep_thread(caller, deadline);
+    } else {
         crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
-
-        // Try to switch to another thread
-        let (prev, next) = crate::sched::on_timer_tick();
-        if let (Some(prev_id), Some(next_id)) = (prev, next) {
-            if prev_id != next_id {
-                // Switch to different thread
-                crate::sched::perform_context_switch(prev_id, next_id);
-            } else {
-                // No other thread to run - wait for interrupt (avoid busy-loop)
-                // Enable interrupts and halt until next interrupt
-                unsafe {
-                    core::arch::asm!(
-                        "sti",      // Enable interrupts
-                        "hlt",      // Halt until interrupt
-                        "cli",      // Disable interrupts again
-                        options(nomem, nostack)
-                    );
-                }
-            }
-        } else {
-            // No threads available - halt and wait
-            unsafe {
-                core::arch::asm!(
-                    "sti",
-                    "hlt",
-                    "cli",
-                    options(nomem, nostack)
-                );
-            }
-        }
-
-        // Back from blocking - mark as ready and unregister
-        crate::thread::set_thread_state(caller, crate::thread::ThreadState::Ready);
-        // Note: We'll re-register on the next iteration if we loop again
     }
+
+    // Single context switch — returns when the scheduler picks us again
+    crate::sched::drive_cooperative_tick();
+
+    // Remove any pending sleep-queue entry to prevent a spurious second wakeup
+    // if a message arrived before the deadline expired.
+    if deadline_tick.is_some() {
+        crate::sched::cancel_sleep(caller);
+    }
+
+    // Clean up port wait registrations
+    crate::ipc::unregister_wait_any(caller, &ports);
+
+    // Check which port has a message (message wakeup) or return timeout
+    for (idx, port_id) in ports.iter().enumerate() {
+        if let Ok(true) = crate::ipc::has_message(*port_id) {
+            return idx as u64;
+        }
+    }
+
+    ETIMEDOUT
 }
 
 /// Spawn a new process from a registered driver
