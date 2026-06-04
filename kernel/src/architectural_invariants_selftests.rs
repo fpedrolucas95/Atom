@@ -93,7 +93,7 @@ fn make_userspace_thread(tid: ThreadId, pid: ProcessId, pml4: usize) -> Thread {
         id: tid,
         process_id: Some(pid),
         state: ThreadState::Ready,
-        context: CpuContext::zero(),
+        context: alloc::boxed::Box::new(CpuContext::zero()),
         kernel_stack: 0,
         kernel_stack_size: 0,
         address_space: pml4 as u64,

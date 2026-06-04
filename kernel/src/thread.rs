@@ -60,6 +60,7 @@
 
 #![allow(dead_code)]
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -364,7 +365,11 @@ pub struct Thread {
     pub id: ThreadId,
     pub process_id: Option<ProcessId>,
     pub state: ThreadState,
-    pub context: CpuContext,
+    // Box-allocated so its address is stable when Vec<Thread> reallocates on SMP.
+    // perform_context_switch keeps raw *mut CpuContext across the THREAD_LIST lock
+    // release; without Box, a concurrent add_thread() can realloc the Vec and
+    // dangle those pointers → crash.
+    pub context: Box<CpuContext>,
     pub kernel_stack: u64,
     pub kernel_stack_size: usize,
     /// Compatibility cache of the owning process PML4.
@@ -396,7 +401,7 @@ impl Thread {
         name: &'static str,
     ) -> Self {
         let id = ThreadId::new();
-        let context = CpuContext::new(entry_point, kernel_stack, address_space);
+        let context = Box::new(CpuContext::new(entry_point, kernel_stack, address_space));
         let capability_table = crate::cap::create_capability_table(id);
         
         // Write canary and immediately verify it
@@ -616,7 +621,7 @@ impl ThreadList {
             let (left, right) = threads.split_at_mut(from_idx);
             Some(f(&mut right[0].context, &left[to_idx].context))
         } else {
-            let ctx_copy = threads[from_idx].context;
+            let ctx_copy = *threads[from_idx].context;
             Some(f(&mut threads[from_idx].context, &ctx_copy))
         }
     }
@@ -627,7 +632,7 @@ impl ThreadList {
             id: t.id,
             process_id: t.process_id,
             state: t.state,
-            context: t.context,
+            context: t.context.clone(),
             kernel_stack: t.kernel_stack,
             kernel_stack_size: t.kernel_stack_size,
             address_space: t.address_space,
@@ -1329,7 +1334,7 @@ pub fn jump_to_thread(thread_id: ThreadId) -> ! {
             .find(|t| t.id == thread_id)
             .expect("Thread not found");
 
-        (thread.context, thread.kernel_stack)
+        (*thread.context, thread.kernel_stack)
     };
 
     gdt::set_rsp0(kernel_stack);
@@ -1428,7 +1433,7 @@ pub fn snapshot_context(thread_id: ThreadId) -> Option<CpuContext> {
     threads
         .iter()
         .find(|t| t.id == thread_id)
-        .map(|t| t.context)
+        .map(|t| *t.context)
 }
 
 /// Returns true if the thread executes in Ring 3 (userspace).
@@ -1580,12 +1585,16 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         threads[to_idx].context.cr3 = to_cr3;
 
         let to_is_userspace = threads[to_idx].is_userspace;
-        let from_ptr = &mut threads[from_idx].context as *mut CpuContext;
-        let to_ptr = &threads[to_idx].context as *const CpuContext;
+        // Dereference the Box to get a raw pointer into the heap allocation.
+        // The Box's inner CpuContext lives at a stable heap address even when
+        // Vec<Thread> reallocates after we release the lock below — that is the
+        // point of storing context as Box<CpuContext> instead of inline.
+        let from_ptr = &mut *threads[from_idx].context as *mut CpuContext;
+        let to_ptr = &*threads[to_idx].context as *const CpuContext;
         let to_kernel_stack = threads[to_idx].kernel_stack;
 
         if to_is_userspace {
-            log_user_entry_once(to_id, &threads[to_idx].context);
+            log_user_entry_once(to_id, &*threads[to_idx].context);
         }
 
         (from_ptr, to_ptr, to_kernel_stack, to_cr3)

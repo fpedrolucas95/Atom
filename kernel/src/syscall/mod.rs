@@ -1423,7 +1423,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         id: tid,
         process_id: Some(caller_process_id),
         state: crate::thread::ThreadState::Ready,
-        context,
+        context: alloc::boxed::Box::new(context),
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_SIZE,
         address_space: caller_addr_space,
@@ -1580,7 +1580,7 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
         id: child_tid,
         process_id: Some(child_pid),
         state: ThreadState::Ready,
-        context: child_context,
+        context: alloc::boxed::Box::new(child_context),
         kernel_stack: child_kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_SIZE,
         address_space: child_pml4 as u64,
@@ -2036,7 +2036,8 @@ fn sys_ipc_recv(
 
             log_debug!(
                 LOG_ORIGIN,
-                "ipc_recv blocking (caller={}, port_id={}, timeout_ms={})",
+                "[ipc] cpu={} ipc_recv blocking (caller={}, port_id={}, timeout_ms={})",
+                crate::smp::current_cpu_id(),
                 caller,
                 port_id,
                 timeout_ms
@@ -2048,6 +2049,28 @@ fn sys_ipc_recv(
                         caller,
                         crate::thread::ThreadState::Blocked
                     );
+
+                    // SMP TOCTOU guard: a sender on another CPU may have fired between
+                    // block_receive() (which set receiver_blocked while caller was Running)
+                    // and set_thread_state(Blocked) above.  In that window, mark_thread_ready
+                    // was called with caller still Running → it was a no-op.  The message is
+                    // in the queue but nobody will wake us.  Check now and short-circuit.
+                    if let Ok(Some(msg)) = crate::ipc::try_receive_message(port_id, caller) {
+                        crate::thread::set_thread_state(
+                            caller,
+                            crate::thread::ThreadState::Running,
+                        );
+                        crate::ipc::cancel_blocked_receiver(port_id, caller);
+                        log_debug!(
+                            LOG_ORIGIN,
+                            "ipc_recv TOCTOU: message found after Blocked transition, \
+                             returning without sleep (caller={}, port_id={})",
+                            caller,
+                            port_id
+                        );
+                        return copy_message(msg);
+                    }
+
                     let (prev, next) = crate::sched::on_timer_tick();
 
                     if let (Some(prev_id), Some(next_id)) = (prev, next) {
@@ -4629,7 +4652,7 @@ fn spawn_process_internal(
         id: pid,
         process_id: Some(process_id),
         state: ThreadState::Ready,
-        context,
+        context: alloc::boxed::Box::new(context),
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
         address_space: new_pml4_phys as u64,

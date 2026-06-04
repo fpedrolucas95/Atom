@@ -980,6 +980,19 @@ impl IpcManager {
     }
 
     /// Register a thread as waiting on multiple ports via wait_any
+    fn cancel_blocked_receiver(&self, port_id: PortId, caller: ThreadId) {
+        {
+            let mut ports = self.ports.lock();
+            if let Some(port) = ports.get_mut(&port_id) {
+                if port.receiver_blocked == Some(caller) {
+                    port.receiver_blocked = None;
+                    port.max_waiter_priority = None;
+                }
+            }
+        }
+        self.waiting_threads.lock().remove(&caller);
+    }
+
     fn register_wait_any(&self, caller: ThreadId, ports_to_wait: &[PortId]) {
         let mut ports = self.ports.lock();
         for port_id in ports_to_wait {
@@ -1237,6 +1250,18 @@ pub fn register_waiter(port_id: PortId, caller: ThreadId) -> Result<(), IpcError
 /// Check if a port has messages without consuming them (for wait_any)
 pub fn has_message(port_id: PortId) -> Result<bool, IpcError> {
     IPC_MANAGER.has_message(port_id)
+}
+
+/// Cancel a pending block_receive registration for a thread.
+///
+/// Called in the block_recv TOCTOU recovery path: if a message arrived between
+/// block_receive() and set_thread_state(Blocked), the send() path already cleared
+/// receiver_blocked and called mark_thread_ready (which was a no-op because the
+/// thread was still Running).  We consumed the message via try_receive_message,
+/// so now we just need to remove any waiting_threads entry that block_recv may
+/// have inserted before the sender ran.
+pub fn cancel_blocked_receiver(port_id: PortId, caller: ThreadId) {
+    IPC_MANAGER.cancel_blocked_receiver(port_id, caller)
 }
 
 /// Close all ports owned by a thread and wake up any threads waiting on those ports

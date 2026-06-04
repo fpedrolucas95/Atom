@@ -357,7 +357,7 @@ fn create_init_process(
         id: pid,
         process_id: Some(process_id),
         state: ThreadState::Ready,
-        context,
+        context: alloc::boxed::Box::new(context),
         kernel_stack: kernel_stack_top,
         kernel_stack_size: KERNEL_STACK_PAGES * PAGE_SIZE,
         address_space: init_pml4_phys as u64,

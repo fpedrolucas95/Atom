@@ -396,6 +396,16 @@ impl Scheduler {
             thread::set_thread_state(next, ThreadState::Running);
             self.ownership.lock().insert(next, cpu_id);
 
+            if previous != Some(next) {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "[smp] cpu={} sched: {:?} → {:?}",
+                    cpu_id,
+                    previous,
+                    next
+                );
+            }
+
             // INVARIANT: A thread cannot be both Running and in a ready queue.
             #[cfg(debug_assertions)]
             if self.is_in_any_ready_queue(next) {
@@ -439,6 +449,25 @@ impl Scheduler {
     fn mark_ready(&self, id: ThreadId) {
         match thread::get_thread_state(id) {
             Some(ThreadState::Blocked) | Some(ThreadState::Ready) => self.enqueue_ready(id, None),
+            Some(ThreadState::Running) => {
+                // Thread registered as a receiver (via block_recv) but has not yet
+                // transitioned to Blocked.  We cannot enqueue a Running thread — that
+                // would let two CPUs execute the same thread simultaneously.
+                // Instead flag a reschedule on the owning CPU so the thread returns
+                // promptly to try_receive_message and finds the waiting message.
+                if let Some(owner_cpu) = self.ownership.lock().get(&id).copied() {
+                    if owner_cpu != NO_CPU_OWNER && owner_cpu < self.cpus.len() {
+                        self.cpus[owner_cpu].lock().resched_pending = true;
+                        log_debug!(
+                            LOG_ORIGIN,
+                            "mark_ready: tid={} Running on cpu={}, set resched_pending \
+                             (block_recv TOCTOU — message in queue, TOCTOU guard will catch it)",
+                            id,
+                            owner_cpu
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
