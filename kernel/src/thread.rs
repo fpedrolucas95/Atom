@@ -1634,6 +1634,10 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         switch_context(from_ctx_ptr, to_ctx_ptr);
     }
 
+    // from's registers have been saved to its CpuContext Box.  Clear the
+    // per-CPU marker so reap_zombies knows it is now safe to free that Box.
+    crate::sched::clear_pending_switch_from();
+
     // Re-enable interrupts when we resume
     crate::interrupts::enable();
 }
@@ -2125,6 +2129,16 @@ pub fn reap_zombies() {
             zombie.stack_size,
         );
 
+        // Spin until no CPU is mid-switch away from this zombie.  The window
+        // between perform_context_switch releasing THREAD_LIST.threads.lock()
+        // and the assembly saving from's registers to its CpuContext Box is
+        // ~200 ns; in practice perform_final_cleanup above takes far longer,
+        // so this loop almost never iterates.  The spinloop is a correctness
+        // backstop for the theoretical SMP race.
+        while crate::sched::is_pending_switch_from(zombie.id) {
+            core::hint::spin_loop();
+        }
+
         // Only now remove from the global thread list
         if let Some(_removed) = THREAD_LIST.remove(zombie.id) {
             log_debug!(LOG_ORIGIN, "Zombie thread {} removed from global list", zombie.id);
@@ -2227,54 +2241,35 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     // Step 8: Remove from scheduler (handled automatically when thread is removed or state is Exited)
     log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will skip this thread from now on");
 
-    let is_current = crate::sched::current_thread() == Some(thread_id);
+    // Always defer final cleanup to the idle thread's reaper.
+    //
+    // Immediately removing a thread from THREAD_LIST is unsafe: there is a
+    // window between schedule_local setting cpu.current = chosen (making
+    // prev_id no longer "current" on any CPU) and perform_context_switch
+    // completing the assembly save of prev_id's registers.  If another CPU
+    // calls terminate_entity during that window and removes the thread,
+    // perform_context_switch cannot find it and panics.
+    //
+    // Deferring to ZOMBIE_THREADS means the thread stays in THREAD_LIST until
+    // reap_zombies runs.  reap_zombies additionally waits for any in-flight
+    // context switch away from the zombie to complete (via is_pending_switch_from)
+    // before dropping the CpuContext Box, preventing a use-after-free.
+    log_info!(
+        LOG_ORIGIN,
+        "Deferring final cleanup of thread {} ('{}') to reaper",
+        thread_id,
+        thread_name
+    );
+    ZOMBIE_THREADS.lock().push(ZombieInfo {
+        id: thread_id,
+        process_id: thread_process_id,
+        pml4: address_space_cr3,
+        stack: kernel_stack,
+        stack_size: kernel_stack_size,
+        name: thread_name,
+    });
 
-    if is_current {
-        log_info!(LOG_ORIGIN, "Current thread {} exiting - deferring final cleanup to reaper", thread_id);
-        ZOMBIE_THREADS.lock().push(ZombieInfo {
-            id: thread_id,
-            process_id: thread_process_id,
-            pml4: address_space_cr3,
-            stack: kernel_stack,
-            stack_size: kernel_stack_size,
-            name: thread_name,
-        });
-    } else {
-        perform_final_cleanup(
-            thread_id,
-            thread_process_id,
-            address_space_cr3,
-            kernel_stack,
-            kernel_stack_size,
-        );
-
-        // Step 9: Remove from global thread list
-        log_debug!(LOG_ORIGIN, "Step 9/10: Removing from thread list");
-        if let Some(_removed) = THREAD_LIST.remove(thread_id) {
-            log_debug!(LOG_ORIGIN, "Thread removed from global list");
-        }
-
-        // Step 10: Update counters and log final report
-        log_debug!(LOG_ORIGIN, "Step 10/10: Updating resource counters");
-        RESOURCE_COUNTERS.threads_terminated.fetch_add(1, Ordering::Relaxed);
-
-        log_info!(
-            LOG_ORIGIN,
-            "=== ENTITY {} ('{}') TERMINATED SUCCESSFULLY ===",
-            thread_id,
-            thread_name
-        );
-    }
-
-    if !is_current {
-        RESOURCE_COUNTERS.log_stats();
-    } else {
-        log_debug!(
-            LOG_ORIGIN,
-            "Resource stats deferred until zombie reaping for TID {}",
-            thread_id
-        );
-    }
+    RESOURCE_COUNTERS.log_stats();
 }
 
 /// Legacy function - redirects to terminate_entity

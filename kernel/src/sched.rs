@@ -90,6 +90,11 @@ struct CpuSchedulerState {
     resched_pending: bool,
     context_switches: u64,
     steals: u64,
+    /// The thread being switched away from in a context switch that is currently
+    /// in flight on this CPU.  Set in schedule_local when a new thread is chosen;
+    /// cleared in perform_context_switch after the assembly save is complete.
+    /// reap_zombies spin-waits on this before freeing a zombie's CpuContext Box.
+    pending_switch_from: Option<ThreadId>,
 }
 
 impl CpuSchedulerState {
@@ -102,6 +107,7 @@ impl CpuSchedulerState {
             resched_pending: false,
             context_switches: 0,
             steals: 0,
+            pending_switch_from: None,
         }
     }
 }
@@ -470,6 +476,13 @@ impl Scheduler {
             cpu.current = chosen;
             if previous != chosen {
                 cpu.context_switches = cpu.context_switches.saturating_add(1);
+                // Record the outgoing thread so reap_zombies can wait for the
+                // assembly save in perform_context_switch to finish before it
+                // drops the thread's CpuContext Box.
+                cpu.pending_switch_from = previous;
+            } else {
+                // No switch — clear any stale marker from a previous tick.
+                cpu.pending_switch_from = None;
             }
         }
 
@@ -719,6 +732,31 @@ pub fn sleep_thread(id: ThreadId, wake_tick: u64) { if let Some(s) = scheduler_o
 pub fn cancel_sleep(id: ThreadId) { if let Some(s) = scheduler_opt() { s.sleep_queue.lock().retain(|(tid, _)| *tid != id); } }
 pub fn wake_sleeping_threads() { if let Some(s) = scheduler_opt() { s.wake_sleeping_threads(); } }
 pub fn current_thread() -> Option<ThreadId> { scheduler_opt().and_then(|s| s.current_thread()) }
+
+/// Clear the pending-switch-from marker for the current CPU.
+/// Called by perform_context_switch immediately after switch_context returns,
+/// signalling that the assembly save of the outgoing thread is complete and
+/// its CpuContext Box may safely be freed by reap_zombies.
+pub fn clear_pending_switch_from() {
+    if let Some(s) = scheduler_opt() {
+        let cpu_id = s.local_cpu_id();
+        s.cpus[cpu_id].lock().pending_switch_from = None;
+    }
+}
+
+/// Return true if any CPU is currently mid-switch away from `id`.
+/// reap_zombies uses this to defer freeing the thread's CpuContext Box until
+/// the assembly save on the other CPU completes.
+pub fn is_pending_switch_from(id: ThreadId) -> bool {
+    if let Some(s) = scheduler_opt() {
+        for cpu in s.cpus.iter() {
+            if cpu.lock().pending_switch_from == Some(id) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 pub fn restore_current_after_block(id: ThreadId) {
     if let Some(s) = scheduler_opt() {
