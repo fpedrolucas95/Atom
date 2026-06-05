@@ -1,15 +1,11 @@
+use crate::NetError;
 use alloc::vec::Vec;
 use atom_syscall::ipc::PortId;
 use libipc::messages::{
-    MessageType,
-    NetSocketMsg, NetSocketReplyMsg,
-    NetConnectMsg, NetConnectReplyMsg,
-    NetSendMsg, NetSendReplyMsg,
-    NetRecvMsg, NetRecvReplyMsg,
-    NetCloseMsg, NetCloseReplyMsg,
+    MessageType, NetCloseMsg, NetCloseReplyMsg, NetConnectMsg, NetConnectReplyMsg, NetRecvMsg,
+    NetRecvReplyMsg, NetSendMsg, NetSendReplyMsg, NetSocketMsg, NetSocketReplyMsg,
 };
-use libipc::protocol::{send_message, try_recv_message, get_payload};
-use crate::NetError;
+use libipc::protocol::{get_payload, send_message, try_recv_message};
 
 fn ipc_err(_e: atom_syscall::SyscallError) -> NetError {
     NetError::IpcError
@@ -55,7 +51,12 @@ pub fn net_socket(netd_port: PortId) -> Result<u32, NetError> {
 use crate::IpAddr;
 
 /// Connect a TCP socket to remote_ip:remote_port.
-pub fn net_connect(netd_port: PortId, socket_id: u32, remote_ip: IpAddr, remote_port: u16) -> Result<(), NetError> {
+pub fn net_connect(
+    netd_port: PortId,
+    socket_id: u32,
+    remote_ip: IpAddr,
+    remote_port: u16,
+) -> Result<(), NetError> {
     let reply_port = atom_syscall::ipc::create_port().map_err(ipc_err)?;
 
     let ipv4 = remote_ip.to_u32().ok_or(NetError::InvalidArgument)?;
@@ -153,7 +154,12 @@ pub fn net_send(netd_port: PortId, socket_id: u32, data: &[u8]) -> Result<usize,
 }
 
 /// Receive data from a socket into buf. timeout_ms = 0 means use default (10000ms).
-pub fn net_recv(netd_port: PortId, socket_id: u32, buf: &mut [u8], timeout_ms: u32) -> Result<usize, NetError> {
+pub fn net_recv(
+    netd_port: PortId,
+    socket_id: u32,
+    buf: &mut [u8],
+    timeout_ms: u32,
+) -> Result<usize, NetError> {
     let reply_port = atom_syscall::ipc::create_port().map_err(ipc_err)?;
 
     let effective_timeout = if timeout_ms == 0 { 10000 } else { timeout_ms };

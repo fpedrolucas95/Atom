@@ -1,0 +1,21 @@
+[package]
+name = "browser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Simple Atom userspace browser for rendering basic HTML"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+libgui = { path = "../../libs/libgui" }
+libnet = { path = "../../libs/libnet" }
+
+[[bin]]
+name = "browser"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

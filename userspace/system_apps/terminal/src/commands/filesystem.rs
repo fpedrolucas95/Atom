@@ -8,9 +8,9 @@ use crate::parser::ParsedCommand;
 use crate::window::Theme;
 
 extern crate alloc;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 
 // ============================================================================
 // Current working directory (static, no-std)
@@ -46,8 +46,13 @@ fn first_path_arg<'a>(cmd: &'a ParsedCommand<'_>) -> Option<&'a str> {
             continue;
         }
         // Known flags that consume the next argument as a value
-        if a == "-n" || a == "--lines" || a == "-d" || a == "--depth"
-            || a == "-maxdepth" || a == "--maxdepth" || a == "-name"
+        if a == "-n"
+            || a == "--lines"
+            || a == "-d"
+            || a == "--depth"
+            || a == "-maxdepth"
+            || a == "--maxdepth"
+            || a == "-name"
         {
             skip_next = true;
             continue;
@@ -69,9 +74,15 @@ fn positional_args_vec<'a>(cmd: &'a ParsedCommand<'_>) -> Vec<&'a str> {
 // ============================================================================
 
 fn resolve_path(path: &str) -> String {
-    if path.is_empty() { return String::from(get_current_dir()); }
-    if path.starts_with('/') { return normalize(path); }
-    if path == "~" { return String::from("/"); }
+    if path.is_empty() {
+        return String::from(get_current_dir());
+    }
+    if path.starts_with('/') {
+        return normalize(path);
+    }
+    if path == "~" {
+        return String::from("/");
+    }
     let cwd = get_current_dir();
     let combined = if cwd.ends_with('/') {
         format!("{}{}", cwd, path)
@@ -90,33 +101,44 @@ fn normalize(path: &str) -> String {
     for seg in path.split('/') {
         match seg {
             "" | "." => {}
-            ".." => { parts.pop(); }
+            ".." => {
+                parts.pop();
+            }
             s => parts.push(s),
         }
     }
     let mut out = String::from("/");
     for (i, p) in parts.iter().enumerate() {
-        if i > 0 { out.push('/'); }
+        if i > 0 {
+            out.push('/');
+        }
         for b in p.bytes() {
             out.push(b as char);
         }
     }
-    if out.is_empty() { out.push('/'); }
+    if out.is_empty() {
+        out.push('/');
+    }
     out
 }
 
 fn file_extension(name: &str) -> &str {
-    name.rfind('.').map(|p| &name[p+1..]).unwrap_or("")
+    name.rfind('.').map(|p| &name[p + 1..]).unwrap_or("")
 }
 
 fn fmt_size(bytes: u64) -> String {
-    if bytes < 1024 { format!("{} B", bytes) }
-    else if bytes < 1024*1024 {
-        format!("{}.{} KB", bytes/1024, (bytes%1024)*10/1024)
-    } else if bytes < 1024*1024*1024 {
-        format!("{}.{} MB", bytes/(1024*1024), (bytes%(1024*1024))*10/(1024*1024))
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{}.{} KB", bytes / 1024, (bytes % 1024) * 10 / 1024)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!(
+            "{}.{} MB",
+            bytes / (1024 * 1024),
+            (bytes % (1024 * 1024)) * 10 / (1024 * 1024)
+        )
     } else {
-        format!("{} GB", bytes/(1024*1024*1024))
+        format!("{} GB", bytes / (1024 * 1024 * 1024))
     }
 }
 
@@ -124,7 +146,9 @@ fn fs_read_file(path: &str) -> core::result::Result<Vec<u8>, atom_syscall::fs::F
     atom_syscall::fs::read_file(path)
 }
 
-fn fs_list_dir(path: &str) -> core::result::Result<Vec<atom_syscall::fs::FsDirent>, atom_syscall::fs::FsError> {
+fn fs_list_dir(
+    path: &str,
+) -> core::result::Result<Vec<atom_syscall::fs::FsDirent>, atom_syscall::fs::FsError> {
     let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
     let fd = atom_syscall::fs::open(path, flags, 0)?;
     let entries = atom_syscall::fs::readdir(fd);
@@ -137,16 +161,28 @@ fn fs_list_dir(path: &str) -> core::result::Result<Vec<atom_syscall::fs::FsDiren
 // ============================================================================
 
 pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let path      = cmd.arg(0).map(|p| resolve_path(p))
-                       .unwrap_or_else(|| String::from(get_current_dir()));
-    let show_all  = cmd.has_flag("-a", "--all");
-    let long_fmt  = cmd.has_flag("-l", "--long");
+    let path = cmd
+        .arg(0)
+        .map(|p| resolve_path(p))
+        .unwrap_or_else(|| String::from(get_current_dir()));
+    let show_all = cmd.has_flag("-a", "--all");
+    let long_fmt = cmd.has_flag("-l", "--long");
 
     ctx.println("");
     let mut header = [0u8; 72];
     let mut pos = 0;
-    for b in b"Contents of ".iter() { if pos < header.len() { header[pos] = *b; pos += 1; } }
-    for b in path.bytes()            { if pos < header.len() { header[pos] = b;  pos += 1; } }
+    for b in b"Contents of ".iter() {
+        if pos < header.len() {
+            header[pos] = *b;
+            pos += 1;
+        }
+    }
+    for b in path.bytes() {
+        if pos < header.len() {
+            header[pos] = b;
+            pos += 1;
+        }
+    }
     let header_str = unsafe { core::str::from_utf8_unchecked(&header[..pos]) };
     ctx.println_colored(header_str, Theme::TEXT_INFO);
     ctx.println("");
@@ -167,8 +203,12 @@ pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
 
     for entry in entries {
         let name = entry.name;
-        if name == "." || name == ".." { continue; }
-        if !show_all && name.starts_with('.') { continue; }
+        if name == "." || name == ".." {
+            continue;
+        }
+        if !show_all && name.starts_with('.') {
+            continue;
+        }
 
         let is_dir = entry.file_type == atom_syscall::fs::FileType::Directory;
         if long_fmt {
@@ -183,16 +223,28 @@ pub fn cmd_ls(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
                 };
                 atom_syscall::fs::stat(&full).map(|s| s.size).unwrap_or(0)
             };
-            let size_str = if is_dir { String::from("   --      ") }
-                else { format!("{:<10}  ", size) };
+            let size_str = if is_dir {
+                String::from("   --      ")
+            } else {
+                format!("{:<10}  ", size)
+            };
             let line = format!("{}  {}  {}", type_str, size_str, name);
-            if is_dir { ctx.println_colored(&line, Theme::PROMPT_PATH); }
-            else       { ctx.println(&line); }
+            if is_dir {
+                ctx.println_colored(&line, Theme::PROMPT_PATH);
+            } else {
+                ctx.println(&line);
+            }
         } else if is_dir {
             let mut dir_buf = [0u8; 64];
             let mut dp = 0;
-            for b in name.bytes() { if dp < 63 { dir_buf[dp] = b; dp += 1; } }
-            dir_buf[dp] = b'/'; dp += 1;
+            for b in name.bytes() {
+                if dp < 63 {
+                    dir_buf[dp] = b;
+                    dp += 1;
+                }
+            }
+            dir_buf[dp] = b'/';
+            dp += 1;
             let ds = unsafe { core::str::from_utf8_unchecked(&dir_buf[..dp]) };
             ctx.println_colored(ds, Theme::PROMPT_PATH);
         } else {
@@ -261,7 +313,9 @@ pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     // Support multiple files
     let mut i = 0;
     loop {
-        let Some(fname) = cmd.arg(i) else { break; };
+        let Some(fname) = cmd.arg(i) else {
+            break;
+        };
         let path = resolve_path(fname);
 
         match fs_read_file(&path) {
@@ -272,7 +326,9 @@ pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
                     ctx.println_colored(&hdr, Theme::TEXT_INFO);
                 }
                 let content = unsafe { core::str::from_utf8_unchecked(&buffer) };
-                for line in content.split('\n') { ctx.println(line); }
+                for line in content.split('\n') {
+                    ctx.println(line);
+                }
             }
             Err(e) => {
                 let msg = format!("cat: {}: {:?}", fname, e);
@@ -290,11 +346,16 @@ pub fn cmd_cat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
 // ============================================================================
 
 pub fn cmd_head(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let n: usize = cmd.get_option("-n", "--lines")
+    let n: usize = cmd
+        .get_option("-n", "--lines")
         .and_then(|s| {
             let mut v = 0usize;
             for c in s.bytes() {
-                if c >= b'0' && c <= b'9' { v = v * 10 + (c - b'0') as usize; } else { return None; }
+                if c >= b'0' && c <= b'9' {
+                    v = v * 10 + (c - b'0') as usize;
+                } else {
+                    return None;
+                }
             }
             Some(v)
         })
@@ -309,7 +370,9 @@ pub fn cmd_head(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         Ok(buf) => {
             let content = unsafe { core::str::from_utf8_unchecked(&buf) };
             for (i, line) in content.split('\n').enumerate() {
-                if i >= n { break; }
+                if i >= n {
+                    break;
+                }
                 ctx.println(line);
             }
         }
@@ -327,11 +390,16 @@ pub fn cmd_head(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
 // ============================================================================
 
 pub fn cmd_tail(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let n: usize = cmd.get_option("-n", "--lines")
+    let n: usize = cmd
+        .get_option("-n", "--lines")
         .and_then(|s| {
             let mut v = 0usize;
             for c in s.bytes() {
-                if c >= b'0' && c <= b'9' { v = v * 10 + (c - b'0') as usize; } else { return None; }
+                if c >= b'0' && c <= b'9' {
+                    v = v * 10 + (c - b'0') as usize;
+                } else {
+                    return None;
+                }
             }
             Some(v)
         })
@@ -347,7 +415,9 @@ pub fn cmd_tail(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
             let content = unsafe { core::str::from_utf8_unchecked(&buf) };
             let lines: Vec<&str> = content.split('\n').collect();
             let start = if lines.len() > n { lines.len() - n } else { 0 };
-            for line in &lines[start..] { ctx.println(line); }
+            for line in &lines[start..] {
+                ctx.println(line);
+            }
         }
         Err(e) => {
             let msg = format!("tail: {}: {:?}", fname, e);
@@ -366,7 +436,7 @@ pub fn cmd_wc(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
     let show_lines = cmd.has_flag("-l", "--lines");
     let show_words = cmd.has_flag("-w", "--words");
     let show_bytes = cmd.has_flag("-c", "--bytes");
-    let all        = !show_lines && !show_words && !show_bytes;
+    let all = !show_lines && !show_words && !show_bytes;
 
     let Some(fname) = first_path_arg(cmd) else {
         ctx.error("Usage: wc [-l] [-w] [-c] <file>");
@@ -381,9 +451,15 @@ pub fn cmd_wc(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
             let bytes = buf.len();
 
             let mut out = String::new();
-            if all || show_lines { out.push_str(&format!("{:>8} ", lines)); }
-            if all || show_words { out.push_str(&format!("{:>8} ", words)); }
-            if all || show_bytes { out.push_str(&format!("{:>8} ", bytes)); }
+            if all || show_lines {
+                out.push_str(&format!("{:>8} ", lines));
+            }
+            if all || show_words {
+                out.push_str(&format!("{:>8} ", words));
+            }
+            if all || show_bytes {
+                out.push_str(&format!("{:>8} ", bytes));
+            }
             out.push_str(fname);
             ctx.println(&out);
         }
@@ -413,9 +489,15 @@ pub fn cmd_mkdir(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
         // Create each component
         let mut cumulative = String::from("/");
         for seg in path.trim_start_matches('/').split('/') {
-            if seg.is_empty() { continue; }
-            if cumulative != "/" { cumulative.push('/'); }
-            for b in seg.bytes() { cumulative.push(b as char); }
+            if seg.is_empty() {
+                continue;
+            }
+            if cumulative != "/" {
+                cumulative.push('/');
+            }
+            for b in seg.bytes() {
+                cumulative.push(b as char);
+            }
             let _ = atom_syscall::fs::mkdir(&cumulative, 0o755);
         }
         let msg = format!("mkdir: created '{}'", arg);
@@ -468,7 +550,7 @@ pub fn cmd_rm(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
     let recursive = cmd.has_flag("-r", "--recursive")
         || cmd.has_flag("-R", "--recursive")
         || cmd.has_flag("-rf", "");
-    let force     = cmd.has_flag("-f", "--force");
+    let force = cmd.has_flag("-f", "--force");
 
     let Some(arg) = first_path_arg(cmd) else {
         ctx.error("Usage: rm [-r] [-f] <file>");
@@ -514,14 +596,15 @@ fn rm_recursive(path: &str) -> core::result::Result<(), atom_syscall::fs::FsErro
     let stat = atom_syscall::fs::stat(path)?;
     if stat.is_dir() {
         // Read directory entries
-        let flags = atom_syscall::fs::OpenFlags::RDONLY
-            | atom_syscall::fs::OpenFlags::DIRECTORY;
+        let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
         let fd = atom_syscall::fs::open(path, flags, 0)?;
         let entries = atom_syscall::fs::readdir(fd)?;
         let _ = atom_syscall::fs::close(fd);
 
         for entry in entries {
-            if entry.name == "." || entry.name == ".." { continue; }
+            if entry.name == "." || entry.name == ".." {
+                continue;
+            }
             let child = if path.ends_with('/') {
                 format!("{}{}", path, entry.name)
             } else {
@@ -588,17 +671,21 @@ pub fn cmd_cp(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
 }
 
 fn copy_file(src: &str, dst: &str) -> core::result::Result<(), atom_syscall::fs::FsError> {
-    let src_fd = atom_syscall::fs::open(src,
-        atom_syscall::fs::OpenFlags::RDONLY, 0)?;
-    let dst_fd = atom_syscall::fs::open(dst,
+    let src_fd = atom_syscall::fs::open(src, atom_syscall::fs::OpenFlags::RDONLY, 0)?;
+    let dst_fd = atom_syscall::fs::open(
+        dst,
         atom_syscall::fs::OpenFlags::CREAT
-        | atom_syscall::fs::OpenFlags::TRUNC
-        | atom_syscall::fs::OpenFlags::WRONLY, 0o644)?;
+            | atom_syscall::fs::OpenFlags::TRUNC
+            | atom_syscall::fs::OpenFlags::WRONLY,
+        0o644,
+    )?;
 
     let mut buf = [0u8; 4096];
     loop {
         let n = atom_syscall::fs::read(src_fd, &mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         atom_syscall::fs::write_all(dst_fd, &buf[..n])?;
     }
     let _ = atom_syscall::fs::close(src_fd);
@@ -648,7 +735,8 @@ pub fn cmd_fsync(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
     let fd = match atom_syscall::fs::open(&path, atom_syscall::fs::OpenFlags::RDONLY, 0) {
         Ok(fd) => fd,
         Err(atom_syscall::fs::FsError::IsDir) => {
-            let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
+            let flags =
+                atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
             match atom_syscall::fs::open(&path, flags, 0) {
                 Ok(fd) => fd,
                 Err(e) => {
@@ -700,9 +788,13 @@ pub fn cmd_stat(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
             ctx.println_colored(&line, Theme::TEXT_INFO);
             let sz_line = format!("  Size: {}  ({})", s.size, fmt_size(s.size));
             ctx.println(&sz_line);
-            let type_str = if s.is_dir() { "directory" }
-                else if s.is_file() { "regular file" }
-                else { "other" };
+            let type_str = if s.is_dir() {
+                "directory"
+            } else if s.is_file() {
+                "regular file"
+            } else {
+                "other"
+            };
             let type_line = format!("  Type: {}", type_str);
             ctx.println(&type_line);
             let ext = file_extension(arg);
@@ -739,8 +831,9 @@ pub fn cmd_chmod(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comma
     // Parse octal mode
     let mut mode = 0u32;
     for c in mode_arg.bytes() {
-        if c >= b'0' && c <= b'7' { mode = mode * 8 + (c - b'0') as u32; }
-        else {
+        if c >= b'0' && c <= b'7' {
+            mode = mode * 8 + (c - b'0') as u32;
+        } else {
             ctx.error("chmod: mode must be an octal number (e.g. 755)");
             return CommandResult::Error;
         }
@@ -773,7 +866,7 @@ pub fn cmd_ln(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
         return CommandResult::Error;
     };
     let target = resolve_path(target_arg);
-    let link   = resolve_path(link_arg);
+    let link = resolve_path(link_arg);
 
     let result = if symbolic {
         atom_syscall::fs::symlink(&target, &link)
@@ -801,12 +894,19 @@ pub fn cmd_ln(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
 // ============================================================================
 
 pub fn cmd_find(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let root    = first_path_arg(cmd).unwrap_or(get_current_dir());
+    let root = first_path_arg(cmd).unwrap_or(get_current_dir());
     let pattern = cmd.get_option("-name", "-name").unwrap_or("*");
-    let max_depth = cmd.get_option("-maxdepth", "--maxdepth")
+    let max_depth = cmd
+        .get_option("-maxdepth", "--maxdepth")
         .and_then(|s| {
             let mut v = 0u32;
-            for c in s.bytes() { if c >= b'0' && c <= b'9' { v = v*10+(c-b'0')as u32; } else { return None; } }
+            for c in s.bytes() {
+                if c >= b'0' && c <= b'9' {
+                    v = v * 10 + (c - b'0') as u32;
+                } else {
+                    return None;
+                }
+            }
             Some(v)
         })
         .unwrap_or(u32::MAX);
@@ -818,19 +918,24 @@ pub fn cmd_find(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
     CommandResult::Ok
 }
 
-fn find_recursive(dir: &str, pattern: &str, depth: u32, max: u32,
-                  ctx: &mut CommandContext<'_>) {
-    if depth > max { return; }
-    let flags = atom_syscall::fs::OpenFlags::RDONLY
-        | atom_syscall::fs::OpenFlags::DIRECTORY;
-    let Ok(fd) = atom_syscall::fs::open(dir, flags, 0) else { return };
+fn find_recursive(dir: &str, pattern: &str, depth: u32, max: u32, ctx: &mut CommandContext<'_>) {
+    if depth > max {
+        return;
+    }
+    let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
+    let Ok(fd) = atom_syscall::fs::open(dir, flags, 0) else {
+        return;
+    };
     let Ok(entries) = atom_syscall::fs::readdir(fd) else {
-        let _ = atom_syscall::fs::close(fd); return;
+        let _ = atom_syscall::fs::close(fd);
+        return;
     };
     let _ = atom_syscall::fs::close(fd);
 
     for entry in entries {
-        if entry.name == "." || entry.name == ".." { continue; }
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
         let child = if dir.ends_with('/') {
             format!("{}{}", dir, entry.name)
         } else {
@@ -846,9 +951,11 @@ fn find_recursive(dir: &str, pattern: &str, depth: u32, max: u32,
 }
 
 fn matches_glob(name: &str, pattern: &str) -> bool {
-    if pattern == "*" { return true; }
+    if pattern == "*" {
+        return true;
+    }
     if pattern.starts_with('*') && pattern.ends_with('*') {
-        let mid = &pattern[1..pattern.len()-1];
+        let mid = &pattern[1..pattern.len() - 1];
         return name.contains(mid);
     }
     if pattern.starts_with('*') {
@@ -856,7 +963,7 @@ fn matches_glob(name: &str, pattern: &str) -> bool {
         return name.ends_with(suffix);
     }
     if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len()-1];
+        let prefix = &pattern[..pattern.len() - 1];
         return name.starts_with(prefix);
     }
     name == pattern
@@ -868,10 +975,14 @@ fn matches_glob(name: &str, pattern: &str) -> bool {
 
 pub fn cmd_df(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
-    ctx.println_colored("Filesystem      Size     Used    Avail  Use%  Mounted on",
-        Theme::TEXT_DIM);
-    ctx.println_colored("─────────────────────────────────────────────────────────",
-        Theme::TEXT_DIM);
+    ctx.println_colored(
+        "Filesystem      Size     Used    Avail  Use%  Mounted on",
+        Theme::TEXT_DIM,
+    );
+    ctx.println_colored(
+        "─────────────────────────────────────────────────────────",
+        Theme::TEXT_DIM,
+    );
     ctx.println("/dev/sda1       512 MB   128 MB   384 MB  25%   /");
     ctx.println("tmpfs            64 MB     2 MB    62 MB   3%   /tmp");
     ctx.println("");
@@ -885,15 +996,19 @@ pub fn cmd_df(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
 // ============================================================================
 
 pub fn cmd_du(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let summary  = cmd.has_flag("-s", "--summarize");
-    let human    = cmd.has_flag("-h", "--human-readable");
+    let summary = cmd.has_flag("-s", "--summarize");
+    let human = cmd.has_flag("-h", "--human-readable");
     let path_arg = first_path_arg(cmd).unwrap_or(get_current_dir());
-    let path     = resolve_path(path_arg);
+    let path = resolve_path(path_arg);
 
     ctx.println("");
     let total = du_recursive(&path, summary, human, ctx);
     if summary {
-        let s = if human { fmt_size(total) } else { format!("{}", total / 1024) };
+        let s = if human {
+            fmt_size(total)
+        } else {
+            format!("{}", total / 1024)
+        };
         let line = format!("{:<8} {}", s, path_arg);
         ctx.println(&line);
     }
@@ -901,23 +1016,26 @@ pub fn cmd_du(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandR
     CommandResult::Ok
 }
 
-fn du_recursive(path: &str, summary: bool, human: bool,
-                ctx: &mut CommandContext<'_>) -> u64 {
-    let flags = atom_syscall::fs::OpenFlags::RDONLY
-        | atom_syscall::fs::OpenFlags::DIRECTORY;
+fn du_recursive(path: &str, summary: bool, human: bool, ctx: &mut CommandContext<'_>) -> u64 {
+    let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
     let Ok(fd) = atom_syscall::fs::open(path, flags, 0) else {
         // It's a file
-        if let Ok(s) = atom_syscall::fs::stat(path) { return s.size; }
+        if let Ok(s) = atom_syscall::fs::stat(path) {
+            return s.size;
+        }
         return 0;
     };
     let Ok(entries) = atom_syscall::fs::readdir(fd) else {
-        let _ = atom_syscall::fs::close(fd); return 0;
+        let _ = atom_syscall::fs::close(fd);
+        return 0;
     };
     let _ = atom_syscall::fs::close(fd);
 
     let mut total = 0u64;
     for entry in entries {
-        if entry.name == "." || entry.name == ".." { continue; }
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
         let child = if path.ends_with('/') {
             format!("{}{}", path, entry.name)
         } else {
@@ -926,7 +1044,11 @@ fn du_recursive(path: &str, summary: bool, human: bool,
         let size = du_recursive(&child, summary, human, ctx);
         total += size;
         if !summary {
-            let s = if human { fmt_size(size) } else { format!("{}", size / 1024) };
+            let s = if human {
+                fmt_size(size)
+            } else {
+                format!("{}", size / 1024)
+            };
             let line = format!("{:<8} {}", s, child);
             ctx.println(&line);
         }
@@ -939,12 +1061,21 @@ fn du_recursive(path: &str, summary: bool, human: bool,
 // ============================================================================
 
 pub fn cmd_tree(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
-    let path = cmd.arg(0).map(|p| resolve_path(p))
-                  .unwrap_or_else(|| String::from(get_current_dir()));
-    let max_depth = cmd.get_option("-d", "--depth")
+    let path = cmd
+        .arg(0)
+        .map(|p| resolve_path(p))
+        .unwrap_or_else(|| String::from(get_current_dir()));
+    let max_depth = cmd
+        .get_option("-d", "--depth")
         .and_then(|s| {
             let mut v = 0u32;
-            for c in s.bytes() { if c >= b'0' && c <= b'9' { v = v*10+(c-b'0') as u32; } else { return None; } }
+            for c in s.bytes() {
+                if c >= b'0' && c <= b'9' {
+                    v = v * 10 + (c - b'0') as u32;
+                } else {
+                    return None;
+                }
+            }
             Some(v)
         })
         .unwrap_or(3u32);
@@ -956,24 +1087,28 @@ pub fn cmd_tree(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
     CommandResult::Ok
 }
 
-fn tree_recursive(dir: &str, prefix: &str, depth: u32, max: u32,
-                  ctx: &mut CommandContext<'_>) {
-    if depth >= max { return; }
-    let flags = atom_syscall::fs::OpenFlags::RDONLY
-        | atom_syscall::fs::OpenFlags::DIRECTORY;
-    let Ok(fd) = atom_syscall::fs::open(dir, flags, 0) else { return };
+fn tree_recursive(dir: &str, prefix: &str, depth: u32, max: u32, ctx: &mut CommandContext<'_>) {
+    if depth >= max {
+        return;
+    }
+    let flags = atom_syscall::fs::OpenFlags::RDONLY | atom_syscall::fs::OpenFlags::DIRECTORY;
+    let Ok(fd) = atom_syscall::fs::open(dir, flags, 0) else {
+        return;
+    };
     let Ok(entries) = atom_syscall::fs::readdir(fd) else {
-        let _ = atom_syscall::fs::close(fd); return;
+        let _ = atom_syscall::fs::close(fd);
+        return;
     };
     let _ = atom_syscall::fs::close(fd);
 
     // Filter out . and ..
-    let real: Vec<_> = entries.iter()
+    let real: Vec<_> = entries
+        .iter()
         .filter(|e| e.name != "." && e.name != "..")
         .collect();
 
     for (i, entry) in real.iter().enumerate() {
-        let last  = i + 1 == real.len();
+        let last = i + 1 == real.len();
         let connector = if last { "`-- " } else { "|-- " };
         let line = format!("{}{}{}", prefix, connector, entry.name);
         if entry.file_type == atom_syscall::fs::FileType::Directory {

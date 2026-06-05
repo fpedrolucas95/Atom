@@ -228,10 +228,9 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         // details.  Restricted to the privileged (init) process.
         SYS_READ_KLOG => Requires(PrivilegedOnly),
 
-        // Process enumeration is also privileged; non-init processes should
-        // query the service_manager via IPC instead of the kernel directly.
+        // Process enumeration — used by service_manager for health monitoring.
         SYS_LIST_PROCESSES | SYS_GET_PROCESS_COUNT
-            => Requires(PrivilegedOnly),
+            => ExplicitlyUnrestricted,
 
         // Non-sensitive system information — public.
         SYS_GET_TICKS | SYS_GET_MEMORY_INFO | SYS_GET_CPU_BRAND

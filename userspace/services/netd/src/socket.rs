@@ -1,17 +1,12 @@
-use alloc::vec::Vec;
-use alloc::format;
-use atom_syscall::debug::log;
-use crate::tcp::TcpManager;
 use crate::dns::DnsCache;
+use crate::tcp::TcpManager;
+use alloc::format;
+use alloc::vec::Vec;
+use atom_syscall::debug::log;
 use libipc::messages::{
-    NetSocketMsg, NetSocketReplyMsg,
-    NetConnectMsg, NetConnectReplyMsg,
-    NetSendMsg, NetSendReplyMsg,
-    NetRecvMsg, NetRecvReplyMsg,
-    NetCloseMsg, NetCloseReplyMsg,
-    NetResolveMsg, NetResolveReplyMsg,
-    NetIcmpEchoRequestMsg, NetIcmpEchoReplyMsg,
-    NetIpAddr,
+    NetCloseMsg, NetCloseReplyMsg, NetConnectMsg, NetConnectReplyMsg, NetIcmpEchoReplyMsg,
+    NetIcmpEchoRequestMsg, NetIpAddr, NetRecvMsg, NetRecvReplyMsg, NetResolveMsg,
+    NetResolveReplyMsg, NetSendMsg, NetSendReplyMsg, NetSocketMsg, NetSocketReplyMsg,
 };
 
 /// A pending deferred recv: socket waiting for data
@@ -40,7 +35,7 @@ pub struct PendingResolve {
     pub name_len: usize,
     pub reply_port: u64,
     pub in_use: bool,
-    pub needs_resend: bool,  // true = re-send DNS query on next tick (after ARP reply)
+    pub needs_resend: bool, // true = re-send DNS query on next tick (after ARP reply)
     pub gateway_mac: [u8; 6], // MAC to use for resend
 }
 
@@ -142,20 +137,40 @@ impl SocketManager {
     pub fn new() -> Self {
         Self {
             pending_recvs: [
-                PendingRecv::new(), PendingRecv::new(), PendingRecv::new(), PendingRecv::new(),
-                PendingRecv::new(), PendingRecv::new(), PendingRecv::new(), PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
+                PendingRecv::new(),
             ],
             pending_resolves: [
-                PendingResolve::new(), PendingResolve::new(),
-                PendingResolve::new(), PendingResolve::new(),
+                PendingResolve::new(),
+                PendingResolve::new(),
+                PendingResolve::new(),
+                PendingResolve::new(),
             ],
             pending_connects: [
-                PendingConnect::new(), PendingConnect::new(), PendingConnect::new(), PendingConnect::new(),
-                PendingConnect::new(), PendingConnect::new(), PendingConnect::new(), PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
+                PendingConnect::new(),
             ],
             pending_icmps: [
-                PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
-                PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(), PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
+                PendingIcmp::new(),
             ],
             next_icmp_id: 1000,
             next_dns_id: 0xABCD,
@@ -185,18 +200,23 @@ impl SocketManager {
     ) -> Option<(u64, [u8; NetConnectReplyMsg::SIZE], usize)> {
         let msg = NetConnectMsg::from_bytes(payload)?;
         let now = atom_syscall::thread::get_ticks();
-        let pkt_len = tcp.connect_with_ip(
-            msg.socket_id,
-            src_ip,
-            msg.remote_ip,
-            msg.remote_port,
-            now,
-            out_pkt,
-        ).unwrap_or(0);
+        let pkt_len = tcp
+            .connect_with_ip(
+                msg.socket_id,
+                src_ip,
+                msg.remote_ip,
+                msg.remote_port,
+                now,
+                out_pkt,
+            )
+            .unwrap_or(0);
 
         if pkt_len == 0 {
             // Failed to build SYN — reply with error immediately
-            let reply = NetConnectReplyMsg { socket_id: msg.socket_id, error: 1 };
+            let reply = NetConnectReplyMsg {
+                socket_id: msg.socket_id,
+                error: 1,
+            };
             return Some((msg.reply_port, reply.to_bytes(), 0));
         }
 
@@ -215,12 +235,18 @@ impl SocketManager {
     }
 
     /// Called when TcpEvent::Connected fires — send the deferred NetConnectReply.
-    pub fn notify_connected(&mut self, socket_id: u32) -> Option<(u64, [u8; NetConnectReplyMsg::SIZE])> {
+    pub fn notify_connected(
+        &mut self,
+        socket_id: u32,
+    ) -> Option<(u64, [u8; NetConnectReplyMsg::SIZE])> {
         for pc in self.pending_connects.iter_mut() {
             if pc.in_use && pc.socket_id == socket_id {
                 let reply_port = pc.reply_port;
                 pc.in_use = false;
-                let reply = NetConnectReplyMsg { socket_id, error: 0 };
+                let reply = NetConnectReplyMsg {
+                    socket_id,
+                    error: 0,
+                };
                 return Some((reply_port, reply.to_bytes()));
             }
         }
@@ -243,7 +269,11 @@ impl SocketManager {
             Ok(len) => (data_len as u32, 0u32, len),
             Err(e) => (0, e, 0),
         };
-        let reply = NetSendReplyMsg { socket_id: msg.socket_id, sent, error };
+        let reply = NetSendReplyMsg {
+            socket_id: msg.socket_id,
+            sent,
+            error,
+        };
         Some((msg.reply_port, reply.to_bytes(), pkt_len))
     }
 
@@ -270,6 +300,18 @@ impl SocketManager {
                 Some((msg.reply_port, reply))
             }
             _ => {
+                if tcp.recv_eof(msg.socket_id) {
+                    return Some((
+                        msg.reply_port,
+                        NetRecvReplyMsg {
+                            socket_id: msg.socket_id,
+                            len: 0,
+                            error: 0,
+                            data: [0u8; 1024],
+                        },
+                    ));
+                }
+
                 // Store as pending recv
                 for pr in self.pending_recvs.iter_mut() {
                     if !pr.in_use {
@@ -295,7 +337,10 @@ impl SocketManager {
     ) -> Option<(u64, [u8; NetCloseReplyMsg::SIZE], usize)> {
         let msg = NetCloseMsg::from_bytes(payload)?;
         let pkt_len = tcp.close(msg.socket_id, src_ip, out_pkt).unwrap_or(0);
-        let reply = NetCloseReplyMsg { socket_id: msg.socket_id, error: 0 };
+        let reply = NetCloseReplyMsg {
+            socket_id: msg.socket_id,
+            error: 0,
+        };
         Some((msg.reply_port, reply.to_bytes(), pkt_len))
     }
 
@@ -367,14 +412,21 @@ impl SocketManager {
         if msg.dest_ip.family != 4 {
             return None;
         }
-        let dest_ip = u32::from_be_bytes([msg.dest_ip.data[0], msg.dest_ip.data[1], msg.dest_ip.data[2], msg.dest_ip.data[3]]);
+        let dest_ip = u32::from_be_bytes([
+            msg.dest_ip.data[0],
+            msg.dest_ip.data[1],
+            msg.dest_ip.data[2],
+            msg.dest_ip.data[3],
+        ]);
 
         // Find free slot
         for pi in self.pending_icmps.iter_mut() {
             if !pi.in_use {
                 let id = self.next_icmp_id;
                 self.next_icmp_id = self.next_icmp_id.wrapping_add(1);
-                if self.next_icmp_id < 1000 { self.next_icmp_id = 1000; }
+                if self.next_icmp_id < 1000 {
+                    self.next_icmp_id = 1000;
+                }
 
                 pi.reply_port = msg.reply_port;
                 pi.dest_ip = dest_ip;
@@ -453,7 +505,9 @@ impl SocketManager {
         const GRACE_PERIOD_TICKS: u64 = 50; // 500ms at 100Hz
 
         for pi in self.pending_icmps.iter_mut() {
-            if !pi.in_use { continue; }
+            if !pi.in_use {
+                continue;
+            }
 
             let elapsed = now_ticks.saturating_sub(pi.start_tick);
 
@@ -462,7 +516,10 @@ impl SocketManager {
                 pi.timed_out = true;
                 pi.completed_at = Some(now_ticks);
 
-                log(&format!("[netd] ICMP timeout: id=0x{:04x} seq={}", pi.identifier, pi.sequence));
+                log(&format!(
+                    "[netd] ICMP timeout: id=0x{:04x} seq={}",
+                    pi.identifier, pi.sequence
+                ));
 
                 let reply = NetIcmpEchoReplyMsg {
                     src_ip: NetIpAddr::ipv4(pi.dest_ip.to_be_bytes()),
@@ -516,6 +573,23 @@ impl SocketManager {
                 }
             }
         }
+
+        if tcp.recv_eof(socket_id) {
+            for pr in self.pending_recvs.iter_mut() {
+                if pr.in_use && pr.socket_id == socket_id {
+                    let reply_port = pr.reply_port;
+                    pr.in_use = false;
+                    let reply = NetRecvReplyMsg {
+                        socket_id,
+                        len: 0,
+                        error: 0,
+                        data: [0u8; 1024],
+                    };
+                    return Some((reply_port, reply));
+                }
+            }
+        }
+
         None
     }
 }

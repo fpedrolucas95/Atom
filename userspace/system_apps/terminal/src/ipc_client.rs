@@ -9,9 +9,9 @@
 // - Requests are sent as structured messages
 // - Responses are received and decoded
 
-use atom_syscall::ipc::{create_port, close_port, send, recv_with_timeout, PortId};
-use atom_syscall::thread::get_ticks;
 use atom_abi::PORT_FS_SERVICE;
+use atom_syscall::ipc::{close_port, create_port, recv_with_timeout, send, PortId};
+use atom_syscall::thread::get_ticks;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -60,10 +60,10 @@ pub enum MessageType {
 pub mod service_ports {
     use super::PortId;
 
-    pub const NAME_SERVICE: PortId = 1;        // namesvc (Port 1)
-    pub const SERVICE_MANAGER: PortId = 2;     // service_manager (Port 2)
-    pub const FILESYSTEM: PortId = 3;          // fsd (Port 3)
-    pub const BLOCK_SERVICE: PortId = 4;       // block service (Port 4)
+    pub const NAME_SERVICE: PortId = 1; // namesvc (Port 1)
+    pub const SERVICE_MANAGER: PortId = 2; // service_manager (Port 2)
+    pub const FILESYSTEM: PortId = 3; // fsd (Port 3)
+    pub const BLOCK_SERVICE: PortId = 4; // block service (Port 4)
     pub const DISPLAY_SERVER: PortId = 5;
     pub const INPUT_SERVER: PortId = 6;
 }
@@ -164,7 +164,7 @@ impl IpcClient {
     where
         F: FnMut(u64, &str, &str), // pid, name, state
     {
-        use atom_syscall::process::{ProcessInfo, list_processes};
+        use atom_syscall::process::{list_processes, ProcessInfo};
 
         // Allocate buffer for process list
         let mut buffer = [ProcessInfo::empty(); 32];
@@ -197,7 +197,7 @@ impl IpcClient {
     where
         F: FnMut(&str, u64, &str), // name, port, status
     {
-        use atom_syscall::process::{ProcessInfo, list_processes, thread_state};
+        use atom_syscall::process::{list_processes, thread_state, ProcessInfo};
 
         // Get process list to infer active services
         let mut buffer = [ProcessInfo::empty(); 32];
@@ -216,8 +216,12 @@ impl IpcClient {
 
             // Map process names to service names and ports
             match name {
-                "display" | "display_server" => callback("display_server", service_ports::DISPLAY_SERVER, status),
-                "keyboard" | "input" => callback("keyboard_driver", service_ports::INPUT_SERVER, status),
+                "display" | "display_server" => {
+                    callback("display_server", service_ports::DISPLAY_SERVER, status)
+                }
+                "keyboard" | "input" => {
+                    callback("keyboard_driver", service_ports::INPUT_SERVER, status)
+                }
                 "ui_shell" | "shell" => callback("ui_shell", 8, status),
                 "terminal" => callback("terminal", 9, status),
                 _ => {}
@@ -269,7 +273,7 @@ impl IpcClient {
     {
         match path {
             "/proc" => {
-                use atom_syscall::process::{ProcessInfo, list_processes};
+                use atom_syscall::process::{list_processes, ProcessInfo};
                 let mut buffer = [ProcessInfo::empty(); 32];
                 let count = list_processes(&mut buffer);
 
@@ -297,7 +301,7 @@ impl IpcClient {
     where
         F: FnMut(&str, bool, u64), // name, is_dir, size
     {
-        use libipc::messages::{MessageHeader, MessageType, FsReply, FsDirentIter};
+        use libipc::messages::{FsDirentIter, FsReply, MessageHeader, MessageType};
 
         if path.len() > 4096 {
             return Err("path too long");
@@ -330,16 +334,14 @@ impl IpcClient {
             return Err("response too short");
         }
 
-        let header = MessageHeader::from_bytes(&response_buf[..16])
-            .ok_or("invalid header")?;
+        let header = MessageHeader::from_bytes(&response_buf[..16]).ok_or("invalid header")?;
 
         if header.msg_type != MessageType::FsReaddirReply {
             return Err("wrong message type in reply");
         }
 
         // Parse FsReply (16 bytes: error + value)
-        let reply = FsReply::from_bytes(&response_buf[16..32])
-            .ok_or("invalid fs reply")?;
+        let reply = FsReply::from_bytes(&response_buf[16..32]).ok_or("invalid fs reply")?;
 
         if !reply.is_ok() {
             return Err("fs operation failed");
@@ -368,7 +370,7 @@ impl IpcClient {
     fn read_virtual_file(&self, path: &str, buffer: &mut [u8]) -> Option<usize> {
         match path {
             "/proc/version" | "/etc/version" => {
-                let content = b"OS:           Atom OS 0.1.0 (Helium)\nKernel:       0.1.0-microkernel\n";
+                let content = b"OS:           Atom OS 0.2.0 (Beryllium)\nKernel:       0.2.0-smp-microkernel\n";
                 let copy_len = content.len().min(buffer.len());
                 buffer[..copy_len].copy_from_slice(&content[..copy_len]);
                 return Some(copy_len);
@@ -460,7 +462,7 @@ impl IpcClient {
     /// Returns file metadata (size, is_dir, timestamps)
     /// Note: Requires fsd to be fully operational
     pub fn stat_file(&self, path: &str) -> Option<FileInfo> {
-        use libipc::messages::{MessageHeader, MessageType, FsReply, FsStatBuf};
+        use libipc::messages::{FsReply, FsStatBuf, MessageHeader, MessageType};
 
         if path.len() > 4096 {
             return None;

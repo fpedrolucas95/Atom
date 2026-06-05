@@ -189,11 +189,13 @@ struct SidebarItem {
 }
 
 const SIDEBAR_ITEMS: &[SidebarItem] = &[
-    SidebarItem { label: "Home",      path: "/home",   icon: "H" },
-    SidebarItem { label: "Documents", path: "/home/docs", icon: "D" },
-    SidebarItem { label: "Downloads", path: "/home/dl",   icon: "L" },
-    SidebarItem { label: "System",    path: "/",       icon: "S" },
-    SidebarItem { label: "Temporary", path: "/tmp",    icon: "T" },
+    SidebarItem { label: "Home",        path: "/user/home",   icon: "H" },
+    SidebarItem { label: "Apps",        path: "/apps",        icon: "A" },
+    SidebarItem { label: "User Apps",   path: "/apps/user",   icon: "U" },
+    SidebarItem { label: "System Apps", path: "/apps/system", icon: "S" },
+    SidebarItem { label: "Config",      path: "/user/config", icon: "C" },
+    SidebarItem { label: "Data",        path: "/user/data",   icon: "D" },
+    SidebarItem { label: "Root",        path: "/",            icon: "/" },
 ];
 
 // ============================================================================
@@ -237,7 +239,7 @@ impl FileManager {
             window_id, compositor_port, local_port,
             surface: Some(surface),
             width: w, height: h,
-            cwd: String::from("/home"),
+            cwd: String::from("/user/home"),
             history: Vec::new(),
             entries: Vec::new(),
             filtered_entries: Vec::new(),
@@ -253,31 +255,35 @@ impl FileManager {
             running: true,
             needs_redraw: true,
         };
-        fm.load_dir("/home");
+        fm.load_dir("/user/home");
         fm
     }
 
-    fn load_dir(&mut self, path: &str) {
-        self.entries.clear();
-        self.selected = None;
-        self.scroll_offset = 0;
-        
+    fn load_dir(&mut self, path: &str) -> bool {
         match Dir::open(path) {
             Ok(dir) => {
+                self.entries.clear();
+                self.selected = None;
+                self.scroll_offset = 0;
+
                 if let Ok(list) = dir.list() {
                     for de in list {
                         if de.name == "." || de.name == ".." { continue; }
                         self.entries.push(Entry::from_dir_entry(&de));
                     }
                 }
+
+                self.apply_filter();
+                self.status_msg = format!("{} items", self.filtered_entries.len());
+                self.needs_redraw = true;
+                true
             }
             Err(_) => {
                 self.status_msg = format!("Error: Could not open {}", path);
+                self.needs_redraw = true;
+                false
             }
         }
-        self.apply_filter();
-        self.status_msg = format!("{} items", self.filtered_entries.len());
-        self.needs_redraw = true;
     }
 
     fn apply_filter(&mut self) {
@@ -293,8 +299,11 @@ impl FileManager {
 
     fn navigate_to(&mut self, path: String) {
         let old = self.cwd.clone();
+        if !self.load_dir(&path) {
+            return;
+        }
+
         self.cwd = path.clone();
-        self.load_dir(&path);
         self.history.push(old);
         
         // Update sidebar selection
@@ -520,13 +529,10 @@ impl FileManager {
                     let idx = (row * cols + col) as usize;
                     if idx < self.filtered_entries.len() {
                         if self.selected == Some(idx) {
-                            let tick = get_ticks();
-                            if tick - self.last_click_tick < 50 { // Double click
-                                self.activate(idx);
-                            }
-                            self.last_click_tick = tick;
+                            self.activate(idx);
                         } else {
                             self.selected = Some(idx);
+                            self.last_click_idx = idx as i32;
                             self.last_click_tick = get_ticks();
                         }
                     }
@@ -535,13 +541,10 @@ impl FileManager {
                     let idx = ((my as u32 - LIST_HDR_H) / LIST_ROW_H) as usize;
                     if idx < self.filtered_entries.len() {
                         if self.selected == Some(idx) {
-                            let tick = get_ticks();
-                            if tick - self.last_click_tick < 50 {
-                                self.activate(idx);
-                            }
-                            self.last_click_tick = tick;
+                            self.activate(idx);
                         } else {
                             self.selected = Some(idx);
+                            self.last_click_idx = idx as i32;
                             self.last_click_tick = get_ticks();
                         }
                     }
@@ -552,6 +555,14 @@ impl FileManager {
     }
 
     fn handle_key(&mut self, ev: IpcKeyEvent) {
+        if ev.character == 10 || ev.character == 13 || ev.scancode == 0x1C {
+            if let Some(idx) = self.selected {
+                self.activate(idx);
+            }
+            self.needs_redraw = true;
+            return;
+        }
+
         // Simple search input — use ev.character for printable chars
         if ev.character >= 32 && ev.character <= 126 {
             self.search_query.push(ev.character as char);
@@ -575,10 +586,12 @@ impl FileManager {
             } else {
                 format!("{}/{}", self.cwd, entry.name)
             };
+            log(&format!("fileman: opening directory '{}'", new_path));
             self.navigate_to(new_path);
         } else {
             if entry.name.ends_with(".atxf") {
                 let path = self.full_path(entry_idx);
+                log(&format!("fileman: activating app '{}'", path));
                 self.status_msg = format!("Launching {}...", entry.name);
                 self.needs_redraw = true;
                 self.launch_app(&path);
@@ -649,8 +662,9 @@ impl FileManager {
 
     fn go_back(&mut self) {
         if let Some(prev) = self.history.pop() {
-            self.cwd = prev.clone();
-            self.load_dir(&prev);
+            if self.load_dir(&prev) {
+                self.cwd = prev;
+            }
         }
     }
 

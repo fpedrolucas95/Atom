@@ -2,18 +2,18 @@
 extern crate alloc;
 
 pub mod addr;
-pub mod socket;
+pub mod config;
 pub mod dns;
 pub mod http;
 pub mod icmp;
-pub mod config;
+pub mod socket;
 
 pub use addr::*;
-pub use socket::*;
+pub use config::*;
 pub use dns::*;
 pub use http::*;
 pub use icmp::*;
-pub use config::*;
+pub use socket::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NetError {

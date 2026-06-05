@@ -42,9 +42,11 @@ impl core::fmt::Display for IpAddr {
             Self::V4(b) => write!(f, "{}.{}.{}.{}", b[0], b[1], b[2], b[3]),
             Self::V6(b) => {
                 for i in 0..8 {
-                    let word = u16::from_be_bytes([b[i*2], b[i*2+1]]);
+                    let word = u16::from_be_bytes([b[i * 2], b[i * 2 + 1]]);
                     write!(f, "{:x}", word)?;
-                    if i < 7 { write!(f, ":")?; }
+                    if i < 7 {
+                        write!(f, ":")?;
+                    }
                 }
                 Ok(())
             }

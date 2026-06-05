@@ -286,28 +286,32 @@ impl E1000 {
     /// Poll for a received packet. Returns length or 0.
     fn recv(&mut self, out: &mut [u8; RX_BUF_SIZE]) -> usize {
         let next = (self.rx_tail + 1) % NUM_RX_DESC;
-        let desc = unsafe { &mut *self.rx_descs.add(next) };
+        let desc_ptr = unsafe { self.rx_descs.add(next) };
 
-        // Memory fence to ensure we see hardware writes to the descriptor
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        // Use read_volatile so the compiler always re-reads hardware-written memory.
+        // A plain field access through &mut may be optimised into a cached load.
+        let status = unsafe { core::ptr::read_volatile(&(*desc_ptr).status) };
 
-        if desc.status & RDESC_STA_DD == 0 {
+        if status & RDESC_STA_DD == 0 {
             return 0; // nothing yet
         }
 
-        // Check for errors
-        if desc.errors != 0 {
-            // Return descriptor to hardware even on error
-            desc.status = 0;
+        let errors = unsafe { core::ptr::read_volatile(&(*desc_ptr).errors) };
+        if errors != 0 {
+            log("nic_driver: RX descriptor has errors, discarding");
+            unsafe { core::ptr::write_volatile(&mut (*desc_ptr).status, 0u8) };
             self.rx_tail = next;
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
             self.write32(E1000_RDT, self.rx_tail as u32);
             return 0;
         }
 
-        let len = desc.length as usize;
+        let len = unsafe { core::ptr::read_volatile(&(*desc_ptr).length) } as usize;
         if len == 0 || len > RX_BUF_SIZE {
-            desc.status = 0;
+            log("nic_driver: RX descriptor length invalid");
+            unsafe { core::ptr::write_volatile(&mut (*desc_ptr).status, 0u8) };
             self.rx_tail = next;
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
             self.write32(E1000_RDT, self.rx_tail as u32);
             return 0;
         }
@@ -321,9 +325,8 @@ impl E1000 {
         out[..len].copy_from_slice(src);
 
         // Return descriptor to hardware
-        desc.status = 0;
+        unsafe { core::ptr::write_volatile(&mut (*desc_ptr).status, 0u8) };
         self.rx_tail = next;
-        // Fence to ensure descriptor write is visible before updating RDT
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         self.write32(E1000_RDT, self.rx_tail as u32);
 
@@ -498,25 +501,23 @@ fn main() -> ! {
     let mut rx_check_counter = 0u32;
 
     loop {
-        // Handle IPC (ring assignment from netd, IRQ notifications).
-        // timeout=5ms: block until a message arrives or rings need servicing.
-        // IRQ notifications wake this up immediately when a packet arrives.
-        let ports = [port];
-        if atom_syscall::ipc::wait_any(&ports, 5).is_ok() {
-            while let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
-                if header.msg_type == MessageType::NetAssignRings {
-                    let payload = get_payload(&ipc_buf, len);
-                    if let Some(msg) = NetAssignRingsMsg::from_bytes(payload) {
-                        setup_rings(&mut tx_consumer, &mut rx_producer, msg);
-                        log("nic_driver: rings configured, link up");
-                    }
-                } else if header.msg_type == MessageType::IrqNotification {
-                    // IRQ fired — clear it and process
-                    if irq_info.irq_cap != 0 {
-                        atom_syscall::raw::irq_ack(irq_info.irq_cap);
-                    }
-                    let _icr = nic.read32(E1000_ICR); // clears interrupt
+        // Check IPC non-blockingly. wait_any() with ANY timeout can block for
+        // ~1 second on miscalibrated timer hardware — that delay is longer than
+        // ICMP timeouts and causes all pings to report "timeout". Use
+        // try_recv_message() (non-blocking) instead and rely on yield_now() for
+        // CPU sharing. If an IRQ capability is available we still clear ICR.
+        while let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
+            if header.msg_type == MessageType::NetAssignRings {
+                let payload = get_payload(&ipc_buf, len);
+                if let Some(msg) = NetAssignRingsMsg::from_bytes(payload) {
+                    setup_rings(&mut tx_consumer, &mut rx_producer, msg);
+                    log("nic_driver: rings configured, link up");
                 }
+            } else if header.msg_type == MessageType::IrqNotification {
+                if irq_info.irq_cap != 0 {
+                    atom_syscall::raw::irq_ack(irq_info.irq_cap);
+                }
+                let _icr = nic.read32(E1000_ICR); // clears interrupt
             }
         }
 
@@ -538,27 +539,39 @@ fn main() -> ! {
 
         // Drain received packets → push to RX ring
         if let Some(ref mut rx) = rx_producer {
-            // Periodically log RX descriptor status for diagnostics
+            // Periodically log RX state for diagnostics
             rx_check_counter += 1;
             if rx_check_counter >= 5000 {
                 rx_check_counter = 0;
                 let rdh = nic.read32(E1000_RDH);
                 let rdt = nic.read32(E1000_RDT);
-                let status = nic.read32(E1000_STATUS);
+                let hw_status = nic.read32(E1000_STATUS);
                 let rctl = nic.read32(E1000_RCTL);
-                // Log if RDH != expected (hardware advanced past our tail)
+                let next_desc = (nic.rx_tail + 1) % NUM_RX_DESC;
+                let desc_status = unsafe {
+                    core::ptr::read_volatile(
+                        &(*nic.rx_descs.add(next_desc)).status
+                    )
+                };
+
+                // Build a compact status line without alloc
+                let link_up = hw_status & 0x2 != 0;
+                if !link_up {
+                    log("nic_driver: WARNING link down — RCTL disabled or link not set");
+                }
+                // Log RDH/RDT so we can tell if hardware is receiving
                 let expected_rdh = (nic.rx_tail + 1) % NUM_RX_DESC;
                 if rdh != expected_rdh as u32 {
-                    // Hardware has received packets we haven't processed
-                    log("nic_driver: RDH mismatch — hardware received packets");
+                    log("nic_driver: RDH mismatch — hardware has received packets");
+                } else if rdh == 0 && rdt == (NUM_RX_DESC as u32 - 1) {
+                    // Never moved from init state — no packets received at all
+                    log("nic_driver: DIAG RX idle — RDH=0 RDT=7 desc_status=0 (no packets)");
                 }
-                // Log link status
-                if status & 0x2 != 0 {
-                    // Link up bit
-                } else {
-                    log("nic_driver: WARNING link down");
+                // Log RCTL to confirm RX is enabled
+                if rctl & 0x2 == 0 {
+                    log("nic_driver: WARNING RCTL.EN=0 — receiver disabled!");
                 }
-                let _ = (rdh, rdt, rctl);
+                let _ = (rdh, rdt, rctl, desc_status);
             }
 
             loop {
@@ -581,6 +594,7 @@ fn main() -> ! {
             }
         }
 
+        // Yield to avoid spinning at 100% CPU when no work is available.
         atom_syscall::thread::yield_now();
     }
 }

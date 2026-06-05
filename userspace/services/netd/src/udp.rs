@@ -4,10 +4,10 @@ pub const UDP_HEADER_LEN: usize = 8;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct UdpHeader {
-    pub src_port: u16,  // big-endian
-    pub dst_port: u16,  // big-endian
-    pub length: u16,    // big-endian: header + payload
-    pub checksum: u16,  // big-endian (0 = disabled)
+    pub src_port: u16, // big-endian
+    pub dst_port: u16, // big-endian
+    pub length: u16,   // big-endian: header + payload
+    pub checksum: u16, // big-endian (0 = disabled)
 }
 
 /// Compute UDP checksum using IPv4 pseudo-header.
@@ -36,7 +36,11 @@ pub fn udp_checksum(src_ip: u32, dst_ip: u32, udp_segment: &[u8]) -> u16 {
     }
     let result = !(sum as u16);
     // RFC 768: if computed checksum is 0, transmit as 0xFFFF
-    if result == 0 { 0xFFFF } else { result }
+    if result == 0 {
+        0xFFFF
+    } else {
+        result
+    }
 }
 
 /// Build a UDP datagram into `out` with proper checksum.

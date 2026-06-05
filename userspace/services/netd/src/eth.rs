@@ -44,7 +44,11 @@ pub fn parse_eth_frame(data: &[u8]) -> Option<(EthHeader, &[u8])> {
     dst_mac.copy_from_slice(&data[0..6]);
     src_mac.copy_from_slice(&data[6..12]);
     let ethertype = u16::from_be_bytes([data[12], data[13]]);
-    let hdr = EthHeader { dst_mac, src_mac, ethertype };
+    let hdr = EthHeader {
+        dst_mac,
+        src_mac,
+        ethertype,
+    };
     Some((hdr, &data[ETH_HEADER_LEN..]))
 }
 

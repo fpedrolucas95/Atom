@@ -1,11 +1,8 @@
+use crate::{IpAddr, NetError};
 use alloc::vec::Vec;
 use atom_syscall::ipc::PortId;
-use libipc::messages::{
-    MessageType,
-    NetIcmpEchoRequestMsg, NetIcmpEchoReplyMsg,
-};
-use libipc::protocol::{send_message, get_payload};
-use crate::{NetError, IpAddr};
+use libipc::messages::{MessageType, NetIcmpEchoReplyMsg, NetIcmpEchoRequestMsg};
+use libipc::protocol::{get_payload, send_message};
 
 #[derive(Debug, Clone)]
 pub struct IcmpEchoReply {
@@ -54,8 +51,11 @@ pub fn net_icmp_echo(
                         let payload_bytes = get_payload(&response_buf, len);
                         if let Some(reply_msg) = NetIcmpEchoReplyMsg::from_bytes(payload_bytes) {
                             if reply_msg.error == 0 {
-                                let mut reply_payload = Vec::with_capacity(reply_msg.payload_len as usize);
-                                reply_payload.extend_from_slice(&reply_msg.payload[..reply_msg.payload_len as usize]);
+                                let mut reply_payload =
+                                    Vec::with_capacity(reply_msg.payload_len as usize);
+                                reply_payload.extend_from_slice(
+                                    &reply_msg.payload[..reply_msg.payload_len as usize],
+                                );
 
                                 let result = IcmpEchoReply {
                                     src_ip: IpAddr::from_net_ip_addr(reply_msg.src_ip),

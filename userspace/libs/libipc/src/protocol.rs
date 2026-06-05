@@ -131,13 +131,13 @@ pub fn lookup_service(name: &str) -> SyscallResult<PortId> {
         return Err(e);
     }
 
-    // Wait for response with reasonable timeout
-    // 10000 yields gives enough time for namesvc to process the lookup
-    // even if the system is busy initializing other services
+    // Wait for response. Poll with yields so namesvc can run on another CPU.
+    // 200000 yields gives ~200ms even on very slow scheduling paths, which is
+    // enough for namesvc to process the request under heavy boot load.
     let mut buffer = [0u8; 128];
     let mut result = Err(atom_syscall::SyscallError::TimedOut);
 
-    for _ in 0..10000 {
+    for _ in 0..200000u32 {
         if let Ok(Some((header, len))) = try_recv_message(reply_port, &mut buffer) {
             if header.msg_type == MessageType::NsResponse {
                 let payload = get_payload(&buffer, len);

@@ -25,14 +25,38 @@ impl BufPool {
         // Can't use array init with non-Copy in const, use manual init
         Self {
             bufs: [
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
-                PacketBuf::new(), PacketBuf::new(), PacketBuf::new(), PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
+                PacketBuf::new(),
             ],
         }
     }
@@ -59,11 +83,19 @@ impl BufPool {
 
     /// Get a reference to a buffer by index.
     pub fn get(&self, idx: usize) -> Option<&PacketBuf> {
-        if idx < 32 { Some(&self.bufs[idx]) } else { None }
+        if idx < 32 {
+            Some(&self.bufs[idx])
+        } else {
+            None
+        }
     }
 
     /// Get a mutable reference to a buffer by index.
     pub fn get_mut(&mut self, idx: usize) -> Option<&mut PacketBuf> {
-        if idx < 32 { Some(&mut self.bufs[idx]) } else { None }
+        if idx < 32 {
+            Some(&mut self.bufs[idx])
+        } else {
+            None
+        }
     }
 }

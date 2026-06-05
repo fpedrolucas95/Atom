@@ -101,12 +101,7 @@ fn write_arp_packet(pkt: &ArpPacket, out: &mut [u8]) -> usize {
 }
 
 /// Build an ARP request frame (Ethernet + ARP). Returns total length written to `out`.
-pub fn build_arp_request(
-    src_mac: [u8; 6],
-    src_ip: u32,
-    target_ip: u32,
-    out: &mut [u8],
-) -> usize {
+pub fn build_arp_request(src_mac: [u8; 6], src_ip: u32, target_ip: u32, out: &mut [u8]) -> usize {
     let pkt = ArpPacket {
         htype: 1,
         ptype: 0x0800,
@@ -164,5 +159,15 @@ pub fn parse_arp(data: &[u8]) -> Option<ArpPacket> {
     let mut tha = [0u8; 6];
     tha.copy_from_slice(&data[18..24]);
     let tpa = u32::from_be_bytes([data[24], data[25], data[26], data[27]]);
-    Some(ArpPacket { htype, ptype, hlen, plen, oper, sha, spa, tha, tpa })
+    Some(ArpPacket {
+        htype,
+        ptype,
+        hlen,
+        plen,
+        oper,
+        sha,
+        spa,
+        tha,
+        tpa,
+    })
 }

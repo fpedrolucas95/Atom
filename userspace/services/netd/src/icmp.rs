@@ -66,14 +66,10 @@ pub mod v6 {
 
 // Re-export v4 types as default for now to minimize breakage
 pub use v4::{
-    ICMPV4_ECHO_REQUEST as ICMP_ECHO_REQUEST,
-    ICMPV4_ECHO_REPLY as ICMP_ECHO_REPLY,
+    build_echo_request as build_icmp_echo_request, parse_icmp, Icmpv4Packet as IcmpPacket,
+    ICMPV4_ECHO_REPLY as ICMP_ECHO_REPLY, ICMPV4_ECHO_REQUEST as ICMP_ECHO_REQUEST,
     ICMPV4_HEADER_LEN as ICMP_HEADER_LEN,
-    Icmpv4Packet as IcmpPacket,
-    build_echo_request as build_icmp_echo_request,
-    parse_icmp,
 };
-
 
 #[cfg(test)]
 mod tests {
