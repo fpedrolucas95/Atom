@@ -1,7 +1,8 @@
+use crate::NetError;
+use alloc::string::String;
 use atom_syscall::ipc::PortId;
 use libipc::messages::{MessageType, NetResolveMsg, NetResolveReplyMsg};
-use libipc::protocol::{send_message, try_recv_message, get_payload};
-use crate::NetError;
+use libipc::protocol::{get_payload, send_message, try_recv_message};
 
 fn ipc_err(_e: atom_syscall::SyscallError) -> NetError {
     NetError::IpcError
@@ -52,7 +53,16 @@ pub fn net_resolve(netd_port: PortId, hostname: &str) -> Result<IpAddr, NetError
         return Ok(IpAddr::V4(octets));
     }
 
-    let hostname_bytes = hostname.as_bytes();
+    let mut normalized = String::new();
+    let query_name = if hostname.bytes().any(|b| b == b'.') {
+        hostname
+    } else {
+        normalized.push_str(hostname);
+        normalized.push_str(".com");
+        &normalized
+    };
+
+    let hostname_bytes = query_name.as_bytes();
     if hostname_bytes.len() > 255 {
         return Err(NetError::InvalidArgument);
     }

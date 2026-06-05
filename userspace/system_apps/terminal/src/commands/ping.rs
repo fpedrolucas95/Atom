@@ -1,9 +1,9 @@
 use crate::commands::{CommandContext, CommandResult};
 use crate::parser::ParsedCommand;
-use libnet::{net_resolve, net_icmp_echo, NetError};
-use libipc::protocol::lookup_service;
 use alloc::format;
 use alloc::vec::Vec;
+use libipc::protocol::lookup_service;
+use libnet::{net_icmp_echo, net_resolve, NetError};
 
 pub fn cmd_ping(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     if cmd.arg_count == 0 {
@@ -24,21 +24,29 @@ pub fn cmd_ping(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
                 if let Ok(val) = cmd.args[i + 1].parse::<u32>() {
                     count = val;
                     i += 2;
-                } else { i += 1; }
+                } else {
+                    i += 1;
+                }
             }
             "-i" if i + 1 < cmd.args.len() => {
                 if let Ok(val) = cmd.args[i + 1].parse::<u32>() {
                     interval_ms = val;
                     i += 2;
-                } else { i += 1; }
+                } else {
+                    i += 1;
+                }
             }
             "-t" if i + 1 < cmd.args.len() => {
                 if let Ok(val) = cmd.args[i + 1].parse::<u32>() {
                     timeout_ms = val;
                     i += 2;
-                } else { i += 1; }
+                } else {
+                    i += 1;
+                }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 

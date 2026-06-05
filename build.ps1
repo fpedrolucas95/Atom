@@ -48,7 +48,8 @@ $USERSPACE_APPS = @(
     "fileman",
     "fs_test",
     "hello_atxf",
-    "timesync"
+    "timesync",
+    "browser"
 )
 
 # -------------------------------------------------------------------------

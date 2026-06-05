@@ -4,7 +4,7 @@
 // All process information is obtained via IPC to the process manager service.
 
 use super::{CommandContext, CommandResult};
-use crate::parser::{ParsedCommand, parse_number};
+use crate::parser::{parse_number, ParsedCommand};
 use crate::window::Theme;
 
 /// ps command - list running processes
@@ -121,7 +121,10 @@ pub fn cmd_exec(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         arr
     };
 
-    match ctx.ipc.spawn_process(program, &args[..cmd.arg_count.saturating_sub(1)]) {
+    match ctx
+        .ipc
+        .spawn_process(program, &args[..cmd.arg_count.saturating_sub(1)])
+    {
         Some(pid) => {
             let mut msg = [0u8; 64];
             let mut pos = 0;
@@ -230,7 +233,7 @@ pub fn cmd_memory(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Com
     CommandResult::Ok
 }
 
-/// services command - list registered services 
+/// services command - list registered services
 pub fn cmd_services(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
     ctx.println("");
     ctx.println_colored("Registered Services", Theme::TEXT_INFO);
@@ -238,11 +241,11 @@ pub fn cmd_services(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> C
     ctx.println("");
     ctx.println("NAME                 PORT     STATUS");
     ctx.println("----                 ----     ------");
-    
+
     ctx.ipc.query_services(|name, port, status| {
         let mut line = [0u8; 64];
         let mut pos = 0;
-        
+
         // Name (20 chars)
         for byte in name.bytes() {
             if pos < 20 {
@@ -254,10 +257,10 @@ pub fn cmd_services(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> C
             line[pos] = b' ';
             pos += 1;
         }
-        
+
         line[pos] = b' ';
         pos += 1;
-        
+
         // Port (8 chars)
         let mut port_str = [0u8; 8];
         let port_len = format_number(port, &mut port_str);
@@ -269,7 +272,7 @@ pub fn cmd_services(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> C
             line[pos] = b' ';
             pos += 1;
         }
-        
+
         // Status
         for byte in status.bytes() {
             if pos < 60 {
@@ -277,9 +280,9 @@ pub fn cmd_services(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> C
                 pos += 1;
             }
         }
-        
+
         let line_str = unsafe { core::str::from_utf8_unchecked(&line[..pos]) };
-        
+
         // Color based on status
         if status == "active" {
             ctx.println_colored(line_str, Theme::TEXT_SUCCESS);
@@ -287,7 +290,7 @@ pub fn cmd_services(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> C
             ctx.println(line_str);
         }
     });
-    
+
     ctx.println("");
     CommandResult::Ok
 }

@@ -10,30 +10,30 @@ use atom_syscall::graphics::{Color, Framebuffer};
 pub struct Theme;
 impl Theme {
     // Window chrome colors
-    pub const WINDOW_BG: Color = Color::new(18, 20, 28);       // Deep dark terminal background
-    pub const WINDOW_BORDER: Color = Color::new(42, 48, 64);   // Subtle border
-    pub const TITLE_BAR_BG: Color = Color::new(24, 27, 36);    // Title bar background
+    pub const WINDOW_BG: Color = Color::new(18, 20, 28); // Deep dark terminal background
+    pub const WINDOW_BORDER: Color = Color::new(42, 48, 64); // Subtle border
+    pub const TITLE_BAR_BG: Color = Color::new(24, 27, 36); // Title bar background
     pub const TITLE_BAR_TEXT: Color = Color::new(180, 186, 200);
 
     // Terminal content colors
-    pub const TEXT_NORMAL: Color = Color::new(210, 215, 225);  // Default text
-    pub const TEXT_BRIGHT: Color = Color::WHITE;               // Bright/bold text
-    pub const TEXT_DIM: Color = Color::new(110, 118, 138);     // Dimmed text
-    pub const TEXT_ERROR: Color = Color::new(240, 85, 96);     // Error messages
-    pub const TEXT_SUCCESS: Color = Color::new(72, 199, 142);  // Success messages
-    pub const TEXT_INFO: Color = Color::new(86, 182, 245);     // Info messages
-    pub const TEXT_WARNING: Color = Color::new(245, 189, 65);  // Warning messages
+    pub const TEXT_NORMAL: Color = Color::new(210, 215, 225); // Default text
+    pub const TEXT_BRIGHT: Color = Color::WHITE; // Bright/bold text
+    pub const TEXT_DIM: Color = Color::new(110, 118, 138); // Dimmed text
+    pub const TEXT_ERROR: Color = Color::new(240, 85, 96); // Error messages
+    pub const TEXT_SUCCESS: Color = Color::new(72, 199, 142); // Success messages
+    pub const TEXT_INFO: Color = Color::new(86, 182, 245); // Info messages
+    pub const TEXT_WARNING: Color = Color::new(245, 189, 65); // Warning messages
 
     // Prompt colors
-    pub const PROMPT_USER: Color = Color::new(99, 143, 255);   // User part of prompt
-    pub const PROMPT_PATH: Color = Color::new(72, 199, 142);   // Path part of prompt
-    pub const PROMPT_SYMBOL: Color = Color::new(200, 160, 255);// $ or # symbol
+    pub const PROMPT_USER: Color = Color::new(99, 143, 255); // User part of prompt
+    pub const PROMPT_PATH: Color = Color::new(72, 199, 142); // Path part of prompt
+    pub const PROMPT_SYMBOL: Color = Color::new(200, 160, 255); // $ or # symbol
 
     // Cursor
-    pub const CURSOR_BG: Color = Color::new(99, 143, 255);     // Cursor block color (accent)
+    pub const CURSOR_BG: Color = Color::new(99, 143, 255); // Cursor block color (accent)
 
     // Selection (future use)
-    pub const SELECTION_BG: Color = Color::new(50, 70, 110);   // Selected text background
+    pub const SELECTION_BG: Color = Color::new(50, 70, 110); // Selected text background
 
     // Separator / divider lines in help output
     pub const SEPARATOR: Color = Color::new(48, 54, 72);
@@ -205,7 +205,15 @@ impl TerminalWindow {
     }
 
     /// Draw a string at the given row/column position
-    pub fn draw_text(&self, fb: &Framebuffer, row: u32, col: u32, text: &str, fg: Color, bg: Color) {
+    pub fn draw_text(
+        &self,
+        fb: &Framebuffer,
+        row: u32,
+        col: u32,
+        text: &str,
+        fg: Color,
+        bg: Color,
+    ) {
         let cfg = &self.config;
         let x = cfg.content_x() + col * cfg.char_width;
         let y = cfg.content_y() + row * cfg.char_height;

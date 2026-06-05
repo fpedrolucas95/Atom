@@ -31,11 +31,11 @@ mod ipc_client;
 mod parser;
 mod window;
 
-use core::panic::PanicInfo;
+use alloc::boxed::Box;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
+use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use alloc::boxed::Box;
 
 // ============================================================================
 // Simple Bump Allocator for Userspace
@@ -73,9 +73,11 @@ unsafe impl GlobalAlloc for BumpAllocator {
                 return core::ptr::null_mut();
             }
 
-            if self.next.compare_exchange_weak(
-                current, new_next, Ordering::SeqCst, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .next
+                .compare_exchange_weak(current, new_next, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
                 return (self.heap.get() as *mut u8).add(aligned);
             }
         }
@@ -94,20 +96,18 @@ fn alloc_error(_layout: Layout) -> ! {
     loop {}
 }
 
-use atom_syscall::graphics::SharedSurface;
-use atom_syscall::ipc::{create_port, try_recv, send, wait_any, PortId};
-use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
+use atom_syscall::graphics::SharedSurface;
+use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
+use atom_syscall::thread::{exit, yield_now};
 
 use libipc::messages::{
-    MessageType, MessageHeader,
+    KeyEvent as IpcKeyEvent, MessageHeader, MessageType, MouseButtonEvent, MouseMoveEvent,
     SurfaceAssignMsg, SurfacePresentMsg,
-    KeyEvent as IpcKeyEvent,
-    MouseButtonEvent, MouseMoveEvent,
 };
 
-use buffer::{DisplayBuffer, InputBuffer, History};
-use commands::{CommandContext, CommandResult, execute};
+use buffer::{DisplayBuffer, History, InputBuffer};
+use commands::{execute, CommandContext, CommandResult};
 use input::{InputHandler, KeyEvent};
 use ipc_client::IpcClient;
 use parser::parse_command;
@@ -160,10 +160,13 @@ struct Terminal {
     sb_drag_start_off: usize,
 }
 
-
-
 impl Terminal {
-    fn new(window_id: u32, compositor_port: PortId, local_port: PortId, surface: SharedSurface) -> Self {
+    fn new(
+        window_id: u32,
+        compositor_port: PortId,
+        local_port: PortId,
+        surface: SharedSurface,
+    ) -> Self {
         let width = surface.width();
         let height = surface.height();
         Self {
@@ -267,8 +270,10 @@ impl Terminal {
 
     fn show_welcome(&mut self) {
         self.display.writeln("", Theme::TEXT_NORMAL);
-        self.display.writeln("  Atom Terminal v0.2.0", Theme::TEXT_INFO);
-        self.display.writeln("  Type 'help' for available commands.", Theme::TEXT_DIM);
+        self.display
+            .writeln("  Atom Terminal v0.2.0", Theme::TEXT_INFO);
+        self.display
+            .writeln("  Type 'help' for available commands.", Theme::TEXT_DIM);
         self.display.writeln("", Theme::TEXT_NORMAL);
         self.display_dirty = true;
     }
@@ -409,47 +414,45 @@ impl Terminal {
                 self.input_dirty = true;
             }
 
-            KeyEvent::Control(ch) => {
-                match ch {
-                    '\x03' => {
-                        self.display.writeln("^C", Theme::TEXT_DIM);
-                        self.input.clear();
-                        self.show_prompt();
-                        self.display_dirty = true;
-                        self.input_dirty = true;
-                    }
-                    '\x04' => {
-                        if self.input.is_empty() {
-                            self.running = false;
-                        }
-                    }
-                    '\x0C' => {
-                        self.display.clear();
-                        self.show_prompt();
-                        self.display_dirty = true;
-                        self.input_dirty = true;
-                    }
-                    '\x01' => {
-                        self.input.cursor_home();
-                        self.input_dirty = true;
-                    }
-                    '\x05' => {
-                        self.input.cursor_end();
-                        self.input_dirty = true;
-                    }
-                    '\x15' => {
-                        self.input.clear();
-                        self.input_dirty = true;
-                    }
-                    '\x0B' => {
-                        while self.input.cursor() < self.input.len() {
-                            self.input.delete();
-                        }
-                        self.input_dirty = true;
-                    }
-                    _ => {}
+            KeyEvent::Control(ch) => match ch {
+                '\x03' => {
+                    self.display.writeln("^C", Theme::TEXT_DIM);
+                    self.input.clear();
+                    self.show_prompt();
+                    self.display_dirty = true;
+                    self.input_dirty = true;
                 }
-            }
+                '\x04' => {
+                    if self.input.is_empty() {
+                        self.running = false;
+                    }
+                }
+                '\x0C' => {
+                    self.display.clear();
+                    self.show_prompt();
+                    self.display_dirty = true;
+                    self.input_dirty = true;
+                }
+                '\x01' => {
+                    self.input.cursor_home();
+                    self.input_dirty = true;
+                }
+                '\x05' => {
+                    self.input.cursor_end();
+                    self.input_dirty = true;
+                }
+                '\x15' => {
+                    self.input.clear();
+                    self.input_dirty = true;
+                }
+                '\x0B' => {
+                    while self.input.cursor() < self.input.len() {
+                        self.input.delete();
+                    }
+                    self.input_dirty = true;
+                }
+                _ => {}
+            },
 
             _ => {}
         }
@@ -507,8 +510,7 @@ impl Terminal {
         // dy > 0 → dragged down → thumb moves toward bottom → view_offset decreases.
         let dy = y - self.sb_drag_start_y;
         let delta = dy * max_off / track_h;
-        let new_off = (self.sb_drag_start_off as i32 - delta)
-            .clamp(0, max_off) as usize;
+        let new_off = (self.sb_drag_start_off as i32 - delta).clamp(0, max_off) as usize;
 
         self.display.set_view_offset(new_off);
         self.display_dirty = true;
@@ -539,11 +541,18 @@ impl Terminal {
                 if let Some(line) = self.display.get_line_at_view(row) {
                     for col in 0..cols {
                         if let Some(cell) = line.get(col) {
-                            self.draw_char(surface, row as u32, col as u32,
-                                           cell.ch, cell.fg, cell.bg);
+                            self.draw_char(
+                                surface, row as u32, col as u32, cell.ch, cell.fg, cell.bg,
+                            );
                         } else {
-                            self.draw_char(surface, row as u32, col as u32,
-                                           b' ', Theme::TEXT_NORMAL, Theme::WINDOW_BG);
+                            self.draw_char(
+                                surface,
+                                row as u32,
+                                col as u32,
+                                b' ',
+                                Theme::TEXT_NORMAL,
+                                Theme::WINDOW_BG,
+                            );
                         }
                     }
                 } else {
@@ -568,8 +577,14 @@ impl Terminal {
                     if i == cursor_pos {
                         self.draw_char_with_cursor(surface, input_row as u32, col as u32, byte);
                     } else {
-                        self.draw_char(surface, input_row as u32, col as u32,
-                                       byte, Theme::TEXT_NORMAL, Theme::WINDOW_BG);
+                        self.draw_char(
+                            surface,
+                            input_row as u32,
+                            col as u32,
+                            byte,
+                            Theme::TEXT_NORMAL,
+                            Theme::WINDOW_BG,
+                        );
                     }
                 }
             }
@@ -625,7 +640,8 @@ impl Terminal {
         let present_msg = SurfacePresentMsg {
             window_id: self.window_id,
         };
-        let header = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
+        let header =
+            MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
 
         let header_bytes = header.to_bytes();
         let payload_bytes = present_msg.to_bytes();
@@ -639,11 +655,15 @@ impl Terminal {
 
     // ── Draw primitives ───────────────────────────────────────────────────────
 
-    fn draw_char(&self, surface: &SharedSurface, row: u32, col: u32,
-                 ch: u8,
-                 fg: atom_syscall::graphics::Color,
-                 bg: atom_syscall::graphics::Color)
-    {
+    fn draw_char(
+        &self,
+        surface: &SharedSurface,
+        row: u32,
+        col: u32,
+        ch: u8,
+        fg: atom_syscall::graphics::Color,
+        bg: atom_syscall::graphics::Color,
+    ) {
         let x = col * self.char_width;
         let y = row * self.char_height;
         surface.fill_rect(x, y, self.char_width, self.char_height, bg);
@@ -764,16 +784,14 @@ impl Terminal {
                     let payload_start = MessageHeader::SIZE;
                     if let Some(msg) = SurfaceAssignMsg::from_bytes(&msg_buffer[payload_start..]) {
                         log("Terminal: Received new surface assignment");
-                        if let Ok(new_surface) = SharedSurface::from_region(
-                            msg.region_id, msg.width, msg.height)
+                        if let Ok(new_surface) =
+                            SharedSurface::from_region(msg.region_id, msg.width, msg.height)
                         {
                             self.surface = Some(new_surface);
                             self.surface_width = msg.width;
                             self.surface_height = msg.height;
-                            self.display.set_dimensions(
-                                self.rows() as usize,
-                                self.cols() as usize,
-                            );
+                            self.display
+                                .set_dimensions(self.rows() as usize, self.cols() as usize);
                             self.full_redraw_needed = true;
                         }
                     }
@@ -781,7 +799,9 @@ impl Terminal {
                 MessageType::KeyPress => {
                     let payload_start = MessageHeader::SIZE;
                     if len >= payload_start + 3 {
-                        if let Some(ipc_event) = IpcKeyEvent::from_bytes(&msg_buffer[payload_start..]) {
+                        if let Some(ipc_event) =
+                            IpcKeyEvent::from_bytes(&msg_buffer[payload_start..])
+                        {
                             if let Some(event) = self.convert_ipc_key_event(&ipc_event) {
                                 self.handle_key(event);
                             }
@@ -919,8 +939,6 @@ fn main() -> ! {
 
     exit(0);
 }
-
-
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {

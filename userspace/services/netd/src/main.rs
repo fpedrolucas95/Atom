@@ -8,14 +8,14 @@
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
 use alloc::format;
 use atom_syscall::debug::log;
-use libring::{RingHeader, RingEntry, RingProducer, RingConsumer};
-use libipc::protocol::{register_service, lookup_service, send_message, try_recv_message, get_payload};
-use libipc::messages::{
-    MessageType, NetAssignRingsMsg, NetDriverReadyMsg,
+use core::panic::PanicInfo;
+use libipc::messages::{MessageType, NetAssignRingsMsg, NetDriverReadyMsg};
+use libipc::protocol::{
+    get_payload, lookup_service, register_service, send_message, try_recv_message,
 };
+use libring::{RingConsumer, RingEntry, RingHeader, RingProducer};
 
 mod allocator {
     use core::alloc::{GlobalAlloc, Layout};
@@ -43,7 +43,9 @@ mod allocator {
             let heap_start = HEAP.data.get() as *mut u8;
             let current = *next;
             let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-            if aligned + layout.size() > HEAP_SIZE { return null_mut(); }
+            if aligned + layout.size() > HEAP_SIZE {
+                return null_mut();
+            }
             *next = aligned + layout.size();
             heap_start.add(aligned)
         }
@@ -54,27 +56,27 @@ mod allocator {
     static ALLOCATOR: BumpAllocator = BumpAllocator;
 }
 
-mod config;
-mod buf;
-mod eth;
 mod arp;
-mod ip;
-mod icmp;
-mod udp;
-mod tcp;
+mod buf;
+mod config;
 mod dns;
+mod eth;
+mod icmp;
+mod ip;
 mod socket;
+mod tcp;
+mod udp;
 
-use config::NetConfig;
+use arp::{build_arp_reply, build_arp_request, parse_arp, ArpTable, ARP_REPLY, ARP_REQUEST};
 use buf::BufPool;
-use arp::{ArpTable, parse_arp, build_arp_reply, build_arp_request, ARP_REQUEST, ARP_REPLY};
+use config::NetConfig;
+use dns::{build_dns_query, parse_dns_response, DnsCache};
 use eth::{build_eth_frame, parse_eth_frame};
-use ip::{build_ipv4, parse_ipv4, next_hop, IP_PROTO_ICMP, IP_PROTO_TCP, IP_PROTO_UDP};
 use icmp::{build_icmp_echo_request, parse_icmp, ICMP_ECHO_REPLY};
-use udp::{build_udp, build_udp_with_checksum, parse_udp};
-use tcp::{TcpManager, TcpEvent, parse_tcp};
-use dns::{DnsCache, build_dns_query, parse_dns_response};
+use ip::{build_ipv4, next_hop, parse_ipv4, IP_PROTO_ICMP, IP_PROTO_TCP, IP_PROTO_UDP};
 use socket::SocketManager;
+use tcp::{parse_tcp, TcpEvent, TcpManager};
+use udp::{build_udp, build_udp_with_checksum, parse_udp};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -109,18 +111,23 @@ fn main() -> ! {
         Ok(id) => id,
         Err(_) => {
             log("netd: FAILED to create shared region");
-            loop { atom_syscall::thread::sleep_ms(1000); }
+            loop {
+                atom_syscall::thread::sleep_ms(1000);
+            }
         }
     };
 
     let va = match atom_syscall::shared_mem::map_region(
-        region_id, 0,
+        region_id,
+        0,
         atom_syscall::shared_mem::RegionFlags::READ | atom_syscall::shared_mem::RegionFlags::WRITE,
     ) {
         Ok(v) => v,
         Err(_) => {
             log("netd: FAILED to map shared region");
-            loop { atom_syscall::thread::sleep_ms(1000); }
+            loop {
+                atom_syscall::thread::sleep_ms(1000);
+            }
         }
     };
 
@@ -135,21 +142,21 @@ fn main() -> ! {
         (*rx_header_ptr).capacity = ring_capacity;
     }
 
-    let mut tx_producer = RingProducer::new(
-        unsafe { &*tx_header_ptr },
-        unsafe { core::slice::from_raw_parts_mut(tx_entries_ptr, ring_capacity) },
-    );
-    let mut rx_consumer = RingConsumer::new(
-        unsafe { &*rx_header_ptr },
-        unsafe { core::slice::from_raw_parts(rx_entries_ptr, ring_capacity) },
-    );
+    let mut tx_producer = RingProducer::new(unsafe { &*tx_header_ptr }, unsafe {
+        core::slice::from_raw_parts_mut(tx_entries_ptr, ring_capacity)
+    });
+    let mut rx_consumer = RingConsumer::new(unsafe { &*rx_header_ptr }, unsafe {
+        core::slice::from_raw_parts(rx_entries_ptr, ring_capacity)
+    });
 
     // ── 2. Register IPC port ──────────────────────────────────────────────────
     let port = match atom_syscall::ipc::create_port() {
         Ok(p) => p,
         Err(_) => {
             log("netd: FAILED to create port");
-            loop { atom_syscall::thread::sleep_ms(1000); }
+            loop {
+                atom_syscall::thread::sleep_ms(1000);
+            }
         }
     };
     if register_service("netd", port).is_err() {
@@ -172,7 +179,12 @@ fn main() -> ! {
         region_id,
         ring_capacity: ring_capacity as u32,
     };
-    send_message(driver_port, MessageType::NetAssignRings, &assign_msg.to_bytes()).ok();
+    send_message(
+        driver_port,
+        MessageType::NetAssignRings,
+        &assign_msg.to_bytes(),
+    )
+    .ok();
     log("netd: rings assigned to nic_driver");
 
     // ── 4. Wait for NetDriverReady with MAC ───────────────────────────────────
@@ -208,9 +220,22 @@ fn main() -> ! {
         let mut icmp_buf = [0u8; 8];
         let icmp_len = build_icmp_echo_request(1, 1, &[], &mut icmp_buf);
         let mut ip_buf = [0u8; 64];
-        let ip_len = build_ipv4(cfg.own_ip, cfg.gateway, IP_PROTO_ICMP, 64, &icmp_buf[..icmp_len], &mut ip_buf);
+        let ip_len = build_ipv4(
+            cfg.own_ip,
+            cfg.gateway,
+            IP_PROTO_ICMP,
+            64,
+            &icmp_buf[..icmp_len],
+            &mut ip_buf,
+        );
         let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-        let eth_len = build_eth_frame(broadcast, cfg.own_mac, 0x0800, &ip_buf[..ip_len], &mut pkt_buf);
+        let eth_len = build_eth_frame(
+            broadcast,
+            cfg.own_mac,
+            0x0800,
+            &ip_buf[..ip_len],
+            &mut pkt_buf,
+        );
         push_to_tx(&mut tx_producer, &pkt_buf[..eth_len]);
         log("netd: sent ICMP ping to gateway");
     }
@@ -264,21 +289,27 @@ fn main() -> ! {
                     if dns_len > 0 {
                         let mut udp_buf = [0u8; 600];
                         let udp_len = build_udp_with_checksum(
-                            cfg.own_ip, cfg.dns_server,
-                            49000, 53,
+                            cfg.own_ip,
+                            cfg.dns_server,
+                            49000,
+                            53,
                             &dns_buf[..dns_len],
                             &mut udp_buf,
                         );
                         let mut ip_buf = [0u8; 700];
                         let ip_len = build_ipv4(
-                            cfg.own_ip, cfg.dns_server,
-                            IP_PROTO_UDP, 64,
+                            cfg.own_ip,
+                            cfg.dns_server,
+                            IP_PROTO_UDP,
+                            64,
                             &udp_buf[..udp_len],
                             &mut ip_buf,
                         );
                         let mut eth_buf = [0u8; 800];
                         let eth_len = build_eth_frame(
-                            gateway_mac, cfg.own_mac, 0x0800,
+                            gateway_mac,
+                            cfg.own_mac,
+                            0x0800,
                             &ip_buf[..ip_len],
                             &mut eth_buf,
                         );
@@ -301,6 +332,7 @@ fn main() -> ! {
                 &mut tcp_mgr,
                 &mut dns_cache,
                 &mut sock_mgr,
+                &mut arp_table,
                 &mut tx_producer,
             );
             did_work = true;
@@ -322,8 +354,36 @@ fn main() -> ! {
         let mut tcp_out = [0u8; 1600];
         if let Some((pkt_len, event)) = tcp_mgr.tick(cfg.own_ip, now, &mut tcp_out) {
             if pkt_len > 0 {
-                // Push the raw TCP segment (tick already built it with IP context)
-                push_to_tx(&mut tx_producer, &tcp_out[..pkt_len]);
+                let socket_id = match event {
+                    TcpEvent::ConnectTimeout(sid)
+                    | TcpEvent::Connected(sid)
+                    | TcpEvent::AckOnly(sid)
+                    | TcpEvent::DataReceived(sid)
+                    | TcpEvent::Closed(sid) => sid,
+                };
+                if let Some(sock) = tcp_mgr.get_socket(socket_id) {
+                    let remote_ip = sock.remote_ip;
+                    let hop = next_hop(remote_ip, cfg.own_ip, cfg.netmask, cfg.gateway);
+                    let dst_mac = get_or_broadcast_mac(hop, &arp_table, &mut tx_producer, &cfg);
+                    let mut ip_buf = [0u8; 1600];
+                    let ip_len = build_ipv4(
+                        cfg.own_ip,
+                        remote_ip,
+                        IP_PROTO_TCP,
+                        64,
+                        &tcp_out[..pkt_len],
+                        &mut ip_buf,
+                    );
+                    let mut eth_buf = [0u8; 1600];
+                    let eth_len = build_eth_frame(
+                        dst_mac,
+                        cfg.own_mac,
+                        0x0800,
+                        &ip_buf[..ip_len],
+                        &mut eth_buf,
+                    );
+                    push_to_tx(&mut tx_producer, &eth_buf[..eth_len]);
+                }
             }
             match event {
                 TcpEvent::ConnectTimeout(sid) => {
@@ -370,11 +430,28 @@ fn dispatch_rx(
                 if arp_pkt.oper == ARP_REPLY {
                     log("netd: ARP reply received, updating table");
                     arp_table.insert(arp_pkt.spa, arp_pkt.sha, now);
+
+                    let dns_hop = next_hop(cfg.dns_server, cfg.own_ip, cfg.netmask, cfg.gateway);
+                    if arp_pkt.spa == dns_hop {
+                        for pr in sock_mgr.pending_resolves.iter_mut() {
+                            if pr.in_use && !pr.needs_resend {
+                                pr.needs_resend = true;
+                                pr.gateway_mac = arp_pkt.sha;
+                                log("netd: marked DNS query for resend after ARP reply");
+                            }
+                        }
+                    }
                 } else if arp_pkt.oper == ARP_REQUEST && arp_pkt.tpa == cfg.own_ip {
                     log("netd: ARP request for our IP, sending reply");
                     // Reply to ARP request for our IP
                     let mut out = [0u8; 64];
-                    let len = build_arp_reply(cfg.own_mac, cfg.own_ip, arp_pkt.sha, arp_pkt.spa, &mut out);
+                    let len = build_arp_reply(
+                        cfg.own_mac,
+                        cfg.own_ip,
+                        arp_pkt.sha,
+                        arp_pkt.spa,
+                        &mut out,
+                    );
                     push_to_tx(tx_producer, &out[..len]);
 
                     // After sending ARP reply, slirp now knows our MAC.
@@ -413,7 +490,12 @@ fn dispatch_rx(
                                     icmp_payload,
                                 ) {
                                     IcmpMatchResult::Matched(reply_port, reply_bytes) => {
-                                        send_message(reply_port, MessageType::NetIcmpEchoReply, &reply_bytes).ok();
+                                        send_message(
+                                            reply_port,
+                                            MessageType::NetIcmpEchoReply,
+                                            &reply_bytes,
+                                        )
+                                        .ok();
                                     }
                                     IcmpMatchResult::Duplicate => {
                                         log(&format!("[netd] Duplicate ICMP reply ignored: id=0x{:04x} seq={}", icmp_pkt.id, icmp_pkt.seq));
@@ -447,7 +529,8 @@ fn dispatch_rx(
                                             reply_port,
                                             MessageType::NetResolveReply,
                                             &reply_bytes,
-                                        ).ok();
+                                        )
+                                        .ok();
                                     } else {
                                         log(&format!("[netd] Duplicate or late DNS response ignored: id=0x{:04x}", dns_resp.id));
                                     }
@@ -476,6 +559,7 @@ fn dispatch_rx(
                                         // data_offset=5 means 20-byte header
                                         let payload_in_resp = match &event {
                                             TcpEvent::Connected(_) => 0,
+                                            TcpEvent::AckOnly(_) => 0,
                                             TcpEvent::DataReceived(_) => 0,
                                             TcpEvent::Closed(_) => 0,
                                             TcpEvent::ConnectTimeout(_) => 0,
@@ -490,17 +574,21 @@ fn dispatch_rx(
                                     // Wrap in IPv4
                                     let mut ip_buf = [0u8; 1600];
                                     let ip_len = build_ipv4(
-                                        ip_hdr.dst, ip_hdr.src,
-                                        IP_PROTO_TCP, 64,
+                                        ip_hdr.dst,
+                                        ip_hdr.src,
+                                        IP_PROTO_TCP,
+                                        64,
                                         &out_buf[..tcp_resp_len],
                                         &mut ip_buf,
                                     );
                                     // Wrap in Ethernet
-                                    let dst_mac = arp_table.lookup(ip_hdr.src)
-                                        .unwrap_or(eth_hdr.src_mac);
+                                    let dst_mac =
+                                        arp_table.lookup(ip_hdr.src).unwrap_or(eth_hdr.src_mac);
                                     let mut eth_buf = [0u8; 1600];
                                     let eth_len = build_eth_frame(
-                                        dst_mac, cfg.own_mac, 0x0800,
+                                        dst_mac,
+                                        cfg.own_mac,
+                                        0x0800,
                                         &ip_buf[..ip_len],
                                         &mut eth_buf,
                                     );
@@ -511,25 +599,6 @@ fn dispatch_rx(
                                 match event {
                                     TcpEvent::Connected(sid) => {
                                         log("netd: TCP SYN-ACK received, sending ACK and notifying app");
-                                        // Send the ACK that on_rx built in out_buf
-                                        if tcp_resp_len > 0 {
-                                            let mut ip_buf = [0u8; 1600];
-                                            let ip_len = build_ipv4(
-                                                ip_hdr.dst, ip_hdr.src,
-                                                IP_PROTO_TCP, 64,
-                                                &out_buf[..tcp_resp_len],
-                                                &mut ip_buf,
-                                            );
-                                            let dst_mac = arp_table.lookup(ip_hdr.src)
-                                                .unwrap_or(eth_hdr.src_mac);
-                                            let mut eth_buf = [0u8; 1600];
-                                            let eth_len = build_eth_frame(
-                                                dst_mac, cfg.own_mac, 0x0800,
-                                                &ip_buf[..ip_len],
-                                                &mut eth_buf,
-                                            );
-                                            push_to_tx(tx_producer, &eth_buf[..eth_len]);
-                                        }
                                         // Notify the app that was waiting for connect
                                         if let Some((reply_port, reply_bytes)) =
                                             sock_mgr.notify_connected(sid)
@@ -538,18 +607,24 @@ fn dispatch_rx(
                                                 reply_port,
                                                 MessageType::NetConnectReply,
                                                 &reply_bytes,
-                                            ).ok();
+                                            )
+                                            .ok();
                                         }
                                     }
                                     TcpEvent::DataReceived(sid) => {
                                         if let Some((reply_port, reply_msg)) =
                                             sock_mgr.notify_data_received(sid, tcp_mgr)
                                         {
-                                            send_message(
+                                            if let Err(e) = send_message(
                                                 reply_port,
                                                 MessageType::NetRecvReply,
                                                 &reply_msg.to_bytes(),
-                                            ).ok();
+                                            ) {
+                                                log(&alloc::format!(
+                                                    "netd: failed to deliver NetRecvReply: {:?}",
+                                                    e
+                                                ));
+                                            }
                                         }
                                     }
                                     TcpEvent::Closed(sid) => {
@@ -580,6 +655,7 @@ fn handle_ipc(
     tcp_mgr: &mut TcpManager,
     dns_cache: &mut DnsCache,
     sock_mgr: &mut SocketManager,
+    arp_table: &mut ArpTable,
     tx_producer: &mut RingProducer,
 ) {
     match msg_type {
@@ -597,17 +673,21 @@ fn handle_ipc(
                     // Wrap TCP SYN in IPv4 + Ethernet
                     if let Some(msg) = libipc::messages::NetConnectMsg::from_bytes(payload) {
                         let hop = next_hop(msg.remote_ip, cfg.own_ip, cfg.netmask, cfg.gateway);
-                        let dst_mac = get_or_broadcast_mac(hop, tx_producer, cfg);
+                        let dst_mac = get_or_broadcast_mac(hop, arp_table, tx_producer, cfg);
                         let mut ip_buf = [0u8; 1600];
                         let ip_len = build_ipv4(
-                            cfg.own_ip, msg.remote_ip,
-                            IP_PROTO_TCP, 64,
+                            cfg.own_ip,
+                            msg.remote_ip,
+                            IP_PROTO_TCP,
+                            64,
                             &out_pkt[..pkt_len],
                             &mut ip_buf,
                         );
                         let mut eth_buf = [0u8; 1600];
                         let eth_len = build_eth_frame(
-                            dst_mac, cfg.own_mac, 0x0800,
+                            dst_mac,
+                            cfg.own_mac,
+                            0x0800,
                             &ip_buf[..ip_len],
                             &mut eth_buf,
                         );
@@ -630,17 +710,21 @@ fn handle_ipc(
                         if let Some(sock) = tcp_mgr.get_socket(msg.socket_id) {
                             let remote_ip = sock.remote_ip;
                             let hop = next_hop(remote_ip, cfg.own_ip, cfg.netmask, cfg.gateway);
-                            let dst_mac = get_or_broadcast_mac(hop, tx_producer, cfg);
+                            let dst_mac = get_or_broadcast_mac(hop, arp_table, tx_producer, cfg);
                             let mut ip_buf = [0u8; 1600];
                             let ip_len = build_ipv4(
-                                cfg.own_ip, remote_ip,
-                                IP_PROTO_TCP, 64,
+                                cfg.own_ip,
+                                remote_ip,
+                                IP_PROTO_TCP,
+                                64,
                                 &out_pkt[..pkt_len],
                                 &mut ip_buf,
                             );
                             let mut eth_buf = [0u8; 1600];
                             let eth_len = build_eth_frame(
-                                dst_mac, cfg.own_mac, 0x0800,
+                                dst_mac,
+                                cfg.own_mac,
+                                0x0800,
                                 &ip_buf[..ip_len],
                                 &mut eth_buf,
                             );
@@ -666,17 +750,21 @@ fn handle_ipc(
                         if let Some(sock) = tcp_mgr.get_socket(msg.socket_id) {
                             let remote_ip = sock.remote_ip;
                             let hop = next_hop(remote_ip, cfg.own_ip, cfg.netmask, cfg.gateway);
-                            let dst_mac = get_or_broadcast_mac(hop, tx_producer, cfg);
+                            let dst_mac = get_or_broadcast_mac(hop, arp_table, tx_producer, cfg);
                             let mut ip_buf = [0u8; 1600];
                             let ip_len = build_ipv4(
-                                cfg.own_ip, remote_ip,
-                                IP_PROTO_TCP, 64,
+                                cfg.own_ip,
+                                remote_ip,
+                                IP_PROTO_TCP,
+                                64,
                                 &out_pkt[..pkt_len],
                                 &mut ip_buf,
                             );
                             let mut eth_buf = [0u8; 1600];
                             let eth_len = build_eth_frame(
-                                dst_mac, cfg.own_mac, 0x0800,
+                                dst_mac,
+                                cfg.own_mac,
+                                0x0800,
                                 &ip_buf[..ip_len],
                                 &mut eth_buf,
                             );
@@ -707,22 +795,31 @@ fn handle_ipc(
                             if dns_len > 0 {
                                 let mut udp_buf = [0u8; 600];
                                 let udp_len = build_udp_with_checksum(
-                                    cfg.own_ip, cfg.dns_server,
-                                    49000, 53,
+                                    cfg.own_ip,
+                                    cfg.dns_server,
+                                    49000,
+                                    53,
                                     &dns_buf[..dns_len],
                                     &mut udp_buf,
                                 );
                                 let mut ip_buf = [0u8; 700];
                                 let ip_len = build_ipv4(
-                                    cfg.own_ip, cfg.dns_server,
-                                    IP_PROTO_UDP, 64,
+                                    cfg.own_ip,
+                                    cfg.dns_server,
+                                    IP_PROTO_UDP,
+                                    64,
                                     &udp_buf[..udp_len],
                                     &mut ip_buf,
                                 );
-                                let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+                                let hop =
+                                    next_hop(cfg.dns_server, cfg.own_ip, cfg.netmask, cfg.gateway);
+                                let dst_mac =
+                                    get_or_broadcast_mac(hop, arp_table, tx_producer, cfg);
                                 let mut eth_buf = [0u8; 800];
                                 let eth_len = build_eth_frame(
-                                    broadcast, cfg.own_mac, 0x0800,
+                                    dst_mac,
+                                    cfg.own_mac,
+                                    0x0800,
                                     &ip_buf[..ip_len],
                                     &mut eth_buf,
                                 );
@@ -743,13 +840,15 @@ fn handle_ipc(
             // Configuration update from init/service_manager
             if let Some(msg) = libipc::messages::NetConfigureMsg::from_bytes(payload) {
                 let _ = msg; // Would update cfg, but cfg is not mut here
-                // In a real implementation, we'd update the config
+                             // In a real implementation, we'd update the config
             }
         }
         MessageType::NetIcmpEchoRequest => {
             let now = atom_syscall::thread::get_ticks();
             log("netd: received NetIcmpEchoRequest");
-            if let Some((dest_ip, id, seq, icmp_payload)) = sock_mgr.handle_net_icmp_echo(payload, now) {
+            if let Some((dest_ip, id, seq, icmp_payload)) =
+                sock_mgr.handle_net_icmp_echo(payload, now)
+            {
                 let mut icmp_buf = [0u8; 128];
                 // In handle_net_icmp_echo we didn't return the payload easily,
                 // but for now we'll just re-parse it from the original payload if needed.
@@ -762,16 +861,34 @@ fn handle_ipc(
                     echo_payload[..copy_len].copy_from_slice(&msg.payload[..copy_len]);
                 }
 
-                let icmp_len = build_icmp_echo_request(id, seq, &echo_payload[..echo_payload_len], &mut icmp_buf);
+                let icmp_len = build_icmp_echo_request(
+                    id,
+                    seq,
+                    &echo_payload[..echo_payload_len],
+                    &mut icmp_buf,
+                );
 
                 let mut ip_buf = [0u8; 200];
-                let ip_len = build_ipv4(cfg.own_ip, dest_ip, IP_PROTO_ICMP, 64, &icmp_buf[..icmp_len], &mut ip_buf);
+                let ip_len = build_ipv4(
+                    cfg.own_ip,
+                    dest_ip,
+                    IP_PROTO_ICMP,
+                    64,
+                    &icmp_buf[..icmp_len],
+                    &mut ip_buf,
+                );
 
                 let hop = next_hop(dest_ip, cfg.own_ip, cfg.netmask, cfg.gateway);
-                let dst_mac = get_or_broadcast_mac(hop, tx_producer, cfg);
+                let dst_mac = get_or_broadcast_mac(hop, arp_table, tx_producer, cfg);
 
                 let mut eth_buf = [0u8; 256];
-                let eth_len = build_eth_frame(dst_mac, cfg.own_mac, 0x0800, &ip_buf[..ip_len], &mut eth_buf);
+                let eth_len = build_eth_frame(
+                    dst_mac,
+                    cfg.own_mac,
+                    0x0800,
+                    &ip_buf[..ip_len],
+                    &mut eth_buf,
+                );
 
                 push_to_tx(tx_producer, &eth_buf[..eth_len]);
                 log("netd: ICMP Echo Request pushed to TX");
@@ -788,7 +905,12 @@ fn handle_ipc(
                     mac: cfg.own_mac,
                     _pad: [0u8; 2],
                 };
-                send_message(msg.reply_port, MessageType::NetGetConfigReply, &reply.to_bytes()).ok();
+                send_message(
+                    msg.reply_port,
+                    MessageType::NetGetConfigReply,
+                    &reply.to_bytes(),
+                )
+                .ok();
             }
         }
         _ => {}
@@ -798,13 +920,15 @@ fn handle_ipc(
 /// Get MAC for a given IP from ARP table, or return broadcast and send ARP request.
 fn get_or_broadcast_mac(
     ip: u32,
+    arp_table: &ArpTable,
     tx_producer: &mut RingProducer,
     cfg: &NetConfig,
 ) -> [u8; 6] {
-    // We don't have access to arp_table here, so always use broadcast for now.
-    // In a full implementation, we'd pass arp_table as a parameter.
+    if let Some(mac) = arp_table.lookup(ip) {
+        return mac;
+    }
+
     let broadcast = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-    // Send ARP request for the IP
     let mut arp_buf = [0u8; 64];
     let arp_len = build_arp_request(cfg.own_mac, cfg.own_ip, ip, &mut arp_buf);
     push_to_tx(tx_producer, &arp_buf[..arp_len]);

@@ -9,8 +9,8 @@
 extern crate alloc;
 
 use crate::window::Theme;
-use atom_syscall::graphics::Color;
 use alloc::vec::Vec;
+use atom_syscall::graphics::Color;
 
 /// Maximum characters per line
 pub const MAX_LINE_LENGTH: usize = 256;
@@ -534,7 +534,7 @@ impl DisplayBuffer {
         //   virtual_start = scrollback_count - view_offset
         // (clamped to 0 if view_offset > scrollback_count, though set_view_offset prevents that)
         let virtual_start = self.scrollback_count.saturating_sub(self.view_offset);
-        let virtual_idx   = virtual_start + screen_row;
+        let virtual_idx = virtual_start + screen_row;
 
         if virtual_idx < self.scrollback_count {
             self.get_scrollback_entry(virtual_idx)

@@ -1,7 +1,7 @@
 /// A parsed DNS response with the first A record
 pub struct DnsResponse {
     pub id: u16,
-    pub ip: u32,   // first A record, big-endian
+    pub ip: u32, // first A record, big-endian
     pub ttl: u32,
 }
 

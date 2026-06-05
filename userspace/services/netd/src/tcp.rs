@@ -7,6 +7,8 @@ pub const TCP_PSH: u8 = 0x08;
 pub const TCP_ACK: u8 = 0x10;
 
 pub const TCP_HEADER_LEN: usize = 20;
+pub const TCP_RECV_BUF_LEN: usize = 64 * 1024;
+pub const TCP_MAX_SOCKETS: usize = 4;
 
 /// TCP connection state machine states
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,7 +31,7 @@ pub struct TcpHeader {
     pub dst_port: u16,
     pub seq: u32,
     pub ack_num: u32,
-    pub data_offset: u8,  // high nibble = offset in 32-bit words (5 for no options)
+    pub data_offset: u8, // high nibble = offset in 32-bit words (5 for no options)
     pub flags: u8,
     pub window: u16,
     pub checksum: u16,
@@ -47,7 +49,7 @@ pub struct TcpSocket {
     pub ack: u32,
     pub send_buf: [u8; 4096],
     pub send_len: usize,
-    pub recv_buf: [u8; 4096],
+    pub recv_buf: [u8; TCP_RECV_BUF_LEN],
     pub recv_len: usize,
     pub recv_ready: bool,
     pub owner_port: u64,
@@ -69,7 +71,7 @@ impl TcpSocket {
             ack: 0,
             send_buf: [0u8; 4096],
             send_len: 0,
-            recv_buf: [0u8; 4096],
+            recv_buf: [0u8; TCP_RECV_BUF_LEN],
             recv_len: 0,
             recv_ready: false,
             owner_port: 0,
@@ -83,17 +85,24 @@ impl TcpSocket {
 
 /// Events emitted by TcpManager for the main loop to act on
 pub enum TcpEvent {
-    Connected(u32),       // socket_id — SYN-ACK received, ACK sent
-    DataReceived(u32),    // socket_id — data in recv_buf
-    Closed(u32),          // socket_id — FIN received
-    ConnectTimeout(u32),  // socket_id — SYN timeout
+    Connected(u32),      // socket_id — SYN-ACK received, ACK sent
+    DataReceived(u32),   // socket_id — data in recv_buf
+    AckOnly(u32),        // socket_id — ACK emitted without new data for userspace
+    Closed(u32),         // socket_id — FIN received
+    ConnectTimeout(u32), // socket_id — SYN timeout
 }
 
-/// Manages up to 8 TCP sockets
+/// Manages TCP sockets.
 pub struct TcpManager {
-    pub sockets: [TcpSocket; 8],
+    pub sockets: [TcpSocket; TCP_MAX_SOCKETS],
     next_local_port: u16,
     next_id: u32,
+}
+
+fn recv_window(recv_len: usize) -> u16 {
+    TCP_RECV_BUF_LEN
+        .saturating_sub(recv_len)
+        .min(u16::MAX as usize) as u16
 }
 
 /// Compute TCP checksum using pseudo-header
@@ -184,8 +193,10 @@ impl TcpManager {
     pub fn new() -> Self {
         Self {
             sockets: [
-                TcpSocket::new(), TcpSocket::new(), TcpSocket::new(), TcpSocket::new(),
-                TcpSocket::new(), TcpSocket::new(), TcpSocket::new(), TcpSocket::new(),
+                TcpSocket::new(),
+                TcpSocket::new(),
+                TcpSocket::new(),
+                TcpSocket::new(),
             ],
             next_local_port: 49152,
             next_id: 1,
@@ -224,7 +235,11 @@ impl TcpManager {
     ) -> Option<usize> {
         let idx = self.find_by_id_mut(socket_id)?;
         let local_port = self.next_local_port;
-        self.next_local_port = if self.next_local_port >= 65535 { 49152 } else { self.next_local_port + 1 };
+        self.next_local_port = if self.next_local_port >= 65535 {
+            49152
+        } else {
+            self.next_local_port + 1
+        };
 
         let sock = &mut self.sockets[idx];
         sock.local_port = local_port;
@@ -238,10 +253,14 @@ impl TcpManager {
 
         let own_ip = 0u32; // Will be filled by caller from config
         let len = build_tcp_segment(
-            own_ip, remote_ip,
-            local_port, remote_port,
-            sock.seq, 0,
-            TCP_SYN, 65535,
+            own_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            sock.seq,
+            0,
+            TCP_SYN,
+            65535,
             &[],
             out_buf,
         );
@@ -262,7 +281,11 @@ impl TcpManager {
         let idx = self.find_by_id_mut(socket_id)?;
 
         let local_port = self.next_local_port;
-        self.next_local_port = if self.next_local_port >= 65535 { 49152 } else { self.next_local_port + 1 };
+        self.next_local_port = if self.next_local_port >= 65535 {
+            49152
+        } else {
+            self.next_local_port + 1
+        };
 
         let sock = &mut self.sockets[idx];
         sock.local_port = local_port;
@@ -276,10 +299,14 @@ impl TcpManager {
 
         let isn = sock.seq;
         let len = build_tcp_segment(
-            src_ip, remote_ip,
-            local_port, remote_port,
-            isn, 0,
-            TCP_SYN, 65535,
+            src_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            isn,
+            0,
+            TCP_SYN,
+            65535,
             &[],
             out_buf,
         );
@@ -314,10 +341,14 @@ impl TcpManager {
                     let ack = sock.ack;
                     let socket_id = sock.id;
                     build_tcp_segment(
-                        dst_ip, src_ip,
-                        local_port, remote_port,
-                        seq, ack,
-                        TCP_ACK, 65535,
+                        dst_ip,
+                        src_ip,
+                        local_port,
+                        remote_port,
+                        seq,
+                        ack,
+                        TCP_ACK,
+                        recv_window(sock.recv_len),
                         &[],
                         out_buf,
                     );
@@ -338,14 +369,44 @@ impl TcpManager {
                 }
                 // Data received
                 if !payload.is_empty() {
-                    let copy_len = payload.len().min(4096 - sock.recv_len);
+                    if tcp_hdr.seq != sock.ack {
+                        let local_port = sock.local_port;
+                        let remote_port = sock.remote_port;
+                        let seq = sock.seq;
+                        let ack = sock.ack;
+                        let socket_id = sock.id;
+                        build_tcp_segment(
+                            dst_ip,
+                            src_ip,
+                            local_port,
+                            remote_port,
+                            seq,
+                            ack,
+                            TCP_ACK,
+                            recv_window(sock.recv_len),
+                            &[],
+                            out_buf,
+                        );
+                        return Some(TcpEvent::AckOnly(socket_id));
+                    }
+
+                    let copy_len = payload
+                        .len()
+                        .min(TCP_RECV_BUF_LEN.saturating_sub(sock.recv_len));
                     if copy_len > 0 {
                         let start = sock.recv_len;
-                        sock.recv_buf[start..start + copy_len].copy_from_slice(&payload[..copy_len]);
+                        sock.recv_buf[start..start + copy_len]
+                            .copy_from_slice(&payload[..copy_len]);
                         sock.recv_len += copy_len;
                         sock.recv_ready = true;
                     }
-                    sock.ack = sock.ack.wrapping_add(payload.len() as u32);
+                    sock.ack = sock.ack.wrapping_add(copy_len as u32);
+
+                    if copy_len == payload.len() && tcp_hdr.flags & TCP_FIN != 0 {
+                        sock.ack = sock.ack.wrapping_add(1);
+                        sock.state = TcpState::CloseWait;
+                    }
+
                     // Send ACK
                     let local_port = sock.local_port;
                     let remote_port = sock.remote_port;
@@ -353,17 +414,45 @@ impl TcpManager {
                     let ack = sock.ack;
                     let socket_id = sock.id;
                     build_tcp_segment(
-                        dst_ip, src_ip,
-                        local_port, remote_port,
-                        seq, ack,
-                        TCP_ACK, 65535,
+                        dst_ip,
+                        src_ip,
+                        local_port,
+                        remote_port,
+                        seq,
+                        ack,
+                        TCP_ACK,
+                        recv_window(sock.recv_len),
                         &[],
                         out_buf,
                     );
-                    return Some(TcpEvent::DataReceived(socket_id));
+                    if copy_len > 0 {
+                        return Some(TcpEvent::DataReceived(socket_id));
+                    }
+                    return Some(TcpEvent::AckOnly(socket_id));
                 }
                 // FIN received
                 if tcp_hdr.flags & TCP_FIN != 0 {
+                    if tcp_hdr.seq != sock.ack {
+                        let local_port = sock.local_port;
+                        let remote_port = sock.remote_port;
+                        let seq = sock.seq;
+                        let ack = sock.ack;
+                        let socket_id = sock.id;
+                        build_tcp_segment(
+                            dst_ip,
+                            src_ip,
+                            local_port,
+                            remote_port,
+                            seq,
+                            ack,
+                            TCP_ACK,
+                            recv_window(sock.recv_len),
+                            &[],
+                            out_buf,
+                        );
+                        return Some(TcpEvent::AckOnly(socket_id));
+                    }
+
                     sock.ack = sock.ack.wrapping_add(1);
                     sock.state = TcpState::CloseWait;
                     let local_port = sock.local_port;
@@ -372,16 +461,40 @@ impl TcpManager {
                     let ack = sock.ack;
                     let socket_id = sock.id;
                     build_tcp_segment(
-                        dst_ip, src_ip,
-                        local_port, remote_port,
-                        seq, ack,
-                        TCP_ACK | TCP_FIN, 65535,
+                        dst_ip,
+                        src_ip,
+                        local_port,
+                        remote_port,
+                        seq,
+                        ack,
+                        TCP_ACK,
+                        recv_window(sock.recv_len),
                         &[],
                         out_buf,
                     );
-                    sock.seq = sock.seq.wrapping_add(1);
-                    sock.state = TcpState::LastAck;
                     return Some(TcpEvent::Closed(socket_id));
+                }
+            }
+            TcpState::CloseWait => {
+                if !payload.is_empty() || tcp_hdr.flags & TCP_FIN != 0 {
+                    let local_port = sock.local_port;
+                    let remote_port = sock.remote_port;
+                    let seq = sock.seq;
+                    let ack = sock.ack;
+                    let socket_id = sock.id;
+                    build_tcp_segment(
+                        dst_ip,
+                        src_ip,
+                        local_port,
+                        remote_port,
+                        seq,
+                        ack,
+                        TCP_ACK,
+                        recv_window(sock.recv_len),
+                        &[],
+                        out_buf,
+                    );
+                    return Some(TcpEvent::AckOnly(socket_id));
                 }
             }
             TcpState::FinWait1 => {
@@ -396,10 +509,14 @@ impl TcpManager {
                     let ack = sock.ack;
                     let socket_id = sock.id;
                     build_tcp_segment(
-                        dst_ip, src_ip,
-                        local_port, remote_port,
-                        seq, ack,
-                        TCP_ACK, 65535,
+                        dst_ip,
+                        src_ip,
+                        local_port,
+                        remote_port,
+                        seq,
+                        ack,
+                        TCP_ACK,
+                        recv_window(sock.recv_len),
                         &[],
                         out_buf,
                     );
@@ -417,10 +534,14 @@ impl TcpManager {
                     let ack = sock.ack;
                     let socket_id = sock.id;
                     build_tcp_segment(
-                        dst_ip, src_ip,
-                        local_port, remote_port,
-                        seq, ack,
-                        TCP_ACK, 65535,
+                        dst_ip,
+                        src_ip,
+                        local_port,
+                        remote_port,
+                        seq,
+                        ack,
+                        TCP_ACK,
+                        recv_window(sock.recv_len),
                         &[],
                         out_buf,
                     );
@@ -462,10 +583,14 @@ impl TcpManager {
         let seq = sock.seq;
         let ack = sock.ack;
         let len = build_tcp_segment(
-            src_ip, remote_ip,
-            local_port, remote_port,
-            seq, ack,
-            TCP_PSH | TCP_ACK, 65535,
+            src_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            TCP_PSH | TCP_ACK,
+            recv_window(sock.recv_len),
             &data[..send_len],
             out_buf,
         );
@@ -494,30 +619,45 @@ impl TcpManager {
         Ok(copy_len)
     }
 
+    pub fn recv_eof(&self, socket_id: u32) -> bool {
+        self.get_socket(socket_id)
+            .map(|sock| sock.recv_len == 0 && sock.state == TcpState::CloseWait)
+            .unwrap_or(false)
+    }
+
     /// Send FIN to close a socket. Returns packet length or None.
     pub fn close(&mut self, socket_id: u32, src_ip: u32, out_buf: &mut [u8]) -> Option<usize> {
         let idx = self.find_by_id_mut(socket_id)?;
         let sock = &mut self.sockets[idx];
-        if sock.state != TcpState::Established {
+        if sock.state != TcpState::Established && sock.state != TcpState::CloseWait {
             sock.state = TcpState::Closed;
             sock.in_use = false;
             return None;
         }
+        let passive_close = sock.state == TcpState::CloseWait;
         let remote_ip = sock.remote_ip;
         let remote_port = sock.remote_port;
         let local_port = sock.local_port;
         let seq = sock.seq;
         let ack = sock.ack;
         let len = build_tcp_segment(
-            src_ip, remote_ip,
-            local_port, remote_port,
-            seq, ack,
-            TCP_FIN | TCP_ACK, 65535,
+            src_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            TCP_FIN | TCP_ACK,
+            recv_window(sock.recv_len),
             &[],
             out_buf,
         );
         sock.seq = sock.seq.wrapping_add(1);
-        sock.state = TcpState::FinWait1;
+        sock.state = if passive_close {
+            TcpState::LastAck
+        } else {
+            TcpState::FinWait1
+        };
         Some(len)
     }
 
@@ -531,7 +671,9 @@ impl TcpManager {
     ) -> Option<(usize, TcpEvent)> {
         for i in 0..8 {
             let sock = &self.sockets[i];
-            if !sock.in_use { continue; }
+            if !sock.in_use {
+                continue;
+            }
 
             match sock.state {
                 TcpState::SynSent => {
@@ -549,10 +691,14 @@ impl TcpManager {
                         let remote_port = sock.remote_port;
                         let local_port = sock.local_port;
                         let len = build_tcp_segment(
-                            src_ip, remote_ip,
-                            local_port, remote_port,
-                            isn, 0,
-                            TCP_SYN, 65535,
+                            src_ip,
+                            remote_ip,
+                            local_port,
+                            remote_port,
+                            isn,
+                            0,
+                            TCP_SYN,
+                            recv_window(sock.recv_len),
                             &[],
                             out_buf,
                         );
@@ -574,7 +720,12 @@ impl TcpManager {
         None
     }
 
-    fn find_socket_mut(&mut self, remote_ip: u32, remote_port: u16, local_port: u16) -> Option<usize> {
+    fn find_socket_mut(
+        &mut self,
+        remote_ip: u32,
+        remote_port: u16,
+        local_port: u16,
+    ) -> Option<usize> {
         for (i, sock) in self.sockets.iter().enumerate() {
             if sock.in_use
                 && sock.remote_ip == remote_ip

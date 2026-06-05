@@ -180,7 +180,9 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     let mut star_ti = usize::MAX; // text index after last *
 
     while ti < text_bytes.len() {
-        if pi < pattern_bytes.len() && (pattern_bytes[pi] == b'?' || pattern_bytes[pi] == text_bytes[ti]) {
+        if pi < pattern_bytes.len()
+            && (pattern_bytes[pi] == b'?' || pattern_bytes[pi] == text_bytes[ti])
+        {
             // Match single character
             pi += 1;
             ti += 1;

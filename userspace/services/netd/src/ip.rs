@@ -8,16 +8,16 @@ pub const IPV4_HEADER_LEN: usize = 20;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ipv4Header {
-    pub ver_ihl: u8,      // version=4, ihl=5 → 0x45
+    pub ver_ihl: u8, // version=4, ihl=5 → 0x45
     pub dscp_ecn: u8,
-    pub total_len: u16,   // big-endian
-    pub id: u16,          // big-endian
-    pub flags_frag: u16,  // big-endian
+    pub total_len: u16,  // big-endian
+    pub id: u16,         // big-endian
+    pub flags_frag: u16, // big-endian
     pub ttl: u8,
     pub protocol: u8,
-    pub checksum: u16,    // big-endian
-    pub src: u32,         // big-endian
-    pub dst: u32,         // big-endian
+    pub checksum: u16, // big-endian
+    pub src: u32,      // big-endian
+    pub dst: u32,      // big-endian
 }
 
 /// Compute IPv4 one's complement checksum over header bytes.
@@ -41,20 +41,13 @@ pub fn ipv4_checksum(header_bytes: &[u8]) -> u16 {
 }
 
 /// Build an IPv4 packet into `out`. Returns total length (header + payload).
-pub fn build_ipv4(
-    src: u32,
-    dst: u32,
-    proto: u8,
-    ttl: u8,
-    payload: &[u8],
-    out: &mut [u8],
-) -> usize {
+pub fn build_ipv4(src: u32, dst: u32, proto: u8, ttl: u8, payload: &[u8], out: &mut [u8]) -> usize {
     let total_len = IPV4_HEADER_LEN + payload.len();
     if out.len() < total_len {
         return 0;
     }
     out[0] = 0x45; // version=4, ihl=5
-    out[1] = 0;    // DSCP/ECN
+    out[1] = 0; // DSCP/ECN
     out[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
     out[4..6].copy_from_slice(&0u16.to_be_bytes()); // id=0
     out[6..8].copy_from_slice(&0u16.to_be_bytes()); // flags/frag=0 (DF could be set)

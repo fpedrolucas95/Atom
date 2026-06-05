@@ -2,11 +2,11 @@
 //
 // Command registry and execution framework for all built-in terminal commands.
 
-pub mod system;
-pub mod process;
 pub mod filesystem;
-pub mod ping;
 pub mod net;
+pub mod ping;
+pub mod process;
+pub mod system;
 
 use crate::buffer::DisplayBuffer;
 use crate::ipc_client::IpcClient;
@@ -26,7 +26,7 @@ pub enum CommandResult {
 /// Command context passed to every command handler
 pub struct CommandContext<'a> {
     pub display: &'a mut DisplayBuffer,
-    pub ipc:     &'a IpcClient,
+    pub ipc: &'a IpcClient,
 }
 
 impl<'a> CommandContext<'a> {
@@ -196,7 +196,8 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
 
 /// (usage, description) for a single command
 pub fn get_command_help(c: &str) -> Option<(&'static str, &'static str)> {
-    COMMANDS.iter()
+    COMMANDS
+        .iter()
         .find(|(name, _, _)| name.eq_ignore_ascii_case(c))
         .map(|(_, usage, desc)| (*usage, *desc))
 }
@@ -208,47 +209,87 @@ pub fn get_all_commands() -> &'static [(&'static str, &'static str, &'static str
 
 static COMMANDS: &[(&str, &str, &str)] = &[
     // ── System ────────────────────────────────────────────────────────────
-    ("help",     "help [command]",         "Show help (scroll up to read more)"),
-    ("version",  "version",                "Display system version"),
-    ("uptime",   "uptime",                 "Show system uptime"),
-    ("date",     "date",                   "Show current date / time"),
-    ("sysinfo",  "sysinfo",                "System info with ASCII logo"),
-    ("clear",    "clear",                  "Clear the terminal screen"),
-    ("echo",     "echo [text...]",         "Print text to terminal"),
-    ("log",      "log",                    "Show system log (dmesg)"),
+    (
+        "help",
+        "help [command]",
+        "Show help (scroll up to read more)",
+    ),
+    ("version", "version", "Display system version"),
+    ("uptime", "uptime", "Show system uptime"),
+    ("date", "date", "Show current date / time"),
+    ("sysinfo", "sysinfo", "System info with ASCII logo"),
+    ("clear", "clear", "Clear the terminal screen"),
+    ("echo", "echo [text...]", "Print text to terminal"),
+    ("log", "log", "Show system log (dmesg)"),
     // ── Process ───────────────────────────────────────────────────────────
-    ("ps",       "ps",                     "List running processes"),
-    ("kill",     "kill <pid>",             "Terminate a process"),
-    ("exec",     "exec <program>",         "Launch a program"),
-    ("mem",      "mem",                    "Memory usage statistics"),
-    ("services", "services",               "List registered services"),
+    ("ps", "ps", "List running processes"),
+    ("kill", "kill <pid>", "Terminate a process"),
+    ("exec", "exec <program>", "Launch a program"),
+    ("mem", "mem", "Memory usage statistics"),
+    ("services", "services", "List registered services"),
     // ── Filesystem – read ─────────────────────────────────────────────────
-    ("ls",       "ls [-l] [-a] [path]",   "List directory contents"),
-    ("cd",       "cd [path]",             "Change working directory"),
-    ("pwd",      "pwd",                    "Print working directory"),
-    ("cat",      "cat <file> [...]",      "Display file contents"),
-    ("head",     "head [-n N] <file>",    "Show first N lines (default 10)"),
-    ("tail",     "tail [-n N] <file>",    "Show last N lines (default 10)"),
-    ("wc",       "wc [-l|-w|-c] <file>",  "Count lines / words / bytes"),
-    ("stat",     "stat <file>",            "Show file metadata"),
-    ("find",     "find [path] [-name pat]","Find files matching pattern"),
-    ("tree",     "tree [-d N] [path]",    "Directory tree (depth N, default 3)"),
+    ("ls", "ls [-l] [-a] [path]", "List directory contents"),
+    ("cd", "cd [path]", "Change working directory"),
+    ("pwd", "pwd", "Print working directory"),
+    ("cat", "cat <file> [...]", "Display file contents"),
+    (
+        "head",
+        "head [-n N] <file>",
+        "Show first N lines (default 10)",
+    ),
+    (
+        "tail",
+        "tail [-n N] <file>",
+        "Show last N lines (default 10)",
+    ),
+    ("wc", "wc [-l|-w|-c] <file>", "Count lines / words / bytes"),
+    ("stat", "stat <file>", "Show file metadata"),
+    (
+        "find",
+        "find [path] [-name pat]",
+        "Find files matching pattern",
+    ),
+    (
+        "tree",
+        "tree [-d N] [path]",
+        "Directory tree (depth N, default 3)",
+    ),
     // ── Filesystem – write ────────────────────────────────────────────────
-    ("mkdir",    "mkdir [-p] <dir>",      "Create directory (-p: parents)"),
-    ("rmdir",    "rmdir <dir>",            "Remove empty directory"),
-    ("rm",       "rm [-r] [-f] <path>",   "Remove file (-r: recursive)"),
-    ("mv",       "mv <src> <dst>",        "Move / rename file or directory"),
-    ("cp",       "cp <src> <dst>",        "Copy file"),
-    ("touch",    "touch <file>",           "Create file or update timestamp"),
-    ("fsync",    "fsync <path>",           "Force file or directory metadata to disk"),
-    ("chmod",    "chmod <mode> <path>",   "Change file permissions (octal)"),
-    ("ln",       "ln [-s] <tgt> <link>",  "Create hard or symbolic link"),
-    ("df",       "df",                     "Show disk free space"),
-    ("du",       "du [-s] [-h] [path]",   "Show disk usage"),
+    (
+        "mkdir",
+        "mkdir [-p] <dir>",
+        "Create directory (-p: parents)",
+    ),
+    ("rmdir", "rmdir <dir>", "Remove empty directory"),
+    ("rm", "rm [-r] [-f] <path>", "Remove file (-r: recursive)"),
+    ("mv", "mv <src> <dst>", "Move / rename file or directory"),
+    ("cp", "cp <src> <dst>", "Copy file"),
+    ("touch", "touch <file>", "Create file or update timestamp"),
+    (
+        "fsync",
+        "fsync <path>",
+        "Force file or directory metadata to disk",
+    ),
+    (
+        "chmod",
+        "chmod <mode> <path>",
+        "Change file permissions (octal)",
+    ),
+    ("ln", "ln [-s] <tgt> <link>", "Create hard or symbolic link"),
+    ("df", "df", "Show disk free space"),
+    ("du", "du [-s] [-h] [path]", "Show disk usage"),
     // ── Terminal ──────────────────────────────────────────────────────────
-    ("exit",     "exit",                   "Exit the terminal"),
-    ("ports",    "ports",                  "List IPC ports"),
-    ("caps",     "caps",                   "List process capabilities"),
-    ("ping",     "ping <host> [options]",  "Send ICMP ECHO_REQUEST to network hosts"),
-    ("ifconfig", "ifconfig",               "Display network interface configuration"),
+    ("exit", "exit", "Exit the terminal"),
+    ("ports", "ports", "List IPC ports"),
+    ("caps", "caps", "List process capabilities"),
+    (
+        "ping",
+        "ping <host> [options]",
+        "Send ICMP ECHO_REQUEST to network hosts",
+    ),
+    (
+        "ifconfig",
+        "ifconfig",
+        "Display network interface configuration",
+    ),
 ];

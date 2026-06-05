@@ -3,13 +3,13 @@
 // Commands for displaying system information, version, uptime, etc.
 // All information is obtained via IPC requests to system services.
 
-use super::{CommandContext, CommandResult, get_all_commands, get_command_help};
 use super::filesystem;
+use super::{get_all_commands, get_command_help, CommandContext, CommandResult};
 use crate::parser::ParsedCommand;
 use crate::window::Theme;
 use atom_syscall::thread::{get_cpu_count, get_ticks};
-use libnet::net_get_config;
 use libipc::protocol::lookup_service;
+use libnet::net_get_config;
 
 /// Version information
 const OS_NAME: &str = "Atom OS";
@@ -51,40 +51,87 @@ pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
     } else {
         // ── Full command listing ──────────────────────────────────────────────
         ctx.println("");
-        ctx.println_colored("╔══════════════════════════════════════════════╗", Theme::TEXT_INFO);
-        ctx.println_colored("║        Atom Terminal – Command Reference     ║", Theme::TEXT_INFO);
-        ctx.println_colored("╚══════════════════════════════════════════════╝", Theme::TEXT_INFO);
-        ctx.println_colored("  Scroll up (Page Up / Ctrl+Up) to read more", Theme::TEXT_DIM);
+        ctx.println_colored(
+            "╔══════════════════════════════════════════════╗",
+            Theme::TEXT_INFO,
+        );
+        ctx.println_colored(
+            "║        Atom Terminal – Command Reference     ║",
+            Theme::TEXT_INFO,
+        );
+        ctx.println_colored(
+            "╚══════════════════════════════════════════════╝",
+            Theme::TEXT_INFO,
+        );
+        ctx.println_colored(
+            "  Scroll up (Page Up / Ctrl+Up) to read more",
+            Theme::TEXT_DIM,
+        );
         ctx.println("");
 
         let commands = get_all_commands();
 
         // Category headers and their members
         let categories: &[(&str, &[&str])] = &[
-            ("System", &["help","version","uptime","date","sysinfo","clear","echo","log"]),
+            (
+                "System",
+                &[
+                    "help", "version", "uptime", "date", "sysinfo", "clear", "echo", "log",
+                ],
+            ),
             ("Network", &["ping", "ifconfig"]),
-            ("Process", &["ps","kill","exec","mem","services"]),
-            ("Navigation & Read", &["ls","cd","pwd","cat","head","tail","wc","stat","find","tree"]),
-            ("Write & Manage", &["mkdir","rmdir","rm","mv","cp","touch","fsync","chmod","ln","df","du"]),
-            ("Terminal", &["exit","ports","caps"]),
+            ("Process", &["ps", "kill", "exec", "mem", "services"]),
+            (
+                "Navigation & Read",
+                &[
+                    "ls", "cd", "pwd", "cat", "head", "tail", "wc", "stat", "find", "tree",
+                ],
+            ),
+            (
+                "Write & Manage",
+                &[
+                    "mkdir", "rmdir", "rm", "mv", "cp", "touch", "fsync", "chmod", "ln", "df", "du",
+                ],
+            ),
+            ("Terminal", &["exit", "ports", "caps"]),
         ];
 
         for (cat_name, members) in categories {
             ctx.println_colored(cat_name, Theme::PROMPT_USER);
-            ctx.println_colored("──────────────────────────────────────────────", Theme::SEPARATOR);
+            ctx.println_colored(
+                "──────────────────────────────────────────────",
+                Theme::SEPARATOR,
+            );
 
             for (name, usage, desc) in commands.iter() {
                 // name, usage, desc are &&str here (slice iter returns &T)
-                if !members.iter().any(|m| m == name) { continue; }
+                if !members.iter().any(|m| m == name) {
+                    continue;
+                }
 
                 // Format:  usage (padded to 32 chars) + desc
                 let mut line = [0u8; 92];
                 let mut pos = 0;
-                line[pos] = b' '; pos += 1;
-                line[pos] = b' '; pos += 1;
-                for b in usage.bytes() { if pos < 32 { line[pos] = b; pos += 1; } }
-                while pos < 34 { line[pos] = b' '; pos += 1; }
-                for b in desc.bytes()  { if pos < 90 { line[pos] = b; pos += 1; } }
+                line[pos] = b' ';
+                pos += 1;
+                line[pos] = b' ';
+                pos += 1;
+                for b in usage.bytes() {
+                    if pos < 32 {
+                        line[pos] = b;
+                        pos += 1;
+                    }
+                }
+                while pos < 34 {
+                    line[pos] = b' ';
+                    pos += 1;
+                }
+                for b in desc.bytes() {
+                    if pos < 90 {
+                        line[pos] = b;
+                        pos += 1;
+                    }
+                }
                 let s = unsafe { core::str::from_utf8_unchecked(&line[..pos]) };
                 ctx.println(s);
             }
@@ -92,7 +139,10 @@ pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         }
 
         ctx.println_colored("Keyboard shortcuts", Theme::PROMPT_USER);
-        ctx.println_colored("──────────────────────────────────────────────", Theme::SEPARATOR);
+        ctx.println_colored(
+            "──────────────────────────────────────────────",
+            Theme::SEPARATOR,
+        );
         ctx.println("  Ctrl+C   Cancel current input");
         ctx.println("  Ctrl+L   Clear screen");
         ctx.println("  Ctrl+A   Beginning of line");
@@ -104,7 +154,10 @@ pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         ctx.println("  PgUp     Scroll terminal output up");
         ctx.println("  PgDn     Scroll terminal output down");
         ctx.println("");
-        ctx.println_colored("  Type 'help <command>' for usage and examples.", Theme::TEXT_DIM);
+        ctx.println_colored(
+            "  Type 'help <command>' for usage and examples.",
+            Theme::TEXT_DIM,
+        );
         ctx.println("");
     }
 
@@ -118,7 +171,10 @@ fn show_command_help(topic: &str, ctx: &mut CommandContext<'_>) {
     // Check static table first
     if let Some((usage, desc)) = get_command_help(topic) {
         ctx.println_colored(usage, Theme::TEXT_INFO);
-        ctx.println_colored("──────────────────────────────────────────────", Theme::SEPARATOR);
+        ctx.println_colored(
+            "──────────────────────────────────────────────",
+            Theme::SEPARATOR,
+        );
         ctx.println(desc);
         ctx.println("");
     }
@@ -520,7 +576,11 @@ pub fn cmd_echo(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
         let fd = match atom_syscall::fs::open(&path, flags, 0o644) {
             Ok(fd) => fd,
             Err(e) => {
-                ctx.error(&alloc::format!("echo: cannot open '{}': {:?}", cmd.args[idx + 1], e));
+                ctx.error(&alloc::format!(
+                    "echo: cannot open '{}': {:?}",
+                    cmd.args[idx + 1],
+                    e
+                ));
                 return CommandResult::Error;
             }
         };
@@ -621,10 +681,13 @@ pub fn cmd_sysinfo(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Co
     ctx.println(uptime);
 
     if let Ok(netd_port) = lookup_service("netd") {
-        if let Ok(cfg) = net_get_config(netd_port) {
-            ctx.print("IP:           ");
-            ctx.println(&alloc::format!("{}", cfg.ip));
+        ctx.print("IP:           ");
+        match net_get_config(netd_port) {
+            Ok(cfg) => ctx.println(&alloc::format!("{}", cfg.ip)),
+            Err(e) => ctx.println(&alloc::format!("unavailable ({:?})", e)),
         }
+    } else {
+        ctx.println("IP:           unavailable (netd not found)");
     }
 
     ctx.println("");

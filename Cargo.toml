@@ -33,6 +33,7 @@ exclude = [
     "userspace/services/nic_driver",
     "userspace/services/netd",
     "userspace/apps/timesync",
+    "userspace/apps/browser",
 ]
 resolver = "2"
 
