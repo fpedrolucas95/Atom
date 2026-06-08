@@ -401,7 +401,7 @@ fn fetch_http(url: &str) -> Result<String, String> {
     for _ in 0..4 {
         let (host, path, port) = split_http_url(&current_url)?;
         let response = libnet::http_get(netd, &host, &path, port)
-            .map_err(|_| String::from("HTTP request failed"))?;
+            .map_err(|e| format!("HTTP request failed ({:?})", e))?;
 
         if response.status >= 300 && response.status < 400 {
             if let Some(location) = response.location {
