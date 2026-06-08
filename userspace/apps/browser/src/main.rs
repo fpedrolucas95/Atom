@@ -17,55 +17,110 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use atom_syscall::atom_abi::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE, USER_PAGE_SIZE};
 use atom_syscall::debug::log;
 use atom_syscall::thread::{exit, yield_now};
+use atom_syscall::vm::mmap_anon;
 use libgui::application::Application;
 use libgui::color::Color;
 use libgui::event::{Event, KeyEvent, MouseButton, MouseEvent, WindowEvent};
 use libimage::{ImageDecoder, JpgDecoder, PngDecoder};
 use libipc::protocol::lookup_service;
 
-// Generous heap: the bump allocator never frees, and decoded images can be
-// hundreds of KB. 16 MiB covers several page loads (with images) before reset.
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+// Allocate browser heap lazily with mmap instead of keeping a multi-MiB array
+// in .bss. Atom maps executable BSS eagerly, so a large static heap makes simply
+// opening the browser consume physical memory needed by other apps' surfaces.
+const HEAP_CHUNK_SIZE: usize = 256 * 1024;
 
-struct BumpAllocator {
-    heap: UnsafeCell<[u8; HEAP_SIZE]>,
+struct MmapBumpAllocator {
+    lock: AtomicBool,
     next: AtomicUsize,
+    end: AtomicUsize,
 }
 
-unsafe impl Sync for BumpAllocator {}
+unsafe impl Sync for MmapBumpAllocator {}
 
-impl BumpAllocator {
+impl MmapBumpAllocator {
     const fn new() -> Self {
         Self {
-            heap: UnsafeCell::new([0u8; HEAP_SIZE]),
+            lock: AtomicBool::new(false),
             next: AtomicUsize::new(0),
+            end: AtomicUsize::new(0),
         }
+    }
+
+    fn lock(&self) {
+        while self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn unlock(&self) {
+        self.lock.store(false, Ordering::Release);
+    }
+
+    fn align_up(value: usize, align: usize) -> Option<usize> {
+        let mask = align.checked_sub(1)?;
+        value.checked_add(mask).map(|v| v & !mask)
+    }
+
+    fn grow(&self, min_size: usize, align: usize) -> Option<(usize, usize)> {
+        let needed = min_size.checked_add(align)?;
+        let chunk = Self::align_up(needed.max(HEAP_CHUNK_SIZE), USER_PAGE_SIZE)?;
+        let addr = mmap_anon(chunk, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE).ok()?;
+        Some((addr as usize, chunk))
     }
 }
 
-unsafe impl GlobalAlloc for BumpAllocator {
+unsafe impl GlobalAlloc for MmapBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
+        let size = layout.size().max(1);
         let align = layout.align().max(16);
+
+        self.lock();
         loop {
             let cur = self.next.load(Ordering::Relaxed);
-            let aligned = (cur + align - 1) & !(align - 1);
-            let end = aligned + size;
-            if end > HEAP_SIZE {
-                return core::ptr::null_mut();
+            let end = self.end.load(Ordering::Relaxed);
+            if cur != 0 {
+                if let Some(aligned) = Self::align_up(cur, align) {
+                    if let Some(next) = aligned.checked_add(size) {
+                        if next <= end {
+                            self.next.store(next, Ordering::Relaxed);
+                            self.unlock();
+                            return aligned as *mut u8;
+                        }
+                    }
+                }
             }
-            if self
-                .next
-                .compare_exchange_weak(cur, end, Ordering::SeqCst, Ordering::Relaxed)
-                .is_ok()
-            {
-                return (self.heap.get() as *mut u8).add(aligned);
+
+            let Some((base, chunk)) = self.grow(size, align) else {
+                self.unlock();
+                return core::ptr::null_mut();
+            };
+            let Some(aligned) = Self::align_up(base, align) else {
+                self.unlock();
+                return core::ptr::null_mut();
+            };
+            let Some(next) = aligned.checked_add(size) else {
+                self.unlock();
+                return core::ptr::null_mut();
+            };
+            let Some(new_end) = base.checked_add(chunk) else {
+                self.unlock();
+                return core::ptr::null_mut();
+            };
+            if next <= new_end {
+                self.next.store(next, Ordering::Relaxed);
+                self.end.store(new_end, Ordering::Relaxed);
+                self.unlock();
+                return aligned as *mut u8;
             }
         }
     }
@@ -73,11 +128,12 @@ unsafe impl GlobalAlloc for BumpAllocator {
 }
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+static ALLOCATOR: MmapBumpAllocator = MmapBumpAllocator::new();
 
 #[alloc_error_handler]
 fn alloc_error(_: Layout) -> ! {
-    loop {}
+    log("browser: out of memory");
+    exit(0xFE);
 }
 
 #[panic_handler]
@@ -129,10 +185,19 @@ struct Run {
 }
 
 enum Block {
-    Text { kind: TextKind, runs: Vec<Run> },
+    Text {
+        kind: TextKind,
+        runs: Vec<Run>,
+    },
     Rule,
-    Image { alt: String, img: Option<libimage::DecodedImage>, src: String },
-    Input { idx: usize },
+    Image {
+        alt: String,
+        img: Option<libimage::DecodedImage>,
+        src: String,
+    },
+    Input {
+        idx: usize,
+    },
 }
 
 struct InputMeta {
@@ -601,22 +666,34 @@ fn main() -> ! {
     let mut browser = Browser::new();
 
     loop {
+        let mut handled_event = false;
         loop {
             let event = app.poll_event();
             match event {
                 Event::None => break,
                 Event::Quit => exit(0),
-                Event::Key(key) => browser.handle_key(key),
-                Event::Mouse(m) => browser.handle_mouse(m, surface.width()),
+                Event::Key(key) => {
+                    handled_event = true;
+                    browser.handle_key(key);
+                }
+                Event::Mouse(m) => {
+                    handled_event = true;
+                    browser.handle_mouse(m, surface.width());
+                }
                 Event::Window(WindowEvent::Focus) => {
+                    handled_event = true;
                     browser.focused = true;
                     browser.needs_redraw = true;
                 }
                 Event::Window(WindowEvent::Unfocus) => {
+                    handled_event = true;
                     browser.focused = false;
                     browser.needs_redraw = true;
                 }
-                Event::Window(WindowEvent::Resize { .. }) => browser.needs_redraw = true,
+                Event::Window(WindowEvent::Resize { .. }) => {
+                    handled_event = true;
+                    browser.needs_redraw = true;
+                }
                 _ => {}
             }
         }
@@ -625,7 +702,11 @@ fn main() -> ! {
             browser.render(&mut surface);
         }
 
-        yield_now();
+        if handled_event {
+            yield_now();
+        } else {
+            app.wait_for_event(100);
+        }
     }
 }
 
@@ -867,7 +948,11 @@ fn draw_input_block(
                     y as u32,
                     w,
                     h,
-                    if focused { accent } else { Color::rgb(180, 190, 205) },
+                    if focused {
+                        accent
+                    } else {
+                        Color::rgb(180, 190, 205)
+                    },
                 );
                 if value.is_empty() && !focused {
                     s.draw_string(
@@ -1085,6 +1170,12 @@ fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     }
     if let Some(stripped) = rel.strip_prefix("//") {
         return Some(format!("http://{}", stripped));
+    }
+    if let Some(colon_idx) = rel.find(':') {
+        let slash_idx = rel.find('/').unwrap_or(rel.len());
+        if colon_idx < slash_idx {
+            return None;
+        }
     }
     let (host, base_path, port) = split_http_url(base_url).ok()?;
     let hostport = if port == 80 {
