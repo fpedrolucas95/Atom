@@ -1,0 +1,702 @@
+//! A forgiving, single-pass HTML5 tokenizer and block builder.
+//!
+//! The parser produces the flat [`Document`] the renderer consumes. It supports
+//! a practical subset of HTML5: document metadata (`<title>`), headings,
+//! paragraphs and the common flow containers, ordered/unordered lists,
+//! blockquotes, preformatted text, rules, images, form controls, and a range of
+//! inline formatting elements (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …).
+//! Inline and block styling is resolved here — from element defaults, inline
+//! `style="..."` attributes, and a [`Stylesheet`] gathered from `<style>`
+//! blocks — so the renderer stays a dumb, fast painter.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use libgui::color::Color;
+
+use crate::css::{self, Stylesheet};
+use crate::dom::{Block, Document, InputKind, InputMeta, Run, RunStyle, TextKind};
+use crate::text::{decode_entities, find_ignore_ascii_case, resolve_entity, SmallStr};
+
+/// Parse a full HTML document into the renderer's model.
+pub fn parse_html(html: &str) -> Document {
+    let sheet = extract_stylesheet(html);
+    let mut parser = HtmlParser::new(html, &sheet);
+    parser.parse();
+    Document {
+        title: parser.title,
+        blocks: parser.blocks,
+        links: parser.links,
+        inputs: parser.inputs,
+    }
+}
+
+/// Pre-pass: collect every `<style>` block into a single stylesheet so rules in
+/// `<head>` apply to the body that follows them.
+fn extract_stylesheet(html: &str) -> Stylesheet {
+    let bytes = html.as_bytes();
+    let mut sheet = Stylesheet::new();
+    let mut pos = 0;
+    while let Some(rel) = find_ignore_ascii_case(&bytes[pos..], b"<style") {
+        let tag_open = pos + rel;
+        let Some(gt) = bytes[tag_open..].iter().position(|&b| b == b'>') else {
+            break;
+        };
+        let content_start = tag_open + gt + 1;
+        let Some(close_rel) = find_ignore_ascii_case(&bytes[content_start..], b"</style") else {
+            break;
+        };
+        let content_end = content_start + close_rel;
+        if let Ok(css) = core::str::from_utf8(&bytes[content_start..content_end]) {
+            sheet.parse_into(css);
+        }
+        pos = content_end;
+    }
+    sheet
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Attribute parsing (single pass per tag)
+// ────────────────────────────────────────────────────────────────────────────
+
+struct Attr {
+    name: SmallStr,
+    value: String,
+}
+
+/// Parse a tag's attribute bytes once into a small list, decoding entities in
+/// values. Querying then avoids re-scanning the byte stream per attribute.
+fn parse_attrs(attrs: &[u8]) -> Vec<Attr> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < attrs.len() {
+        while i < attrs.len() && attrs[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name_start = i;
+        while i < attrs.len()
+            && (attrs[i].is_ascii_alphanumeric() || attrs[i] == b'-' || attrs[i] == b'_' || attrs[i] == b':')
+        {
+            i += 1;
+        }
+        if i == name_start {
+            i += 1; // skip a stray byte (e.g. `/` in self-closing tags)
+            continue;
+        }
+        let name = SmallStr::lower(&attrs[name_start..i]);
+
+        while i < attrs.len() && attrs[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let value = if i < attrs.len() && attrs[i] == b'=' {
+            i += 1;
+            while i < attrs.len() && attrs[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            read_attr_value(attrs, &mut i)
+        } else {
+            String::new()
+        };
+        out.push(Attr { name, value });
+    }
+    out
+}
+
+fn read_attr_value(attrs: &[u8], i: &mut usize) -> String {
+    if *i >= attrs.len() {
+        return String::new();
+    }
+    let raw = if attrs[*i] == b'\'' || attrs[*i] == b'"' {
+        let quote = attrs[*i];
+        *i += 1;
+        let start = *i;
+        while *i < attrs.len() && attrs[*i] != quote {
+            *i += 1;
+        }
+        let v = &attrs[start..*i];
+        if *i < attrs.len() {
+            *i += 1;
+        }
+        v
+    } else {
+        let start = *i;
+        while *i < attrs.len() && !attrs[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+        &attrs[start..*i]
+    };
+    decode_entities(core::str::from_utf8(raw).unwrap_or(""))
+}
+
+fn get_attr<'a>(attrs: &'a [Attr], name: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .find(|a| a.name.eq(name))
+        .map(|a| a.value.as_str())
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Inline style stack
+// ────────────────────────────────────────────────────────────────────────────
+
+/// One styled element on the open-element stack, recording exactly which global
+/// effects it applied so they can be undone precisely when it closes.
+#[derive(Clone, Copy)]
+struct Frame {
+    tag: SmallStr,
+    bold: bool,
+    mono: bool,
+    underline: bool,
+    color: bool,
+    hidden: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Skip {
+    None,
+    Script,
+    Style,
+}
+
+struct HtmlParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    sheet: &'a Stylesheet,
+
+    blocks: Vec<Block>,
+    runs: Vec<Run>,
+    cur: String,
+    cur_kind: TextKind,
+    cur_marker: Option<String>,
+
+    links: Vec<String>,
+    cur_link: Option<usize>,
+    inputs: Vec<InputMeta>,
+    form_action: String,
+    list_stack: Vec<ListCtx>,
+
+    // Inline style accumulation.
+    frames: Vec<Frame>,
+    bold_depth: u32,
+    mono_depth: u32,
+    underline_depth: u32,
+    hidden_depth: u32,
+    color_stack: Vec<Color>,
+
+    title: String,
+    in_title: bool,
+    in_pre: bool,
+    skip: Skip,
+    last_was_space: bool,
+}
+
+struct ListCtx {
+    ordered: bool,
+    counter: u32,
+}
+
+impl<'a> HtmlParser<'a> {
+    fn new(html: &'a str, sheet: &'a Stylesheet) -> Self {
+        Self {
+            bytes: html.as_bytes(),
+            pos: 0,
+            sheet,
+            blocks: Vec::new(),
+            runs: Vec::new(),
+            cur: String::new(),
+            cur_kind: TextKind::Paragraph,
+            cur_marker: None,
+            links: Vec::new(),
+            cur_link: None,
+            inputs: Vec::new(),
+            form_action: String::new(),
+            list_stack: Vec::new(),
+            frames: Vec::new(),
+            bold_depth: 0,
+            mono_depth: 0,
+            underline_depth: 0,
+            hidden_depth: 0,
+            color_stack: Vec::new(),
+            title: String::new(),
+            in_title: false,
+            in_pre: false,
+            skip: Skip::None,
+            last_was_space: true,
+        }
+    }
+
+    fn parse(&mut self) {
+        while self.pos < self.bytes.len() {
+            if self.skip != Skip::None {
+                self.skip_element();
+                continue;
+            }
+            match self.bytes[self.pos] {
+                b'<' => self.parse_tag(),
+                b'&' => self.parse_entity(),
+                b => {
+                    self.pos += 1;
+                    self.push_char(b as char);
+                }
+            }
+        }
+        self.flush_block();
+        if self.blocks.is_empty() {
+            self.push_text_block(TextKind::Paragraph, "(empty document)");
+        }
+    }
+
+    // ── Tag dispatch ────────────────────────────────────────────────────────
+
+    fn parse_tag(&mut self) {
+        let start = self.pos + 1;
+        let Some(end) = self.bytes[start..].iter().position(|&b| b == b'>') else {
+            self.pos = self.bytes.len();
+            return;
+        };
+        let tag_bytes = &self.bytes[start..start + end];
+        self.pos = start + end + 1;
+
+        if tag_bytes.starts_with(b"!--") || tag_bytes.starts_with(b"!") || tag_bytes.starts_with(b"?")
+        {
+            return; // comments, <!doctype>, processing instructions
+        }
+
+        let mut idx = 0;
+        skip_ws(tag_bytes, &mut idx);
+        let closing = tag_bytes.get(idx) == Some(&b'/');
+        if closing {
+            idx += 1;
+        }
+        skip_ws(tag_bytes, &mut idx);
+        let name_start = idx;
+        while idx < tag_bytes.len()
+            && (tag_bytes[idx].is_ascii_alphanumeric() || tag_bytes[idx] == b'-')
+        {
+            idx += 1;
+        }
+        let name = SmallStr::lower(&tag_bytes[name_start..idx]);
+        if name.is_empty() {
+            return;
+        }
+
+        if closing {
+            self.close_tag(name.as_str());
+        } else {
+            let attrs = parse_attrs(&tag_bytes[idx..]);
+            self.open_tag(name, &attrs);
+        }
+    }
+
+    fn open_tag(&mut self, name: SmallStr, attrs: &[Attr]) {
+        let tag = name.as_str();
+        match tag {
+            "script" => {
+                self.skip = Skip::Script;
+                return;
+            }
+            "style" => {
+                self.skip = Skip::Style;
+                return;
+            }
+            "title" => {
+                self.flush_block();
+                self.in_title = true;
+                self.cur.clear();
+                self.last_was_space = true;
+                return;
+            }
+            "br" => {
+                self.flush_block();
+                return;
+            }
+            "hr" => {
+                self.flush_block();
+                if self.hidden_depth == 0 {
+                    self.blocks.push(Block::Rule);
+                }
+                return;
+            }
+            "img" => {
+                self.emit_image(attrs);
+                return;
+            }
+            "input" => {
+                self.emit_input(attrs);
+                return;
+            }
+            "ul" | "ol" => {
+                self.flush_block();
+                self.list_stack.push(ListCtx {
+                    ordered: tag == "ol",
+                    counter: 0,
+                });
+            }
+            "form" => {
+                self.form_action = get_attr(attrs, "action").unwrap_or("").to_string();
+            }
+            "a" => {
+                self.flush_run();
+                let href = get_attr(attrs, "href").unwrap_or("").to_string();
+                self.cur_link = Some(self.links.len());
+                self.links.push(href);
+            }
+            _ => {}
+        }
+
+        // Block elements: start a new block and remember any list marker.
+        if let Some(kind) = block_kind(tag) {
+            self.start_block(kind);
+            if kind == TextKind::ListItem {
+                self.cur_marker = Some(self.next_list_marker());
+            }
+            if kind == TextKind::Pre {
+                self.in_pre = true;
+            }
+        }
+
+        // Apply element + CSS + inline styling as an unwindable frame.
+        self.push_frame(name, attrs);
+    }
+
+    fn close_tag(&mut self, name: &str) {
+        self.pop_frame(name);
+        match name {
+            "title" => {
+                self.title = self.cur.trim().to_string();
+                self.cur.clear();
+                self.in_title = false;
+                self.last_was_space = true;
+            }
+            "ul" | "ol" => {
+                self.flush_block();
+                self.list_stack.pop();
+            }
+            "form" => self.form_action.clear(),
+            "a" => {
+                self.flush_run();
+                self.cur_link = None;
+            }
+            "pre" => {
+                self.flush_block();
+                self.in_pre = false;
+                self.cur_kind = TextKind::Paragraph;
+            }
+            _ if block_kind(name).is_some() => {
+                self.flush_block();
+                self.cur_kind = TextKind::Paragraph;
+            }
+            _ => {}
+        }
+    }
+
+    // ── Styling frames ──────────────────────────────────────────────────────
+
+    fn push_frame(&mut self, name: SmallStr, attrs: &[Attr]) {
+        let tag = name.as_str();
+        let (mut bold, mono, mut underline) = inline_defaults(tag);
+        let mut color: Option<Color> = None;
+        let mut hidden = false;
+
+        // Cascade: stylesheet rules for this tag/class, then inline style/attrs.
+        let classes = get_attr(attrs, "class").unwrap_or("");
+        let css_style = self.sheet.style_for(tag, classes);
+        merge_css(&css_style, &mut bold, &mut underline, &mut color, &mut hidden);
+
+        if let Some(inline) = get_attr(attrs, "style") {
+            let s = css::parse_inline(inline);
+            merge_css(&s, &mut bold, &mut underline, &mut color, &mut hidden);
+        }
+        if let Some(c) = get_attr(attrs, "color").and_then(css::parse_color) {
+            color = Some(c);
+        }
+
+        if !(bold || mono || underline || color.is_some() || hidden) {
+            return; // no effect — nothing to unwind later
+        }
+
+        self.flush_run();
+        if bold {
+            self.bold_depth += 1;
+        }
+        if mono {
+            self.mono_depth += 1;
+        }
+        if underline {
+            self.underline_depth += 1;
+        }
+        if hidden {
+            self.hidden_depth += 1;
+        }
+        if let Some(c) = color {
+            self.color_stack.push(c);
+        }
+        self.frames.push(Frame {
+            tag: name,
+            bold,
+            mono,
+            underline,
+            color: color.is_some(),
+            hidden,
+        });
+    }
+
+    fn pop_frame(&mut self, name: &str) {
+        let Some(pos) = self.frames.iter().rposition(|f| f.tag.eq(name)) else {
+            return;
+        };
+        self.flush_run();
+        let frame = self.frames.remove(pos);
+        if frame.bold {
+            self.bold_depth -= 1;
+        }
+        if frame.mono {
+            self.mono_depth -= 1;
+        }
+        if frame.underline {
+            self.underline_depth -= 1;
+        }
+        if frame.hidden {
+            self.hidden_depth -= 1;
+        }
+        if frame.color {
+            self.color_stack.pop();
+        }
+    }
+
+    fn current_style(&self) -> RunStyle {
+        RunStyle {
+            color: self.color_stack.last().copied(),
+            bold: self.bold_depth > 0,
+            mono: self.mono_depth > 0,
+            underline: self.underline_depth > 0,
+        }
+    }
+
+    // ── Void elements ───────────────────────────────────────────────────────
+
+    fn emit_image(&mut self, attrs: &[Attr]) {
+        self.flush_block();
+        if self.hidden_depth > 0 {
+            return;
+        }
+        self.blocks.push(Block::Image {
+            alt: get_attr(attrs, "alt").unwrap_or("").to_string(),
+            img: None,
+            src: get_attr(attrs, "src").unwrap_or("").to_string(),
+        });
+    }
+
+    fn emit_input(&mut self, attrs: &[Attr]) {
+        let kind = match get_attr(attrs, "type").unwrap_or("text") {
+            "submit" | "button" => InputKind::Submit,
+            "search" => InputKind::Search,
+            "hidden" => return,
+            _ => InputKind::Text,
+        };
+        self.flush_block();
+        if self.hidden_depth > 0 {
+            return;
+        }
+        let placeholder = get_attr(attrs, "placeholder")
+            .or_else(|| get_attr(attrs, "value"))
+            .unwrap_or("")
+            .to_string();
+        let idx = self.inputs.len();
+        self.inputs.push(InputMeta {
+            kind,
+            placeholder,
+            name: get_attr(attrs, "name").unwrap_or("").to_string(),
+            action: self.form_action.clone(),
+        });
+        self.blocks.push(Block::Input { idx });
+    }
+
+    // ── Text accumulation ───────────────────────────────────────────────────
+
+    fn parse_entity(&mut self) {
+        let start = self.pos + 1;
+        let max_end = (start + 12).min(self.bytes.len());
+        for end in start..max_end {
+            if self.bytes[end] == b';' {
+                let entity = &self.bytes[start..end];
+                self.pos = end + 1;
+                let rep = resolve_entity(entity).unwrap_or(" ");
+                self.push_text(rep);
+                return;
+            }
+        }
+        self.pos += 1;
+        self.push_char('&');
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.push_char(ch);
+        }
+    }
+
+    fn push_char(&mut self, ch: char) {
+        if self.skip != Skip::None || self.hidden_depth > 0 {
+            return;
+        }
+        if self.in_title {
+            self.cur.push(ch);
+            return;
+        }
+        if self.in_pre {
+            if ch != '\r' {
+                self.cur.push(ch);
+            }
+            return;
+        }
+        if ch.is_whitespace() {
+            if !self.last_was_space && !self.cur.is_empty() {
+                self.cur.push(' ');
+                self.last_was_space = true;
+            }
+        } else {
+            self.cur.push(ch);
+            self.last_was_space = false;
+        }
+    }
+
+    // ── Block / run flushing ────────────────────────────────────────────────
+
+    fn start_block(&mut self, kind: TextKind) {
+        self.flush_block();
+        self.cur_kind = kind;
+        self.last_was_space = true;
+    }
+
+    fn next_list_marker(&mut self) -> String {
+        match self.list_stack.last_mut() {
+            Some(ctx) if ctx.ordered => {
+                ctx.counter += 1;
+                alloc::format!("{}.", ctx.counter)
+            }
+            _ => String::from("*"),
+        }
+    }
+
+    fn flush_run(&mut self) {
+        if self.cur.is_empty() {
+            return;
+        }
+        let text = core::mem::take(&mut self.cur);
+        self.runs.push(Run {
+            text,
+            link: self.cur_link,
+            style: self.current_style(),
+        });
+    }
+
+    fn flush_block(&mut self) {
+        self.flush_run();
+        let has_text = self
+            .runs
+            .iter()
+            .any(|r| r.text.chars().any(|c| !c.is_whitespace()));
+        if has_text {
+            self.blocks.push(Block::Text {
+                kind: self.cur_kind,
+                runs: core::mem::take(&mut self.runs),
+                marker: self.cur_marker.take(),
+            });
+        } else {
+            self.runs.clear();
+            self.cur_marker = None;
+        }
+        self.cur_kind = TextKind::Paragraph;
+        self.last_was_space = true;
+    }
+
+    fn push_text_block(&mut self, kind: TextKind, text: &str) {
+        self.blocks.push(Block::Text {
+            kind,
+            runs: alloc::vec![Run {
+                text: String::from(text),
+                link: None,
+                style: RunStyle::default(),
+            }],
+            marker: None,
+        });
+    }
+
+    // ── Skipping raw-text elements (script/style) ───────────────────────────
+
+    fn skip_element(&mut self) {
+        let needle: &[u8] = match self.skip {
+            Skip::Script => b"</script",
+            Skip::Style => b"</style",
+            Skip::None => return,
+        };
+        match find_ignore_ascii_case(&self.bytes[self.pos..], needle) {
+            Some(rel) => {
+                self.pos += rel;
+                if let Some(gt) = self.bytes[self.pos..].iter().position(|&b| b == b'>') {
+                    self.pos += gt + 1;
+                } else {
+                    self.pos = self.bytes.len();
+                }
+            }
+            None => self.pos = self.bytes.len(),
+        }
+        self.skip = Skip::None;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tag classification helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Map a tag to its block kind, or `None` for inline / structural tags.
+fn block_kind(tag: &str) -> Option<TextKind> {
+    Some(match tag {
+        "h1" => TextKind::H1,
+        "h2" => TextKind::H2,
+        "h3" | "h4" | "h5" | "h6" => TextKind::H3,
+        "p" | "div" | "section" | "article" | "main" | "header" | "footer" | "center" | "nav"
+        | "aside" | "figure" | "figcaption" | "td" | "th" | "tr" | "caption" | "dd" | "dt"
+        | "dl" => TextKind::Paragraph,
+        "li" => TextKind::ListItem,
+        "blockquote" => TextKind::Quote,
+        "pre" => TextKind::Pre,
+        _ => return None,
+    })
+}
+
+/// Default inline effects (bold, mono, underline) for a formatting tag.
+fn inline_defaults(tag: &str) -> (bool, bool, bool) {
+    match tag {
+        "b" | "strong" | "mark" => (true, false, false),
+        "code" | "tt" | "kbd" | "samp" | "var" => (false, true, false),
+        "u" | "ins" => (false, false, true),
+        _ => (false, false, false),
+    }
+}
+
+fn merge_css(
+    s: &css::Style,
+    bold: &mut bool,
+    underline: &mut bool,
+    color: &mut Option<Color>,
+    hidden: &mut bool,
+) {
+    if let Some(b) = s.bold {
+        *bold = b;
+    }
+    if let Some(u) = s.underline {
+        *underline = u;
+    }
+    if let Some(c) = s.color {
+        *color = Some(c);
+    }
+    *hidden |= s.hidden;
+}
+
+fn skip_ws(bytes: &[u8], idx: &mut usize) {
+    while *idx < bytes.len() && bytes[*idx].is_ascii_whitespace() {
+        *idx += 1;
+    }
+}
