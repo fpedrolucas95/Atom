@@ -30,7 +30,7 @@ use atom_syscall::debug::log;
 use libipc::messages::{
     MessageType, MessageHeader, SurfaceAssignMsg, SurfacePresentMsg,
     KeyEvent as IpcKeyEvent, MouseButtonEvent, MouseMoveEvent, MouseButton,
-    AppRegisterMsg, AppLaunchRequestMsg, AppLaunchReplyMsg,
+    MouseScrollEvent, AppRegisterMsg, AppLaunchRequestMsg, AppLaunchReplyMsg,
 };
 use libipc::protocol::{lookup_service, send_message, try_recv_message, get_payload};
 
@@ -102,6 +102,7 @@ const CHAR_H:    u32 = 8;
 const TOOLBAR_H: u32 = 48;
 const SIDEBAR_W: u32 = 180;
 const STATUS_H:  u32 = 24;
+const SCROLLBAR_W: u32 = 10;
 
 // Icon view cell
 const ICON_CELL_W: u32 = 100;
@@ -294,6 +295,7 @@ impl FileManager {
             }
         }
         self.selected = None;
+        self.scroll_offset = 0;
         self.needs_redraw = true;
     }
 
@@ -403,11 +405,15 @@ impl FileManager {
             ViewMode::Icons => self.draw_icons(surface, cx, cy, cw, ch),
             ViewMode::List  => self.draw_list(surface, cx, cy, cw, ch),
         }
+        self.draw_scrollbar(surface, cx, cy, cw, ch);
     }
 
     fn draw_icons(&self, surface: &SharedSurface, cx: u32, cy: u32, cw: u32, ch: u32) {
-        let cols = (cw / ICON_CELL_W).max(1);
-        for (i, &entry_idx) in self.filtered_entries.iter().enumerate() {
+        let content_w = cw.saturating_sub(SCROLLBAR_W + spacing::SM);
+        let cols = (content_w / ICON_CELL_W).max(1);
+        let start = self.scroll_offset as usize * cols as usize;
+        for (visible_i, &entry_idx) in self.filtered_entries.iter().enumerate().skip(start) {
+            let i = visible_i - start;
             let entry = &self.entries[entry_idx];
             let row = i as u32 / cols;
             let col = i as u32 % cols;
@@ -417,7 +423,7 @@ impl FileManager {
             
             if y + ICON_CELL_H > cy + ch { break; }
 
-            let is_sel = self.selected == Some(i);
+            let is_sel = self.selected == Some(visible_i);
             if is_sel {
                 surface.fill_rect_rounded_aa(x, y, ICON_CELL_W - spacing::MD, ICON_CELL_H - spacing::MD, radius::MD, ds::ATOM_COLOR_SURFACE_ALT);
             }
@@ -436,20 +442,22 @@ impl FileManager {
     }
 
     fn draw_list(&self, surface: &SharedSurface, cx: u32, cy: u32, cw: u32, ch: u32) {
+        let content_w = cw.saturating_sub(SCROLLBAR_W + spacing::SM);
         // Header
-        surface.fill_rect(cx, cy, cw, LIST_HDR_H, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.fill_rect(cx, cy, content_w, LIST_HDR_H, ds::ATOM_COLOR_SURFACE_ALT);
         surface.draw_string(cx + spacing::MD, cy + 10, "Name", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE_ALT);
-        surface.draw_string(cx + cw - 100, cy + 10, "Size", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE_ALT);
+        surface.draw_string(cx + content_w - 100, cy + 10, "Size", ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE_ALT);
 
-        for (i, &entry_idx) in self.filtered_entries.iter().enumerate() {
+        for (visible_i, &entry_idx) in self.filtered_entries.iter().enumerate().skip(self.scroll_offset as usize) {
+            let i = visible_i - self.scroll_offset as usize;
             let entry = &self.entries[entry_idx];
             let y = cy + LIST_HDR_H + i as u32 * LIST_ROW_H;
             if y + LIST_ROW_H > cy + ch { break; }
 
-            let is_sel = self.selected == Some(i);
+            let is_sel = self.selected == Some(visible_i);
             let bg = if is_sel { ds::ATOM_COLOR_SURFACE_ALT } else { ds::ATOM_COLOR_BG };
             if is_sel {
-                surface.fill_rect(cx, y, cw, LIST_ROW_H, bg);
+                surface.fill_rect(cx, y, content_w, LIST_ROW_H, bg);
             }
 
             let icon_color = entry.kind.color();
@@ -457,8 +465,23 @@ impl FileManager {
             surface.draw_string(cx + spacing::LG + 8, y + 8, &entry.name, ds::ATOM_COLOR_TEXT_PRIMARY, bg);
             
             let size_str = if entry.is_dir { String::from("--") } else { format_size(entry.size) };
-            surface.draw_string(cx + cw - 100, y + 8, &size_str, ds::ATOM_COLOR_TEXT_SECONDARY, bg);
+            surface.draw_string(cx + content_w - 100, y + 8, &size_str, ds::ATOM_COLOR_TEXT_SECONDARY, bg);
         }
+    }
+
+    fn draw_scrollbar(&self, surface: &SharedSurface, cx: u32, cy: u32, cw: u32, ch: u32) {
+        let max = self.max_scroll_offset();
+        if max == 0 {
+            return;
+        }
+        let sx = cx + cw - SCROLLBAR_W - 2;
+        surface.fill_rect(sx, cy, SCROLLBAR_W, ch, ds::ATOM_COLOR_SURFACE);
+        let total_rows = self.total_content_rows().max(1);
+        let visible_rows = self.visible_content_rows().max(1);
+        let thumb_h = (ch * visible_rows / total_rows).max(20).min(ch);
+        let travel = ch.saturating_sub(thumb_h);
+        let thumb_y = cy + travel * self.scroll_offset / max;
+        surface.fill_rect_rounded_aa(sx + 2, thumb_y, SCROLLBAR_W - 4, thumb_h, radius::XS, ds::ATOM_COLOR_BORDER);
     }
 
     fn draw_status(&self, surface: &SharedSurface) {
@@ -483,6 +506,10 @@ impl FileManager {
                     if ev.button == MouseButton::Left {
                         self.handle_click();
                     }
+                }
+                MessageType::MouseScroll => {
+                    let ev = MouseScrollEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
+                    self.handle_scroll(ev.dz);
                 }
                 MessageType::KeyPress => {
                     let ev = IpcKeyEvent::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
@@ -523,9 +550,10 @@ impl FileManager {
             
             match self.view_mode {
                 ViewMode::Icons => {
-                    let cols = ((self.width - SIDEBAR_W) / ICON_CELL_W).max(1);
+                    let content_w = (self.width - SIDEBAR_W).saturating_sub(SCROLLBAR_W + spacing::SM);
+                    let cols = (content_w / ICON_CELL_W).max(1);
                     let col = mx as u32 / ICON_CELL_W;
-                    let row = my as u32 / ICON_CELL_H;
+                    let row = self.scroll_offset + my as u32 / ICON_CELL_H;
                     let idx = (row * cols + col) as usize;
                     if idx < self.filtered_entries.len() {
                         if self.selected == Some(idx) {
@@ -538,7 +566,11 @@ impl FileManager {
                     }
                 }
                 ViewMode::List => {
-                    let idx = ((my as u32 - LIST_HDR_H) / LIST_ROW_H) as usize;
+                    if my < LIST_HDR_H as i32 {
+                        self.needs_redraw = true;
+                        return;
+                    }
+                    let idx = (self.scroll_offset + (my as u32 - LIST_HDR_H) / LIST_ROW_H) as usize;
                     if idx < self.filtered_entries.len() {
                         if self.selected == Some(idx) {
                             self.activate(idx);
@@ -552,6 +584,38 @@ impl FileManager {
             }
         }
         self.needs_redraw = true;
+    }
+
+    fn handle_scroll(&mut self, dz: i32) {
+        if dz > 0 {
+            self.scroll_offset = self.scroll_offset.saturating_sub(2);
+        } else if dz < 0 {
+            self.scroll_offset = (self.scroll_offset + 2).min(self.max_scroll_offset());
+        }
+        self.needs_redraw = true;
+    }
+
+    fn visible_content_rows(&self) -> u32 {
+        let ch = self.height.saturating_sub(TOOLBAR_H + STATUS_H);
+        match self.view_mode {
+            ViewMode::Icons => (ch / ICON_CELL_H).max(1),
+            ViewMode::List => ch.saturating_sub(LIST_HDR_H) / LIST_ROW_H,
+        }
+    }
+
+    fn total_content_rows(&self) -> u32 {
+        match self.view_mode {
+            ViewMode::Icons => {
+                let content_w = (self.width - SIDEBAR_W).saturating_sub(SCROLLBAR_W + spacing::SM);
+                let cols = (content_w / ICON_CELL_W).max(1);
+                (self.filtered_entries.len() as u32 + cols - 1) / cols
+            }
+            ViewMode::List => self.filtered_entries.len() as u32,
+        }
+    }
+
+    fn max_scroll_offset(&self) -> u32 {
+        self.total_content_rows().saturating_sub(self.visible_content_rows())
     }
 
     fn handle_key(&mut self, ev: IpcKeyEvent) {

@@ -791,8 +791,6 @@ if [ "$RUN" = true ]; then
         -bios "$OVMF_PATH" \
         -drive format=raw,file=$DISK_IMG,cache=writeback \
         -device VGA \
-        -usb \
-        -device usb-mouse \
         -serial file:serial.log \
         -debugcon file:serial_log.txt \
         -global isa-debugcon.iobase=0xE9 \

@@ -122,6 +122,7 @@ fn main() -> ! {
         if browser.needs_redraw {
             browser.render(&mut surface);
         }
+        browser.finish_pending_load();
 
         // Idle without busy-spinning: block for events when nothing happened.
         if handled_event {

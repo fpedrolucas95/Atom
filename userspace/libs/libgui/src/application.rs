@@ -13,7 +13,10 @@ use crate::event::{Event, MouseEvent, WindowEvent};
 use atom_syscall::ipc::{PortId, create_port, wait_any};
 use atom_syscall::SyscallResult;
 use libipc::protocol::{lookup_service, send_message, get_payload};
-use libipc::messages::{MessageType, WmCreateWindowRequest, WmCreateWindowResponse, SurfaceAssignMsg};
+use libipc::messages::{
+    MessageType, MouseScrollEvent, SurfaceAssignMsg, WmCreateWindowRequest,
+    WmCreateWindowResponse,
+};
 
 /// Application state and context
 pub struct Application {
@@ -157,6 +160,15 @@ impl Application {
                         };
                         return Event::Mouse(MouseEvent::ButtonUp {
                             button,
+                            x: mouse_event.x,
+                            y: mouse_event.y,
+                        });
+                    }
+                }
+                MessageType::MouseScroll => {
+                    if let Some(mouse_event) = MouseScrollEvent::from_bytes(payload) {
+                        return Event::Mouse(MouseEvent::Scroll {
+                            delta: mouse_event.dz as i16,
                             x: mouse_event.x,
                             y: mouse_event.y,
                         });

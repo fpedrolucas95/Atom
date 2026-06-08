@@ -17,6 +17,7 @@ use libgui::color::Color;
 #[derive(Clone, Copy, Default)]
 pub struct Style {
     pub color: Option<Color>,
+    pub background: Option<Color>,
     pub bold: Option<bool>,
     pub underline: Option<bool>,
     pub hidden: bool,
@@ -27,6 +28,9 @@ impl Style {
     pub fn overlay(&mut self, other: &Style) {
         if other.color.is_some() {
             self.color = other.color;
+        }
+        if other.background.is_some() {
+            self.background = other.background;
         }
         if other.bold.is_some() {
             self.bold = other.bold;
@@ -53,9 +57,17 @@ pub fn parse_inline(decls: &str) -> Style {
 fn apply_declaration(style: &mut Style, prop: &str, value: &str) {
     // Property names are case-insensitive; keywords likewise.
     let prop = AsciiLower(prop);
+    let value = value
+        .strip_suffix("!important")
+        .unwrap_or(value)
+        .trim();
     let lower = value.to_ascii_lowercase();
     match prop {
         _ if prop.eq("color") => style.color = parse_color(value),
+        _ if prop.eq("background-color") && lower != "transparent" => {
+            style.background = parse_color(value)
+        }
+        _ if prop.eq("background") => style.background = parse_background_color(value),
         _ if prop.eq("font-weight") => {
             style.bold = Some(matches!(
                 lower.as_str(),
@@ -71,6 +83,15 @@ fn apply_declaration(style: &mut Style, prop: &str, value: &str) {
         }
         _ => {}
     }
+}
+
+fn parse_background_color(value: &str) -> Option<Color> {
+    if value.eq_ignore_ascii_case("transparent") {
+        return None;
+    }
+    value
+        .split_ascii_whitespace()
+        .find_map(parse_color)
 }
 
 /// A parsed `<style>` block: an ordered list of selector → declaration rules.

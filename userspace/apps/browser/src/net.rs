@@ -17,6 +17,11 @@ use crate::url::{normalize_redirect_url, split_http_url};
 const MAX_PAGE_REDIRECTS: u32 = 4;
 const MAX_IMAGE_REDIRECTS: u32 = 3;
 
+pub struct PageFetch {
+    pub body: String,
+    pub final_url: String,
+}
+
 fn is_redirect(status: u16) -> bool {
     (300..400).contains(&status)
 }
@@ -26,7 +31,7 @@ fn is_success(status: u16) -> bool {
 }
 
 /// Fetch a page body as text, following plain-HTTP redirects.
-pub fn fetch_http(url: &str) -> Result<String, String> {
+pub fn fetch_http(url: &str) -> Result<PageFetch, String> {
     let netd = lookup_service("netd").map_err(|_| String::from("netd service not found"))?;
 
     let mut current = String::from(url);
@@ -56,7 +61,10 @@ pub fn fetch_http(url: &str) -> Result<String, String> {
         if response.body.is_empty() {
             return Err(format!("HTTP {} with empty body", response.status));
         }
-        return Ok(String::from_utf8_lossy(&response.body).into_owned());
+        return Ok(PageFetch {
+            body: String::from_utf8_lossy(&response.body).into_owned(),
+            final_url: current,
+        });
     }
     Err(String::from("Too many HTTP redirects"))
 }

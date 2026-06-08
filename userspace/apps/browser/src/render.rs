@@ -16,33 +16,36 @@ use crate::text::truncate_for_width;
 pub const CHAR_W: u32 = 8;
 pub const CHAR_H: u32 = 8;
 pub const LINE_H: u32 = 12;
-pub const TOOLBAR_H: u32 = 42;
+pub const TOOLBAR_H: u32 = 58;
 pub const STATUS_H: u32 = 20;
 pub const PADDING: u32 = 12;
-pub const ADDR_Y: u32 = 8;
-pub const ADDR_H: u32 = 24;
+pub const ADDR_Y: u32 = 16;
+pub const ADDR_H: u32 = 26;
+pub const NAV_X: u32 = 12;
+pub const NAV_BTN_W: u32 = 28;
+pub const NAV_GAP: u32 = 6;
 
 // ── Palette ─────────────────────────────────────────────────────────────────
-pub const BG: Color = Color::rgb(248, 249, 252);
-pub const CHROME: Color = Color::rgb(34, 40, 49);
-pub const CHROME_LINE: Color = Color::rgb(74, 86, 104);
-pub const TEXT: Color = Color::rgb(28, 34, 43);
-pub const MUTED: Color = Color::rgb(94, 105, 120);
-pub const ACCENT: Color = Color::rgb(38, 132, 255);
-pub const FIELD_BG: Color = Color::rgb(255, 255, 255);
+pub const CHROME: Color = Color::rgb(30, 41, 59);
+pub const CHROME_LINE: Color = Color::rgb(56, 68, 88);
+pub const TEXT: Color = Color::rgb(226, 232, 240);
+pub const MUTED: Color = Color::rgb(148, 163, 184);
+pub const ACCENT: Color = Color::rgb(74, 138, 255);
+pub const FIELD_BG: Color = Color::rgb(7, 11, 18);
+pub const SCROLLBAR_W: u32 = 8;
 
-const HEADING1: Color = Color::rgb(17, 24, 39);
-const HEADING3: Color = Color::rgb(83, 96, 116);
-const CODE: Color = Color::rgb(176, 48, 96);
-const RULE: Color = Color::rgb(210, 218, 230);
-const PANEL: Color = Color::rgb(230, 236, 245);
-const PANEL_BORDER: Color = Color::rgb(203, 213, 225);
-const PLACEHOLDER: Color = Color::rgb(150, 160, 175);
-const FIELD_BORDER: Color = Color::rgb(180, 190, 205);
+const HEADING1: Color = Color::rgb(240, 245, 252);
+const HEADING3: Color = Color::rgb(180, 190, 205);
+const CODE: Color = Color::rgb(255, 177, 107);
+const RULE: Color = Color::rgb(42, 52, 68);
+const PANEL: Color = Color::rgb(15, 23, 36);
+const PANEL_BORDER: Color = Color::rgb(48, 60, 80);
+const PLACEHOLDER: Color = Color::rgb(116, 130, 150);
+const FIELD_BORDER: Color = Color::rgb(56, 68, 88);
 
 /// Geometry of the address bar: (input_x, input_w, go_x, go_w).
 pub fn addr_bar_geom(width: u32) -> (u32, u32, u32, u32) {
-    let input_x = 62u32;
+    let input_x = NAV_X + (NAV_BTN_W + NAV_GAP) * 4 + 10;
     let input_w = width.saturating_sub(input_x + 72);
     let go_w = 48u32;
     let go_x = width.saturating_sub(58);
@@ -96,15 +99,34 @@ fn paint_for(run: &Run, default: Color) -> Painted {
 }
 
 /// Default block text colour and vertical padding (top, bottom) by kind.
-fn block_metrics(kind: TextKind) -> (Color, i32, i32) {
+fn block_metrics(kind: TextKind, page_bg: Color) -> (Color, i32, i32) {
+    let light_page = page_bg.r as u32 * 299
+        + page_bg.g as u32 * 587
+        + page_bg.b as u32 * 114
+        >= 160_000;
+    let text = if light_page {
+        Color::rgb(32, 37, 45)
+    } else {
+        TEXT
+    };
+    let heading = if light_page {
+        Color::rgb(20, 24, 31)
+    } else {
+        HEADING1
+    };
+    let muted = if light_page {
+        Color::rgb(91, 99, 112)
+    } else {
+        MUTED
+    };
     match kind {
-        TextKind::H1 => (HEADING1, 12, 8),
+        TextKind::H1 => (heading, 12, 8),
         TextKind::H2 => (ACCENT, 10, 6),
-        TextKind::H3 => (HEADING3, 8, 4),
-        TextKind::ListItem => (TEXT, 4, 4),
-        TextKind::Quote => (MUTED, 8, 8),
-        TextKind::Pre => (TEXT, 8, 8),
-        TextKind::Paragraph => (TEXT, 6, 6),
+        TextKind::H3 => (if light_page { muted } else { HEADING3 }, 8, 4),
+        TextKind::ListItem => (text, 4, 4),
+        TextKind::Quote => (muted, 8, 8),
+        TextKind::Pre => (text, 8, 8),
+        TextKind::Paragraph => (text, 6, 6),
     }
 }
 
@@ -179,12 +201,17 @@ fn draw_control(s: &mut Surface, meta: &InputMeta, value: &str, focused: bool, x
             s.draw_string(x + 8, y + 6, &truncate_for_width(label, w.saturating_sub(12)), Color::WHITE, ACCENT);
         }
         InputKind::Select => {
+            let label = if value.is_empty() {
+                meta.placeholder.as_str()
+            } else {
+                value
+            };
             s.fill_rect(x, y, w, h, FIELD_BG);
             s.draw_rect(x, y, w, h, FIELD_BORDER);
             s.draw_string(
                 x + 6,
                 y + 6,
-                &truncate_for_width(&meta.placeholder, w.saturating_sub(22)),
+                &truncate_for_width(label, w.saturating_sub(22)),
                 TEXT,
                 FIELD_BG,
             );
@@ -234,6 +261,7 @@ pub fn draw_text_block(
     max_w: u32,
     mut y: i32,
     clip: Clip,
+    page_bg: Color,
     link_hits: &mut Vec<Hit>,
     form: &FormCtx,
     input_hits: &mut Vec<Hit>,
@@ -242,7 +270,7 @@ pub fn draw_text_block(
         return draw_pre(s, items, x0, max_w, y, clip);
     }
 
-    let (default_fg, top_pad, bottom_pad) = block_metrics(kind);
+    let (default_fg, top_pad, bottom_pad) = block_metrics(kind, page_bg);
     y += top_pad;
     let block_top = y;
 
@@ -303,7 +331,7 @@ pub fn draw_text_block(
         if first_line {
             if let Some(m) = marker {
                 if clip.visible(y, CHAR_H as i32) {
-                    s.draw_string(x0 + 8, y as u32, m, ACCENT, BG);
+                    s.draw_string(x0 + 8, y as u32, m, ACCENT, page_bg);
                 }
             }
             first_line = false;
@@ -319,7 +347,7 @@ pub fn draw_text_block(
             match *tok {
                 Tok::Word { text, paint, link } => {
                     if line_visible && ty >= 0 {
-                        draw_word(s, x, ty as u32, text, &paint, BG);
+                        draw_word(s, x, ty as u32, text, &paint, page_bg);
                     }
                     if let Some(idx) = link {
                         link_hits.push(Hit {
@@ -417,6 +445,7 @@ pub fn draw_image_block(
     s: &mut Surface,
     alt: &str,
     img: &Option<libimage::DecodedImage>,
+    error: Option<&str>,
     align: Align,
     x0: u32,
     max_w: u32,
@@ -440,7 +469,7 @@ pub fn draw_image_block(
             let (w, h) = (max_w.min(260), 64u32);
             let ix = centered(w);
             if clip.visible(y, h as i32) {
-                s.fill_rect(ix, y as u32, w, h, Color::rgb(238, 240, 244));
+                s.fill_rect(ix, y as u32, w, h, PANEL);
                 s.draw_rect(ix, y as u32, w, h, PANEL_BORDER);
                 let label = if alt.is_empty() {
                     String::from("[image]")
@@ -449,12 +478,20 @@ pub fn draw_image_block(
                     l.push_str(alt);
                     l
                 };
+                let label = if let Some(err) = error {
+                    let mut l = label;
+                    l.push_str(" - ");
+                    l.push_str(err);
+                    l
+                } else {
+                    label
+                };
                 s.draw_string(
                     ix + 8,
                     y as u32 + h / 2 - 4,
                     &truncate_for_width(&label, w.saturating_sub(16)),
                     MUTED,
-                    Color::rgb(238, 240, 244),
+                    PANEL,
                 );
             }
             y + h as i32 + 10

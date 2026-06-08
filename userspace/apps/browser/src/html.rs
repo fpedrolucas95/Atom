@@ -27,6 +27,7 @@ pub fn parse_html(html: &str) -> Document {
     parser.parse();
     Document {
         title: parser.title,
+        background: parser.background,
         blocks: parser.blocks,
         links: parser.links,
         inputs: parser.inputs,
@@ -183,6 +184,7 @@ struct HtmlParser<'a> {
     hidden_depth: u32,
     center_depth: u32,
     color_stack: Vec<Color>,
+    background: Option<Color>,
 
     title: String,
     in_title: bool,
@@ -225,6 +227,7 @@ impl<'a> HtmlParser<'a> {
             hidden_depth: 0,
             center_depth: 0,
             color_stack: Vec::new(),
+            background: None,
             title: String::new(),
             in_title: false,
             in_pre: false,
@@ -298,6 +301,9 @@ impl<'a> HtmlParser<'a> {
 
     fn open_tag(&mut self, name: SmallStr, attrs: &[u8]) {
         let tag = name.as_str();
+        if tag == "html" || tag == "body" {
+            self.capture_document_background(tag, attrs);
+        }
         match tag {
             "script" => {
                 self.skip = Skip::Script;
@@ -410,6 +416,29 @@ impl<'a> HtmlParser<'a> {
 
     // ── Styling frames ──────────────────────────────────────────────────────
 
+    fn capture_document_background(&mut self, tag: &str, attrs: &[u8]) {
+        let mut background = None;
+        if !self.sheet.is_empty() {
+            let classes = find_attr(attrs, b"class").unwrap_or_default();
+            background = self.sheet.style_for(tag, &classes).background;
+        }
+        if let Some(inline) = find_attr(attrs, b"style") {
+            let style = css::parse_inline(&inline);
+            if style.background.is_some() {
+                background = style.background;
+            }
+        }
+        if let Some(color) = find_attr(attrs, b"bgcolor")
+            .as_deref()
+            .and_then(css::parse_color)
+        {
+            background = Some(color);
+        }
+        if background.is_some() {
+            self.background = background;
+        }
+    }
+
     fn push_frame(&mut self, name: SmallStr, attrs: &[u8]) {
         let tag = name.as_str();
         let (mut bold, mono, mut underline) = inline_defaults(tag);
@@ -518,6 +547,7 @@ impl<'a> HtmlParser<'a> {
         self.blocks.push(Block::Image {
             alt: find_attr(attrs, b"alt").unwrap_or_default(),
             img: None,
+            error: None,
             src: find_attr(attrs, b"src").unwrap_or_default(),
             align: self.current_align(),
         });
@@ -544,6 +574,7 @@ impl<'a> HtmlParser<'a> {
             name: find_attr(attrs, b"name").unwrap_or_default(),
             action: self.form_action.clone(),
             size,
+            options: Vec::new(),
         });
     }
 
@@ -563,6 +594,7 @@ impl<'a> HtmlParser<'a> {
             name: find_attr(attrs, b"name").unwrap_or_default(),
             action: self.form_action.clone(),
             size: None,
+            options: Vec::new(),
         });
     }
 
@@ -578,6 +610,11 @@ impl<'a> HtmlParser<'a> {
         }
         let text = self.opt_text.trim();
         if !text.is_empty() {
+            if let Some(idx) = self.select_idx {
+                if let Some(meta) = self.inputs.get_mut(idx) {
+                    meta.options.push(text.to_string());
+                }
+            }
             if self.opt_first.is_none() {
                 self.opt_first = Some(text.to_string());
             }

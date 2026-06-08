@@ -74,6 +74,7 @@ pub enum Block {
     Image {
         alt: String,
         img: Option<libimage::DecodedImage>,
+        error: Option<String>,
         src: String,
         align: Align,
     },
@@ -87,6 +88,8 @@ pub struct InputMeta {
     pub action: String,
     /// Requested width in characters (`size` attribute), if any.
     pub size: Option<u32>,
+    /// Labels captured from `<option>` children for `<select>` controls.
+    pub options: Vec<String>,
 }
 
 /// A clickable region in screen coordinates tied to a link or input index.
@@ -108,6 +111,7 @@ impl Hit {
 /// A fully parsed document ready for layout.
 pub struct Document {
     pub title: String,
+    pub background: Option<Color>,
     pub blocks: Vec<Block>,
     pub links: Vec<String>,
     pub inputs: Vec<InputMeta>,
