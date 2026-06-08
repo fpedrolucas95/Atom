@@ -1,4 +1,4 @@
-//! Atom Desktop Environment alpha
+//! Atom Desktop Environment — UI Shell
 
 #![no_std]
 #![no_main]
@@ -6,120 +6,16 @@
 
 extern crate alloc;
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-struct BumpAllocator {
-    start: AtomicUsize,
-    size: AtomicUsize,
-    next: AtomicUsize,
-    // Support for a "scratch stack" of backing regions.
-    // Index 0 is always the permanent logic heap.
-    regions: [(AtomicUsize, AtomicUsize, AtomicUsize); 2],
-    current_region: AtomicUsize,
-}
-
-unsafe impl Sync for BumpAllocator {}
-
-impl BumpAllocator {
-    const fn new() -> Self {
-        Self {
-            start: AtomicUsize::new(0),
-            size: AtomicUsize::new(0),
-            next: AtomicUsize::new(0),
-            regions: [
-                (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)),
-                (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)),
-            ],
-            current_region: AtomicUsize::new(0),
-        }
-    }
-
-    fn init(&self, start: usize, size: usize) {
-        self.regions[0].0.store(start, Ordering::SeqCst);
-        self.regions[0].1.store(size, Ordering::SeqCst);
-        self.regions[0].2.store(0, Ordering::SeqCst);
-        self.start.store(start, Ordering::SeqCst);
-        self.size.store(size, Ordering::SeqCst);
-        self.next.store(0, Ordering::SeqCst);
-    }
-
-    /// Activate a scratch region. Future allocations come from here.
-    fn push_scratch(&self, start: usize, size: usize) {
-        self.regions[1].0.store(start, Ordering::SeqCst);
-        self.regions[1].1.store(size, Ordering::SeqCst);
-        self.regions[1].2.store(0, Ordering::SeqCst);
-        self.current_region.store(1, Ordering::SeqCst);
-    }
-
-    /// Deactivate the scratch region. Future allocations return to the permanent heap.
-    fn pop_scratch(&self) {
-        self.current_region.store(0, Ordering::SeqCst);
-    }
-}
-
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        let align = layout.align().max(16);
-
-        let rid = self.current_region.load(Ordering::Relaxed);
-        let (start_atom, size_atom, next_atom) = &self.regions[rid];
-
-        let heap_start = start_atom.load(Ordering::Relaxed);
-        let heap_size = size_atom.load(Ordering::Relaxed);
-
-        if heap_start == 0 || heap_size == 0 {
-            return core::ptr::null_mut();
-        }
-
-        loop {
-            let current = next_atom.load(Ordering::Relaxed);
-            let aligned = (current + align - 1) & !(align - 1);
-            let new_next = aligned + size;
-
-            if new_next > heap_size {
-                return core::ptr::null_mut();
-            }
-
-            if next_atom.compare_exchange_weak(
-                current, new_next, Ordering::SeqCst, Ordering::Relaxed
-            ).is_ok() {
-                return (heap_start as *mut u8).add(aligned);
-            }
-        }
-    }
-
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let rid = self.current_region.load(Ordering::Relaxed);
-        let (start_atom, _, next_atom) = &self.regions[rid];
-
-        let heap_start = start_atom.load(Ordering::Relaxed);
-        let blk_offset = ptr as usize - heap_start;
-        let blk_end = blk_offset + layout.size();
-
-        let _ = next_atom.compare_exchange(
-            blk_end, blk_offset, Ordering::SeqCst, Ordering::Relaxed,
-        );
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator::new();
-
-#[alloc_error_handler]
-fn alloc_error(layout: Layout) -> ! {
-    log("atom_desktop: allocation failure");
-    let _ = layout;
-    loop {}
-}
+use core::panic::PanicInfo;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::panic::PanicInfo;
 
-use atom_syscall::graphics::{Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags, shared_region_create, shared_region_map, shared_region_unmap, shared_region_destroy, get_framebuffer};
+use atom_syscall::graphics::{
+    Color, Framebuffer, SharedSurface, SharedRegionId, SharedMemFlags,
+    shared_region_create, shared_region_map, shared_region_unmap, shared_region_destroy,
+    get_framebuffer,
+};
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{exit, yield_now};
@@ -129,101 +25,430 @@ use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancod
 use atom_syscall::fs;
 use atom_syscall::SyscallError;
 
-use libipc::messages::{MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg, AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent, MouseButtonEvent, MouseButton, OpenInTabMsg, ApplyWallpaperMsg, WallpaperAppliedMsg, WallpaperFailedMsg};
+use libipc::messages::{
+    MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg,
+    AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent,
+    MouseButtonEvent, MouseButton, OpenInTabMsg, ApplyWallpaperMsg, WallpaperAppliedMsg,
+    WallpaperFailedMsg,
+};
 use libipc::protocol::send_message_async;
 use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
 
-/// Shell visual theme — all values sourced from `atom_theme` (DS v1.0 Luminous Dark).
-///
-/// **No hard-coded RGB values.**  Every constant is an alias or a
-/// direct mapping of an `atom_theme::colors` token to the
-/// `atom_syscall::graphics::Color` type used by the compositor.
-///
-/// ## Shell-specific metrics
-///
-/// Layout numbers (panel height, dock height, etc.) come from
-/// `atom_theme::shell`.  The raw `const` values below are kept for
-/// backward-compatibility with the rest of the file; they match the DS spec.
+mod mem {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::cell::UnsafeCell;
+    use core::ptr;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const MIN_BLOCK: usize = 32;
+    const ALIGN: usize = 16;
+
+    #[inline]
+    fn align_up(v: usize, a: usize) -> usize {
+        (v + a - 1) & !(a - 1)
+    }
+
+    #[repr(C)]
+    struct FreeNode {
+        size: usize,
+        next: *mut FreeNode,
+    }
+
+    #[repr(C)]
+    struct AllocHeader {
+        size: usize,
+        block_offset: usize,
+    }
+
+    const HEADER_SIZE: usize = core::mem::size_of::<AllocHeader>();
+
+    struct Spinlock {
+        flag: AtomicBool,
+    }
+    impl Spinlock {
+        const fn new() -> Self {
+            Self { flag: AtomicBool::new(false) }
+        }
+        #[inline]
+        fn lock(&self) {
+            while self
+                .flag
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+        }
+        #[inline]
+        fn unlock(&self) {
+            self.flag.store(false, Ordering::Release);
+        }
+    }
+
+    struct Inner {
+        heap_start: usize,
+        heap_end: usize,
+        free_list: *mut FreeNode,
+        scratch_start: usize,
+        scratch_end: usize,
+        scratch_next: usize,
+    }
+
+    pub struct Heap {
+        lock: Spinlock,
+        inner: UnsafeCell<Inner>,
+        scratch_active: AtomicBool,
+    }
+
+    unsafe impl Sync for Heap {}
+
+    impl Heap {
+        pub const fn new() -> Self {
+            Self {
+                lock: Spinlock::new(),
+                inner: UnsafeCell::new(Inner {
+                    heap_start: 0,
+                    heap_end: 0,
+                    free_list: ptr::null_mut(),
+                    scratch_start: 0,
+                    scratch_end: 0,
+                    scratch_next: 0,
+                }),
+                scratch_active: AtomicBool::new(false),
+            }
+        }
+
+        pub fn init(&self, start: usize, size: usize) {
+            self.lock.lock();
+            unsafe {
+                let inner = &mut *self.inner.get();
+                let aligned = align_up(start, ALIGN);
+                let end = start + size;
+                inner.heap_start = aligned;
+                inner.heap_end = end;
+                let node = aligned as *mut FreeNode;
+                (*node).size = end - aligned;
+                (*node).next = ptr::null_mut();
+                inner.free_list = node;
+            }
+            self.lock.unlock();
+        }
+
+        pub fn push_scratch(&self, start: usize, size: usize) {
+            self.lock.lock();
+            unsafe {
+                let inner = &mut *self.inner.get();
+                let aligned = align_up(start, ALIGN);
+                inner.scratch_start = aligned;
+                inner.scratch_end = start + size;
+                inner.scratch_next = aligned;
+            }
+            self.scratch_active.store(true, Ordering::SeqCst);
+            self.lock.unlock();
+        }
+
+        pub fn pop_scratch(&self) {
+            self.scratch_active.store(false, Ordering::SeqCst);
+            self.lock.lock();
+            unsafe {
+                let inner = &mut *self.inner.get();
+                inner.scratch_start = 0;
+                inner.scratch_end = 0;
+                inner.scratch_next = 0;
+            }
+            self.lock.unlock();
+        }
+
+        unsafe fn alloc_scratch(&self, inner: &mut Inner, size: usize, align: usize) -> *mut u8 {
+            let base = align_up(inner.scratch_next, align.max(ALIGN));
+            let total = base + size;
+            if total > inner.scratch_end {
+                return ptr::null_mut();
+            }
+            inner.scratch_next = total;
+            base as *mut u8
+        }
+
+        unsafe fn alloc_heap(&self, inner: &mut Inner, size: usize, align: usize) -> *mut u8 {
+            let align = align.max(ALIGN);
+            let mut prev: *mut FreeNode = ptr::null_mut();
+            let mut cur = inner.free_list;
+
+            while !cur.is_null() {
+                let block_addr = cur as usize;
+                let block_size = (*cur).size;
+                let block_end = block_addr + block_size;
+                let payload_addr = align_up(block_addr + HEADER_SIZE, align);
+                let split_at = align_up(payload_addr + size, ALIGN);
+
+                if split_at <= block_end {
+                    let remainder = block_end - split_at;
+
+                    if prev.is_null() {
+                        inner.free_list = (*cur).next;
+                    } else {
+                        (*prev).next = (*cur).next;
+                    }
+
+                    let reserved_total;
+                    if remainder >= MIN_BLOCK {
+                        let rem_node = split_at as *mut FreeNode;
+                        (*rem_node).size = remainder;
+                        (*rem_node).next = inner.free_list;
+                        inner.free_list = rem_node;
+                        reserved_total = split_at - block_addr;
+                    } else {
+                        reserved_total = block_size;
+                    }
+
+                    let header = (payload_addr - HEADER_SIZE) as *mut AllocHeader;
+                    (*header).size = reserved_total;
+                    (*header).block_offset = payload_addr - HEADER_SIZE - block_addr;
+                    return payload_addr as *mut u8;
+                }
+
+                prev = cur;
+                cur = (*cur).next;
+            }
+
+            ptr::null_mut()
+        }
+    }
+
+    unsafe impl GlobalAlloc for Heap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let size = layout.size().max(1);
+            let align = layout.align().max(ALIGN);
+
+            if self.scratch_active.load(Ordering::SeqCst) {
+                self.lock.lock();
+                let inner = &mut *self.inner.get();
+                let p = self.alloc_scratch(inner, size, align);
+                self.lock.unlock();
+                return p;
+            }
+
+            self.lock.lock();
+            let inner = &mut *self.inner.get();
+            let p = self.alloc_heap(inner, size, align);
+            self.lock.unlock();
+            p
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            if ptr.is_null() {
+                return;
+            }
+            let addr = ptr as usize;
+
+            self.lock.lock();
+            let inner = &mut *self.inner.get();
+
+            if addr >= inner.scratch_start && addr < inner.scratch_end {
+                self.lock.unlock();
+                return;
+            }
+            if addr < inner.heap_start || addr > inner.heap_end {
+                self.lock.unlock();
+                return;
+            }
+
+            let header = (addr - HEADER_SIZE) as *mut AllocHeader;
+            let total = (*header).size;
+            let block_offset = (*header).block_offset;
+            let block_addr = (header as usize) - block_offset;
+
+            let node = block_addr as *mut FreeNode;
+            (*node).size = total;
+            (*node).next = inner.free_list;
+            inner.free_list = node;
+
+            Self::coalesce(inner);
+
+            self.lock.unlock();
+        }
+    }
+
+    impl Heap {
+        unsafe fn coalesce(inner: &mut Inner) {
+            let mut a = inner.free_list;
+            while !a.is_null() {
+                let a_start = a as usize;
+                let a_end = a_start + (*a).size;
+
+                let mut prev: *mut FreeNode = ptr::null_mut();
+                let mut b = inner.free_list;
+                while !b.is_null() {
+                    if b == a {
+                        prev = b;
+                        b = (*b).next;
+                        continue;
+                    }
+                    let b_start = b as usize;
+                    let b_end = b_start + (*b).size;
+
+                    if a_end == b_start {
+                        (*a).size += (*b).size;
+                        if prev.is_null() {
+                            inner.free_list = (*b).next;
+                        } else {
+                            (*prev).next = (*b).next;
+                        }
+                        b = inner.free_list;
+                        prev = ptr::null_mut();
+                        continue;
+                    } else if b_end == a_start {
+                        (*b).size += (*a).size;
+                        Self::remove_node(inner, a);
+                        a = b;
+                        break;
+                    }
+
+                    prev = b;
+                    b = (*b).next;
+                }
+
+                a = (*a).next;
+            }
+        }
+
+        unsafe fn remove_node(inner: &mut Inner, target: *mut FreeNode) {
+            let mut prev: *mut FreeNode = ptr::null_mut();
+            let mut cur = inner.free_list;
+            while !cur.is_null() {
+                if cur == target {
+                    if prev.is_null() {
+                        inner.free_list = (*cur).next;
+                    } else {
+                        (*prev).next = (*cur).next;
+                    }
+                    return;
+                }
+                prev = cur;
+                cur = (*cur).next;
+            }
+        }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: mem::Heap = mem::Heap::new();
+
+#[alloc_error_handler]
+fn alloc_error(_layout: core::alloc::Layout) -> ! {
+    log("atom_desktop: allocation failure");
+    loop {}
+}
+
 mod theme {
-    // Import DS token source
     use atom_theme::colors as ds;
     use atom_syscall::graphics::Color;
 
-    // ── Desktop ───────────────────────────────────────────────────────────
-    /// Main desktop background (DS: ATOM_COLOR_BG  #0B0E13)
     pub const DESKTOP_BG: Color = ds::ATOM_COLOR_BG;
 
-    // ── Top bar / panel ───────────────────────────────────────────────────
-    /// Panel background (DS: ATOM_COLOR_BG — darkest layer)
     pub const PANEL_BG: Color = ds::ATOM_COLOR_BG;
-    /// Panel background accent row (DS: ATOM_COLOR_SURFACE)
     pub const PANEL_BG_ACCENT: Color = ds::ATOM_COLOR_SURFACE;
-    /// Panel text (DS: ATOM_COLOR_TEXT_PRIMARY)
     pub const PANEL_TEXT: Color = ds::ATOM_COLOR_TEXT_PRIMARY;
-    /// Panel dimmed text (DS: ATOM_COLOR_TEXT_SECONDARY)
     pub const PANEL_TEXT_DIM: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
-    /// Panel border (DS: ATOM_COLOR_BORDER)
     pub const PANEL_BORDER: Color = ds::ATOM_COLOR_BORDER;
 
-    // ── Accent ────────────────────────────────────────────────────────────
-    /// Primary accent blue (DS: ATOM_COLOR_ACCENT  #4C8DFF)
     pub const ACCENT: Color = ds::ATOM_COLOR_ACCENT;
 
-    // ── Windows ───────────────────────────────────────────────────────────
-    /// Window content background (DS: ATOM_COLOR_SURFACE_ALT)
     pub const WINDOW_BG: Color = ds::ATOM_COLOR_WIN_BG;
-    /// Window title bar — unfocused (DS: ATOM_COLOR_WIN_HDR)
     pub const WINDOW_HEADER: Color = ds::ATOM_COLOR_WIN_HDR;
-    /// Window title bar — focused (DS: ATOM_COLOR_WIN_HDR_FOC)
     pub const WINDOW_HEADER_FOCUSED: Color = ds::ATOM_COLOR_WIN_HDR_FOC;
-    /// Window border — unfocused (DS: ATOM_COLOR_BORDER)
     pub const WINDOW_BORDER: Color = ds::ATOM_COLOR_WIN_BORDER;
-    /// Window border — focused (DS: ATOM_COLOR_WIN_BORDER_FOC)
     pub const WINDOW_BORDER_FOCUSED: Color = ds::ATOM_COLOR_WIN_BORDER_FOC;
 
-    // ── Dock ──────────────────────────────────────────────────────────────
-    /// Dock background (DS: ATOM_COLOR_DOCK_BG)
     pub const DOCK_BG: Color = ds::ATOM_COLOR_DOCK_BG;
-    /// Dock border (DS: ATOM_COLOR_DOCK_BORDER)
     pub const DOCK_BORDER: Color = ds::ATOM_COLOR_DOCK_BORDER;
 
-    // ── Cursor ────────────────────────────────────────────────────────────
-    pub const CURSOR_FILL: Color    = Color::WHITE;
+    pub const CURSOR_FILL: Color = Color::WHITE;
     pub const CURSOR_OUTLINE: Color = Color::BLACK;
 
-    // ── Shadows ───────────────────────────────────────────────────────────
-    /// Shadow base colour (DS: ATOM_COLOR_SHADOW — near-black blue tint)
     pub const SHADOW: Color = ds::ATOM_COLOR_SHADOW;
 
-    // ── Window traffic-light buttons ──────────────────────────────────────
-    /// Close button (DS: ATOM_COLOR_ERROR  #EF4444)
-    pub const BTN_CLOSE: Color    = ds::ATOM_COLOR_BTN_CLOSE;
-    /// Maximise button (DS: ATOM_COLOR_SUCCESS  #22C55E)
+    pub const BTN_CLOSE: Color = ds::ATOM_COLOR_BTN_CLOSE;
     pub const BTN_MAXIMIZE: Color = ds::ATOM_COLOR_BTN_MAX;
-    /// Minimise button (DS: ATOM_COLOR_WARNING  #F59E0B)
     pub const BTN_MINIMIZE: Color = ds::ATOM_COLOR_BTN_MIN;
-    /// Inactive button (unfocused window)
     pub const BTN_INACTIVE: Color = ds::ATOM_COLOR_BTN_INACTIVE;
 
-    // ── Context menu ─────────────────────────────────────────────────────
-    /// Menu panel background (DS: ATOM_COLOR_SURFACE)
-    pub const MENU_BG: Color     = ds::ATOM_COLOR_MENU_BG;
-    /// Menu border (DS: ATOM_COLOR_BORDER)
+    pub const MENU_BG: Color = ds::ATOM_COLOR_MENU_BG;
     pub const MENU_BORDER: Color = ds::ATOM_COLOR_MENU_BORDER;
-    /// Menu text (DS: ATOM_COLOR_TEXT_PRIMARY)
-    pub const MENU_TEXT: Color   = ds::ATOM_COLOR_MENU_TEXT;
+    pub const MENU_TEXT: Color = ds::ATOM_COLOR_MENU_TEXT;
 
-    // ── Desktop icon labels ───────────────────────────────────────────────
-    /// Icon label text (DS: ATOM_COLOR_TEXT_SECONDARY)
     pub const ICON_LABEL: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
 }
 
-const WINDOW_HEADER_HEIGHT: u32 = atom_theme::shell::WINDOW_TITLE_HEIGHT; // 36 px
-const WINDOW_BORDER_WIDTH: u32  = 1;
-const WINDOW_MIN_WIDTH: u32     = 150;
-const WINDOW_MIN_HEIGHT: u32    = 100;
-const PANEL_HEIGHT: u32         = atom_theme::shell::TOP_BAR_HEIGHT;       // 32 px
-const DOCK_HEIGHT: u32          = atom_theme::shell::DOCK_HEIGHT;          // 64 px
+const WINDOW_HEADER_HEIGHT: u32 = atom_theme::shell::WINDOW_TITLE_HEIGHT;
+const WINDOW_BORDER_WIDTH: u32 = 1;
+const WINDOW_MIN_WIDTH: u32 = 150;
+const WINDOW_MIN_HEIGHT: u32 = 100;
+const PANEL_HEIGHT: u32 = atom_theme::shell::TOP_BAR_HEIGHT;
+const DOCK_HEIGHT: u32 = atom_theme::shell::DOCK_HEIGHT;
+const CLOSE_GRACE_TICKS: u32 = 200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Rect {
+    pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub fn union(&self, other: &Rect) -> Rect {
+        let x1 = self.x.min(other.x);
+        let y1 = self.y.min(other.y);
+        let x2 = (self.x + self.w as i32).max(other.x + other.w as i32);
+        let y2 = (self.y + self.h as i32).max(other.y + other.h as i32);
+        Rect { x: x1, y: y1, w: (x2 - x1) as u32, h: (y2 - y1) as u32 }
+    }
+
+    pub fn intersects(&self, other: &Rect) -> bool {
+        self.x < other.x + other.w as i32
+            && self.x + self.w as i32 > other.x
+            && self.y < other.y + other.h as i32
+            && self.y + self.h as i32 > other.y
+    }
+}
+
+#[inline]
+fn isqrt_helper(n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+#[inline]
+fn frac_sqrt_256_helper(n: u32, sq_int: u32) -> u32 {
+    if sq_int == 0 {
+        return 0;
+    }
+    let step = 2 * sq_int + 1;
+    let remainder = n - sq_int * sq_int;
+    (remainder * 256) / step
+}
+
+#[inline]
+fn rgb32_to_color(pixel: u32) -> Color {
+    Color::new(
+        ((pixel >> 16) & 0xFF) as u8,
+        ((pixel >> 8) & 0xFF) as u8,
+        (pixel & 0xFF) as u8,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -246,8 +471,6 @@ struct Window {
     surface: Option<SharedSurface>,
     surface_region_id: Option<SharedRegionId>,
     content_dirty: bool,
-    /// True once the app has presented at least one frame into the current surface.
-    /// Prevents blitting a blank/black surface after resize until the app redraws.
     surface_ready: bool,
     saved_x: i32,
     saved_y: i32,
@@ -326,30 +549,60 @@ impl Window {
     fn content_x(&self) -> u32 {
         (self.x as u32).wrapping_add(WINDOW_BORDER_WIDTH)
     }
-
     fn content_y(&self) -> u32 {
         (self.y as u32).wrapping_add(WINDOW_HEADER_HEIGHT)
     }
-
     fn content_width(&self) -> u32 {
         self.width.saturating_sub(WINDOW_BORDER_WIDTH * 2)
     }
-
     fn content_height(&self) -> u32 {
         self.height.saturating_sub(WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH)
     }
 
     fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x && py >= self.y
+        px >= self.x
+            && py >= self.y
             && px < self.x + self.width as i32
             && py < self.y + self.height as i32
     }
 
     fn header_contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x && py >= self.y
+        px >= self.x
+            && py >= self.y
             && px < self.x + self.width as i32
             && py < self.y + WINDOW_HEADER_HEIGHT as i32
     }
+}
+
+fn send_wm_window_event(
+    port: PortId,
+    window_id: WindowId,
+    event_type: libipc::messages::WindowEventType,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) {
+    if port == 0 {
+        return;
+    }
+    let msg = libipc::messages::WmWindowEventMsg {
+        window_id,
+        event_type,
+        x,
+        y,
+        width,
+        height,
+    };
+    let header = MessageHeader::new(
+        MessageType::WmEvent,
+        libipc::messages::WmWindowEventMsg::SIZE as u32,
+    );
+    let mut full = [0u8; 64];
+    full[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+    full[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]
+        .copy_from_slice(&msg.to_bytes());
+    let _ = send(port, &full[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
 }
 
 struct WindowManager {
@@ -360,21 +613,7 @@ struct WindowManager {
 
 impl WindowManager {
     fn new() -> Self {
-        Self {
-            windows: Vec::new(),
-            next_id: 1,
-            focused_id: None,
-        }
-    }
-
-    fn create_window(&mut self, title: &str, x: i32, y: i32, width: u32, height: u32) -> WindowId {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let window = Window::new(id, title, x, y, width, height);
-        self.windows.push(window);
-        self.focus_window(id);
-        id
+        Self { windows: Vec::new(), next_id: 1, focused_id: None }
     }
 
     fn create_window_with_process(
@@ -388,7 +627,6 @@ impl WindowManager {
     ) -> Option<WindowId> {
         let id = self.next_id;
         self.next_id += 1;
-
         let window = Window::new_with_process(id, title, x, y, width, height, event_port)?;
         self.windows.push(window);
         self.focus_window(id);
@@ -415,18 +653,15 @@ impl WindowManager {
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == prev_id) {
                 w.focused = false;
                 if let Some(port) = w.event_port {
-                    if port != 0 {
-                        let msg = libipc::messages::WmWindowEventMsg {
-                            window_id: prev_id,
-                            event_type: libipc::messages::WindowEventType::Unfocus,
-                            x: w.x, y: w.y, width: w.width, height: w.height,
-                        };
-                        let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                        let mut full_msg = [0u8; 64];
-                        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                        let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
-                    }
+                    send_wm_window_event(
+                        port,
+                        prev_id,
+                        libipc::messages::WindowEventType::Unfocus,
+                        w.x,
+                        w.y,
+                        w.width,
+                        w.height,
+                    );
                 }
             }
         }
@@ -440,18 +675,15 @@ impl WindowManager {
             }
 
             if let Some(port) = window.event_port {
-                if port != 0 {
-                    let msg = libipc::messages::WmWindowEventMsg {
-                        window_id: id,
-                        event_type: libipc::messages::WindowEventType::Focus,
-                        x: window.x, y: window.y, width: window.width, height: window.height,
-                    };
-                    let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                    let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
-                }
+                send_wm_window_event(
+                    port,
+                    id,
+                    libipc::messages::WindowEventType::Focus,
+                    window.x,
+                    window.y,
+                    window.width,
+                    window.height,
+                );
             }
 
             self.windows.push(window);
@@ -471,7 +703,12 @@ impl WindowManager {
     fn close_window(&mut self, id: WindowId) {
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
-            self.focused_id = self.windows.iter().filter(|w| w.visible && w.state != WindowState::Minimized).last().map(|w| w.id);
+            self.focused_id = self
+                .windows
+                .iter()
+                .filter(|w| w.visible && w.state != WindowState::Minimized)
+                .last()
+                .map(|w| w.id);
             if let Some(new_focus) = self.focused_id {
                 self.focus_window(new_focus);
             }
@@ -485,7 +722,6 @@ impl WindowManager {
             }
             let new_width = width.max(WINDOW_MIN_WIDTH);
             let new_height = height.max(WINDOW_MIN_HEIGHT);
-
             if window.width != new_width || window.height != new_height {
                 window.width = new_width;
                 window.height = new_height;
@@ -494,7 +730,14 @@ impl WindowManager {
         }
     }
 
-    fn toggle_maximize(&mut self, id: WindowId, work_x: i32, work_y: i32, work_w: u32, work_h: u32) -> bool {
+    fn toggle_maximize(
+        &mut self,
+        id: WindowId,
+        work_x: i32,
+        work_y: i32,
+        work_w: u32,
+        work_h: u32,
+    ) -> bool {
         if let Some(window) = self.get_window_mut(id) {
             match window.state {
                 WindowState::Maximized => {
@@ -509,7 +752,6 @@ impl WindowManager {
                     window.saved_y = window.y;
                     window.saved_width = window.width;
                     window.saved_height = window.height;
-
                     window.state = WindowState::Maximized;
                     window.x = work_x;
                     window.y = work_y;
@@ -529,7 +771,12 @@ impl WindowManager {
             window.focused = false;
         }
         if self.focused_id == Some(id) {
-            self.focused_id = self.windows.iter().filter(|w| w.visible && w.state != WindowState::Minimized).last().map(|w| w.id);
+            self.focused_id = self
+                .windows
+                .iter()
+                .filter(|w| w.visible && w.state != WindowState::Minimized)
+                .last()
+                .map(|w| w.id);
             if let Some(new_focus) = self.focused_id {
                 self.focus_window(new_focus);
             }
@@ -544,10 +791,7 @@ struct CursorState {
 
 impl CursorState {
     fn new(width: u32, height: u32) -> Self {
-        Self {
-            x: (width / 2) as i32,
-            y: (height / 2) as i32,
-        }
+        Self { x: (width / 2) as i32, y: (height / 2) as i32 }
     }
 
     fn apply_delta(&mut self, dx: i32, dy: i32, width: u32, height: u32) {
@@ -560,18 +804,10 @@ struct PendingWindow {
     window_id: WindowId,
 }
 
-/// A window whose close has been requested but whose shared-surface destruction
-/// is deferred so the client has time to notice the TerminateRequest and exit
-/// cleanly (avoiding page faults from accessing unmapped shared memory).
 struct PendingClose {
     window_id: WindowId,
     deadline_tick: u32,
 }
-
-/// Grace period (in ~10 ms ticks) before a closing window's shared memory is
-/// actually destroyed.  200 ticks ≈ 2 seconds — plenty of time for any client
-/// to process the TerminateRequest and unmap its side.
-const CLOSE_GRACE_TICKS: u32 = 200;
 
 struct DesktopIcon {
     label: String,
@@ -596,37 +832,22 @@ struct ContextMenu {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Rect {
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-}
-
-impl Rect {
-    fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    fn union(&self, other: &Rect) -> Rect {
-        let x1 = self.x.min(other.x);
-        let y1 = self.y.min(other.y);
-        let x2 = (self.x + self.w as i32).max(other.x + other.w as i32);
-        let y2 = (self.y + self.h as i32).max(other.y + other.h as i32);
-        Rect {
-            x: x1,
-            y: y1,
-            w: (x2 - x1) as u32,
-            h: (y2 - y1) as u32,
-        }
-    }
-
-    fn intersects(&self, other: &Rect) -> bool {
-        self.x < other.x + other.w as i32 &&
-        self.x + self.w as i32 > other.x &&
-        self.y < other.y + other.h as i32 &&
-        self.y + self.h as i32 > other.y
-    }
+enum DragOperation {
+    None,
+    Move {
+        window_id: WindowId,
+        start_mouse_x: i32,
+        start_mouse_y: i32,
+        start_win_x: i32,
+        start_win_y: i32,
+    },
+    Resize {
+        window_id: WindowId,
+        start_mouse_x: i32,
+        start_mouse_y: i32,
+        start_win_w: u32,
+        start_win_h: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,10 +855,6 @@ enum CurrentWallpaperSource {
     SolidColor { rgb: u32 },
     Image { path: String },
 }
-
-// ============================================================================
-// Desktop Configuration Structures (Task 1.3)
-// ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WallpaperSourceType {
@@ -652,14 +869,12 @@ impl WallpaperSourceType {
             libipc::messages::WallpaperSourceType::SolidColor => Self::SolidColor,
         }
     }
-
     fn to_str(self) -> &'static str {
         match self {
             Self::Image => "Image",
             Self::SolidColor => "SolidColor",
         }
     }
-    
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "Image" => Some(Self::Image),
@@ -688,7 +903,6 @@ impl ScalingMode {
             libipc::messages::ScalingMode::Tile => Self::Tile,
         }
     }
-
     fn to_str(self) -> &'static str {
         match self {
             Self::Fill => "Fill",
@@ -698,7 +912,6 @@ impl ScalingMode {
             Self::Tile => "Tile",
         }
     }
-    
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "Fill" => Some(Self::Fill),
@@ -763,18 +976,15 @@ impl DesktopConfig {
 
     fn to_json(&self) -> Result<String, ()> {
         let mut json = String::from("{\n");
-        
-        // Wallpaper section
         json.push_str("  \"wallpaper\": {\n");
         json.push_str("    \"source_type\": \"");
         json.push_str(self.wallpaper.source_type.to_str());
         json.push_str("\",\n");
-        
+
         match self.wallpaper.source_type {
             WallpaperSourceType::Image => {
                 if let Some(ref path) = self.wallpaper.image_path {
                     json.push_str("    \"image_path\": \"");
-                    // Escape special characters
                     for ch in path.chars() {
                         match ch {
                             '"' => json.push_str("\\\""),
@@ -796,13 +1006,12 @@ impl DesktopConfig {
                 }
             }
         }
-        
+
         json.push_str("    \"scaling_mode\": \"");
         json.push_str(self.wallpaper.scaling_mode.to_str());
         json.push_str("\"\n");
         json.push_str("  },\n");
-        
-        // Resolution section
+
         json.push_str("  \"resolution\": {\n");
         json.push_str("    \"width\": ");
         json.push_str(&format_u32(self.resolution.width));
@@ -812,33 +1021,30 @@ impl DesktopConfig {
         json.push_str("\n");
         json.push_str("  }\n");
         json.push_str("}");
-        
+
         Ok(json)
     }
-    
+
     fn from_json(json: &str) -> Result<Self, ParseError> {
-        // Simple JSON parser for no_std environment
         let json = json.trim();
-        
-        // Extract wallpaper section
-        let wallpaper_start = json.find("\"wallpaper\"")
+
+        let wallpaper_start = json
+            .find("\"wallpaper\"")
             .ok_or(ParseError::MissingField("wallpaper"))?;
-        let wallpaper_obj_start = json[wallpaper_start..].find('{')
+        let _wallpaper_obj_start = json[wallpaper_start..]
+            .find('{')
             .ok_or(ParseError::InvalidJson)?;
-        
-        // Extract source_type
+
         let source_type_str = extract_string_field(json, "source_type")
             .ok_or(ParseError::MissingField("source_type"))?;
         let source_type = WallpaperSourceType::from_str(&source_type_str)
             .ok_or(ParseError::InvalidFieldValue("source_type"))?;
-        
-        // Extract scaling_mode
+
         let scaling_mode_str = extract_string_field(json, "scaling_mode")
             .ok_or(ParseError::MissingField("scaling_mode"))?;
         let scaling_mode = ScalingMode::from_str(&scaling_mode_str)
             .ok_or(ParseError::InvalidFieldValue("scaling_mode"))?;
-        
-        // Extract conditional fields
+
         let image_path = match source_type {
             WallpaperSourceType::Image => {
                 let path = extract_string_field(json, "image_path")
@@ -850,7 +1056,7 @@ impl DesktopConfig {
             }
             WallpaperSourceType::SolidColor => None,
         };
-        
+
         let color_rgb = match source_type {
             WallpaperSourceType::SolidColor => {
                 let rgb = extract_number_field(json, "color_rgb")
@@ -859,42 +1065,31 @@ impl DesktopConfig {
             }
             WallpaperSourceType::Image => None,
         };
-        
-        // Extract resolution section
+
         let width = extract_number_field(json, "width")
             .ok_or(ParseError::MissingField("width"))?;
         let height = extract_number_field(json, "height")
             .ok_or(ParseError::MissingField("height"))?;
-        
+
         let config = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type,
-                image_path,
-                color_rgb,
-                scaling_mode,
-            },
-            resolution: ResolutionConfig {
-                width,
-                height,
-            },
+            wallpaper: WallpaperConfig { source_type, image_path, color_rgb, scaling_mode },
+            resolution: ResolutionConfig { width, height },
         };
-        
-        // Validate
-        config.validate().map_err(|_| ParseError::InvalidFieldValue("validation"))?;
-        
+
+        config
+            .validate()
+            .map_err(|_| ParseError::InvalidFieldValue("validation"))?;
         Ok(config)
     }
-    
+
     fn validate(&self) -> Result<(), ValidationError> {
-        // Validate resolution bounds
         if self.resolution.width < 640 || self.resolution.width > 1920 {
             return Err(ValidationError::InvalidResolution);
         }
         if self.resolution.height < 480 || self.resolution.height > 1080 {
             return Err(ValidationError::InvalidResolution);
         }
-        
-        // Validate wallpaper config consistency
+
         match self.wallpaper.source_type {
             WallpaperSourceType::Image => {
                 if self.wallpaper.image_path.is_none() {
@@ -918,27 +1113,25 @@ impl DesktopConfig {
                 }
             }
         }
-        
         Ok(())
     }
 }
 
-// Helper functions for JSON parsing
 fn extract_string_field(json: &str, field_name: &str) -> Option<String> {
     let pattern = alloc::format!("\"{}\"", field_name);
     let field_start = json.find(&pattern)?;
     let after_field = &json[field_start + pattern.len()..];
     let colon_pos = after_field.find(':')?;
     let after_colon = after_field[colon_pos + 1..].trim_start();
-    
+
     if !after_colon.starts_with('"') {
         return None;
     }
-    
+
     let value_start = 1;
     let mut value_end = value_start;
     let chars: Vec<char> = after_colon.chars().collect();
-    
+
     while value_end < chars.len() {
         if chars[value_end] == '\\' && value_end + 1 < chars.len() {
             value_end += 2;
@@ -949,11 +1142,11 @@ fn extract_string_field(json: &str, field_name: &str) -> Option<String> {
         }
         value_end += 1;
     }
-    
+
     if value_end >= chars.len() {
         return None;
     }
-    
+
     let value: String = chars[value_start..value_end].iter().collect();
     Some(value)
 }
@@ -964,7 +1157,7 @@ fn extract_number_field(json: &str, field_name: &str) -> Option<u32> {
     let after_field = &json[field_start + pattern.len()..];
     let colon_pos = after_field.find(':')?;
     let after_colon = after_field[colon_pos + 1..].trim_start();
-    
+
     let mut num_str = String::new();
     for ch in after_colon.chars() {
         if ch.is_ascii_digit() {
@@ -973,7 +1166,6 @@ fn extract_number_field(json: &str, field_name: &str) -> Option<u32> {
             break;
         }
     }
-    
     parse_u32(&num_str)
 }
 
@@ -981,21 +1173,33 @@ fn format_u32(n: u32) -> String {
     if n == 0 {
         return String::from("0");
     }
-    
     let mut result = String::new();
     let mut num = n;
     let mut digits = Vec::new();
-    
     while num > 0 {
         digits.push((num % 10) as u8 + b'0');
         num /= 10;
     }
-    
     for &digit in digits.iter().rev() {
         result.push(digit as char);
     }
-    
     result
+}
+
+fn parse_u32(s: &str) -> Option<u32> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut result: u32 = 0;
+    for ch in s.chars() {
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        let digit = (ch as u8 - b'0') as u32;
+        result = result.checked_mul(10)?;
+        result = result.checked_add(digit)?;
+    }
+    Some(result)
 }
 
 fn validate_wallpaper_path(path: &str) -> bool {
@@ -1010,8 +1214,7 @@ fn validate_wallpaper_path(path: &str) -> bool {
 }
 
 fn wallpaper_png_sidecar_path(path: &str) -> Option<String> {
-    let lower = path.as_bytes();
-    if lower.len() < 5 {
+    if path.as_bytes().len() < 5 {
         return None;
     }
     let ext_start = path.rfind('.')?;
@@ -1023,63 +1226,6 @@ fn wallpaper_png_sidecar_path(path: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn parse_u32(s: &str) -> Option<u32> {
-    if s.is_empty() {
-        return None;
-    }
-    
-    let mut result: u32 = 0;
-    for ch in s.chars() {
-        if !ch.is_ascii_digit() {
-            return None;
-        }
-        let digit = (ch as u8 - b'0') as u32;
-        result = result.checked_mul(10)?;
-        result = result.checked_add(digit)?;
-    }
-    
-    Some(result)
-}
-
-// ============================================================================
-// End Desktop Configuration Structures
-// ============================================================================
-
-
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DragOperation {
-    None,
-    Move { window_id: WindowId, start_mouse_x: i32, start_mouse_y: i32, start_win_x: i32, start_win_y: i32 },
-    Resize { window_id: WindowId, start_mouse_x: i32, start_mouse_y: i32, start_win_w: u32, start_win_h: u32 },
-}
-
-fn isqrt_helper(n: u32) -> u32 {
-    if n == 0 { return 0; }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    x
-}
-
-fn frac_sqrt_256_helper(n: u32, sq_int: u32) -> u32 {
-    if sq_int == 0 { return 0; }
-    let step = 2 * sq_int + 1;
-    let remainder = n - sq_int * sq_int;
-    (remainder * 256) / step
-}
-
-fn rgb32_to_color(pixel: u32) -> Color {
-    Color::new(
-        ((pixel >> 16) & 0xFF) as u8,
-        ((pixel >> 8) & 0xFF) as u8,
-        (pixel & 0xFF) as u8,
-    )
 }
 
 struct Compositor {
@@ -1134,35 +1280,13 @@ impl Compositor {
         let _ = register_irq_handler(1, event_port);
         let _ = register_irq_handler(12, event_port);
 
-        let mut icons = Vec::new();
-        icons.push(DesktopIcon {
-            label: String::from("Files"),
-            executable: String::from("fileman"),
-            x: 28,
-            y: PANEL_HEIGHT as i32 + 28,
-            color: atom_theme::colors::ATOM_COLOR_ACCENT_GLOW,
-        });
-        icons.push(DesktopIcon {
-            label: String::from("Rectangles"),
-            executable: String::from("demo_rects"),
-            x: 28,
-            y: PANEL_HEIGHT as i32 + 120,
-            color: atom_theme::colors::ATOM_COLOR_ACCENT,
-        });
-        icons.push(DesktopIcon {
-            label: String::from("Text"),
-            executable: String::from("demo_text"),
-            x: 28,
-            y: PANEL_HEIGHT as i32 + 212,
-            color: atom_theme::colors::ATOM_COLOR_SUCCESS,
-        });
-
+        let icons = Self::build_desktop_icons();
         let dock_apps = Self::build_dock_apps();
 
-        // Backbuffer region: dynamically sized to current resolution.
         let bb_size = (fb.stride() * fb.height() * 4) as usize;
         let bb_region = shared_region_create(bb_size).expect("Failed to create backbuffer region");
-        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map backbuffer region") as *mut u32;
+        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE)
+            .expect("Failed to map backbuffer region") as *mut u32;
 
         let backbuffer_fb = Framebuffer::new_custom(
             bb_ptr as u64,
@@ -1170,7 +1294,8 @@ impl Compositor {
             fb.height(),
             fb.stride(),
             fb.bytes_per_pixel() as u32,
-        ).expect("Failed to create backbuffer framebuffer");
+        )
+        .expect("Failed to create backbuffer framebuffer");
 
         Self {
             fb,
@@ -1220,6 +1345,63 @@ impl Compositor {
         }
     }
 
+    fn build_desktop_icons() -> Vec<DesktopIcon> {
+        let mut icons = Vec::new();
+        icons.push(DesktopIcon {
+            label: String::from("Files"),
+            executable: String::from("fileman"),
+            x: 28,
+            y: PANEL_HEIGHT as i32 + 28,
+            color: atom_theme::colors::ATOM_COLOR_ACCENT_GLOW,
+        });
+        icons.push(DesktopIcon {
+            label: String::from("Rectangles"),
+            executable: String::from("demo_rects"),
+            x: 28,
+            y: PANEL_HEIGHT as i32 + 120,
+            color: atom_theme::colors::ATOM_COLOR_ACCENT,
+        });
+        icons.push(DesktopIcon {
+            label: String::from("Text"),
+            executable: String::from("demo_text"),
+            x: 28,
+            y: PANEL_HEIGHT as i32 + 212,
+            color: atom_theme::colors::ATOM_COLOR_SUCCESS,
+        });
+        icons
+    }
+
+    fn build_dock_apps() -> Vec<DockApp> {
+        let candidates: [(&str, &str, Color); 4] = [
+            ("fileman", "Files", atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),
+            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
+            ("tinygl_demo", "TinyGL", atom_theme::colors::ATOM_COLOR_SUCCESS),
+            ("terminal", "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),
+        ];
+
+        let mut apps = Vec::new();
+        for (exec, label, color) in candidates.iter() {
+            let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
+            let user_path = alloc::format!("/apps/user/{}.atxf", exec);
+            let exists = fs::stat(&sys_path).is_ok() || fs::stat(&user_path).is_ok();
+
+            if exists {
+                let mono = if exec.len() >= 2 {
+                    alloc::format!("{}{}", exec.as_bytes()[0] as char, exec.as_bytes()[1] as char)
+                } else {
+                    String::from(*exec)
+                };
+                apps.push(DockApp {
+                    label: String::from(*label),
+                    executable: String::from(*exec),
+                    color: *color,
+                    monogram: mono,
+                });
+            }
+        }
+        apps
+    }
+
     fn run(&mut self) -> ! {
         self.load_persisted_config();
         self.flush_deferred_desktop_work();
@@ -1258,9 +1440,9 @@ impl Compositor {
         while let Some(event) = self.mouse_driver.poll_event() {
             let old_x = self.cursor.x;
             let old_y = self.cursor.y;
-            self.cursor.apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
+            self.cursor
+                .apply_delta(event.dx, event.dy, self.fb.width(), self.fb.height());
 
-            // Mark old and new cursor areas as dirty
             let r1 = Rect::new(old_x, old_y, 24, 24);
             let r2 = Rect::new(self.cursor.x, self.cursor.y, 24, 24);
             self.mark_dirty_rect(r1.union(&r2));
@@ -1272,11 +1454,14 @@ impl Compositor {
                 } else {
                     self.handle_mouse_drag(self.cursor.x, self.cursor.y);
                 }
-
                 if matches!(self.drag_op, DragOperation::None) {
-                    self.dispatch_mouse_move(self.cursor.x, self.cursor.y, event.dx as i16, event.dy as i16);
+                    self.dispatch_mouse_move(
+                        self.cursor.x,
+                        self.cursor.y,
+                        event.dx as i16,
+                        event.dy as i16,
+                    );
                 }
-
                 self.mouse_left_down = true;
             } else if event.right_button {
                 if !self.mouse_right_down {
@@ -1287,7 +1472,12 @@ impl Compositor {
                 if self.mouse_left_down {
                     self.handle_mouse_up(self.cursor.x, self.cursor.y);
                 } else {
-                    self.dispatch_mouse_move(self.cursor.x, self.cursor.y, event.dx as i16, event.dy as i16);
+                    self.dispatch_mouse_move(
+                        self.cursor.x,
+                        self.cursor.y,
+                        event.dx as i16,
+                        event.dy as i16,
+                    );
                 }
                 self.mouse_left_down = false;
                 self.mouse_right_down = false;
@@ -1299,16 +1489,12 @@ impl Compositor {
             let code = scancode & 0x7F;
 
             match code {
-                // 0xE0 extended-key prefix arrives as 0x60 after masking — skip it
                 0x60 => {}
                 scancodes::LEFT_SHIFT | scancodes::RIGHT_SHIFT => {
                     self.keyboard_shift = pressed;
                     self.dispatch_key_event(code, 0, pressed);
                 }
                 _ => {
-                    // Send ALL keys (press and release) to the focused window so
-                    // that game-style apps (Doom, etc.) can handle non-ASCII keys
-                    // like arrows, Ctrl (fire), Shift, and key-up events.
                     let ascii = if pressed {
                         scancode_to_ascii(code, self.keyboard_shift)
                             .map(|c| c as u8)
@@ -1326,31 +1512,20 @@ impl Compositor {
         let target_id = self.captured_window.or_else(|| self.wm.window_at(x, y));
 
         if let Some(id) = target_id {
-            let target = self.wm.get_window(id).and_then(|w| {
-                w.event_port.map(|port| (port, w.content_x(), w.content_y()))
-            });
+            let target = self
+                .wm
+                .get_window(id)
+                .and_then(|w| w.event_port.map(|port| (port, w.content_x(), w.content_y())));
 
             if let Some((port, content_x, content_y)) = target {
                 let rel_x = x - content_x as i32;
                 let rel_y = y - content_y as i32;
-
-                let event = MouseMoveEvent {
-                    x: rel_x,
-                    y: rel_y,
-                    dx,
-                    dy,
-                };
+                let event = MouseMoveEvent { x: rel_x, y: rel_y, dx, dy };
                 self.send_window_event_async(id, port, MessageType::MouseMove, &event.to_bytes());
             }
         }
     }
 
-    /// Dispatch a key event to the focused window.
-    ///
-    /// - Always sends `KeyDown` or `KeyUp` so game-aware apps receive every key.
-    /// - Additionally sends `KeyPress` for printable ASCII key-down events for
-    ///   backward compatibility with apps that rely on that message type (e.g.
-    ///   terminal).
     fn dispatch_key_event(&mut self, scancode: u8, ascii: u8, pressed: bool) {
         let event = KeyEvent {
             scancode,
@@ -1363,33 +1538,38 @@ impl Compositor {
             },
         };
 
-        let target = self.wm.focused_id
-            .and_then(|id| self.wm.get_window(id).and_then(|w| w.event_port.map(|port| (id, port))));
+        let target = self.wm.focused_id.and_then(|id| {
+            self.wm
+                .get_window(id)
+                .and_then(|w| w.event_port.map(|port| (id, port)))
+        });
 
         if let Some((window_id, port)) = target {
-            // Primary: KeyDown / KeyUp for full key tracking
             let primary_type = if pressed { MessageType::KeyDown } else { MessageType::KeyUp };
             self.send_window_event_async(window_id, port, primary_type, &event.to_bytes());
 
-            // Compat: also send KeyPress for printable key-down events
             if pressed && ascii != 0 {
-                self.send_window_event_async(window_id, port, MessageType::KeyPress, &event.to_bytes());
+                self.send_window_event_async(
+                    window_id,
+                    port,
+                    MessageType::KeyPress,
+                    &event.to_bytes(),
+                );
             }
         }
     }
 
-    fn send_window_event_async(&mut self, window_id: WindowId, port: PortId, msg_type: MessageType, payload: &[u8]) {
+    fn send_window_event_async(
+        &mut self,
+        window_id: WindowId,
+        port: PortId,
+        msg_type: MessageType,
+        payload: &[u8],
+    ) {
         if port == 0 {
             return;
         }
-
         if let Err(err) = send_message_async(port, msg_type, payload) {
-            // Only treat NotFound (port closed / process exited) as a
-            // definitive sign the process is dead. Older kernels returned
-            // InvalidArgument for the same closed-port condition, so keep
-            // that path until all boot images have the ENOTFOUND mapping.
-            // Transient errors such as WouldBlock (queue full) must not
-            // destroy the window.
             if matches!(err, SyscallError::NotFound | SyscallError::InvalidArgument) {
                 self.drop_dead_window(window_id);
             }
@@ -1404,7 +1584,8 @@ impl Compositor {
         }
 
         match self.drag_op {
-            DragOperation::Move { window_id: id, .. } | DragOperation::Resize { window_id: id, .. }
+            DragOperation::Move { window_id: id, .. }
+            | DragOperation::Resize { window_id: id, .. }
                 if id == window_id =>
             {
                 self.drag_op = DragOperation::None;
@@ -1412,11 +1593,10 @@ impl Compositor {
             _ => {}
         }
 
-        let rect = if let Some(w) = self.wm.get_window(window_id) {
-            Some(Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25))
-        } else {
-            None
-        };
+        let rect = self
+            .wm
+            .get_window(window_id)
+            .map(|w| Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25));
 
         self.wm.close_window(window_id);
 
@@ -1430,7 +1610,6 @@ impl Compositor {
         if data.len() < MessageHeader::SIZE {
             return;
         }
-
         let header = match MessageHeader::from_bytes(data) {
             Some(h) => h,
             None => return,
@@ -1440,7 +1619,9 @@ impl Compositor {
             MessageType::AppRegister => self.handle_app_registration(data),
             MessageType::WmRequest => self.handle_wm_request(&data[MessageHeader::SIZE..]),
             MessageType::WmCommitFrame => {
-                if let Some(msg) = libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..]) {
+                if let Some(msg) =
+                    libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..])
+                {
                     if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                         window.content_dirty = true;
                         window.surface_ready = true;
@@ -1450,8 +1631,8 @@ impl Compositor {
             }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
-                if data.len() >= payload_start + libipc::messages::SurfacePresentMsg::SIZE {
-                    if let Some(msg) = libipc::messages::SurfacePresentMsg::from_bytes(&data[payload_start..]) {
+                if data.len() >= payload_start + SurfacePresentMsg::SIZE {
+                    if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
                         if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                             window.content_dirty = true;
                             window.surface_ready = true;
@@ -1468,12 +1649,10 @@ impl Compositor {
         if data.len() < MessageHeader::SIZE {
             return;
         }
-
         let header = match MessageHeader::from_bytes(data) {
             Some(h) => h,
             None => return,
         };
-
         if header.msg_type != MessageType::AppRegister {
             return;
         }
@@ -1493,7 +1672,9 @@ impl Compositor {
 
             let result = if let Some(window) = self.wm.get_window_mut(pending.window_id) {
                 window.event_port = Some(reg_msg.app_port);
-                window.surface_region_id.map(|rid| (rid, window.content_width(), window.content_height()))
+                window
+                    .surface_region_id
+                    .map(|rid| (rid, window.content_width(), window.content_height()))
             } else {
                 None
             };
@@ -1505,7 +1686,7 @@ impl Compositor {
                     region_id,
                     cw,
                     ch,
-                    None
+                    None,
                 );
             }
         }
@@ -1515,7 +1696,6 @@ impl Compositor {
         if data.len() < MessageHeader::SIZE {
             return;
         }
-
         let header = match MessageHeader::from_bytes(data) {
             Some(h) => h,
             None => return,
@@ -1529,7 +1709,9 @@ impl Compositor {
                 self.handle_wm_request(&data[MessageHeader::SIZE..]);
             }
             MessageType::WmCommitFrame => {
-                if let Some(msg) = libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..]) {
+                if let Some(msg) =
+                    libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..])
+                {
                     if let Some(window) = self.wm.get_window_mut(msg.window_id) {
                         window.content_dirty = true;
                         window.surface_ready = true;
@@ -1540,7 +1722,12 @@ impl Compositor {
             MessageType::MouseMove => {
                 let payload_start = MessageHeader::SIZE;
                 if let Some(event) = MouseMoveEvent::from_bytes(&data[payload_start..]) {
-                    self.cursor.apply_delta(event.dx as i32, event.dy as i32, self.fb.width(), self.fb.height());
+                    self.cursor.apply_delta(
+                        event.dx as i32,
+                        event.dy as i32,
+                        self.fb.width(),
+                        self.fb.height(),
+                    );
                     self.dirty = true;
                 }
             }
@@ -1590,25 +1777,177 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + 3 {
                     if let Some(key_event) = KeyEvent::from_bytes(&data[payload_start..]) {
-                        let event_port = if let Some(focused_id) = self.wm.focused_id {
-                            if let Some(window) = self.wm.get_window(focused_id) {
-                                window.event_port
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
+                        let event_port = self
+                            .wm
+                            .focused_id
+                            .and_then(|id| self.wm.get_window(id).and_then(|w| w.event_port));
 
                         if let Some(focused_id) = self.wm.focused_id {
                             if let Some(port) = event_port {
-                                self.send_window_event_async(focused_id, port, MessageType::KeyPress, &key_event.to_bytes());
+                                self.send_window_event_async(
+                                    focused_id,
+                                    port,
+                                    MessageType::KeyPress,
+                                    &key_event.to_bytes(),
+                                );
                             }
                         }
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_wm_request(&mut self, payload: &[u8]) {
+        if payload.len() < 4 {
+            return;
+        }
+        let req_type_raw =
+            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let req_type = match libipc::messages::WmRequestType::from_u32(req_type_raw) {
+            Some(t) => t,
+            None => return,
+        };
+
+        match req_type {
+            libipc::messages::WmRequestType::CreateWindow => {
+                if let Some(req) = libipc::messages::WmCreateWindowRequest::from_bytes(payload) {
+                    let win_x = 150 + (self.wm.windows.len() as i32 * 30);
+                    let win_y = 120 + (self.wm.windows.len() as i32 * 30);
+
+                    let id = self.wm.next_id;
+                    self.wm.next_id += 1;
+
+                    let outer_w = req.width + WINDOW_BORDER_WIDTH * 2;
+                    let outer_h = req.height + WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH;
+
+                    let window = match Window::new_with_process(
+                        id,
+                        &req.title,
+                        win_x,
+                        win_y,
+                        outer_w,
+                        outer_h,
+                        req.reply_port as PortId,
+                    ) {
+                        Some(w) => w,
+                        None => return,
+                    };
+
+                    let resp = libipc::messages::WmCreateWindowResponse {
+                        window_id: id,
+                        region_id: window.surface_region_id.unwrap_or(0),
+                        width: window.content_width(),
+                        height: window.content_height(),
+                        stride: window.content_width(),
+                    };
+
+                    self.wm.windows.push(window);
+                    self.wm.focus_window(id);
+                    self.dirty = true;
+
+                    let header = MessageHeader::new(
+                        MessageType::WmResponse,
+                        libipc::messages::WmCreateWindowResponse::SIZE as u32,
+                    );
+                    let mut full_msg = [0u8; 64];
+                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                    full_msg[MessageHeader::SIZE
+                        ..MessageHeader::SIZE
+                            + libipc::messages::WmCreateWindowResponse::SIZE]
+                        .copy_from_slice(&resp.to_bytes());
+                    if req.reply_port != 0 {
+                        let _ = send(
+                            req.reply_port as PortId,
+                            &full_msg[..MessageHeader::SIZE
+                                + libipc::messages::WmCreateWindowResponse::SIZE],
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn send_surface_assignment(
+        &self,
+        window_id: WindowId,
+        port: PortId,
+        region_id: SharedRegionId,
+        width: u32,
+        height: u32,
+        resize_pos: Option<(i32, i32)>,
+    ) {
+        if port == 0 {
+            return;
+        }
+
+        let assign = SurfaceAssignMsg {
+            window_id,
+            region_id,
+            width,
+            height,
+            stride: width,
+            bytes_per_pixel: 4,
+            compositor_port: self.event_port,
+            scale_factor: 1000,
+        };
+
+        let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
+        let mut full_msg = [0u8; 64];
+        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]
+            .copy_from_slice(&assign.to_bytes());
+        let _ = send(port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]);
+
+        if let Some((win_x, win_y)) = resize_pos {
+            send_wm_window_event(
+                port,
+                window_id,
+                libipc::messages::WindowEventType::Resize,
+                win_x,
+                win_y,
+                width,
+                height,
+            );
+        }
+    }
+
+    fn reallocate_window_surface(&mut self, window_id: WindowId) {
+        let (cw, ch, already_correct) = if let Some(window) = self.wm.get_window(window_id) {
+            let cw = window.content_width();
+            let ch = window.content_height();
+            let already_correct = if let Some(ref s) = window.surface {
+                s.width() == cw && s.height() == ch
+            } else {
+                false
+            };
+            (cw, ch, already_correct)
+        } else {
+            return;
+        };
+
+        if already_correct {
+            return;
+        }
+
+        if let Ok(new_surface) = SharedSurface::create(cw, ch) {
+            let region_id = new_surface.region_id();
+
+            let result = if let Some(window) = self.wm.get_window_mut(window_id) {
+                window.surface = Some(new_surface);
+                window.surface_region_id = Some(region_id);
+                window.content_dirty = false;
+                window.surface_ready = false;
+                window.event_port.map(|port| (port, window.x, window.y))
+            } else {
+                None
+            };
+
+            if let Some((port, x, y)) = result {
+                self.send_surface_assignment(window_id, port, region_id, cw, ch, Some((x, y)));
+            }
         }
     }
 
@@ -1644,7 +1983,8 @@ impl Compositor {
                         return;
                     } else if x >= max_x && x < max_x + btn_size {
                         let (wx, wy, ww, wh) = self.get_work_area();
-                        let old_rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
+                        let old_rect =
+                            Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         if self.wm.toggle_maximize(id, wx, wy, ww, wh) {
                             self.mark_dirty_rect(old_rect);
                             self.mark_dirty_rect(Rect::new(wx - 10, wy - 10, ww + 20, wh + 25));
@@ -1686,13 +2026,22 @@ impl Compositor {
                 if let Some(port) = w.event_port {
                     let rel_x = x - w.content_x() as i32;
                     let rel_y = y - w.content_y() as i32;
-                    if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
+                    if rel_x >= 0
+                        && rel_y >= 0
+                        && rel_x < w.content_width() as i32
+                        && rel_y < w.content_height() as i32
+                    {
                         let event = MouseButtonEvent {
                             button: MouseButton::Left,
                             x: rel_x,
                             y: rel_y,
                         };
-                        self.send_window_event_async(id, port, MessageType::MouseButtonDown, &event.to_bytes());
+                        self.send_window_event_async(
+                            id,
+                            port,
+                            MessageType::MouseButtonDown,
+                            &event.to_bytes(),
+                        );
                     }
                 }
             }
@@ -1706,7 +2055,9 @@ impl Compositor {
 
         if let Some(icon_idx) = self.icon_at(x, y) {
             let current = self.click_counter;
-            if self.last_click_icon == Some(icon_idx) && current.wrapping_sub(self.last_click_tick) < 2 {
+            if self.last_click_icon == Some(icon_idx)
+                && current.wrapping_sub(self.last_click_tick) < 2
+            {
                 let exe = self.icons[icon_idx].executable.clone();
                 self.spawn_app(&exe);
                 self.last_click_icon = None;
@@ -1720,7 +2071,13 @@ impl Compositor {
 
     fn handle_mouse_drag(&mut self, x: i32, y: i32) {
         match self.drag_op {
-            DragOperation::Move { window_id, start_mouse_x, start_mouse_y, start_win_x, start_win_y } => {
+            DragOperation::Move {
+                window_id,
+                start_mouse_x,
+                start_mouse_y,
+                start_win_x,
+                start_win_y,
+            } => {
                 let dx = x - start_mouse_x;
                 let dy = y - start_mouse_y;
 
@@ -1730,7 +2087,9 @@ impl Compositor {
                     let nw_y = start_win_y + dy;
                     let new = Rect::new(nw_x - 4, nw_y - 4, w.width + 8, w.height + 8);
                     (old, new)
-                } else { return; };
+                } else {
+                    return;
+                };
 
                 if let Some(w) = self.wm.get_window_mut(window_id) {
                     w.x = start_win_x + dx;
@@ -1740,7 +2099,13 @@ impl Compositor {
                 self.mark_dirty_rect(old_rect);
                 self.mark_dirty_rect(new_rect);
             }
-            DragOperation::Resize { window_id, start_mouse_x, start_mouse_y, start_win_w, start_win_h } => {
+            DragOperation::Resize {
+                window_id,
+                start_mouse_x,
+                start_mouse_y,
+                start_win_w,
+                start_win_h,
+            } => {
                 let dx = x - start_mouse_x;
                 let dy = y - start_mouse_y;
                 let new_w = (start_win_w as i32 + dx).max(WINDOW_MIN_WIDTH as i32) as u32;
@@ -1750,10 +2115,11 @@ impl Compositor {
                     let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
                     let new = Rect::new(w.x - 4, w.y - 4, new_w + 8, new_h + 8);
                     (old, new)
-                } else { return; };
+                } else {
+                    return;
+                };
 
                 self.wm.resize_window(window_id, new_w, new_h);
-
                 self.mark_dirty_rect(old_rect);
                 self.mark_dirty_rect(new_rect);
             }
@@ -1761,19 +2127,182 @@ impl Compositor {
         }
     }
 
-    /// Called when a `VideoModeChanged` IPC message arrives.
-    ///
-    /// Re-acquires the kernel framebuffer and reallocates the backbuffer
-    /// region to match the new resolution.
+    fn handle_mouse_up(&mut self, x: i32, y: i32) {
+        let captured = self.captured_window.take();
+
+        match self.drag_op {
+            DragOperation::Resize { window_id, .. } => {
+                self.reallocate_window_surface(window_id);
+                self.drag_op = DragOperation::None;
+                return;
+            }
+            DragOperation::Move { .. } => {
+                self.drag_op = DragOperation::None;
+                return;
+            }
+            DragOperation::None => {}
+        }
+
+        let target_id = captured.or_else(|| self.wm.window_at(x, y));
+
+        if let Some(id) = target_id {
+            if let Some(w) = self.wm.get_window(id) {
+                if let Some(port) = w.event_port {
+                    let rel_x = x - w.content_x() as i32;
+                    let rel_y = y - w.content_y() as i32;
+                    if rel_x >= 0
+                        && rel_y >= 0
+                        && rel_x < w.content_width() as i32
+                        && rel_y < w.content_height() as i32
+                    {
+                        let event = MouseButtonEvent {
+                            button: MouseButton::Left,
+                            x: rel_x,
+                            y: rel_y,
+                        };
+                        self.send_window_event_async(
+                            id,
+                            port,
+                            MessageType::MouseButtonUp,
+                            &event.to_bytes(),
+                        );
+                    }
+                }
+            }
+        }
+
+        self.drag_op = DragOperation::None;
+    }
+
+    fn handle_right_click(&mut self, x: i32, y: i32) {
+        self.context_menu.visible = false;
+
+        if self.wm.window_at(x, y).is_some() {
+            return;
+        }
+        if self.is_on_panel(y) {
+            return;
+        }
+        if self.is_on_dock(x, y) {
+            return;
+        }
+        if self.icon_at(x, y).is_some() {
+            return;
+        }
+
+        self.context_menu.x = x;
+        self.context_menu.y = y;
+        self.context_menu.visible = true;
+        self.dirty = true;
+    }
+
+    fn handle_context_menu_click(&mut self, x: i32, y: i32) -> bool {
+        let menu_w = 180u32;
+        let item_h = 32u32;
+        let menu_h = self.context_menu.items.len() as u32 * item_h;
+
+        if x >= self.context_menu.x
+            && x < self.context_menu.x + menu_w as i32
+            && y >= self.context_menu.y
+            && y < self.context_menu.y + menu_h as i32
+        {
+            let item_idx = (y - self.context_menu.y) as u32 / item_h;
+            if (item_idx as usize) < self.context_menu.items.len() {
+                let action = &self.context_menu.items[item_idx as usize];
+                if action == "Change Wallpaper" {
+                    self.open_display_settings_wallpaper_tab();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn handle_close_window(&mut self, id: WindowId) {
+        let mut event_port = None;
+        if let Some(w) = self.wm.get_window(id) {
+            event_port = w.event_port;
+        }
+
+        if let Some(port) = event_port {
+            if port != 0 {
+                let msg = TerminateRequestMsg { window_id: id, reason: 0 };
+                let header = MessageHeader::new(
+                    MessageType::TerminateRequest,
+                    TerminateRequestMsg::SIZE as u32,
+                );
+                let mut full_msg = [0u8; 64];
+                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
+                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE]
+                    .copy_from_slice(&msg.to_bytes());
+                let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
+            }
+        }
+
+        let rect = self
+            .wm
+            .get_window(id)
+            .map(|w| Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25));
+
+        if let Some(w) = self.wm.get_window_mut(id) {
+            w.visible = false;
+        }
+
+        if let Some(r) = rect {
+            self.mark_dirty_rect(r);
+        }
+
+        if self.wm.focused_id == Some(id) {
+            self.wm.focused_id = self
+                .wm
+                .windows
+                .iter()
+                .filter(|w| w.visible && w.id != id && w.state != WindowState::Minimized)
+                .last()
+                .map(|w| w.id);
+            if let Some(new_focus) = self.wm.focused_id {
+                self.wm.focus_window(new_focus);
+            }
+        }
+
+        self.pending_close.push(PendingClose {
+            window_id: id,
+            deadline_tick: self.ticks.wrapping_add(CLOSE_GRACE_TICKS),
+        });
+
+        self.dirty = true;
+    }
+
+    fn reap_pending_closes(&mut self) {
+        let current = self.ticks;
+        let mut reaped = false;
+        let mut to_close: Vec<WindowId> = Vec::new();
+        for pc in self.pending_close.iter() {
+            if current.wrapping_sub(pc.deadline_tick) < 0x8000_0000 {
+                to_close.push(pc.window_id);
+            }
+        }
+        for id in to_close.iter() {
+            self.wm.close_window(*id);
+            reaped = true;
+        }
+        self.pending_close
+            .retain(|pc| current.wrapping_sub(pc.deadline_tick) >= 0x8000_0000);
+        if reaped {
+            self.dirty = true;
+        }
+    }
+
     fn mark_dirty_rect(&mut self, rect: Rect) {
         let screen = Rect::new(0, 0, self.fb.width(), self.fb.height());
-        // Clamp to screen
         let x1 = rect.x.max(0);
         let y1 = rect.y.max(0);
         let x2 = (rect.x + rect.w as i32).min(screen.w as i32);
         let y2 = (rect.y + rect.h as i32).min(screen.h as i32);
 
-        if x2 <= x1 || y2 <= y1 { return; }
+        if x2 <= x1 || y2 <= y1 {
+            return;
+        }
         let clamped = Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32);
 
         if let Some(existing) = self.dirty_rect {
@@ -1790,14 +2319,14 @@ impl Compositor {
             None => return,
         };
 
-        // 1. Cleanup old backbuffer
         let _ = shared_region_unmap(self.backbuffer_region);
         let _ = shared_region_destroy(self.backbuffer_region);
 
-        // 2. Allocate new backbuffer
         let bb_size = (new_fb.stride() * new_fb.height() * 4) as usize;
-        let bb_region = shared_region_create(bb_size).expect("Failed to realloc backbuffer region");
-        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map new backbuffer") as *mut u32;
+        let bb_region =
+            shared_region_create(bb_size).expect("Failed to realloc backbuffer region");
+        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE)
+            .expect("Failed to map new backbuffer") as *mut u32;
 
         let new_backbuffer_fb = match Framebuffer::new_custom(
             bb_ptr as u64,
@@ -1810,16 +2339,21 @@ impl Compositor {
             None => return,
         };
 
-        self.fb                = new_fb;
-        self.backbuffer_fb     = new_backbuffer_fb;
+        self.fb = new_fb;
+        self.backbuffer_fb = new_backbuffer_fb;
         self.backbuffer_region = bb_region;
-        self.backbuffer_ptr    = bb_ptr;
-        // Clamp cursor to new screen extents.
-        let w = self.fb.width()  as i32;
+        self.backbuffer_ptr = bb_ptr;
+
+        let w = self.fb.width() as i32;
         let h = self.fb.height() as i32;
-        if self.cursor.x >= w { self.cursor.x = w - 1; }
-        if self.cursor.y >= h { self.cursor.y = h - 1; }
-        self.desktop_config.resolution = ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
+        if self.cursor.x >= w {
+            self.cursor.x = w - 1;
+        }
+        if self.cursor.y >= h {
+            self.cursor.y = h - 1;
+        }
+        self.desktop_config.resolution =
+            ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
 
         self.wallpaper_cache_valid = false;
         if matches!(self.current_wallpaper_source, CurrentWallpaperSource::Image { .. }) {
@@ -1844,48 +2378,14 @@ impl Compositor {
         }
     }
 
-    fn handle_right_click(&mut self, x: i32, y: i32) {
-        self.context_menu.visible = false;
-
-        if self.wm.window_at(x, y).is_some() {
-            return;
-        }
-
-        if self.is_on_panel(y) {
-            return;
-        }
-
-        if self.is_on_dock(x, y) {
-            return;
-        }
-
-        if self.icon_at(x, y).is_some() {
-            return;
-        }
-
-        self.context_menu.x = x;
-        self.context_menu.y = y;
-        self.context_menu.visible = true;
-        self.dirty = true;
-    }
-
-    fn handle_context_menu_click(&mut self, x: i32, y: i32) -> bool {
-        let menu_w = 180u32;
-        let item_h = 32u32;
-        let menu_h = self.context_menu.items.len() as u32 * item_h;
-
-        if x >= self.context_menu.x && x < self.context_menu.x + menu_w as i32 &&
-           y >= self.context_menu.y && y < self.context_menu.y + menu_h as i32 {
-            let item_idx = (y - self.context_menu.y) as u32 / item_h;
-            if (item_idx as usize) < self.context_menu.items.len() {
-                let action = &self.context_menu.items[item_idx as usize];
-                if action == "Change Wallpaper" {
-                    self.open_display_settings_wallpaper_tab();
-                }
-                return true;
-            }
-        }
-        false
+    fn get_work_area(&self) -> (i32, i32, u32, u32) {
+        let sw = self.fb.width();
+        let sh = self.fb.height();
+        let x = 0;
+        let y = PANEL_HEIGHT as i32;
+        let w = sw;
+        let h = sh.saturating_sub(PANEL_HEIGHT + DOCK_HEIGHT + 24);
+        (x, y, w, h)
     }
 
     fn open_display_settings_wallpaper_tab(&mut self) {
@@ -1908,7 +2408,13 @@ impl Compositor {
             }
         };
 
-        if let Some(id) = self.wm.windows.iter().find(|w| w.title == "Display Settings").map(|w| w.id) {
+        if let Some(id) = self
+            .wm
+            .windows
+            .iter()
+            .find(|w| w.title == "Display Settings")
+            .map(|w| w.id)
+        {
             self.wm.focus_window(id);
         }
 
@@ -1928,7 +2434,8 @@ impl Compositor {
     fn send_wallpaper_applied(&mut self) {
         if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
             let msg = WallpaperAppliedMsg {};
-            let header = MessageHeader::new(MessageType::WallpaperApplied, WallpaperAppliedMsg::SIZE as u32);
+            let header =
+                MessageHeader::new(MessageType::WallpaperApplied, WallpaperAppliedMsg::SIZE as u32);
             let mut buf = Vec::new();
             buf.extend_from_slice(&header.to_bytes());
             buf.extend_from_slice(&msg.to_bytes());
@@ -1959,7 +2466,10 @@ impl Compositor {
                     color_rgb: msg.color_rgb,
                     scaling_mode,
                 },
-                resolution: ResolutionConfig { width: self.fb.width(), height: self.fb.height() },
+                resolution: ResolutionConfig {
+                    width: self.fb.width(),
+                    height: self.fb.height(),
+                },
             },
             WallpaperSourceType::Image => DesktopConfig {
                 wallpaper: WallpaperConfig {
@@ -1968,7 +2478,10 @@ impl Compositor {
                     color_rgb: None,
                     scaling_mode,
                 },
-                resolution: ResolutionConfig { width: self.fb.width(), height: self.fb.height() },
+                resolution: ResolutionConfig {
+                    width: self.fb.width(),
+                    height: self.fb.height(),
+                },
             },
         };
 
@@ -2025,7 +2538,8 @@ impl Compositor {
             }
         } else {
             JpgDecoder::decode(&data)
-        }.map_err(|_| "Failed to decode image")?;
+        }
+        .map_err(|_| "Failed to decode image")?;
         if img.width == 0 || img.height == 0 || img.width > 4096 || img.height > 4096 {
             return Err("Image dimensions unsupported");
         }
@@ -2043,10 +2557,19 @@ impl Compositor {
                 self.current_wallpaper_source = CurrentWallpaperSource::SolidColor { rgb };
                 self.wallpaper_cache_valid = false;
                 self.wallpaper_recompute_pending = false;
-                self.desktop_bg = Color::new(((rgb >> 16) & 0xFF) as u8, ((rgb >> 8) & 0xFF) as u8, (rgb & 0xFF) as u8);
+                self.desktop_bg = Color::new(
+                    ((rgb >> 16) & 0xFF) as u8,
+                    ((rgb >> 8) & 0xFF) as u8,
+                    (rgb & 0xFF) as u8,
+                );
             }
             WallpaperSourceType::Image => {
-                let path = config.wallpaper.image_path.as_ref().ok_or("Missing image path")?.clone();
+                let path = config
+                    .wallpaper
+                    .image_path
+                    .as_ref()
+                    .ok_or("Missing image path")?
+                    .clone();
                 self.current_wallpaper_source = CurrentWallpaperSource::Image { path };
                 self.wallpaper_cache_valid = false;
                 self.wallpaper_recompute_pending = true;
@@ -2070,11 +2593,9 @@ impl Compositor {
             match fs::rename(tmp_path, final_path) {
                 Ok(()) => return Ok(()),
                 Err(_) => {
-                    // FAT32 rename is not implemented yet; fall back to direct overwrite.
                 }
             }
         }
-
         fs::write_file(final_path, json.as_bytes()).map_err(|_| "Failed to write config")
     }
 
@@ -2083,7 +2604,11 @@ impl Compositor {
             CurrentWallpaperSource::SolidColor { rgb } => rgb,
             CurrentWallpaperSource::Image { .. } => 0x12141C,
         };
-        self.desktop_bg = Color::new(((fallback_rgb >> 16) & 0xFF) as u8, ((fallback_rgb >> 8) & 0xFF) as u8, (fallback_rgb & 0xFF) as u8);
+        self.desktop_bg = Color::new(
+            ((fallback_rgb >> 16) & 0xFF) as u8,
+            ((fallback_rgb >> 8) & 0xFF) as u8,
+            (fallback_rgb & 0xFF) as u8,
+        );
         self.current_wallpaper_source = CurrentWallpaperSource::SolidColor { rgb: fallback_rgb };
         self.current_scaling_mode = ScalingMode::Fill;
         self.wallpaper_cache_valid = false;
@@ -2106,30 +2631,35 @@ impl Compositor {
             };
 
             if let Some(path) = image_path {
-                // Use a SCRATCH HEAP for large image operations (decode/scale).
-                // 24 MiB provides enough space for raw JPG data + decoded RGBA image + scaled RGBA image.
                 let scratch_size = 24 * 1024 * 1024;
-                let scratch_region = shared_region_create(scratch_size).expect("Failed to create scratch heap");
-                let scratch_start = shared_region_map(scratch_region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map scratch heap");
+                let scratch_region =
+                    shared_region_create(scratch_size).expect("Failed to create scratch heap");
+                let scratch_start = shared_region_map(
+                    scratch_region,
+                    0,
+                    SharedMemFlags::READ_WRITE,
+                )
+                .expect("Failed to map scratch heap");
 
                 ALLOCATOR.push_scratch(scratch_start as usize, scratch_size);
 
                 let result = self.load_and_decode_image(&path).and_then(|wallpaper| {
                     let scaled = self.scale_wallpaper(&wallpaper, self.current_scaling_mode);
 
-                    // Store scaled wallpaper in persistent cache region
                     let sw = self.fb.width();
                     let sh = self.fb.height();
                     let size = (sw * sh * 4) as usize;
 
-                    // Cleanup old cache if size changed or first time
                     if self.wallpaper_cache_region.is_some() {
-                         let _ = shared_region_unmap(self.wallpaper_cache_region.unwrap());
-                         let _ = shared_region_destroy(self.wallpaper_cache_region.unwrap());
+                        let _ = shared_region_unmap(self.wallpaper_cache_region.unwrap());
+                        let _ = shared_region_destroy(self.wallpaper_cache_region.unwrap());
                     }
 
-                    let region = shared_region_create(size).expect("Failed to create wallpaper cache region");
-                    let ptr = shared_region_map(region, 0, SharedMemFlags::READ_WRITE).expect("Failed to map wallpaper cache") as *mut u8;
+                    let region = shared_region_create(size)
+                        .expect("Failed to create wallpaper cache region");
+                    let ptr = shared_region_map(region, 0, SharedMemFlags::READ_WRITE)
+                        .expect("Failed to map wallpaper cache")
+                        as *mut u8;
 
                     let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
                     scaled.blit_to(buf, sw, 0, 0);
@@ -2147,7 +2677,6 @@ impl Compositor {
                 ALLOCATOR.pop_scratch();
                 let _ = shared_region_unmap(scratch_region);
                 let _ = shared_region_destroy(scratch_region);
-
             } else {
                 self.wallpaper_cache_valid = false;
             }
@@ -2195,9 +2724,7 @@ impl Compositor {
         let (r01, g01, b01, a01) = img.get_pixel(x0, y1)?;
         let (r11, g11, b11, a11) = img.get_pixel(x1, y1)?;
 
-        let lerp = |a: u32, b: u32, t: u32| -> u32 {
-            (((a * (65536 - t)) + (b * t)) + 32768) >> 16
-        };
+        let lerp = |a: u32, b: u32, t: u32| -> u32 { (((a * (65536 - t)) + (b * t)) + 32768) >> 16 };
 
         let top_r = lerp(r00 as u32, r10 as u32, tx);
         let top_g = lerp(g00 as u32, g10 as u32, tx);
@@ -2216,7 +2743,14 @@ impl Compositor {
         Some((r, g, b, a))
     }
 
-    fn blit_scaled(dest: &mut DecodedImage, img: &DecodedImage, dst_x: i32, dst_y: i32, dst_w: u32, dst_h: u32) {
+    fn blit_scaled(
+        dest: &mut DecodedImage,
+        img: &DecodedImage,
+        dst_x: i32,
+        dst_y: i32,
+        dst_w: u32,
+        dst_h: u32,
+    ) {
         if dst_w == 0 || dst_h == 0 || img.width == 0 || img.height == 0 {
             return;
         }
@@ -2231,7 +2765,9 @@ impl Compositor {
                 if dx < 0 || dy < 0 || dx >= dest.width as i32 || dy >= dest.height as i32 {
                     continue;
                 }
-                if let Some((r, g, b, a)) = Self::sample_bilinear(img, src_x_fp as i32, src_y_fp as i32) {
+                if let Some((r, g, b, a)) =
+                    Self::sample_bilinear(img, src_x_fp as i32, src_y_fp as i32)
+                {
                     let off = (((dy as u32) * dest.width + dx as u32) * 4) as usize;
                     dest.pixels[off] = r;
                     dest.pixels[off + 1] = g;
@@ -2310,289 +2846,17 @@ impl Compositor {
         }
     }
 
-    fn get_work_area(&self) -> (i32, i32, u32, u32) {
-        let sw = self.fb.width();
-        let sh = self.fb.height();
-
-        let x = 0;
-        let y = PANEL_HEIGHT as i32;
-        let w = sw;
-        // Subtract panel height and dock area (bottom margin)
-        let h = sh.saturating_sub(PANEL_HEIGHT + DOCK_HEIGHT + 24);
-
-        (x, y, w, h)
-    }
-
-    fn send_surface_assignment(&self, window_id: WindowId, port: PortId, region_id: SharedRegionId, width: u32, height: u32, resize_pos: Option<(i32, i32)>) {
-        if port == 0 {
-            return;
-        }
-
-        // 1. Notify client about surface
-        let assign = SurfaceAssignMsg {
-            window_id,
-            region_id,
-            width,
-            height,
-            stride: width,
-            bytes_per_pixel: 4,
-            compositor_port: self.event_port,
-            scale_factor: 1000,
-        };
-
-        let header = MessageHeader::new(MessageType::SurfaceAssign, SurfaceAssignMsg::SIZE as u32);
-        let mut full_msg = [0u8; 64];
-        full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-        full_msg[MessageHeader::SIZE..MessageHeader::SIZE + SurfaceAssignMsg::SIZE].copy_from_slice(&assign.to_bytes());
-        let _ = send(port, &full_msg[..MessageHeader::SIZE + SurfaceAssignMsg::SIZE]);
-
-        if let Some((win_x, win_y)) = resize_pos {
-            // 2. Notify client about resize event
-            let resize_event = libipc::messages::WmWindowEventMsg {
-                window_id,
-                event_type: libipc::messages::WindowEventType::Resize,
-                x: win_x,
-                y: win_y,
-                width,
-                height,
-            };
-
-            let header = MessageHeader::new(MessageType::WmEvent, libipc::messages::WmWindowEventMsg::SIZE as u32);
-            let mut full_msg = [0u8; 64];
-            full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-            full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE].copy_from_slice(&resize_event.to_bytes());
-            let _ = send(port, &full_msg[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
-        }
-    }
-
-    fn reallocate_window_surface(&mut self, window_id: WindowId) {
-        let (cw, ch, already_correct) = if let Some(window) = self.wm.get_window(window_id) {
-            let cw = window.content_width();
-            let ch = window.content_height();
-            let already_correct = if let Some(ref s) = window.surface {
-                s.width() == cw && s.height() == ch
-            } else {
-                false
-            };
-            (cw, ch, already_correct)
-        } else {
-            return;
-        };
-
-        if already_correct {
-            return;
-        }
-
-        // Create new shared surface for the window
-        if let Ok(new_surface) = SharedSurface::create(cw, ch) {
-            let region_id = new_surface.region_id();
-
-            let result = if let Some(window) = self.wm.get_window_mut(window_id) {
-                window.surface = Some(new_surface);
-                window.surface_region_id = Some(region_id);
-                window.content_dirty = false;
-                window.surface_ready = false;
-                window.event_port.map(|port| (port, window.x, window.y))
-            } else {
-                None
-            };
-
-            if let Some((port, x, y)) = result {
-                self.send_surface_assignment(window_id, port, region_id, cw, ch, Some((x, y)));
-            }
-        }
-    }
-
-    fn handle_mouse_up(&mut self, x: i32, y: i32) {
-        let captured = self.captured_window.take();
-
-        match self.drag_op {
-            DragOperation::Resize { window_id, .. } => {
-                self.reallocate_window_surface(window_id);
-                self.drag_op = DragOperation::None;
-                return;
-            }
-            DragOperation::Move { .. } => {
-                self.drag_op = DragOperation::None;
-                return;
-            }
-            DragOperation::None => {}
-        }
-
-        let target_id = captured.or_else(|| self.wm.window_at(x, y));
-
-        if let Some(id) = target_id {
-            if let Some(w) = self.wm.get_window(id) {
-                if let Some(port) = w.event_port {
-                    let rel_x = x - w.content_x() as i32;
-                    let rel_y = y - w.content_y() as i32;
-                    if rel_x >= 0 && rel_y >= 0 && rel_x < w.content_width() as i32 && rel_y < w.content_height() as i32 {
-                        let event = MouseButtonEvent {
-                            button: MouseButton::Left,
-                            x: rel_x,
-                            y: rel_y,
-                        };
-                        self.send_window_event_async(id, port, MessageType::MouseButtonUp, &event.to_bytes());
-                    }
-                }
-            }
-        }
-
-        self.drag_op = DragOperation::None;
-    }
-
-    fn handle_wm_request(&mut self, payload: &[u8]) {
-        if payload.len() < 4 { return; }
-        let req_type_raw = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-        let req_type = match libipc::messages::WmRequestType::from_u32(req_type_raw) {
-            Some(t) => t,
-            None => return,
-        };
-
-        match req_type {
-            libipc::messages::WmRequestType::CreateWindow => {
-                if let Some(req) = libipc::messages::WmCreateWindowRequest::from_bytes(payload) {
-                    let win_x = 150 + (self.wm.windows.len() as i32 * 30);
-                    let win_y = 120 + (self.wm.windows.len() as i32 * 30);
-
-                    let id = self.wm.next_id;
-                    self.wm.next_id += 1;
-
-                    // Treat req.width/req.height as the desired *content* area.
-                    // Add decorations so the surface returned equals exactly what
-                    // the client requested.
-                    let outer_w = req.width + WINDOW_BORDER_WIDTH * 2;
-                    let outer_h = req.height + WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH;
-
-                    let window = match Window::new_with_process(
-                        id, &req.title, win_x, win_y, outer_w, outer_h,
-                        req.reply_port as PortId
-                    ) {
-                        Some(w) => w,
-                        None => return,
-                    };
-
-                    let resp = libipc::messages::WmCreateWindowResponse {
-                        window_id: id,
-                        region_id: window.surface_region_id.unwrap_or(0),
-                        width: window.content_width(),
-                        height: window.content_height(),
-                        stride: window.content_width(),
-                    };
-
-                    self.wm.windows.push(window);
-                    self.wm.focus_window(id);
-                    self.dirty = true;
-
-                    let header = MessageHeader::new(MessageType::WmResponse, libipc::messages::WmCreateWindowResponse::SIZE as u32);
-                    let mut full_msg = [0u8; 64];
-                    full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                    full_msg[MessageHeader::SIZE..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE].copy_from_slice(&resp.to_bytes());
-                    if req.reply_port != 0 {
-                        let _ = send(req.reply_port as PortId, &full_msg[..MessageHeader::SIZE + libipc::messages::WmCreateWindowResponse::SIZE]);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_close_window(&mut self, id: WindowId) {
-        let mut event_port = None;
-        if let Some(w) = self.wm.get_window(id) {
-            event_port = w.event_port;
-        }
-
-        if let Some(port) = event_port {
-            if port != 0 {
-                let msg = TerminateRequestMsg {
-                    window_id: id,
-                    reason: 0,
-                };
-                let header = MessageHeader::new(MessageType::TerminateRequest, TerminateRequestMsg::SIZE as u32);
-                let mut full_msg = [0u8; 64];
-                full_msg[..MessageHeader::SIZE].copy_from_slice(&header.to_bytes());
-                full_msg[MessageHeader::SIZE..MessageHeader::SIZE + TerminateRequestMsg::SIZE].copy_from_slice(&msg.to_bytes());
-                let _ = send(port, &full_msg[..MessageHeader::SIZE + TerminateRequestMsg::SIZE]);
-            }
-        }
-
-        // Hide the window immediately so it disappears from the screen,
-        // but defer actual destruction (which frees the shared surface) so
-        // the client process has time to receive the TerminateRequest and
-        // stop writing to the shared memory before it is unmapped.
-        let rect = if let Some(w) = self.wm.get_window(id) {
-            Some(Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25))
-        } else {
-            None
-        };
-
-        if let Some(w) = self.wm.get_window_mut(id) {
-            w.visible = false;
-        }
-
-        if let Some(r) = rect {
-            self.mark_dirty_rect(r);
-        }
-
-        // Update focus away from the closing window
-        if self.wm.focused_id == Some(id) {
-            self.wm.focused_id = self.wm.windows.iter()
-                .filter(|w| w.visible && w.id != id && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.wm.focused_id {
-                self.wm.focus_window(new_focus);
-            }
-        }
-
-        self.pending_close.push(PendingClose {
-            window_id: id,
-            deadline_tick: self.ticks.wrapping_add(CLOSE_GRACE_TICKS),
-        });
-
-        self.dirty = true;
-    }
-
-    /// Reap windows whose close grace period has expired, destroying their
-    /// shared surfaces.  Called every tick from the main loop.
-    fn reap_pending_closes(&mut self) {
-        let current = self.ticks;
-        let mut reaped = false;
-        // Collect IDs whose deadline has passed (handle wrapping arithmetic)
-        let mut to_close: Vec<WindowId> = Vec::new();
-        for pc in self.pending_close.iter() {
-            // wrapping_sub: if current >= deadline (mod 2^32), time has elapsed
-            if current.wrapping_sub(pc.deadline_tick) < 0x8000_0000 {
-                to_close.push(pc.window_id);
-            }
-        }
-        for id in to_close.iter() {
-            self.wm.close_window(*id);
-            reaped = true;
-        }
-        self.pending_close.retain(|pc| {
-            current.wrapping_sub(pc.deadline_tick) >= 0x8000_0000
-        });
-        if reaped {
-            self.dirty = true;
-        }
-    }
-
     fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {
         let (_, _, _, _, start_x, icon_y, icon_size, spacing) = self.dock_layout()?;
-
         if y < icon_y || y >= icon_y + icon_size {
             return None;
         }
-
         for i in 0..self.dock_apps.len() {
             let ix = start_x + (i as i32 * (icon_size + spacing));
             if x >= ix && x < ix + icon_size {
                 return Some(i);
             }
         }
-
         None
     }
 
@@ -2611,9 +2875,9 @@ impl Compositor {
 
         let width = self.fb.width();
         let height = self.fb.height();
-        let icon_size   = atom_theme::shell::DOCK_ITEM_SIZE as i32;  // DS: 48 px
-        let spacing     = atom_theme::spacing::XL as i32;             // DS: 20 px
-        let side_padding = atom_theme::spacing::XXXL as i32;          // DS: 32 px
+        let icon_size = atom_theme::shell::DOCK_ITEM_SIZE as i32; 
+        let spacing = atom_theme::spacing::XL as i32; 
+        let side_padding = atom_theme::spacing::XXXL as i32;
 
         let total_icons_width = count as i32 * icon_size + (count as i32 - 1) * spacing;
         let dock_width = (total_icons_width + side_padding * 2).max(140) as u32;
@@ -2625,57 +2889,12 @@ impl Compositor {
         Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
     }
 
-    fn build_dock_apps() -> Vec<DockApp> {
-        let candidates: [(&str, &str, Color); 4] = [
-            ("fileman",          "Files",    atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),
-            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
-            ("tinygl_demo",      "TinyGL",   atom_theme::colors::ATOM_COLOR_SUCCESS),
-            ("terminal",         "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),
-        ];
-
-        let mut apps = Vec::new();
-
-        for (exec, label, color) in candidates.iter() {
-            let sys_path = alloc::format!("/apps/system/{}.atxf", exec);
-            let user_path = alloc::format!("/apps/user/{}.atxf", exec);
-
-            let exists = fs::stat(&sys_path).is_ok() || fs::stat(&user_path).is_ok();
-
-            if exists {
-                let mono = if exec.len() >= 2 {
-                    alloc::format!(
-                        "{}{}",
-                        exec.as_bytes()[0] as char,
-                        exec.as_bytes()[1] as char
-                    )
-                } else {
-                    String::from(*exec)
-                };
-
-                apps.push(DockApp {
-                    label: String::from(*label),
-                    executable: String::from(*exec),
-                    color: *color,
-                    monogram: mono,
-                });
-            }
-        }
-
-        apps
-    }
-
     fn spawn_app(&mut self, name: &str) {
-        if name == "terminal" {
-            self.spawn_terminal();
-            return;
-        }
-        if name == "fileman" {
-            self.spawn_fileman();
-            return;
-        }
-        if name == "display_settings" {
-            self.spawn_display_settings();
-            return;
+        match name {
+            "terminal" => return self.spawn_terminal(),
+            "fileman" => return self.spawn_fileman(),
+            "display_settings" => return self.spawn_display_settings(),
+            _ => {}
         }
 
         let user_path = alloc::format!("/apps/user/{}.atxf", name);
@@ -2683,113 +2902,66 @@ impl Compositor {
             let _ = spawn_from_path(&user_path);
             return;
         }
-
         let system_path = alloc::format!("/apps/system/{}.atxf", name);
         if fs::stat(&system_path).is_ok() {
             let _ = spawn_from_path(&system_path);
             return;
         }
-
         let _ = spawn_process(name);
     }
 
-    fn spawn_fileman(&mut self) {
-        let _pid = match spawn_from_path("/apps/user/fileman.atxf") {
-            Ok(pid) => pid,
-            Err(_) => return,
-        };
-
-        let offset = (self.wm.windows.len() as i32) * 30;
-        let win_x = 100 + offset;
-        let win_y = 80 + offset;
-        let win_width = 720u32;
-        let win_height = 480u32;
-
+    fn spawn_hosted_window(
+        &mut self,
+        title: &str,
+        base_x: i32,
+        base_y: i32,
+        step: i32,
+        width: u32,
+        height: u32,
+    ) {
+        let offset = (self.wm.windows.len() as i32) * step;
         let window_id = match self.wm.create_window_with_process(
-            "File Manager",
-            win_x,
-            win_y,
-            win_width,
-            win_height,
+            title,
+            base_x + offset,
+            base_y + offset,
+            width,
+            height,
             0,
         ) {
             Some(id) => id,
             None => return,
         };
-
-        self.pending_windows.push(PendingWindow {
-            window_id,
-        });
-
+        self.pending_windows.push(PendingWindow { window_id });
         self.dirty = true;
+    }
+
+    fn spawn_fileman(&mut self) {
+        if spawn_from_path("/apps/user/fileman.atxf").is_err() {
+            return;
+        }
+        self.spawn_hosted_window("File Manager", 100, 80, 30, 720, 480);
     }
 
     fn spawn_terminal(&mut self) {
-        let _pid = match spawn_process("terminal") {
-            Ok(pid) => pid,
-            Err(_) => return,
-        };
-
-        let offset = (self.wm.windows.len() as i32) * 30;
-        let win_x = 150 + offset;
-        let win_y = 120 + offset;
-        let win_width = 640u32;
-        let win_height = 420u32;
-
-        let window_id = match self.wm.create_window_with_process(
-            "Terminal",
-            win_x,
-            win_y,
-            win_width,
-            win_height,
-            0,
-        ) {
-            Some(id) => id,
-            None => return,
-        };
-
-        self.pending_windows.push(PendingWindow {
-            window_id,
-        });
-
-        self.dirty = true;
+        if spawn_process("terminal").is_err() {
+            return;
+        }
+        self.spawn_hosted_window("Terminal", 150, 120, 30, 640, 420);
     }
 
     fn spawn_display_settings(&mut self) {
-        let _pid = match spawn_process("display_settings") {
-            Ok(pid) => pid,
-            Err(_) => return,
-        };
-
-        let offset = (self.wm.windows.len() as i32) * 20;
-        let win_x = 200 + offset;
-        let win_y = 100 + offset;
-        let win_width = 480u32;
-        let win_height = 420u32;
-
-        let window_id = match self.wm.create_window_with_process(
-            "Display Settings",
-            win_x,
-            win_y,
-            win_width,
-            win_height,
-            0,
-        ) {
-            Some(id) => id,
-            None => return,
-        };
-
-        self.pending_windows.push(PendingWindow {
-            window_id,
-        });
-
-        self.dirty = true;
+        if spawn_process("display_settings").is_err() {
+            return;
+        }
+        self.spawn_hosted_window("Display Settings", 200, 100, 20, 480, 420);
     }
 
     fn draw_all(&mut self) {
-        let draw_rect = self.dirty_rect.take().unwrap_or(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+        let draw_rect = self
+            .dirty_rect
+            .take()
+            .unwrap_or(Rect::new(0, 0, self.fb.width(), self.fb.height()));
 
-        // 1. Wallpaper / Background
         if self.wallpaper_cache_valid && !self.wallpaper_cache_ptr.is_null() {
             let sw = self.fb.width();
             let stride = self.backbuffer_fb.stride();
@@ -2808,15 +2980,20 @@ impl Compositor {
                     core::ptr::copy_nonoverlapping(
                         src_ptr.add(src_off),
                         dst_ptr.add(dst_off),
-                        copy_len as usize
+                        copy_len as usize,
                     );
                 }
             }
         } else {
-            self.backbuffer_fb.fill_rect(draw_rect.x as u32, draw_rect.y as u32, draw_rect.w, draw_rect.h, self.desktop_bg);
+            self.backbuffer_fb.fill_rect(
+                draw_rect.x as u32,
+                draw_rect.y as u32,
+                draw_rect.w,
+                draw_rect.h,
+                self.desktop_bg,
+            );
         }
 
-        // 2. Icons
         for icon in &self.icons {
             let icon_rect = Rect::new(icon.x, icon.y, 60, 80);
             if icon_rect.intersects(&draw_rect) {
@@ -2824,23 +3001,21 @@ impl Compositor {
             }
         }
 
-        // 3. Panel
         let panel_rect = Rect::new(0, 0, self.fb.width(), PANEL_HEIGHT);
         if panel_rect.intersects(&draw_rect) {
-             self.draw_panel();
+            self.draw_panel();
         }
 
-        // 4. Windows
         for window in self.wm.windows.iter() {
             if window.visible {
-                let win_rect = Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12);
+                let win_rect =
+                    Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12);
                 if win_rect.intersects(&draw_rect) {
                     self.draw_window(window);
                 }
             }
         }
 
-        // 5. Dock
         if let Some((dx, dy, dw, dh, _, _, _, _)) = self.dock_layout() {
             let dock_rect = Rect::new(dx, dy, dw, dh);
             if dock_rect.intersects(&draw_rect) {
@@ -2852,43 +3027,62 @@ impl Compositor {
             self.draw_context_menu();
         }
 
-        // 6. Cursor (always drawn)
         self.draw_cursor();
 
-        // 7. Final Blit to screen
-        self.backbuffer_fb.blit_rect(&self.fb, draw_rect.x as u32, draw_rect.y as u32, draw_rect.w, draw_rect.h);
+        self.backbuffer_fb.blit_rect(
+            &self.fb,
+            draw_rect.x as u32,
+            draw_rect.y as u32,
+            draw_rect.w,
+            draw_rect.h,
+        );
     }
 
-    fn draw_context_menu(&self) {
-        let menu_w   = 200u32;
-        let item_h   = atom_theme::spacing::XXXL as u32;                         // DS: 32 px row height
-        let padding_v = atom_theme::spacing::SM as u32 - 2;                      // 6 px vertical padding
-        let menu_r    = atom_theme::radius::SM as u32;                            // DS: 8 px
-        let menu_h    = self.context_menu.items.len() as u32 * item_h + padding_v * 2;
-        let mx = self.context_menu.x as u32;
-        let my = self.context_menu.y as u32;
+    fn draw_panel(&self) {
+        let width = self.backbuffer_fb.width();
 
-        // Shadow
-        self.backbuffer_fb.fill_rect_rounded_alpha(mx + 2, my + 3, menu_w, menu_h, menu_r, theme::SHADOW, 100);
-        // Background
-        self.backbuffer_fb.fill_rect_rounded_aa(mx, my, menu_w, menu_h, menu_r, theme::MENU_BG);
-        // Border
-        self.backbuffer_fb.draw_rect_rounded_aa(mx, my, menu_w, menu_h, menu_r, theme::MENU_BORDER);
+        self.backbuffer_fb.fill_rect(0, 0, width, PANEL_HEIGHT, theme::PANEL_BG);
+        self.backbuffer_fb.fill_rect(0, 0, width, 1, theme::PANEL_BG_ACCENT);
+        self.backbuffer_fb
+            .fill_rect(0, PANEL_HEIGHT - 1, width, 1, theme::PANEL_BORDER);
 
-        for (i, item) in self.context_menu.items.iter().enumerate() {
-            let iy = my + padding_v + (i as u32 * item_h);
-            let text_y = iy + (item_h - 8) / 2;
-            self.backbuffer_fb.draw_string(mx + atom_theme::spacing::LG as u32, text_y, item, theme::MENU_TEXT, theme::MENU_BG);
-        }
-    }
+        let brand_y = (PANEL_HEIGHT - 8) / 2;
+        self.backbuffer_fb.fill_rect_rounded_aa(
+            atom_theme::spacing::MD as u32,
+            brand_y - 1,
+            10,
+            10,
+            atom_theme::radius::XS as u32,
+            theme::ACCENT,
+        );
+        self.backbuffer_fb.draw_string(
+            atom_theme::spacing::MD as u32 + 14,
+            brand_y,
+            "Atom",
+            theme::PANEL_TEXT,
+            theme::PANEL_BG,
+        );
 
-    fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
-        for (i, icon) in self.icons.iter().enumerate() {
-            if x >= icon.x && x < icon.x + 60 && y >= icon.y && y < icon.y + 60 {
-                return Some(i);
+        if let Some(focused_id) = self.wm.focused_id {
+            if let Some(w) = self.wm.get_window(focused_id) {
+                let title_len = w.title.len() as u32 * 8;
+                let title_x = (width / 2).saturating_sub(title_len / 2);
+                self.backbuffer_fb
+                    .draw_string(title_x, brand_y, &w.title, theme::PANEL_TEXT_DIM, theme::PANEL_BG);
             }
         }
-        None
+
+        let clock_x = width.saturating_sub(96);
+        self.backbuffer_fb.fill_rect_rounded_aa(
+            clock_x - atom_theme::spacing::LG as u32,
+            brand_y,
+            8,
+            8,
+            atom_theme::radius::XS as u32,
+            theme::BTN_MAXIMIZE,
+        );
+        self.backbuffer_fb
+            .draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
     fn draw_desktop_icon(&self, icon: &DesktopIcon) {
@@ -2899,49 +3093,23 @@ impl Compositor {
         let icon_x = ix + (size - icon_size) / 2;
         let icon_y = iy + (size - icon_size) / 2 - 2;
 
-        self.backbuffer_fb.fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
+        self.backbuffer_fb
+            .fill_rect_rounded_aa(icon_x, icon_y, icon_size, icon_size, 8, icon.color);
 
-        // Label below icon (centered)
         let label_len = icon.label.len() as u32 * 8;
         let lx = (ix as i32 + (size as i32 - label_len as i32) / 2).max(0) as u32;
         let label_y = iy + size + 6;
-        self.backbuffer_fb.draw_string(lx, label_y, &icon.label, theme::ICON_LABEL, self.desktop_bg);
+        self.backbuffer_fb
+            .draw_string(lx, label_y, &icon.label, theme::ICON_LABEL, self.desktop_bg);
     }
 
-    fn draw_panel(&self) {
-        let width = self.backbuffer_fb.width();
-
-        // Panel background
-        self.backbuffer_fb.fill_rect(0, 0, width, PANEL_HEIGHT, theme::PANEL_BG);
-        // Subtle top highlight
-        self.backbuffer_fb.fill_rect(0, 0, width, 1, theme::PANEL_BG_ACCENT);
-        // Bottom border
-        self.backbuffer_fb.fill_rect(0, PANEL_HEIGHT - 1, width, 1, theme::PANEL_BORDER);
-
-        // Branding: Atom logo area
-        let brand_y = (PANEL_HEIGHT - 8) / 2;
-        // Accent dot — DS: radius::XS, spacing::MD offset
-        self.backbuffer_fb.fill_rect_rounded_aa(atom_theme::spacing::MD as u32, brand_y - 1, 10, 10, atom_theme::radius::XS as u32, theme::ACCENT);
-        // Brand text
-        self.backbuffer_fb.draw_string(atom_theme::spacing::MD as u32 + 14, brand_y, "Atom", theme::PANEL_TEXT, theme::PANEL_BG);
-
-        // Center: focused window title (if any)
-        if let Some(focused_id) = self.wm.focused_id {
-            if let Some(w) = self.wm.get_window(focused_id) {
-                let title_len = w.title.len() as u32 * 8;
-                let title_x = (width / 2).saturating_sub(title_len / 2);
-                self.backbuffer_fb.draw_string(title_x, brand_y, &w.title, theme::PANEL_TEXT_DIM, theme::PANEL_BG);
-            }
-        }
-
-        // Right side: clock + status area
-        let clock_x = width.saturating_sub(96);
-        // Status dot (indicates system running) — DS radius::XS
-        self.backbuffer_fb.fill_rect_rounded_aa(clock_x - atom_theme::spacing::LG as u32, brand_y, 8, 8, atom_theme::radius::XS as u32, theme::BTN_MAXIMIZE);
-        self.backbuffer_fb.draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
-    }
-
-    fn blit_surface_bottom_rounded(&self, surface: &SharedSurface, dest_x: u32, dest_y: u32, radius: u32) {
+    fn blit_surface_bottom_rounded(
+        &self,
+        surface: &SharedSurface,
+        dest_x: u32,
+        dest_y: u32,
+        radius: u32,
+    ) {
         let Some(src_addr) = surface.address() else {
             return;
         };
@@ -2952,8 +3120,12 @@ impl Compositor {
             return;
         }
 
-        let copy_width = surface.width().min(self.backbuffer_fb.width().saturating_sub(dest_x));
-        let copy_height = surface.height().min(self.backbuffer_fb.height().saturating_sub(dest_y));
+        let copy_width = surface
+            .width()
+            .min(self.backbuffer_fb.width().saturating_sub(dest_x));
+        let copy_height = surface
+            .height()
+            .min(self.backbuffer_fb.height().saturating_sub(dest_y));
         if copy_width == 0 || copy_height == 0 {
             return;
         }
@@ -3004,7 +3176,9 @@ impl Compositor {
 
                 let left_src_x = int_offset - 1;
                 let left_src_offset = (sy * src_stride + left_src_x) as usize * fb_bpp;
-                let left_pixel = unsafe { (((src_addr as usize) + left_src_offset) as *const u32).read_volatile() };
+                let left_pixel = unsafe {
+                    (((src_addr as usize) + left_src_offset) as *const u32).read_volatile()
+                };
                 self.backbuffer_fb.fill_rect_alpha(
                     dest_x + left_src_x,
                     row_y,
@@ -3016,7 +3190,9 @@ impl Compositor {
 
                 let right_src_x = copy_width - int_offset;
                 let right_src_offset = (sy * src_stride + right_src_x) as usize * fb_bpp;
-                let right_pixel = unsafe { (((src_addr as usize) + right_src_offset) as *const u32).read_volatile() };
+                let right_pixel = unsafe {
+                    (((src_addr as usize) + right_src_offset) as *const u32).read_volatile()
+                };
                 self.backbuffer_fb.fill_rect_alpha(
                     dest_x + right_src_x,
                     row_y,
@@ -3039,10 +3215,11 @@ impl Compositor {
         let w = window.width;
         let h = window.height;
 
-        // Multi-layer soft shadow (only for non-maximized)
         if window.state != WindowState::Maximized {
-            self.backbuffer_fb.fill_rect_rounded_alpha(x + 2, y + 4, w + 4, h + 4, 6, theme::SHADOW, 60);
-            self.backbuffer_fb.fill_rect_rounded_alpha(x + 1, y + 2, w + 2, h + 2, 4, theme::SHADOW, 90);
+            self.backbuffer_fb
+                .fill_rect_rounded_alpha(x + 2, y + 4, w + 4, h + 4, 6, theme::SHADOW, 60);
+            self.backbuffer_fb
+                .fill_rect_rounded_alpha(x + 1, y + 2, w + 2, h + 2, 4, theme::SHADOW, 90);
         }
 
         let border_color = if window.focused {
@@ -3051,10 +3228,15 @@ impl Compositor {
             theme::WINDOW_BORDER
         };
 
-        // Window outer shell — full rounded rect (border color fills entire area first)
-        self.backbuffer_fb.fill_rect_rounded_aa(x, y, w, h, atom_theme::shell::WINDOW_RADIUS as u32, border_color);
+        self.backbuffer_fb.fill_rect_rounded_aa(
+            x,
+            y,
+            w,
+            h,
+            atom_theme::shell::WINDOW_RADIUS as u32,
+            border_color,
+        );
 
-        // Window header — top corners rounded to match outer border (outer_r - border = inner_r)
         let inner_r = atom_theme::shell::WINDOW_RADIUS as u32 - WINDOW_BORDER_WIDTH;
         let header_color = if window.focused {
             theme::WINDOW_HEADER_FOCUSED
@@ -3062,20 +3244,30 @@ impl Compositor {
             theme::WINDOW_HEADER
         };
         self.backbuffer_fb.fill_rect_top_rounded_aa(
-            x + WINDOW_BORDER_WIDTH, y + WINDOW_BORDER_WIDTH,
-            w - WINDOW_BORDER_WIDTH * 2, WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
-            inner_r, header_color,
+            x + WINDOW_BORDER_WIDTH,
+            y + WINDOW_BORDER_WIDTH,
+            w - WINDOW_BORDER_WIDTH * 2,
+            WINDOW_HEADER_HEIGHT - WINDOW_BORDER_WIDTH,
+            inner_r,
+            header_color,
         );
-        // Header bottom separator
-        self.backbuffer_fb.fill_rect(x + WINDOW_BORDER_WIDTH, y + WINDOW_HEADER_HEIGHT - 1,
-                         w - WINDOW_BORDER_WIDTH * 2, 1, border_color);
+        self.backbuffer_fb.fill_rect(
+            x + WINDOW_BORDER_WIDTH,
+            y + WINDOW_HEADER_HEIGHT - 1,
+            w - WINDOW_BORDER_WIDTH * 2,
+            1,
+            border_color,
+        );
 
-        // Window title (vertically centered in header)
         let title_y = y + (WINDOW_HEADER_HEIGHT - 8) / 2;
-        let title_color = if window.focused { theme::PANEL_TEXT } else { theme::PANEL_TEXT_DIM };
-        self.backbuffer_fb.draw_string(x + 16, title_y, &window.title, title_color, header_color);
+        let title_color = if window.focused {
+            theme::PANEL_TEXT
+        } else {
+            theme::PANEL_TEXT_DIM
+        };
+        self.backbuffer_fb
+            .draw_string(x + 16, title_y, &window.title, title_color, header_color);
 
-        // Traffic light buttons (rounded circles)
         let btn_y = y + (WINDOW_HEADER_HEIGHT - 12) / 2;
         let btn_size = 12u32;
         let btn_radius = 6u32;
@@ -3084,36 +3276,53 @@ impl Compositor {
         let min_x = max_x - 20;
 
         if window.focused {
-            self.backbuffer_fb.fill_rect_rounded_aa(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_CLOSE);
-            self.backbuffer_fb.fill_rect_rounded_aa(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MAXIMIZE);
-            self.backbuffer_fb.fill_rect_rounded_aa(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MINIMIZE);
+            self.backbuffer_fb
+                .fill_rect_rounded_aa(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_CLOSE);
+            self.backbuffer_fb.fill_rect_rounded_aa(
+                max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MAXIMIZE,
+            );
+            self.backbuffer_fb.fill_rect_rounded_aa(
+                min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_MINIMIZE,
+            );
         } else {
-            self.backbuffer_fb.fill_rect_rounded_aa(close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
-            self.backbuffer_fb.fill_rect_rounded_aa(max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
-            self.backbuffer_fb.fill_rect_rounded_aa(min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE);
+            self.backbuffer_fb.fill_rect_rounded_aa(
+                close_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE,
+            );
+            self.backbuffer_fb.fill_rect_rounded_aa(
+                max_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE,
+            );
+            self.backbuffer_fb.fill_rect_rounded_aa(
+                min_x, btn_y, btn_size, btn_size, btn_radius, theme::BTN_INACTIVE,
+            );
         }
 
-        // Content area background — always paint the rounded body first so the
-        // surface AA edge blends against the same shape as the window shell.
         self.backbuffer_fb.fill_rect_bottom_rounded_aa(
-            window.content_x(), window.content_y(),
-            window.content_width(), window.content_height(),
-            inner_r, theme::WINDOW_BG,
+            window.content_x(),
+            window.content_y(),
+            window.content_width(),
+            window.content_height(),
+            inner_r,
+            theme::WINDOW_BG,
         );
 
-        // Blit application surface
         if window.surface_ready {
             if let Some(ref surface) = window.surface {
-                self.blit_surface_bottom_rounded(surface, window.content_x(), window.content_y(), inner_r);
+                self.blit_surface_bottom_rounded(
+                    surface,
+                    window.content_x(),
+                    window.content_y(),
+                    inner_r,
+                );
             }
         }
     }
 
     fn draw_dock(&self) {
-        let (dock_x_i32, dock_y_i32, dock_width, dock_height, start_x_i32, icon_y_i32, icon_size_i32, spacing_i32) = match self.dock_layout() {
-            Some(v) => v,
-            None => return,
-        };
+        let (dock_x_i32, dock_y_i32, dock_width, dock_height, start_x_i32, icon_y_i32, icon_size_i32, spacing_i32) =
+            match self.dock_layout() {
+                Some(v) => v,
+                None => return,
+            };
 
         let dock_x = dock_x_i32 as u32;
         let dock_y = dock_y_i32 as u32;
@@ -3122,16 +3331,16 @@ impl Compositor {
         let icon_size = icon_size_i32 as u32;
         let spacing = spacing_i32 as u32;
 
-        // Dock shadow
-        let dock_r = atom_theme::radius::LG as u32; // DS: 16 px
-        self.backbuffer_fb.fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, dock_r, theme::SHADOW, 80);
+        let dock_r = atom_theme::radius::LG as u32; 
+        self.backbuffer_fb
+            .fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, dock_r, theme::SHADOW, 80);
 
-        // Dock background (pill shape)
-        self.backbuffer_fb.fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BG);
-        // Dock border
-        self.backbuffer_fb.draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BORDER);
-        // Top highlight line
-        self.backbuffer_fb.fill_rect(dock_x + dock_r, dock_y, dock_width - dock_r * 2, 1, theme::DOCK_BORDER);
+        self.backbuffer_fb
+            .fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BG);
+        self.backbuffer_fb
+            .draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BORDER);
+        self.backbuffer_fb
+            .fill_rect(dock_x + dock_r, dock_y, dock_width - dock_r * 2, 1, theme::DOCK_BORDER);
 
         for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
@@ -3139,41 +3348,79 @@ impl Compositor {
             let label_len = app.monogram.len() as u32 * 8;
             let lx = ix + (icon_size - label_len) / 2;
             let ly = icon_y + (icon_size - 8) / 2;
-            self.backbuffer_fb.draw_string(lx, ly, &app.monogram, app.color, theme::DOCK_BG);
+            self.backbuffer_fb
+                .draw_string(lx, ly, &app.monogram, app.color, theme::DOCK_BG);
 
-            // Active indicator dot for running apps
-            if self.wm.windows.iter().any(|w| w.title == app.label && w.visible) {
+            if self
+                .wm
+                .windows
+                .iter()
+                .any(|w| w.title == app.label && w.visible)
+            {
                 let dot_x = ix + icon_size / 2 - 2;
                 let dot_y = icon_y + icon_size + 3;
-                self.backbuffer_fb.fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
+                self.backbuffer_fb
+                    .fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
             }
         }
     }
 
-    fn _backbuffer_as_u8_mut(&mut self) -> &mut [u8] {
-        let ptr = self.backbuffer_ptr as *mut u8;
-        let len = (self.backbuffer_fb.stride() * self.backbuffer_fb.height() * 4) as usize;
-        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+    fn draw_context_menu(&self) {
+        let menu_w = 200u32;
+        let item_h = atom_theme::spacing::XXXL as u32; 
+        let padding_v = atom_theme::spacing::SM as u32 - 2; 
+        let menu_r = atom_theme::radius::SM as u32;
+        let menu_h = self.context_menu.items.len() as u32 * item_h + padding_v * 2;
+        let mx = self.context_menu.x as u32;
+        let my = self.context_menu.y as u32;
+
+        self.backbuffer_fb
+            .fill_rect_rounded_alpha(mx + 2, my + 3, menu_w, menu_h, menu_r, theme::SHADOW, 100);
+        self.backbuffer_fb
+            .fill_rect_rounded_aa(mx, my, menu_w, menu_h, menu_r, theme::MENU_BG);
+        self.backbuffer_fb
+            .draw_rect_rounded_aa(mx, my, menu_w, menu_h, menu_r, theme::MENU_BORDER);
+
+        for (i, item) in self.context_menu.items.iter().enumerate() {
+            let iy = my + padding_v + (i as u32 * item_h);
+            let text_y = iy + (item_h - 8) / 2;
+            self.backbuffer_fb.draw_string(
+                mx + atom_theme::spacing::LG as u32,
+                text_y,
+                item,
+                theme::MENU_TEXT,
+                theme::MENU_BG,
+            );
+        }
+    }
+
+    fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
+        for (i, icon) in self.icons.iter().enumerate() {
+            if x >= icon.x && x < icon.x + 60 && y >= icon.y && y < icon.y + 60 {
+                return Some(i);
+            }
+        }
+        None
     }
 
     fn draw_cursor(&self) {
         let cursor_shape = [
-            [1,0,0,0,0,0,0,0,0,0],
-            [1,1,0,0,0,0,0,0,0,0],
-            [1,2,1,0,0,0,0,0,0,0],
-            [1,2,2,1,0,0,0,0,0,0],
-            [1,2,2,2,1,0,0,0,0,0],
-            [1,2,2,2,2,1,0,0,0,0],
-            [1,2,2,2,2,2,1,0,0,0],
-            [1,2,2,2,2,2,2,1,0,0],
-            [1,2,2,2,2,2,2,2,1,0],
-            [1,2,2,2,2,2,2,2,2,1],
-            [1,2,2,2,2,1,1,1,1,1],
-            [1,2,1,2,1,0,0,0,0,0],
-            [1,1,0,1,2,1,0,0,0,0],
-            [0,0,0,1,2,1,0,0,0,0],
-            [0,0,0,0,1,2,1,0,0,0],
-            [0,0,0,0,1,1,0,0,0,0],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 2, 1, 0],
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 1],
+            [1, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+            [1, 2, 1, 2, 1, 0, 0, 0, 0, 0],
+            [1, 1, 0, 1, 2, 1, 0, 0, 0, 0],
+            [0, 0, 0, 1, 2, 1, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 2, 1, 0, 0, 0],
+            [0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
         ];
 
         for (row, cols) in cursor_shape.iter().enumerate() {
@@ -3217,10 +3464,6 @@ fn main() -> ! {
         }
     };
 
-    // New Memory Model: Logic heap is FIXED and decoupled from graphics.
-    // Graphics buffers (backbuffer, wallpaper) use dedicated shared regions.
-    //
-    // 8 MiB provides headroom for complex desktop states and window management.
     let heap_size = 8 * 1024 * 1024;
 
     let region_id = match shared_region_create(heap_size) {
@@ -3273,267 +3516,4 @@ fn main() -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     log("Desktop: PANIC!");
     exit(0xFF);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_desktop_config_to_json_solid_color() {
-        let config = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type: WallpaperSourceType::SolidColor,
-                image_path: None,
-                color_rgb: Some(1184028),
-                scaling_mode: ScalingMode::Fill,
-            },
-            resolution: ResolutionConfig {
-                width: 1024,
-                height: 768,
-            },
-        };
-        
-        let json = config.to_json().unwrap();
-        assert!(json.contains("\"source_type\": \"SolidColor\""));
-        assert!(json.contains("\"color_rgb\": 1184028"));
-        assert!(json.contains("\"scaling_mode\": \"Fill\""));
-        assert!(json.contains("\"width\": 1024"));
-        assert!(json.contains("\"height\": 768"));
-    }
-    
-    #[test]
-    fn test_desktop_config_to_json_image() {
-        let config = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type: WallpaperSourceType::Image,
-                image_path: Some(String::from("/system/wallpapers/01.jpg")),
-                color_rgb: None,
-                scaling_mode: ScalingMode::Fit,
-            },
-            resolution: ResolutionConfig {
-                width: 1920,
-                height: 1080,
-            },
-        };
-        
-        let json = config.to_json().unwrap();
-        assert!(json.contains("\"source_type\": \"Image\""));
-        assert!(json.contains("\"image_path\": \"/system/wallpapers/01.jpg\""));
-        assert!(json.contains("\"scaling_mode\": \"Fit\""));
-        assert!(json.contains("\"width\": 1920"));
-        assert!(json.contains("\"height\": 1080"));
-    }
-    
-    #[test]
-    fn test_desktop_config_from_json_solid_color() {
-        let json = r#"{
-  "wallpaper": {
-    "source_type": "SolidColor",
-    "color_rgb": 1184028,
-    "scaling_mode": "Fill"
-  },
-  "resolution": {
-    "width": 1024,
-    "height": 768
-  }
-}"#;
-        
-        let config = DesktopConfig::from_json(json).unwrap();
-        assert_eq!(config.wallpaper.source_type, WallpaperSourceType::SolidColor);
-        assert_eq!(config.wallpaper.color_rgb, Some(1184028));
-        assert_eq!(config.wallpaper.scaling_mode, ScalingMode::Fill);
-        assert_eq!(config.resolution.width, 1024);
-        assert_eq!(config.resolution.height, 768);
-    }
-    
-    #[test]
-    fn test_desktop_config_from_json_image() {
-        let json = r#"{
-  "wallpaper": {
-    "source_type": "Image",
-    "image_path": "/system/wallpapers/mountain.jpg",
-    "scaling_mode": "Stretch"
-  },
-  "resolution": {
-    "width": 1920,
-    "height": 1080
-  }
-}"#;
-        
-        let config = DesktopConfig::from_json(json).unwrap();
-        assert_eq!(config.wallpaper.source_type, WallpaperSourceType::Image);
-        assert_eq!(config.wallpaper.image_path, Some(String::from("/system/wallpapers/mountain.jpg")));
-        assert_eq!(config.wallpaper.scaling_mode, ScalingMode::Stretch);
-        assert_eq!(config.resolution.width, 1920);
-        assert_eq!(config.resolution.height, 1080);
-    }
-    
-    #[test]
-    fn test_desktop_config_roundtrip() {
-        let original = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type: WallpaperSourceType::Image,
-                image_path: Some(String::from("/system/wallpapers/test.jpg")),
-                color_rgb: None,
-                scaling_mode: ScalingMode::Center,
-            },
-            resolution: ResolutionConfig {
-                width: 1280,
-                height: 720,
-            },
-        };
-        
-        let json1 = original.to_json().unwrap();
-        let parsed = DesktopConfig::from_json(&json1).unwrap();
-        let json2 = parsed.to_json().unwrap();
-        
-        assert_eq!(json1, json2);
-    }
-    
-    #[test]
-    fn test_validate_resolution_bounds() {
-        let mut config = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type: WallpaperSourceType::SolidColor,
-                image_path: None,
-                color_rgb: Some(1184028),
-                scaling_mode: ScalingMode::Fill,
-            },
-            resolution: ResolutionConfig {
-                width: 1024,
-                height: 768,
-            },
-        };
-        
-        assert!(config.validate().is_ok());
-        
-        // Test invalid width
-        config.resolution.width = 500;
-        assert!(config.validate().is_err());
-        
-        config.resolution.width = 2000;
-        assert!(config.validate().is_err());
-        
-        // Test invalid height
-        config.resolution.width = 1024;
-        config.resolution.height = 400;
-        assert!(config.validate().is_err());
-        
-        config.resolution.height = 1200;
-        assert!(config.validate().is_err());
-    }
-    
-    #[test]
-    fn test_validate_image_path() {
-        let mut config = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type: WallpaperSourceType::Image,
-                image_path: Some(String::from("/system/wallpapers/test.jpg")),
-                color_rgb: None,
-                scaling_mode: ScalingMode::Fill,
-            },
-            resolution: ResolutionConfig {
-                width: 1024,
-                height: 768,
-            },
-        };
-        
-        assert!(config.validate().is_ok());
-        
-        // Test missing path
-        config.wallpaper.image_path = None;
-        assert!(config.validate().is_err());
-        
-        // Test empty path
-        config.wallpaper.image_path = Some(String::from(""));
-        assert!(config.validate().is_err());
-        
-        // Test invalid extension
-        config.wallpaper.image_path = Some(String::from("/system/wallpapers/test.png"));
-        assert!(config.validate().is_err());
-    }
-    
-    #[test]
-    fn test_validate_color_rgb() {
-        let mut config = DesktopConfig {
-            wallpaper: WallpaperConfig {
-                source_type: WallpaperSourceType::SolidColor,
-                image_path: None,
-                color_rgb: Some(1184028),
-                scaling_mode: ScalingMode::Fill,
-            },
-            resolution: ResolutionConfig {
-                width: 1024,
-                height: 768,
-            },
-        };
-        
-        assert!(config.validate().is_ok());
-        
-        // Test missing color
-        config.wallpaper.color_rgb = None;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_wallpaper_path_constraints() {
-        assert!(validate_wallpaper_path("/system/wallpapers/test.jpg"));
-        assert!(validate_wallpaper_path("/system/wallpapers/test.JPEG"));
-        assert!(!validate_wallpaper_path("relative/test.jpg"));
-        assert!(!validate_wallpaper_path("/system/wallpapers/../test.jpg"));
-        assert!(!validate_wallpaper_path("/tmp/test.jpg"));
-        assert!(!validate_wallpaper_path("/system/wallpapers/test.png"));
-    }
-
-    #[test]
-    fn test_parse_invalid_json_missing_fields() {
-        let json = r#"{
-  "wallpaper": {
-    "source_type": "Image"
-  }
-}"#;
-        assert!(matches!(DesktopConfig::from_json(json), Err(ParseError::MissingField(_))));
-    }
-
-    #[test]
-    fn test_parse_invalid_json_conditional_field() {
-        let json = r#"{
-  "wallpaper": {
-    "source_type": "Image",
-    "scaling_mode": "Fill"
-  },
-  "resolution": {
-    "width": 1024,
-    "height": 768
-  }
-}"#;
-        assert!(matches!(DesktopConfig::from_json(json), Err(ParseError::MissingField("image_path"))));
-    }
-    
-    #[test]
-    fn test_scaling_mode_conversions() {
-        assert_eq!(ScalingMode::Fill.to_str(), "Fill");
-        assert_eq!(ScalingMode::Fit.to_str(), "Fit");
-        assert_eq!(ScalingMode::Stretch.to_str(), "Stretch");
-        assert_eq!(ScalingMode::Center.to_str(), "Center");
-        assert_eq!(ScalingMode::Tile.to_str(), "Tile");
-        
-        assert_eq!(ScalingMode::from_str("Fill"), Some(ScalingMode::Fill));
-        assert_eq!(ScalingMode::from_str("Fit"), Some(ScalingMode::Fit));
-        assert_eq!(ScalingMode::from_str("Stretch"), Some(ScalingMode::Stretch));
-        assert_eq!(ScalingMode::from_str("Center"), Some(ScalingMode::Center));
-        assert_eq!(ScalingMode::from_str("Tile"), Some(ScalingMode::Tile));
-        assert_eq!(ScalingMode::from_str("Invalid"), None);
-    }
-    
-    #[test]
-    fn test_wallpaper_source_type_conversions() {
-        assert_eq!(WallpaperSourceType::Image.to_str(), "Image");
-        assert_eq!(WallpaperSourceType::SolidColor.to_str(), "SolidColor");
-        
-        assert_eq!(WallpaperSourceType::from_str("Image"), Some(WallpaperSourceType::Image));
-        assert_eq!(WallpaperSourceType::from_str("SolidColor"), Some(WallpaperSourceType::SolidColor));
-        assert_eq!(WallpaperSourceType::from_str("Invalid"), None);
-    }
 }
