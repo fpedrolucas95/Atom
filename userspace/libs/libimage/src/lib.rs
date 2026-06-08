@@ -1,6 +1,6 @@
 //! libimage — Image decoding for Atom OS
 //!
-//! Provides PNG and JPEG decoders with a unified output abstraction.
+//! Provides PNG, JPEG, and GIF decoders with a unified output abstraction.
 //! All code is `no_std` with `alloc`.
 //!
 //! # Architecture
@@ -33,9 +33,11 @@ pub mod image;
 pub mod deflate;
 pub mod png;
 pub mod jpg;
+pub mod gif;
 pub mod cache;
  
 pub use image::{DecodedImage, ImageFormat, ImageError, ImageDecoder};
 pub use png::PngDecoder;
 pub use jpg::JpgDecoder;
+pub use gif::GifDecoder;
 pub use cache::ImageCache;

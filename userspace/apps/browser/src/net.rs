@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use libimage::{ImageDecoder, JpgDecoder, PngDecoder};
+use libimage::{GifDecoder, ImageDecoder, JpgDecoder, PngDecoder};
 use libipc::protocol::lookup_service;
 
 use crate::text::{
@@ -84,17 +84,21 @@ pub fn fetch_url_bytes(url: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// Decode PNG/JPEG bytes, using the magic number to pick a decoder first.
+/// Decode PNG/JPEG/GIF bytes, using the magic number to pick a decoder first.
 pub fn decode_image(bytes: &[u8]) -> Option<libimage::DecodedImage> {
     const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
     if bytes.starts_with(PNG_MAGIC) {
         return PngDecoder::decode(bytes).ok();
+    }
+    if bytes.starts_with(b"GIF8") {
+        return GifDecoder::decode(bytes).ok();
     }
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
         return JpgDecoder::decode(bytes).ok();
     }
     PngDecoder::decode(bytes)
         .or_else(|_| JpgDecoder::decode(bytes))
+        .or_else(|_| GifDecoder::decode(bytes))
         .ok()
 }
 

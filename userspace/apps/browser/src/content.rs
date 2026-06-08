@@ -51,6 +51,9 @@ pub const ABOUT_HTML: &str = r#"
   </ul>
   <h2>Blockquote</h2>
   <blockquote>The best way to predict the future is to invent it.</blockquote>
+  <h2>Images (PNG / JPEG / GIF)</h2>
+  <p>The GIF below is decoded from an inline <code>data:</code> URI:</p>
+  <img alt="demo gif" src="data:image/gif;base64,R0lGODlhDgAOAIEAAP///yaE/yLFXgAAACwAAAAADgAOAAAIPQADCARAUGAAggAMDiy4MKFChAYJCmgYkeFBhA4vZsS4EcDEhRU7ZqRIsuJHjSUhNrSoUqPHkBVhlkzJMCAAOw==">
   <p class="note">Numeric entities work too: &#65;&#66;&#67; and &#x2192; arrows.</p>
 </body>
 </html>

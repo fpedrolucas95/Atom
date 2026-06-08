@@ -4,7 +4,7 @@
 //!
 //! * **HTML5 / CSS compatibility** — a forgiving parser covering headings,
 //!   flow content, ordered/unordered lists, blockquotes, preformatted text,
-//!   rules, images (PNG/JPEG over HTTP or `data:`), form controls, inline
+//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), form controls, inline
 //!   formatting (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …), HTML entities
 //!   (named and numeric), and a practical CSS subset for `color`,
 //!   `font-weight`, `text-decoration`, and `display` via inline `style="..."`

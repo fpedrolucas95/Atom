@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 pub enum ImageFormat {
     Png,
     Jpg,
+    Gif,
 }
  
 /// Errors returned by image decoders.
