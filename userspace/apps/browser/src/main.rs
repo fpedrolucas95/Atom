@@ -380,6 +380,14 @@ fn normalize_http_url(input: &str) -> Option<String> {
     if trimmed == "google" || trimmed == "google.com" || trimmed == "www.google.com" {
         return Some(String::from("http://www.google.com/"));
     }
+    // Plain-HTTP test pages that never force a redirect to HTTPS — useful as a
+    // "can the browser reach the internet?" check, since Atom has no TLS yet.
+    if trimmed == "neverssl" || trimmed == "neverssl.com" {
+        return Some(String::from("http://neverssl.com/"));
+    }
+    if trimmed == "example" || trimmed == "example.com" {
+        return Some(String::from("http://example.com/"));
+    }
     if trimmed.bytes().any(|b| b == b'.') {
         return Some(format!("http://{}", trimmed));
     }
@@ -1041,7 +1049,10 @@ const ABOUT_HOME: &str = r#"
     <li>Preformatted text: pre</li>
     <li>Line breaks and rules: br, hr</li>
   </ul>
-  <p>Try about:html for a richer render test, or http://example.com/ when netd is online.</p>
+  <h2>Check your connection</h2>
+  <p>Type <a href="http://neverssl.com/">neverssl</a> or <a href="http://example.com/">example</a> and press Enter to load a plain-HTTP page through netd.</p>
+  <p>Note: HTTPS sites (such as google.com) are not supported yet because Atom has no TLS stack, so they cannot be displayed.</p>
+  <p>Try about:html for a richer render test.</p>
 </body>
 </html>
 "#;

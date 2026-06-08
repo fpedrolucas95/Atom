@@ -669,7 +669,7 @@ impl TcpManager {
         now_ticks: u64,
         out_buf: &mut [u8],
     ) -> Option<(usize, TcpEvent)> {
-        for i in 0..8 {
+        for i in 0..TCP_MAX_SOCKETS {
             let sock = &self.sockets[i];
             if !sock.in_use {
                 continue;
