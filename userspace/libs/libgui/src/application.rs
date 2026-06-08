@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::surface::Surface;
 use crate::event::{Event, MouseEvent, WindowEvent};
-use atom_syscall::ipc::{PortId, create_port};
+use atom_syscall::ipc::{PortId, create_port, wait_any};
 use atom_syscall::SyscallResult;
 use libipc::protocol::{lookup_service, send_message, get_payload};
 use libipc::messages::{MessageType, WmCreateWindowRequest, WmCreateWindowResponse, SurfaceAssignMsg};
@@ -224,6 +224,15 @@ impl Application {
             }
             atom_syscall::thread::yield_now();
         }
+    }
+
+    /// Block until this application's event port receives data or the timeout expires.
+    ///
+    /// This does not consume the event. Call `poll_event` after it returns to
+    /// decode the queued compositor message.
+    pub fn wait_for_event(&self, timeout_ms: u64) {
+        let ports = [self.event_port];
+        let _ = wait_any(&ports, timeout_ms);
     }
 
     /// Request application quit
