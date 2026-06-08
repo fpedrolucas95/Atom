@@ -28,8 +28,8 @@ use atom_syscall::SyscallError;
 use libipc::messages::{
     MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg,
     AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent,
-    MouseButtonEvent, MouseButton, OpenInTabMsg, ApplyWallpaperMsg, WallpaperAppliedMsg,
-    WallpaperFailedMsg,
+    MouseButtonEvent, MouseButton, MouseScrollEvent, OpenInTabMsg, ApplyWallpaperMsg,
+    WallpaperAppliedMsg, WallpaperFailedMsg,
 };
 use libipc::protocol::send_message_async;
 use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
@@ -1447,6 +1447,10 @@ impl Compositor {
             let r2 = Rect::new(self.cursor.x, self.cursor.y, 24, 24);
             self.mark_dirty_rect(r1.union(&r2));
 
+            if event.dz != 0 {
+                self.dispatch_mouse_scroll(self.cursor.x, self.cursor.y, event.dz);
+            }
+
             if event.left_button {
                 if !self.mouse_left_down {
                     self.click_counter = self.click_counter.wrapping_add(1);
@@ -1504,6 +1508,27 @@ impl Compositor {
                     };
                     self.dispatch_key_event(code, ascii, pressed);
                 }
+            }
+        }
+    }
+
+    fn dispatch_mouse_scroll(&mut self, x: i32, y: i32, dz: i32) {
+        let target_id = self
+            .captured_window
+            .or_else(|| self.wm.window_at(x, y))
+            .or(self.wm.focused_id);
+
+        if let Some(id) = target_id {
+            let target = self
+                .wm
+                .get_window(id)
+                .and_then(|w| w.event_port.map(|port| (port, w.content_x(), w.content_y())));
+
+            if let Some((port, content_x, content_y)) = target {
+                let rel_x = x - content_x as i32;
+                let rel_y = y - content_y as i32;
+                let event = MouseScrollEvent { dz, x: rel_x, y: rel_y };
+                self.send_window_event_async(id, port, MessageType::MouseScroll, &event.to_bytes());
             }
         }
     }

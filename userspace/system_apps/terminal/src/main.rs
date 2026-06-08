@@ -103,7 +103,7 @@ use atom_syscall::thread::{exit, yield_now};
 
 use libipc::messages::{
     KeyEvent as IpcKeyEvent, MessageHeader, MessageType, MouseButtonEvent, MouseMoveEvent,
-    SurfaceAssignMsg, SurfacePresentMsg,
+    MouseScrollEvent, SurfaceAssignMsg, SurfacePresentMsg,
 };
 
 use buffer::{DisplayBuffer, History, InputBuffer};
@@ -517,6 +517,17 @@ impl Terminal {
         self.full_redraw_needed = true;
     }
 
+    fn handle_mouse_scroll(&mut self, dz: i32) {
+        let lines = (self.rows() as usize / 4).max(3);
+        if dz > 0 {
+            self.display.scroll_view_up(lines);
+        } else if dz < 0 {
+            self.display.scroll_view_down(lines);
+        }
+        self.display_dirty = true;
+        self.full_redraw_needed = true;
+    }
+
     // ── Rendering ─────────────────────────────────────────────────────────────
 
     /// Render the terminal to the shared surface.
@@ -824,6 +835,12 @@ impl Terminal {
                     let payload_start = MessageHeader::SIZE;
                     if let Some(ev) = MouseMoveEvent::from_bytes(&msg_buffer[payload_start..]) {
                         self.handle_mouse_move(ev.x, ev.y);
+                    }
+                }
+                MessageType::MouseScroll => {
+                    let payload_start = MessageHeader::SIZE;
+                    if let Some(ev) = MouseScrollEvent::from_bytes(&msg_buffer[payload_start..]) {
+                        self.handle_mouse_scroll(ev.dz);
                     }
                 }
                 _ => {}

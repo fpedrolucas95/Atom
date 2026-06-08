@@ -597,8 +597,6 @@ if ($Run) {
         -bios "$OVMF_PATH" `
         -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
         -device VGA `
-        -usb `
-        -device usb-mouse `
         -serial stdio `
         -debugcon file:serial_log.txt `
         -global isa-debugcon.iobase=0xE9 `

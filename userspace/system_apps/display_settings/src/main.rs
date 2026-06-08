@@ -38,6 +38,8 @@ use libipc::messages::{
     SurfaceAssignMsg, SurfacePresentMsg,
     KeyEvent as IpcKeyEvent,
     MouseButtonEvent,
+    MouseMoveEvent,
+    MouseButton,
     MouseScrollEvent,
     OpenInTabMsg,
     WallpaperAppliedMsg,
@@ -421,6 +423,8 @@ struct DisplaySettings {
     mode_count:      usize,
     selected:        usize,
     scroll:          usize,
+    scrollbar_dragging: bool,
+    scrollbar_drag_offset: i32,
     dirty:           bool,
     status:          Status,
     running:         bool,
@@ -445,6 +449,8 @@ impl DisplaySettings {
             mode_count,
             selected: sel,
             scroll: 0,
+            scrollbar_dragging: false,
+            scrollbar_drag_offset: 0,
             dirty: true,
             status: Status::new(),
             running: true,
@@ -785,8 +791,7 @@ impl DisplaySettings {
         surface.fill_rect(0, sec_y + SEC_H - 1, w, 1, theme::BORDER);
 
         // ── Mode list ─────────────────────────────────────────────────────────
-        let list_top = sec_y + SEC_H + 4;
-        let list_w   = w - PAD * 2 - SB_W - 4;
+        let (list_top, list_h, list_w, sb_x) = self.resolution_list_geometry();
 
         for i in 0..VISIBLE_ROWS {
             let idx = self.scroll + i;
@@ -823,21 +828,15 @@ impl DisplaySettings {
         }
 
         // ── Scrollbar ─────────────────────────────────────────────────────────
-        let sb_x   = w - PAD - SB_W;
-        let list_h = VISIBLE_ROWS as u32 * ROW_H;
         surface.fill_rect(sb_x, list_top, SB_W, list_h, theme::SCROLLBAR);
 
-        let total  = self.mode_count as u32;
-        let vis    = VISIBLE_ROWS as u32;
-        let thumb_h = if total > 0 { ((list_h * vis) / total).max(12).min(list_h) } else { list_h };
-        let track_h = list_h - thumb_h;
-        let max_sc  = self.mode_count.saturating_sub(VISIBLE_ROWS) as u32;
-        let thumb_y = if max_sc > 0 {
-            list_top + track_h * self.scroll as u32 / max_sc
+        let (thumb_y, thumb_h, _) = self.scrollbar_geometry();
+        let thumb_color = if self.scrollbar_dragging {
+            theme::ACCENT
         } else {
-            list_top
+            theme::THUMB
         };
-        surface.fill_rect_rounded_aa(sb_x + 1, thumb_y, SB_W - 2, thumb_h, 3, theme::THUMB);
+        surface.fill_rect_rounded_aa(sb_x + 1, thumb_y, SB_W - 2, thumb_h, 3, thumb_color);
 
         // ── Info line below list ──────────────────────────────────────────────
         let info_y = list_top + list_h + 4;
@@ -1042,19 +1041,61 @@ impl DisplaySettings {
         }
     }
 
+    fn resolution_list_geometry(&self) -> (u32, u32, u32, u32) {
+        let list_top = HDR_H + TAB_HEIGHT + 14 + SEC_H + 4;
+        let list_h = VISIBLE_ROWS as u32 * ROW_H;
+        let list_w = self.surface_w.saturating_sub(PAD * 2 + SB_W + 4);
+        let sb_x = self.surface_w.saturating_sub(PAD + SB_W);
+        (list_top, list_h, list_w, sb_x)
+    }
+
+    fn scrollbar_geometry(&self) -> (u32, u32, u32) {
+        let (list_top, list_h, _, _) = self.resolution_list_geometry();
+        let total = self.mode_count as u32;
+        let visible = VISIBLE_ROWS as u32;
+        let thumb_h = if total > 0 {
+            ((list_h * visible) / total).max(12).min(list_h)
+        } else {
+            list_h
+        };
+        let travel = list_h.saturating_sub(thumb_h);
+        let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS) as u32;
+        let thumb_y = if max_scroll > 0 {
+            list_top + travel * self.scroll as u32 / max_scroll
+        } else {
+            list_top
+        };
+        (thumb_y, thumb_h, travel)
+    }
+
+    fn set_scroll_from_thumb_y(&mut self, thumb_y: i32) {
+        let (list_top, _, _, _) = self.resolution_list_geometry();
+        let (_, _, travel) = self.scrollbar_geometry();
+        let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS);
+        if travel == 0 || max_scroll == 0 {
+            self.scroll = 0;
+            return;
+        }
+        let relative = (thumb_y - list_top as i32).clamp(0, travel as i32) as u32;
+        self.scroll = ((relative as u64 * max_scroll as u64 + travel as u64 / 2)
+            / travel as u64) as usize;
+        self.dirty = true;
+    }
+
     fn handle_scroll(&mut self, dz: i32) {
+        let steps = dz.unsigned_abs().max(1) as usize;
         if self.active_tab == TabState::Wallpaper {
             if dz > 0 {
-                self.wallpaper_scroll = self.wallpaper_scroll.saturating_sub(2);
+                self.wallpaper_scroll = self.wallpaper_scroll.saturating_sub(steps * 2);
             } else if dz < 0 {
                 let max = self.wallpaper_state.discovered_images.len().saturating_sub(IMAGE_LIST_ROWS * 2);
-                self.wallpaper_scroll = (self.wallpaper_scroll + 2).min(max);
+                self.wallpaper_scroll = (self.wallpaper_scroll + steps * 2).min(max);
             }
         } else if dz > 0 {
-            if self.scroll > 0 { self.scroll -= 1; }
+            self.scroll = self.scroll.saturating_sub(steps);
         } else if dz < 0 {
             let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS);
-            if self.scroll < max_scroll { self.scroll += 1; }
+            self.scroll = (self.scroll + steps).min(max_scroll);
         }
         self.dirty = true;
     }
@@ -1131,10 +1172,30 @@ impl DisplaySettings {
         }
 
         // Resolution tab interactions
+        let (list_top_u, list_h_u, list_w_u, sb_x_u) = self.resolution_list_geometry();
+        let (thumb_y_u, thumb_h_u, _) = self.scrollbar_geometry();
+        if x >= sb_x_u as i32
+            && x < (sb_x_u + SB_W) as i32
+            && y >= list_top_u as i32
+            && y < (list_top_u + list_h_u) as i32
+        {
+            if y >= thumb_y_u as i32 && y < (thumb_y_u + thumb_h_u) as i32 {
+                self.scrollbar_dragging = true;
+                self.scrollbar_drag_offset = y - thumb_y_u as i32;
+            } else if y < thumb_y_u as i32 {
+                self.scroll = self.scroll.saturating_sub(VISIBLE_ROWS);
+            } else {
+                let max_scroll = self.mode_count.saturating_sub(VISIBLE_ROWS);
+                self.scroll = (self.scroll + VISIBLE_ROWS).min(max_scroll);
+            }
+            self.dirty = true;
+            return;
+        }
+
         // Mode list hit test
-        let list_top = (HDR_H + TAB_HEIGHT + 14 + SEC_H + 4) as i32;
-        let list_h   = (VISIBLE_ROWS as u32 * ROW_H) as i32;
-        let list_w   = w - PAD as i32 * 2 - SB_W as i32 - 4;
+        let list_top = list_top_u as i32;
+        let list_h = list_h_u as i32;
+        let list_w = list_w_u as i32;
 
         if x >= PAD as i32 && x < PAD as i32 + list_w
             && y >= list_top && y < list_top + list_h
@@ -1146,6 +1207,20 @@ impl DisplaySettings {
                 self.clamp_scroll();
                 self.dirty = true;
             }
+        }
+    }
+
+    fn handle_mouse_move(&mut self, y: i32) {
+        if !self.scrollbar_dragging || self.active_tab != TabState::Resolution {
+            return;
+        }
+        self.set_scroll_from_thumb_y(y - self.scrollbar_drag_offset);
+    }
+
+    fn handle_mouse_up(&mut self) {
+        if self.scrollbar_dragging {
+            self.scrollbar_dragging = false;
+            self.dirty = true;
         }
     }
 
@@ -1178,7 +1253,21 @@ impl DisplaySettings {
             }
             MessageType::MouseButtonDown => {
                 if let Some(ev) = MouseButtonEvent::from_bytes(payload) {
-                    self.handle_mouse_down(ev.x, ev.y);
+                    if ev.button == MouseButton::Left {
+                        self.handle_mouse_down(ev.x, ev.y);
+                    }
+                }
+            }
+            MessageType::MouseMove => {
+                if let Some(ev) = MouseMoveEvent::from_bytes(payload) {
+                    self.handle_mouse_move(ev.y);
+                }
+            }
+            MessageType::MouseButtonUp => {
+                if let Some(ev) = MouseButtonEvent::from_bytes(payload) {
+                    if ev.button == MouseButton::Left {
+                        self.handle_mouse_up();
+                    }
                 }
             }
             MessageType::MouseScroll => {
@@ -1317,6 +1406,8 @@ mod tests {
             mode_count: 1,
             selected: 0,
             scroll: 0,
+            scrollbar_dragging: false,
+            scrollbar_drag_offset: 0,
             dirty: false,
             status: Status::new(),
             running: true,
