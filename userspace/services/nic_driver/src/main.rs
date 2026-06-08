@@ -501,12 +501,17 @@ fn main() -> ! {
     let mut rx_check_counter = 0u32;
 
     loop {
-        // Check IPC non-blockingly. wait_any() with ANY timeout can block for
-        // ~1 second on miscalibrated timer hardware — that delay is longer than
-        // ICMP timeouts and causes all pings to report "timeout". Use
-        // try_recv_message() (non-blocking) instead and rely on yield_now() for
-        // CPU sharing. If an IRQ capability is available we still clear ICR.
+        // Tracks whether this iteration moved any packets. When idle we must NOT
+        // busy-spin on yield_now(): a perpetually-Ready spinner gets starved by
+        // the scheduler once the system settles (observed: RX ring left undrained
+        // for ~76s, so TCP SYN-ACKs were never processed and connects timed out).
+        // Instead, when idle we block on the port (woken by the e1000 RX IRQ
+        // notification or a short timeout), mirroring netd's idle path.
+        let mut did_work = false;
+
+        // Drain pending IPC (ring assignment + IRQ notifications) non-blockingly.
         while let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
+            did_work = true;
             if header.msg_type == MessageType::NetAssignRings {
                 let payload = get_payload(&ipc_buf, len);
                 if let Some(msg) = NetAssignRingsMsg::from_bytes(payload) {
@@ -527,6 +532,7 @@ fn main() -> ! {
                 if let Some(entry) = tx.pop() {
                     let len = entry.len as usize;
                     if len > 0 && len <= 1514 {
+                        did_work = true;
                         if nic.send(&entry.data[..len]) {
                             log("nic_driver: TX packet sent");
                         } else {
@@ -577,6 +583,7 @@ fn main() -> ! {
             loop {
                 let len = nic.recv(&mut rx_pkt);
                 if len == 0 { break; }
+                did_work = true;
                 log("nic_driver: RX packet received");
                 if rx.can_push() {
                     let mut entry = RingEntry {
@@ -594,8 +601,15 @@ fn main() -> ! {
             }
         }
 
-        // Yield to avoid spinning at 100% CPU when no work is available.
-        atom_syscall::thread::yield_now();
+        // When actively moving packets, yield to drain bursts quickly. When idle,
+        // block on the port with a short timeout so the scheduler reliably wakes
+        // us (on the e1000 RX IRQ notification, or the timeout as a fallback)
+        // instead of leaving a starved spinner that never drains the RX ring.
+        if did_work {
+            atom_syscall::thread::yield_now();
+        } else {
+            let _ = atom_syscall::ipc::wait_any(&[port], 5);
+        }
     }
 }
 
