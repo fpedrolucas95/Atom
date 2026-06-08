@@ -89,9 +89,18 @@ enum Selector {
     Class(String),
 }
 
+/// Cap on retained rules. `style_for` is consulted for every styled element,
+/// so an unbounded sheet from a heavy page would make parsing O(elements ×
+/// rules); this keeps the common cases working while bounding the worst case.
+const MAX_RULES: usize = 256;
+
 impl Stylesheet {
     pub fn new() -> Self {
         Self { rules: Vec::new() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
     }
 
     /// Parse a `<style>` body, appending its rules to this sheet.
@@ -103,6 +112,9 @@ impl Stylesheet {
                 break;
             };
             rest = after;
+            if self.rules.len() >= MAX_RULES {
+                break;
+            }
             let selectors = parse_selectors(head);
             if selectors.is_empty() {
                 continue;

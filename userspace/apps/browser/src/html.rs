@@ -16,7 +16,9 @@ use libgui::color::Color;
 
 use crate::css::{self, Stylesheet};
 use crate::dom::{Block, Document, InputKind, InputMeta, Run, RunStyle, TextKind};
-use crate::text::{decode_entities, find_ignore_ascii_case, resolve_entity, SmallStr};
+use crate::text::{
+    decode_entities, eq_ignore_ascii_case, find_ignore_ascii_case, resolve_entity, SmallStr,
+};
 
 /// Parse a full HTML document into the renderer's model.
 pub fn parse_html(html: &str) -> Document {
@@ -59,54 +61,48 @@ fn extract_stylesheet(html: &str) -> Stylesheet {
 // Attribute parsing (single pass per tag)
 // ────────────────────────────────────────────────────────────────────────────
 
-struct Attr {
-    name: SmallStr,
-    value: String,
-}
-
-/// Parse a tag's attribute bytes once into a small list, decoding entities in
-/// values. Querying then avoids re-scanning the byte stream per attribute.
-fn parse_attrs(attrs: &[u8]) -> Vec<Attr> {
-    let mut out = Vec::new();
+/// Find one attribute by name, scanning the tag's attribute bytes lazily.
+///
+/// This is deliberately on-demand rather than parsing every attribute up front:
+/// large real-world pages have thousands of elements, and eagerly allocating a
+/// list (plus a decoded `String` per attribute) for every tag floods the bump
+/// heap and pegs the CPU. We allocate only the single value we actually need.
+fn find_attr(attrs: &[u8], name: &[u8]) -> Option<String> {
     let mut i = 0;
     while i < attrs.len() {
-        while i < attrs.len() && attrs[i].is_ascii_whitespace() {
-            i += 1;
-        }
+        skip_ws(attrs, &mut i);
         let name_start = i;
         while i < attrs.len()
-            && (attrs[i].is_ascii_alphanumeric() || attrs[i] == b'-' || attrs[i] == b'_' || attrs[i] == b':')
+            && (attrs[i].is_ascii_alphanumeric()
+                || attrs[i] == b'-'
+                || attrs[i] == b'_'
+                || attrs[i] == b':')
         {
             i += 1;
         }
-        if i == name_start {
-            i += 1; // skip a stray byte (e.g. `/` in self-closing tags)
-            continue;
-        }
-        let name = SmallStr::lower(&attrs[name_start..i]);
+        let attr_name = &attrs[name_start..i];
+        skip_ws(attrs, &mut i);
 
-        while i < attrs.len() && attrs[i].is_ascii_whitespace() {
+        if i < attrs.len() && attrs[i] == b'=' {
             i += 1;
-        }
-        let value = if i < attrs.len() && attrs[i] == b'=' {
-            i += 1;
-            while i < attrs.len() && attrs[i].is_ascii_whitespace() {
-                i += 1;
+            skip_ws(attrs, &mut i);
+            let raw = read_attr_value(attrs, &mut i);
+            if eq_ignore_ascii_case(attr_name, name) {
+                return Some(decode_entities(core::str::from_utf8(raw).unwrap_or("")));
             }
-            read_attr_value(attrs, &mut i)
-        } else {
-            String::new()
-        };
-        out.push(Attr { name, value });
+        } else if attr_name.is_empty() {
+            i += 1; // skip a stray byte (e.g. `/` in self-closing tags)
+        }
     }
-    out
+    None
 }
 
-fn read_attr_value(attrs: &[u8], i: &mut usize) -> String {
+/// Read (without decoding) a quoted or unquoted attribute value slice.
+fn read_attr_value<'a>(attrs: &'a [u8], i: &mut usize) -> &'a [u8] {
     if *i >= attrs.len() {
-        return String::new();
+        return &[];
     }
-    let raw = if attrs[*i] == b'\'' || attrs[*i] == b'"' {
+    if attrs[*i] == b'\'' || attrs[*i] == b'"' {
         let quote = attrs[*i];
         *i += 1;
         let start = *i;
@@ -124,15 +120,7 @@ fn read_attr_value(attrs: &[u8], i: &mut usize) -> String {
             *i += 1;
         }
         &attrs[start..*i]
-    };
-    decode_entities(core::str::from_utf8(raw).unwrap_or(""))
-}
-
-fn get_attr<'a>(attrs: &'a [Attr], name: &str) -> Option<&'a str> {
-    attrs
-        .iter()
-        .find(|a| a.name.eq(name))
-        .map(|a| a.value.as_str())
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -283,12 +271,12 @@ impl<'a> HtmlParser<'a> {
         if closing {
             self.close_tag(name.as_str());
         } else {
-            let attrs = parse_attrs(&tag_bytes[idx..]);
-            self.open_tag(name, &attrs);
+            let attrs = &tag_bytes[idx..];
+            self.open_tag(name, attrs);
         }
     }
 
-    fn open_tag(&mut self, name: SmallStr, attrs: &[Attr]) {
+    fn open_tag(&mut self, name: SmallStr, attrs: &[u8]) {
         let tag = name.as_str();
         match tag {
             "script" => {
@@ -333,11 +321,11 @@ impl<'a> HtmlParser<'a> {
                 });
             }
             "form" => {
-                self.form_action = get_attr(attrs, "action").unwrap_or("").to_string();
+                self.form_action = find_attr(attrs, b"action").unwrap_or_default();
             }
             "a" => {
                 self.flush_run();
-                let href = get_attr(attrs, "href").unwrap_or("").to_string();
+                let href = find_attr(attrs, b"href").unwrap_or_default();
                 self.cur_link = Some(self.links.len());
                 self.links.push(href);
             }
@@ -392,22 +380,25 @@ impl<'a> HtmlParser<'a> {
 
     // ── Styling frames ──────────────────────────────────────────────────────
 
-    fn push_frame(&mut self, name: SmallStr, attrs: &[Attr]) {
+    fn push_frame(&mut self, name: SmallStr, attrs: &[u8]) {
         let tag = name.as_str();
         let (mut bold, mono, mut underline) = inline_defaults(tag);
         let mut color: Option<Color> = None;
         let mut hidden = false;
 
-        // Cascade: stylesheet rules for this tag/class, then inline style/attrs.
-        let classes = get_attr(attrs, "class").unwrap_or("");
-        let css_style = self.sheet.style_for(tag, classes);
-        merge_css(&css_style, &mut bold, &mut underline, &mut color, &mut hidden);
-
-        if let Some(inline) = get_attr(attrs, "style") {
-            let s = css::parse_inline(inline);
+        // Cascade: stylesheet rules (only when a sheet exists — avoids a class
+        // lookup and rule scan for every element on large unstyled pages), then
+        // the inline `style="..."` attribute, then a legacy `color` attribute.
+        if !self.sheet.is_empty() {
+            let classes = find_attr(attrs, b"class").unwrap_or_default();
+            let css_style = self.sheet.style_for(tag, &classes);
+            merge_css(&css_style, &mut bold, &mut underline, &mut color, &mut hidden);
+        }
+        if let Some(inline) = find_attr(attrs, b"style") {
+            let s = css::parse_inline(&inline);
             merge_css(&s, &mut bold, &mut underline, &mut color, &mut hidden);
         }
-        if let Some(c) = get_attr(attrs, "color").and_then(css::parse_color) {
+        if let Some(c) = find_attr(attrs, b"color").as_deref().and_then(css::parse_color) {
             color = Some(c);
         }
 
@@ -475,20 +466,20 @@ impl<'a> HtmlParser<'a> {
 
     // ── Void elements ───────────────────────────────────────────────────────
 
-    fn emit_image(&mut self, attrs: &[Attr]) {
+    fn emit_image(&mut self, attrs: &[u8]) {
         self.flush_block();
         if self.hidden_depth > 0 {
             return;
         }
         self.blocks.push(Block::Image {
-            alt: get_attr(attrs, "alt").unwrap_or("").to_string(),
+            alt: find_attr(attrs, b"alt").unwrap_or_default(),
             img: None,
-            src: get_attr(attrs, "src").unwrap_or("").to_string(),
+            src: find_attr(attrs, b"src").unwrap_or_default(),
         });
     }
 
-    fn emit_input(&mut self, attrs: &[Attr]) {
-        let kind = match get_attr(attrs, "type").unwrap_or("text") {
+    fn emit_input(&mut self, attrs: &[u8]) {
+        let kind = match find_attr(attrs, b"type").as_deref().unwrap_or("text") {
             "submit" | "button" => InputKind::Submit,
             "search" => InputKind::Search,
             "hidden" => return,
@@ -498,15 +489,14 @@ impl<'a> HtmlParser<'a> {
         if self.hidden_depth > 0 {
             return;
         }
-        let placeholder = get_attr(attrs, "placeholder")
-            .or_else(|| get_attr(attrs, "value"))
-            .unwrap_or("")
-            .to_string();
+        let placeholder = find_attr(attrs, b"placeholder")
+            .or_else(|| find_attr(attrs, b"value"))
+            .unwrap_or_default();
         let idx = self.inputs.len();
         self.inputs.push(InputMeta {
             kind,
             placeholder,
-            name: get_attr(attrs, "name").unwrap_or("").to_string(),
+            name: find_attr(attrs, b"name").unwrap_or_default(),
             action: self.form_action.clone(),
         });
         self.blocks.push(Block::Input { idx });

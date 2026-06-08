@@ -21,6 +21,8 @@ use crate::url::{normalize_http_url, resolve_url};
 /// Maximum images fetched from the network per page load, bounding how long a
 /// heavy page can block the UI (focus: bounded resource use).
 const MAX_IMAGE_FETCHES: u32 = 6;
+/// Upper bound on total images decoded per page (network + inline `data:`).
+const MAX_IMAGE_DECODES: u32 = 12;
 
 pub struct Browser {
     url: String,
@@ -124,6 +126,7 @@ impl Browser {
     fn load_images(&mut self) {
         let page_url = self.url.clone();
         let mut fetched = 0u32;
+        let mut decoded = 0u32;
         for block in self.doc.blocks.iter_mut() {
             let Block::Image { src, img, .. } = block else {
                 continue;
@@ -131,12 +134,19 @@ impl Browser {
             if img.is_some() {
                 continue;
             }
+            // Decoding is CPU-heavy (inflate + per-pixel work); bound it so a
+            // page full of inline images can't freeze the UI for seconds.
+            if decoded >= MAX_IMAGE_DECODES {
+                continue;
+            }
             if starts_with_ignore_ascii_case(src.trim_start().as_bytes(), b"data:") {
+                decoded += 1;
                 *img = decode_data_uri(src).and_then(|b| decode_image(&b));
             } else if fetched < MAX_IMAGE_FETCHES {
                 fetched += 1;
                 if let Some(url) = resolve_url(&page_url, src) {
                     if let Some(bytes) = fetch_url_bytes(&url) {
+                        decoded += 1;
                         *img = decode_image(&bytes);
                     }
                 }
