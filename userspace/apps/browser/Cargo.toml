@@ -10,6 +10,7 @@ atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
 libgui = { path = "../../libs/libgui" }
 libnet = { path = "../../libs/libnet" }
+libimage = { path = "../../libs/libimage" }
 
 [[bin]]
 name = "browser"
