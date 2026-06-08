@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use libgui::color::Color;
 
 use crate::css::{self, Stylesheet};
-use crate::dom::{Block, Document, InputKind, InputMeta, Run, RunStyle, TextKind};
+use crate::dom::{Align, Block, Document, Inline, InputKind, InputMeta, Run, RunStyle, TextKind};
 use crate::text::{
     decode_entities, eq_ignore_ascii_case, find_ignore_ascii_case, resolve_entity, SmallStr,
 };
@@ -90,6 +90,9 @@ fn find_attr(attrs: &[u8], name: &[u8]) -> Option<String> {
             if eq_ignore_ascii_case(attr_name, name) {
                 return Some(decode_entities(core::str::from_utf8(raw).unwrap_or("")));
             }
+        } else if eq_ignore_ascii_case(attr_name, name) {
+            // Boolean attribute present without a value (e.g. `selected`).
+            return Some(String::new());
         } else if attr_name.is_empty() {
             i += 1; // skip a stray byte (e.g. `/` in self-closing tags)
         }
@@ -137,6 +140,7 @@ struct Frame {
     underline: bool,
     color: bool,
     hidden: bool,
+    center: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,10 +156,11 @@ struct HtmlParser<'a> {
     sheet: &'a Stylesheet,
 
     blocks: Vec<Block>,
-    runs: Vec<Run>,
+    items: Vec<Inline>,
     cur: String,
     cur_kind: TextKind,
     cur_marker: Option<String>,
+    cur_align: Option<Align>,
 
     links: Vec<String>,
     cur_link: Option<usize>,
@@ -163,12 +168,20 @@ struct HtmlParser<'a> {
     form_action: String,
     list_stack: Vec<ListCtx>,
 
+    // `<select>` accumulation: option text is captured, not rendered as body.
+    select_idx: Option<usize>,
+    opt_text: String,
+    opt_selected: bool,
+    opt_chosen: Option<String>,
+    opt_first: Option<String>,
+
     // Inline style accumulation.
     frames: Vec<Frame>,
     bold_depth: u32,
     mono_depth: u32,
     underline_depth: u32,
     hidden_depth: u32,
+    center_depth: u32,
     color_stack: Vec<Color>,
 
     title: String,
@@ -190,20 +203,27 @@ impl<'a> HtmlParser<'a> {
             pos: 0,
             sheet,
             blocks: Vec::new(),
-            runs: Vec::new(),
+            items: Vec::new(),
             cur: String::new(),
             cur_kind: TextKind::Paragraph,
             cur_marker: None,
+            cur_align: None,
             links: Vec::new(),
             cur_link: None,
             inputs: Vec::new(),
             form_action: String::new(),
             list_stack: Vec::new(),
+            select_idx: None,
+            opt_text: String::new(),
+            opt_selected: false,
+            opt_chosen: None,
+            opt_first: None,
             frames: Vec::new(),
             bold_depth: 0,
             mono_depth: 0,
             underline_depth: 0,
             hidden_depth: 0,
+            center_depth: 0,
             color_stack: Vec::new(),
             title: String::new(),
             in_title: false,
@@ -313,6 +333,14 @@ impl<'a> HtmlParser<'a> {
                 self.emit_input(attrs);
                 return;
             }
+            "select" => {
+                self.open_select(attrs);
+                return;
+            }
+            "option" => {
+                self.begin_option(attrs);
+                return;
+            }
             "ul" | "ol" => {
                 self.flush_block();
                 self.list_stack.push(ListCtx {
@@ -360,6 +388,8 @@ impl<'a> HtmlParser<'a> {
                 self.flush_block();
                 self.list_stack.pop();
             }
+            "select" => self.close_select(),
+            "option" => self.commit_option(),
             "form" => self.form_action.clear(),
             "a" => {
                 self.flush_run();
@@ -402,7 +432,14 @@ impl<'a> HtmlParser<'a> {
             color = Some(c);
         }
 
-        if !(bold || mono || underline || color.is_some() || hidden) {
+        // Centre alignment from `<center>` or an `align="center"` attribute.
+        let center = tag == "center"
+            || matches!(
+                find_attr(attrs, b"align").as_deref(),
+                Some("center") | Some("middle")
+            );
+
+        if !(bold || mono || underline || color.is_some() || hidden || center) {
             return; // no effect — nothing to unwind later
         }
 
@@ -419,6 +456,9 @@ impl<'a> HtmlParser<'a> {
         if hidden {
             self.hidden_depth += 1;
         }
+        if center {
+            self.center_depth += 1;
+        }
         if let Some(c) = color {
             self.color_stack.push(c);
         }
@@ -429,6 +469,7 @@ impl<'a> HtmlParser<'a> {
             underline,
             color: color.is_some(),
             hidden,
+            center,
         });
     }
 
@@ -449,6 +490,9 @@ impl<'a> HtmlParser<'a> {
         }
         if frame.hidden {
             self.hidden_depth -= 1;
+        }
+        if frame.center {
+            self.center_depth -= 1;
         }
         if frame.color {
             self.color_stack.pop();
@@ -475,31 +519,97 @@ impl<'a> HtmlParser<'a> {
             alt: find_attr(attrs, b"alt").unwrap_or_default(),
             img: None,
             src: find_attr(attrs, b"src").unwrap_or_default(),
+            align: self.current_align(),
         });
     }
 
+    /// Emit a form control inline within the current flow block.
     fn emit_input(&mut self, attrs: &[u8]) {
         let kind = match find_attr(attrs, b"type").as_deref().unwrap_or("text") {
-            "submit" | "button" => InputKind::Submit,
+            "submit" | "button" | "reset" => InputKind::Submit,
             "search" => InputKind::Search,
             "hidden" => return,
             _ => InputKind::Text,
         };
-        self.flush_block();
         if self.hidden_depth > 0 {
             return;
         }
         let placeholder = find_attr(attrs, b"placeholder")
             .or_else(|| find_attr(attrs, b"value"))
             .unwrap_or_default();
-        let idx = self.inputs.len();
-        self.inputs.push(InputMeta {
+        let size = find_attr(attrs, b"size").and_then(|s| s.trim().parse().ok());
+        self.push_control(InputMeta {
             kind,
             placeholder,
             name: find_attr(attrs, b"name").unwrap_or_default(),
             action: self.form_action.clone(),
+            size,
         });
-        self.blocks.push(Block::Input { idx });
+    }
+
+    fn open_select(&mut self, attrs: &[u8]) {
+        if self.hidden_depth > 0 {
+            return;
+        }
+        self.opt_text.clear();
+        self.opt_selected = false;
+        self.opt_chosen = None;
+        self.opt_first = None;
+        let idx = self.inputs.len();
+        self.select_idx = Some(idx);
+        self.push_control(InputMeta {
+            kind: InputKind::Select,
+            placeholder: String::new(),
+            name: find_attr(attrs, b"name").unwrap_or_default(),
+            action: self.form_action.clone(),
+            size: None,
+        });
+    }
+
+    /// Finalise the option being captured, then start a new one.
+    fn begin_option(&mut self, attrs: &[u8]) {
+        self.commit_option();
+        self.opt_selected = find_attr(attrs, b"selected").is_some();
+    }
+
+    fn commit_option(&mut self) {
+        if self.select_idx.is_none() {
+            return;
+        }
+        let text = self.opt_text.trim();
+        if !text.is_empty() {
+            if self.opt_first.is_none() {
+                self.opt_first = Some(text.to_string());
+            }
+            if self.opt_selected && self.opt_chosen.is_none() {
+                self.opt_chosen = Some(text.to_string());
+            }
+        }
+        self.opt_text.clear();
+        self.opt_selected = false;
+    }
+
+    fn close_select(&mut self) {
+        self.commit_option();
+        if let Some(idx) = self.select_idx.take() {
+            let label = self
+                .opt_chosen
+                .take()
+                .or_else(|| self.opt_first.take())
+                .unwrap_or_default();
+            if let Some(meta) = self.inputs.get_mut(idx) {
+                meta.placeholder = label;
+            }
+        }
+    }
+
+    /// Register an input's metadata and place it inline in the current block.
+    fn push_control(&mut self, meta: InputMeta) {
+        self.flush_run();
+        self.note_align();
+        let idx = self.inputs.len();
+        self.inputs.push(meta);
+        self.items.push(Inline::Control(idx));
     }
 
     // ── Text accumulation ───────────────────────────────────────────────────
@@ -528,6 +638,11 @@ impl<'a> HtmlParser<'a> {
 
     fn push_char(&mut self, ch: char) {
         if self.skip != Skip::None || self.hidden_depth > 0 {
+            return;
+        }
+        // Inside a <select>, text belongs to <option> labels, not the page body.
+        if self.select_idx.is_some() {
+            self.opt_text.push(ch);
             return;
         }
         if self.in_title {
@@ -573,42 +688,61 @@ impl<'a> HtmlParser<'a> {
         if self.cur.is_empty() {
             return;
         }
+        self.note_align();
         let text = core::mem::take(&mut self.cur);
-        self.runs.push(Run {
+        self.items.push(Inline::Run(Run {
             text,
             link: self.cur_link,
             style: self.current_style(),
-        });
+        }));
     }
 
     fn flush_block(&mut self) {
         self.flush_run();
-        let has_text = self
-            .runs
-            .iter()
-            .any(|r| r.text.chars().any(|c| !c.is_whitespace()));
-        if has_text {
+        let has_content = self.items.iter().any(|it| match it {
+            Inline::Run(r) => r.text.chars().any(|c| !c.is_whitespace()),
+            Inline::Control(_) => true,
+        });
+        if has_content {
             self.blocks.push(Block::Text {
                 kind: self.cur_kind,
-                runs: core::mem::take(&mut self.runs),
+                items: core::mem::take(&mut self.items),
+                align: self.cur_align.unwrap_or(Align::Left),
                 marker: self.cur_marker.take(),
             });
         } else {
-            self.runs.clear();
+            self.items.clear();
             self.cur_marker = None;
         }
+        self.cur_align = None;
         self.cur_kind = TextKind::Paragraph;
         self.last_was_space = true;
+    }
+
+    /// Record the current alignment the first time content lands in a block.
+    fn note_align(&mut self) {
+        if self.cur_align.is_none() {
+            self.cur_align = Some(self.current_align());
+        }
+    }
+
+    fn current_align(&self) -> Align {
+        if self.center_depth > 0 {
+            Align::Center
+        } else {
+            Align::Left
+        }
     }
 
     fn push_text_block(&mut self, kind: TextKind, text: &str) {
         self.blocks.push(Block::Text {
             kind,
-            runs: alloc::vec![Run {
+            items: alloc::vec![Inline::Run(Run {
                 text: String::from(text),
                 link: None,
                 style: RunStyle::default(),
-            }],
+            })],
+            align: Align::Left,
             marker: None,
         });
     }

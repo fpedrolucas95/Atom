@@ -24,6 +24,15 @@ pub enum InputKind {
     Text,
     Search,
     Submit,
+    /// A `<select>` drop-down, rendered read-only showing the chosen option.
+    Select,
+}
+
+/// Horizontal alignment of a block's content.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
 }
 
 /// Inline rendering attributes applied to a [`Run`]. Resolved at parse time
@@ -44,11 +53,20 @@ pub struct Run {
     pub style: RunStyle,
 }
 
+/// An inline-level item within a flow block. Form controls flow alongside text
+/// (mirroring HTML's inline-block default) rather than each starting a new line.
+pub enum Inline {
+    Run(Run),
+    /// A form control, indexing into [`Document::inputs`].
+    Control(usize),
+}
+
 /// A laid-out block in document order.
 pub enum Block {
     Text {
         kind: TextKind,
-        runs: Vec<Run>,
+        items: Vec<Inline>,
+        align: Align,
         /// List bullet/number prefix, present only for list items.
         marker: Option<String>,
     },
@@ -57,18 +75,18 @@ pub enum Block {
         alt: String,
         img: Option<libimage::DecodedImage>,
         src: String,
-    },
-    Input {
-        idx: usize,
+        align: Align,
     },
 }
 
-/// Metadata for a form control, addressed by index from [`Block::Input`].
+/// Metadata for a form control, addressed by index from [`Inline::Control`].
 pub struct InputMeta {
     pub kind: InputKind,
     pub placeholder: String,
     pub name: String,
     pub action: String,
+    /// Requested width in characters (`size` attribute), if any.
+    pub size: Option<u32>,
 }
 
 /// A clickable region in screen coordinates tied to a link or input index.

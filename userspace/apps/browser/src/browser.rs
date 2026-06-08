@@ -14,7 +14,7 @@ use crate::content::{ABOUT_HOME, ABOUT_HTML};
 use crate::dom::{Block, Document, Hit, InputKind};
 use crate::html::parse_html;
 use crate::net::{decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
-use crate::render::{self, Clip};
+use crate::render::{self, Clip, FormCtx};
 use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case, truncate_for_width};
 use crate::url::{normalize_http_url, resolve_url};
 
@@ -292,17 +292,22 @@ impl Browser {
             return;
         }
         if let Some(idx) = self.input_hits.iter().find(|h| h.contains(x, y)).map(|h| h.idx) {
-            if self.doc.inputs.get(idx).map(|m| m.kind) == Some(InputKind::Submit) {
-                let target = self
-                    .doc
-                    .inputs
-                    .iter()
-                    .position(|m| m.kind != InputKind::Submit)
-                    .unwrap_or(idx);
-                self.submit_input(target);
-            } else {
-                self.focused_input = Some(idx);
-                self.needs_redraw = true;
+            match self.doc.inputs.get(idx).map(|m| m.kind) {
+                Some(InputKind::Submit) => {
+                    let target = self
+                        .doc
+                        .inputs
+                        .iter()
+                        .position(|m| matches!(m.kind, InputKind::Text | InputKind::Search))
+                        .unwrap_or(idx);
+                    self.submit_input(target);
+                }
+                // Selects are read-only here; text fields take focus.
+                Some(InputKind::Select) => {}
+                _ => {
+                    self.focused_input = Some(idx);
+                    self.needs_redraw = true;
+                }
             }
             return;
         }
@@ -331,35 +336,36 @@ impl Browser {
         let mut input_hits: Vec<Hit> = Vec::new();
         let mut y = clip.top - self.scroll as i32;
 
+        let form = FormCtx {
+            inputs: &self.doc.inputs,
+            values: &self.input_text,
+            focused: self.focused_input,
+        };
         for block in &self.doc.blocks {
             y = match block {
-                Block::Text { kind, runs, marker } => render::draw_text_block(
+                Block::Text {
+                    kind,
+                    items,
+                    align,
+                    marker,
+                } => render::draw_text_block(
                     surface,
                     *kind,
-                    runs,
+                    items,
+                    *align,
                     marker.as_deref(),
                     x0,
                     content_w,
                     y,
                     clip,
                     &mut link_hits,
-                ),
-                Block::Rule => render::draw_rule(surface, x0, content_w, y, clip),
-                Block::Image { alt, img, .. } => {
-                    render::draw_image_block(surface, alt, img, x0, content_w, y, clip)
-                }
-                Block::Input { idx } => render::draw_input_block(
-                    surface,
-                    &self.doc.inputs[*idx],
-                    &self.input_text[*idx],
-                    self.focused_input == Some(*idx),
-                    *idx,
-                    x0,
-                    content_w,
-                    y,
-                    clip,
+                    &form,
                     &mut input_hits,
                 ),
+                Block::Rule => render::draw_rule(surface, x0, content_w, y, clip),
+                Block::Image { alt, img, align, .. } => {
+                    render::draw_image_block(surface, alt, img, *align, x0, content_w, y, clip)
+                }
             };
         }
 

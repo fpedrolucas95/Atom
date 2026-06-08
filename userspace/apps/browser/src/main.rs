@@ -4,11 +4,13 @@
 //!
 //! * **HTML5 / CSS compatibility** — a forgiving parser covering headings,
 //!   flow content, ordered/unordered lists, blockquotes, preformatted text,
-//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), form controls, inline
-//!   formatting (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …), HTML entities
-//!   (named and numeric), and a practical CSS subset for `color`,
-//!   `font-weight`, `text-decoration`, and `display` via inline `style="..."`
-//!   and `<style>` blocks.
+//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls
+//!   (text/search inputs, buttons, and `<select>` drop-downs flowing alongside
+//!   text), centered content (`<center>` / `align`), inline formatting
+//!   (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …), HTML entities (named and
+//!   numeric), and a practical CSS subset for `color`, `font-weight`,
+//!   `text-decoration`, and `display` via inline `style="..."` and `<style>`
+//!   blocks.
 //! * **Low resource use** — a lazily-`mmap`ed bump heap, zero-allocation tag
 //!   tokenisation, redraw only when state changes, and bounded network fetches.
 //! * **Clean structure** — the monolith is split into focused modules

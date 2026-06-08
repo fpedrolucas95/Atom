@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use libgui::color::Color;
 use libgui::surface::Surface;
 
-use crate::dom::{Hit, InputKind, InputMeta, Run, TextKind};
+use crate::dom::{Align, Hit, Inline, InputKind, InputMeta, Run, TextKind};
 use crate::text::truncate_for_width;
 
 // ── Glyph / layout metrics ──────────────────────────────────────────────────
@@ -62,7 +62,18 @@ impl Clip {
     }
 }
 
+/// Height of an inline form control.
+const CTRL_H: u32 = 20;
+
+/// References to per-control state the renderer needs to paint form fields.
+pub struct FormCtx<'a> {
+    pub inputs: &'a [InputMeta],
+    pub values: &'a [String],
+    pub focused: Option<usize>,
+}
+
 /// Resolved colour and decoration for a single run.
+#[derive(Clone, Copy)]
 struct Painted {
     color: Color,
     bold: bool,
@@ -110,22 +121,125 @@ fn draw_word(s: &mut Surface, x: u32, y: u32, word: &str, p: &Painted, bg: Color
     }
 }
 
-/// Draw a flow text block (heading, paragraph, list item, or quote) with word
-/// wrapping. Returns the y position just below the block.
+/// One laid-out inline atom on a line: a word or a form control.
+#[derive(Clone, Copy)]
+enum Tok<'a> {
+    Word {
+        text: &'a str,
+        paint: Painted,
+        link: Option<usize>,
+    },
+    Ctrl {
+        idx: usize,
+        w: u32,
+        h: u32,
+    },
+}
+
+impl Tok<'_> {
+    fn width(&self) -> u32 {
+        match self {
+            Tok::Word { text, .. } => text.chars().count() as u32 * CHAR_W,
+            Tok::Ctrl { w, .. } => *w,
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Tok::Word { .. } => CHAR_H,
+            Tok::Ctrl { h, .. } => *h,
+        }
+    }
+}
+
+/// Intrinsic size of a form control. Text fields size from the `size`
+/// attribute; buttons and selects size to their label.
+fn control_dims(meta: &InputMeta, max_w: u32) -> (u32, u32) {
+    let label_chars = meta.placeholder.chars().count() as u32;
+    let (chars, pad) = match meta.kind {
+        InputKind::Submit => (label_chars.max(2), 16),
+        InputKind::Select => (label_chars.max(3) + 2, 16), // room for the arrow
+        _ => (meta.size.unwrap_or(20).clamp(4, 40), 14),
+    };
+    let w = (chars * CHAR_W + pad).min(max_w.max(CHAR_W));
+    (w, CTRL_H)
+}
+
+/// Draw a form control at the given position.
+#[allow(clippy::too_many_arguments)]
+fn draw_control(s: &mut Surface, meta: &InputMeta, value: &str, focused: bool, x: u32, y: u32, w: u32, h: u32) {
+    match meta.kind {
+        InputKind::Submit => {
+            s.fill_rect(x, y, w, h, ACCENT);
+            let label = if meta.placeholder.is_empty() {
+                "Submit"
+            } else {
+                &meta.placeholder
+            };
+            s.draw_string(x + 8, y + 6, &truncate_for_width(label, w.saturating_sub(12)), Color::WHITE, ACCENT);
+        }
+        InputKind::Select => {
+            s.fill_rect(x, y, w, h, FIELD_BG);
+            s.draw_rect(x, y, w, h, FIELD_BORDER);
+            s.draw_string(
+                x + 6,
+                y + 6,
+                &truncate_for_width(&meta.placeholder, w.saturating_sub(22)),
+                TEXT,
+                FIELD_BG,
+            );
+            s.draw_string(x + w.saturating_sub(12), y + 6, "v", MUTED, FIELD_BG);
+        }
+        _ => {
+            s.fill_rect(x, y, w, h, FIELD_BG);
+            s.draw_rect(x, y, w, h, if focused { ACCENT } else { FIELD_BORDER });
+            if value.is_empty() && !focused {
+                s.draw_string(
+                    x + 6,
+                    y + 6,
+                    &truncate_for_width(&meta.placeholder, w.saturating_sub(12)),
+                    PLACEHOLDER,
+                    FIELD_BG,
+                );
+            } else {
+                let shown = if focused {
+                    let mut v = String::from(value);
+                    v.push('_');
+                    v
+                } else {
+                    String::from(value)
+                };
+                s.draw_string(
+                    x + 6,
+                    y + 6,
+                    &truncate_for_width(&shown, w.saturating_sub(12)),
+                    TEXT,
+                    FIELD_BG,
+                );
+            }
+        }
+    }
+}
+
+/// Draw a flow block (heading, paragraph, list item, or quote) with inline word
+/// + control wrapping and optional centering. Returns the y just below it.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_text_block(
     s: &mut Surface,
     kind: TextKind,
-    runs: &[Run],
+    items: &[Inline],
+    align: Align,
     marker: Option<&str>,
     x0: u32,
     max_w: u32,
     mut y: i32,
     clip: Clip,
     link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
 ) -> i32 {
     if kind == TextKind::Pre {
-        return draw_pre(s, runs, x0, max_w, y, clip);
+        return draw_pre(s, items, x0, max_w, y, clip);
     }
 
     let (default_fg, top_pad, bottom_pad) = block_metrics(kind);
@@ -134,69 +248,142 @@ pub fn draw_text_block(
 
     let (indent, eff_w) = match kind {
         TextKind::ListItem => {
-            let m = marker.unwrap_or("*");
-            if clip.visible(y, CHAR_H as i32) {
-                s.draw_string(x0 + 8, y as u32, m, ACCENT, BG);
-            }
-            let indent = ((m.chars().count() as u32 + 1) * CHAR_W + 8).max(24);
+            let cols = marker.map(|m| m.chars().count() as u32 + 1).unwrap_or(2);
+            let indent = (cols * CHAR_W + 8).max(24);
             (indent, max_w.saturating_sub(indent))
         }
         TextKind::Quote => (16u32, max_w.saturating_sub(16)),
         _ => (0u32, max_w),
     };
-
-    let cols = (eff_w / CHAR_W).max(1);
     let line_x = x0 + indent;
-    let mut cx: u32 = 0;
 
-    for run in runs {
-        let p = paint_for(run, default_fg);
-        for word in run.text.split(' ') {
-            if word.is_empty() {
-                continue;
+    // Flatten items into a token stream the line-wrapper can measure.
+    let mut toks: Vec<Tok> = Vec::new();
+    for item in items {
+        match item {
+            Inline::Run(run) => {
+                let paint = paint_for(run, default_fg);
+                for word in run.text.split(' ') {
+                    if !word.is_empty() {
+                        toks.push(Tok::Word {
+                            text: word,
+                            paint,
+                            link: run.link,
+                        });
+                    }
+                }
             }
-            let wlen = word.chars().count() as u32;
-            if cx != 0 && cx + 1 + wlen > cols {
-                y += LINE_H as i32;
-                cx = 0;
+            Inline::Control(idx) => {
+                if let Some(meta) = form.inputs.get(*idx) {
+                    let (w, h) = control_dims(meta, eff_w);
+                    toks.push(Tok::Ctrl { idx: *idx, w, h });
+                }
             }
-            if cx != 0 {
-                cx += 1;
-            }
-            let px = line_x + cx * CHAR_W;
-            let wpx = wlen * CHAR_W;
-            if clip.visible(y - CHAR_H as i32, (CHAR_H * 2) as i32) {
-                draw_word(s, px, y as u32, word, &p, BG);
-            }
-            if let Some(idx) = run.link {
-                link_hits.push(Hit {
-                    x: px as i32,
-                    y: y - 1,
-                    w: wpx as i32,
-                    h: (CHAR_H + 3) as i32,
-                    idx,
-                });
-            }
-            cx += wlen;
         }
+    }
+
+    let space = CHAR_W;
+    let mut first_line = true;
+    let mut i = 0;
+    while i < toks.len() {
+        // Greedily measure how many tokens fit on this line.
+        let mut line_w = toks[i].width();
+        let mut line_h = LINE_H.max(toks[i].height() + ctrl_gap(&toks[i]));
+        let mut j = i + 1;
+        while j < toks.len() {
+            let add = space + toks[j].width();
+            if line_w + add > eff_w {
+                break;
+            }
+            line_w += add;
+            line_h = line_h.max(toks[j].height() + ctrl_gap(&toks[j]));
+            j += 1;
+        }
+
+        if first_line {
+            if let Some(m) = marker {
+                if clip.visible(y, CHAR_H as i32) {
+                    s.draw_string(x0 + 8, y as u32, m, ACCENT, BG);
+                }
+            }
+            first_line = false;
+        }
+
+        let mut x = match align {
+            Align::Center => line_x + eff_w.saturating_sub(line_w) / 2,
+            Align::Left => line_x,
+        };
+        let line_visible = clip.visible(y, line_h as i32);
+        for tok in &toks[i..j] {
+            let ty = y + (line_h.saturating_sub(tok.height()) / 2) as i32;
+            match *tok {
+                Tok::Word { text, paint, link } => {
+                    if line_visible && ty >= 0 {
+                        draw_word(s, x, ty as u32, text, &paint, BG);
+                    }
+                    if let Some(idx) = link {
+                        link_hits.push(Hit {
+                            x: x as i32,
+                            y: ty - 1,
+                            w: tok.width() as i32,
+                            h: (CHAR_H + 3) as i32,
+                            idx,
+                        });
+                    }
+                }
+                Tok::Ctrl { idx, w, h } => {
+                    let meta = &form.inputs[idx];
+                    let value = form.values.get(idx).map(String::as_str).unwrap_or("");
+                    let focused = form.focused == Some(idx);
+                    if line_visible && ty >= 0 {
+                        draw_control(s, meta, value, focused, x, ty as u32, w, h);
+                    }
+                    input_hits.push(Hit {
+                        x: x as i32,
+                        y: ty,
+                        w: w as i32,
+                        h: h as i32,
+                        idx,
+                    });
+                }
+            }
+            x += tok.width() + space;
+        }
+
+        y += line_h as i32;
+        i = j;
+    }
+
+    if toks.is_empty() {
+        y += LINE_H as i32;
     }
 
     if kind == TextKind::Quote {
-        let bar_h = (y - block_top + LINE_H as i32).max(LINE_H as i32);
+        let bar_h = (y - block_top).max(LINE_H as i32);
         if clip.visible(block_top, bar_h) && block_top >= 0 {
-            s.fill_rect(x0 + 2, block_top.max(0) as u32, 3, bar_h as u32, ACCENT);
+            s.fill_rect(x0 + 2, block_top as u32, 3, bar_h as u32, ACCENT);
         }
     }
 
-    y + LINE_H as i32 + bottom_pad
+    y + bottom_pad
 }
 
-fn draw_pre(s: &mut Surface, runs: &[Run], x0: u32, max_w: u32, mut y: i32, clip: Clip) -> i32 {
+/// Extra vertical breathing room a control adds to its line.
+fn ctrl_gap(tok: &Tok) -> u32 {
+    match tok {
+        Tok::Ctrl { .. } => 6,
+        Tok::Word { .. } => 0,
+    }
+}
+
+fn draw_pre(s: &mut Surface, items: &[Inline], x0: u32, max_w: u32, mut y: i32, clip: Clip) -> i32 {
     let fg = Color::rgb(20, 28, 40);
     y += 8;
     let mut text = String::new();
-    for run in runs {
-        text.push_str(&run.text);
+    for item in items {
+        if let Inline::Run(run) = item {
+            text.push_str(&run.text);
+        }
     }
     let line_count = text.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
     let box_h = line_count * LINE_H + 12;
@@ -225,29 +412,36 @@ pub fn draw_rule(s: &mut Surface, x0: u32, content_w: u32, y: i32, clip: Clip) -
 }
 
 /// Draw an image (scaled to fit) or a placeholder if undecoded.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_image_block(
     s: &mut Surface,
     alt: &str,
     img: &Option<libimage::DecodedImage>,
+    align: Align,
     x0: u32,
     max_w: u32,
     mut y: i32,
     clip: Clip,
 ) -> i32 {
     y += 8;
+    let centered = |w: u32| match align {
+        Align::Center => x0 + max_w.saturating_sub(w) / 2,
+        Align::Left => x0,
+    };
     match img {
         Some(im) if im.width > 0 && im.height > 0 => {
             let (tw, th) = fit_dimensions(im.width, im.height, max_w, 320);
             if clip.visible(y, th as i32) {
-                blit_scaled(s, im, x0, y, tw, th, clip);
+                blit_scaled(s, im, centered(tw), y, tw, th, clip);
             }
             y + th as i32 + 10
         }
         _ => {
             let (w, h) = (max_w.min(260), 64u32);
+            let ix = centered(w);
             if clip.visible(y, h as i32) {
-                s.fill_rect(x0, y as u32, w, h, Color::rgb(238, 240, 244));
-                s.draw_rect(x0, y as u32, w, h, PANEL_BORDER);
+                s.fill_rect(ix, y as u32, w, h, Color::rgb(238, 240, 244));
+                s.draw_rect(ix, y as u32, w, h, PANEL_BORDER);
                 let label = if alt.is_empty() {
                     String::from("[image]")
                 } else {
@@ -256,7 +450,7 @@ pub fn draw_image_block(
                     l
                 };
                 s.draw_string(
-                    x0 + 8,
+                    ix + 8,
                     y as u32 + h / 2 - 4,
                     &truncate_for_width(&label, w.saturating_sub(16)),
                     MUTED,
@@ -305,81 +499,4 @@ fn blit_scaled(
             }
         }
     }
-}
-
-/// Draw a form control and register its hit region.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_input_block(
-    s: &mut Surface,
-    meta: &InputMeta,
-    value: &str,
-    focused: bool,
-    idx: usize,
-    x0: u32,
-    max_w: u32,
-    mut y: i32,
-    clip: Clip,
-    input_hits: &mut Vec<Hit>,
-) -> i32 {
-    y += 6;
-    let h = 26u32;
-    let w = match meta.kind {
-        InputKind::Submit => 120u32.min(max_w),
-        _ => max_w.min(440),
-    };
-    if clip.visible(y, h as i32) {
-        match meta.kind {
-            InputKind::Submit => {
-                s.fill_rect(x0, y as u32, w, h, ACCENT);
-                let label = if meta.placeholder.is_empty() {
-                    "Search"
-                } else {
-                    &meta.placeholder
-                };
-                s.draw_string(x0 + 10, y as u32 + 9, label, Color::WHITE, ACCENT);
-            }
-            _ => {
-                s.fill_rect(x0, y as u32, w, h, FIELD_BG);
-                s.draw_rect(
-                    x0,
-                    y as u32,
-                    w,
-                    h,
-                    if focused { ACCENT } else { FIELD_BORDER },
-                );
-                if value.is_empty() && !focused {
-                    s.draw_string(
-                        x0 + 8,
-                        y as u32 + 9,
-                        &truncate_for_width(&meta.placeholder, w.saturating_sub(16)),
-                        PLACEHOLDER,
-                        FIELD_BG,
-                    );
-                } else {
-                    let shown = if focused {
-                        let mut v = String::from(value);
-                        v.push('_');
-                        v
-                    } else {
-                        String::from(value)
-                    };
-                    s.draw_string(
-                        x0 + 8,
-                        y as u32 + 9,
-                        &truncate_for_width(&shown, w.saturating_sub(16)),
-                        TEXT,
-                        FIELD_BG,
-                    );
-                }
-            }
-        }
-    }
-    input_hits.push(Hit {
-        x: x0 as i32,
-        y,
-        w: w as i32,
-        h: h as i32,
-        idx,
-    });
-    y + h as i32 + 8
 }
