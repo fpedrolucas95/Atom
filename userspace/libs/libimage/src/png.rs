@@ -1,8 +1,8 @@
 //! PNG decoder (RFC 2083).
 //!
 //! Supports:
-//! - Color types: 2 (RGB), 6 (RGBA)
-//! - Bit depth: 8 only
+//! - Color types: 0 (grayscale), 2 (RGB), 3 (indexed), 4 (grayscale+alpha), 6 (RGBA)
+//! - Bit depths: 1/2/4/8 for grayscale and indexed, 8 for RGB/RGBA/grayscale+alpha
 //! - Filter methods: 0–4 (None, Sub, Up, Average, Paeth)
 //! - Compression: DEFLATE via zlib wrapper
 //!
@@ -14,8 +14,11 @@ use crate::deflate::decompress_zlib;
  
 const PNG_SIGNATURE: &[u8] = &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
  
-const COLOR_TYPE_RGB:  u8 = 2;
-const COLOR_TYPE_RGBA: u8 = 6;
+const COLOR_TYPE_GRAYSCALE:       u8 = 0;
+const COLOR_TYPE_RGB:             u8 = 2;
+const COLOR_TYPE_INDEXED:         u8 = 3;
+const COLOR_TYPE_GRAYSCALE_ALPHA: u8 = 4;
+const COLOR_TYPE_RGBA:            u8 = 6;
  
 // ─── Chunk reading ────────────────────────────────────────────────────────────
  
@@ -27,10 +30,6 @@ struct PngReader<'a> {
 impl<'a> PngReader<'a> {
     fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
-    }
- 
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
     }
  
     fn read_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
@@ -111,6 +110,40 @@ fn unfilter_row(filter: u8, row: &mut [u8], prev: &[u8], bpp: usize) -> Result<(
     }
     Ok(())
 }
+
+#[inline]
+fn bits_per_pixel(color_type: u8, bit_depth: u8) -> Result<usize, ImageError> {
+    match color_type {
+        COLOR_TYPE_GRAYSCALE => Ok(bit_depth as usize),
+        COLOR_TYPE_RGB => Ok(3 * bit_depth as usize),
+        COLOR_TYPE_INDEXED => Ok(bit_depth as usize),
+        COLOR_TYPE_GRAYSCALE_ALPHA => Ok(2 * bit_depth as usize),
+        COLOR_TYPE_RGBA => Ok(4 * bit_depth as usize),
+        _ => Err(ImageError::UnsupportedFormat("unsupported PNG color type")),
+    }
+}
+
+#[inline]
+fn scale_sample(value: u8, bit_depth: u8) -> u8 {
+    if bit_depth == 8 {
+        value
+    } else {
+        let max = (1u16 << bit_depth) - 1;
+        ((value as u16 * 255 + max / 2) / max) as u8
+    }
+}
+
+#[inline]
+fn packed_sample(row: &[u8], idx: usize, bit_depth: u8) -> u8 {
+    if bit_depth == 8 {
+        return row[idx];
+    }
+    let bit = idx * bit_depth as usize;
+    let byte = row[bit / 8];
+    let shift = 8 - bit_depth as usize - (bit % 8);
+    let mask = (1u8 << bit_depth) - 1;
+    (byte >> shift) & mask
+}
  
 // ─── Decoder ─────────────────────────────────────────────────────────────────
  
@@ -143,6 +176,10 @@ fn decode_png(data: &[u8]) -> Result<DecodedImage, ImageError> {
     let mut color_type = 0u8;
     let mut ihdr_seen  = false;
     let mut idat_data: Vec<u8> = Vec::new();
+    let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut palette_alpha: Vec<u8> = Vec::new();
+    let mut transparent_gray: Option<u16> = None;
+    let mut transparent_rgb: Option<(u16, u16, u16)> = None;
  
     // Parse chunks until IEND.
     loop {
@@ -171,11 +208,15 @@ fn decode_png(data: &[u8]) -> Result<DecodedImage, ImageError> {
                 if interlace != 0 {
                     return Err(ImageError::UnsupportedFormat("interlaced PNG not supported"));
                 }
-                if bit_depth != 8 {
-                    return Err(ImageError::UnsupportedFormat("PNG bit depth != 8"));
-                }
-                if color_type != COLOR_TYPE_RGB && color_type != COLOR_TYPE_RGBA {
-                    return Err(ImageError::UnsupportedFormat("PNG color type must be RGB or RGBA"));
+                let bit_depth_supported = match color_type {
+                    COLOR_TYPE_GRAYSCALE | COLOR_TYPE_INDEXED => {
+                        matches!(bit_depth, 1 | 2 | 4 | 8)
+                    }
+                    COLOR_TYPE_RGB | COLOR_TYPE_GRAYSCALE_ALPHA | COLOR_TYPE_RGBA => bit_depth == 8,
+                    _ => false,
+                };
+                if !bit_depth_supported {
+                    return Err(ImageError::UnsupportedFormat("unsupported PNG color type/bit depth"));
                 }
                 if width == 0 || height == 0 {
                     return Err(ImageError::CorruptData("zero-dimension PNG"));
@@ -189,6 +230,36 @@ fn decode_png(data: &[u8]) -> Result<DecodedImage, ImageError> {
                 }
                 idat_data.extend_from_slice(cd);
             }
+            b"PLTE" => {
+                if cd.len() % 3 != 0 {
+                    return Err(ImageError::CorruptData("invalid PLTE chunk"));
+                }
+                palette.clear();
+                for rgb in cd.chunks_exact(3) {
+                    palette.push([rgb[0], rgb[1], rgb[2]]);
+                }
+            }
+            b"tRNS" => match color_type {
+                COLOR_TYPE_GRAYSCALE => {
+                    if cd.len() >= 2 {
+                        transparent_gray = Some(u16::from_be_bytes([cd[0], cd[1]]));
+                    }
+                }
+                COLOR_TYPE_RGB => {
+                    if cd.len() >= 6 {
+                        transparent_rgb = Some((
+                            u16::from_be_bytes([cd[0], cd[1]]),
+                            u16::from_be_bytes([cd[2], cd[3]]),
+                            u16::from_be_bytes([cd[4], cd[5]]),
+                        ));
+                    }
+                }
+                COLOR_TYPE_INDEXED => {
+                    palette_alpha.clear();
+                    palette_alpha.extend_from_slice(cd);
+                }
+                _ => {}
+            },
             b"IEND" => break,
             _ => { /* Ignore unknown/ancillary chunks */ }
         }
@@ -205,12 +276,13 @@ fn decode_png(data: &[u8]) -> Result<DecodedImage, ImageError> {
     let raw = decompress_zlib(&idat_data)?;
  
     // Reconstruct scanlines.
-    let src_bpp: usize = match color_type {
-        COLOR_TYPE_RGB  => 3,
-        COLOR_TYPE_RGBA => 4,
-        _ => unreachable!(),
-    };
-    let stride = width as usize * src_bpp;
+    if color_type == COLOR_TYPE_INDEXED && palette.is_empty() {
+        return Err(ImageError::CorruptData("indexed PNG missing PLTE"));
+    }
+
+    let bits_per_pixel = bits_per_pixel(color_type, bit_depth)?;
+    let stride = ((width as usize * bits_per_pixel) + 7) / 8;
+    let filter_bpp = ((bits_per_pixel + 7) / 8).max(1);
     let expected_raw = (stride + 1) * height as usize; // +1 per row for filter byte
  
     if raw.len() < expected_raw {
@@ -231,10 +303,22 @@ fn decode_png(data: &[u8]) -> Result<DecodedImage, ImageError> {
         let filter = raw[row_start];
         raw_row.copy_from_slice(&raw[row_start + 1..row_start + 1 + stride]);
  
-        unfilter_row(filter, &mut raw_row, &prev_row, src_bpp)?;
+        unfilter_row(filter, &mut raw_row, &prev_row, filter_bpp)?;
  
         let dst_row_start = y * width as usize * 4;
         match color_type {
+            COLOR_TYPE_GRAYSCALE => {
+                for x in 0..width as usize {
+                    let raw = packed_sample(&raw_row, x, bit_depth);
+                    let gray = scale_sample(raw, bit_depth);
+                    let alpha = if transparent_gray == Some(raw as u16) { 0 } else { 255 };
+                    let dst = dst_row_start + x * 4;
+                    pixels[dst]     = gray;
+                    pixels[dst + 1] = gray;
+                    pixels[dst + 2] = gray;
+                    pixels[dst + 3] = alpha;
+                }
+            }
             COLOR_TYPE_RGB => {
                 for x in 0..width as usize {
                     let src = x * 3;
@@ -242,14 +326,42 @@ fn decode_png(data: &[u8]) -> Result<DecodedImage, ImageError> {
                     pixels[dst]     = raw_row[src];
                     pixels[dst + 1] = raw_row[src + 1];
                     pixels[dst + 2] = raw_row[src + 2];
-                    pixels[dst + 3] = 255;
+                    pixels[dst + 3] = if transparent_rgb == Some((
+                        raw_row[src] as u16,
+                        raw_row[src + 1] as u16,
+                        raw_row[src + 2] as u16,
+                    )) { 0 } else { 255 };
+                }
+            }
+            COLOR_TYPE_INDEXED => {
+                for x in 0..width as usize {
+                    let idx = packed_sample(&raw_row, x, bit_depth) as usize;
+                    if idx >= palette.len() {
+                        return Err(ImageError::CorruptData("PNG palette index out of range"));
+                    }
+                    let rgb = palette[idx];
+                    let dst = dst_row_start + x * 4;
+                    pixels[dst]     = rgb[0];
+                    pixels[dst + 1] = rgb[1];
+                    pixels[dst + 2] = rgb[2];
+                    pixels[dst + 3] = palette_alpha.get(idx).copied().unwrap_or(255);
+                }
+            }
+            COLOR_TYPE_GRAYSCALE_ALPHA => {
+                for x in 0..width as usize {
+                    let src = x * 2;
+                    let dst = dst_row_start + x * 4;
+                    let gray = raw_row[src];
+                    pixels[dst]     = gray;
+                    pixels[dst + 1] = gray;
+                    pixels[dst + 2] = gray;
+                    pixels[dst + 3] = raw_row[src + 1];
                 }
             }
             COLOR_TYPE_RGBA => {
-                let src_off = 0;
                 let dst_off = dst_row_start;
                 pixels[dst_off..dst_off + stride]
-                    .copy_from_slice(&raw_row[src_off..src_off + stride]);
+                    .copy_from_slice(&raw_row[..stride]);
             }
             _ => unreachable!(),
         }
@@ -342,5 +454,57 @@ mod tests {
             PngDecoder::decode(&data),
             Err(ImageError::UnsupportedFormat("interlaced PNG not supported"))
         );
+    }
+
+    #[test]
+    fn decode_1bit_indexed_png() {
+        let png: &[u8] = &[
+            0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n',
+            0, 0, 0, 13, b'I', b'H', b'D', b'R',
+            0, 0, 0, 2, 0, 0, 0, 1,
+            1, 3, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 6, b'P', b'L', b'T', b'E',
+            0, 0, 0, 255, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 13, b'I', b'D', b'A', b'T',
+            0x78, 0x01, 0x01, 0x02, 0x00, 0xFD, 0xFF, 0x00, 0x40, 0x00, 0x42, 0x00, 0x41,
+            0, 0, 0, 0,
+            0, 0, 0, 0, b'I', b'E', b'N', b'D',
+            0, 0, 0, 0,
+        ];
+
+        let img = PngDecoder::decode(png).expect("indexed PNG should decode");
+        assert_eq!(img.width, 2);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.get_pixel(0, 0), Some((0, 0, 0, 255)));
+        assert_eq!(img.get_pixel(1, 0), Some((255, 0, 0, 255)));
+    }
+
+    #[test]
+    fn decode_2bit_grayscale_png_with_trns() {
+        let png: &[u8] = &[
+            0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n',
+            0, 0, 0, 13, b'I', b'H', b'D', b'R',
+            0, 0, 0, 4, 0, 0, 0, 1,
+            2, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 2, b't', b'R', b'N', b'S',
+            0, 2,
+            0, 0, 0, 0,
+            0, 0, 0, 13, b'I', b'D', b'A', b'T',
+            0x78, 0x01, 0x01, 0x02, 0x00, 0xFD, 0xFF, 0x00, 0x1B, 0x00, 0x1D, 0x00, 0x1C,
+            0, 0, 0, 0,
+            0, 0, 0, 0, b'I', b'E', b'N', b'D',
+            0, 0, 0, 0,
+        ];
+
+        let img = PngDecoder::decode(png).expect("grayscale PNG should decode");
+        assert_eq!(img.width, 4);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.get_pixel(0, 0), Some((0, 0, 0, 255)));
+        assert_eq!(img.get_pixel(1, 0), Some((85, 85, 85, 255)));
+        assert_eq!(img.get_pixel(2, 0), Some((170, 170, 170, 0)));
+        assert_eq!(img.get_pixel(3, 0), Some((255, 255, 255, 255)));
     }
 }

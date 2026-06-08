@@ -251,7 +251,7 @@ impl Browser {
                 if img.is_some() {
                     continue;
                 }
-                if src.trim_start().starts_with("data:") {
+                if starts_with_ignore_ascii_case(src.trim_start().as_bytes(), b"data:") {
                     if let Some(decoded) = decode_data_uri(src).and_then(|b| decode_image(&b)) {
                         *img = Some(decoded);
                     }
@@ -961,6 +961,9 @@ fn fetch_url_bytes(url: &str) -> Option<Vec<u8>> {
         if resp.body.is_empty() {
             return None;
         }
+        if resp.status != 0 && (resp.status < 200 || resp.status >= 300) {
+            return None;
+        }
         return Some(resp.body);
     }
     None
@@ -972,16 +975,22 @@ fn decode_image(bytes: &[u8]) -> Option<libimage::DecodedImage> {
     } else if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
         JpgDecoder::decode(bytes).ok()
     } else {
-        None
+        PngDecoder::decode(bytes)
+            .or_else(|_| JpgDecoder::decode(bytes))
+            .ok()
     }
 }
 
 fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
-    let rest = uri.strip_prefix("data:")?;
+    let trimmed = uri.trim_start();
+    if !starts_with_ignore_ascii_case(trimmed.as_bytes(), b"data:") {
+        return None;
+    }
+    let rest = &trimmed["data:".len()..];
     let comma = rest.find(',')?;
     let meta = &rest[..comma];
     let data = &rest[comma + 1..];
-    if meta.contains("base64") {
+    if find_ignore_ascii_case(meta.as_bytes(), b"base64").is_some() {
         base64_decode(data)
     } else {
         Some(percent_decode(data))
@@ -1020,10 +1029,23 @@ fn split_http_url(url: &str) -> Result<(String, String, u16), String> {
     if !url.starts_with("http://") {
         return Err(String::from("Only plain HTTP is supported"));
     }
-    let rest = &url["http://".len()..];
-    let slash = rest.find('/').unwrap_or(rest.len());
-    let host_port = &rest[..slash];
-    let path = if slash < rest.len() { &rest[slash..] } else { "/" };
+    let rest_with_fragment = &url["http://".len()..];
+    let rest = rest_with_fragment
+        .find('#')
+        .map(|idx| &rest_with_fragment[..idx])
+        .unwrap_or(rest_with_fragment);
+    let path_start = rest
+        .bytes()
+        .position(|b| b == b'/' || b == b'?')
+        .unwrap_or(rest.len());
+    let host_port = &rest[..path_start];
+    let path = if path_start >= rest.len() {
+        String::from("/")
+    } else if rest.as_bytes()[path_start] == b'?' {
+        format!("/{}", &rest[path_start..])
+    } else {
+        String::from(&rest[path_start..])
+    };
     let colon = host_port.find(':');
     let (host, port) = match colon {
         Some(pos) => (
@@ -1035,27 +1057,26 @@ fn split_http_url(url: &str) -> Result<(String, String, u16), String> {
     if host.is_empty() {
         return Err(String::from("Invalid HTTP host"));
     }
-    Ok((String::from(host), String::from(path), port))
+    Ok((String::from(host), path, port))
 }
 
 fn normalize_redirect_url(base_url: &str, location: &str) -> Option<String> {
     if let Some(url) = normalize_http_url(location) {
         return Some(url);
     }
-    if location.starts_with('/') {
-        let (host, _, port) = split_http_url(base_url).ok()?;
-        if port == 80 {
-            return Some(format!("http://{}{}", host, location));
-        }
-        return Some(format!("http://{}:{}{}", host, port, location));
-    }
-    None
+    resolve_url(base_url, location)
 }
 
 /// Resolve a (possibly relative) URL against the current page URL.
 /// Returns None for unsupported schemes (https, data handled separately).
 fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     let rel = rel.trim();
+    if rel.is_empty() || rel.starts_with('#') {
+        return None;
+    }
+    if starts_with_ignore_ascii_case(rel.as_bytes(), b"data:") {
+        return None;
+    }
     if rel.starts_with("http://") {
         return Some(String::from(rel));
     }
@@ -1071,13 +1092,57 @@ fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     } else {
         format!("{}:{}", host, port)
     };
-    if rel.starts_with('/') {
-        return Some(format!("http://{}{}", hostport, rel));
+    let base_path_no_query = base_path
+        .find('?')
+        .map(|idx| &base_path[..idx])
+        .unwrap_or(&base_path);
+    if rel.starts_with('?') {
+        return Some(format!("http://{}{}{}", hostport, base_path_no_query, rel));
     }
-    // Relative to the base path's directory.
-    let dir_end = base_path.rfind('/').map(|i| i + 1).unwrap_or(0);
-    let dir = &base_path[..dir_end];
-    Some(format!("http://{}{}{}", hostport, dir, rel))
+    let (path_part, suffix) = split_path_suffix(rel);
+    let resolved_path = if path_part.starts_with('/') {
+        normalize_url_path(path_part)
+    } else {
+        // Relative to the base path's directory.
+        let dir_end = base_path_no_query.rfind('/').map(|i| i + 1).unwrap_or(0);
+        let dir = &base_path_no_query[..dir_end];
+        normalize_url_path(&format!("{}{}", dir, path_part))
+    };
+    Some(format!("http://{}{}{}", hostport, resolved_path, suffix))
+}
+
+fn split_path_suffix(path: &str) -> (&str, &str) {
+    let mut end = path.len();
+    for marker in [b'?', b'#'] {
+        if let Some(pos) = path.as_bytes().iter().position(|&b| b == marker) {
+            end = end.min(pos);
+        }
+    }
+    (&path[..end], &path[end..])
+}
+
+fn normalize_url_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    let mut out = String::from("/");
+    for (idx, part) in parts.iter().enumerate() {
+        if idx > 0 {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    if path.ends_with('/') && !out.ends_with('/') {
+        out.push('/');
+    }
+    out
 }
 
 fn parse_port(s: &str) -> Option<u16> {
@@ -1574,13 +1639,45 @@ fn find_attr(attrs: &[u8], name: &[u8]) -> Option<String> {
                 &attrs[start..i]
             };
             if eq_ignore_ascii_case(attr_name, name) {
-                return core::str::from_utf8(value).ok().map(String::from);
+                return core::str::from_utf8(value).ok().map(decode_attr_value);
             }
         } else if attr_name.is_empty() {
             i += 1;
         }
     }
     None
+}
+
+fn decode_attr_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            if let Some(semi_rel) = bytes[i + 1..].iter().position(|&b| b == b';') {
+                let entity = &bytes[i + 1..i + 1 + semi_rel];
+                match entity {
+                    b"amp" => out.push('&'),
+                    b"lt" => out.push('<'),
+                    b"gt" => out.push('>'),
+                    b"quot" => out.push('"'),
+                    b"apos" => out.push('\''),
+                    _ => {
+                        out.push('&');
+                        for &b in entity {
+                            out.push(b as char);
+                        }
+                        out.push(';');
+                    }
+                }
+                i += semi_rel + 2;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1590,6 +1687,10 @@ fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| eq_ignore_ascii_case(w, needle))
+}
+
+fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len() && eq_ignore_ascii_case(&haystack[..needle.len()], needle)
 }
 
 fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
