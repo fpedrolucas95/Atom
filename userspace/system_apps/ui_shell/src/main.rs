@@ -2389,10 +2389,14 @@ impl Compositor {
         self.dirty = true;
     }
 
-    fn handle_video_mode_changed(&mut self) {
+    /// Re-read the active framebuffer from the kernel and reallocate the
+    /// backbuffer to match. Used after any video-mode change (runtime or the
+    /// one re-applied from persisted config at boot). Returns `false` if the
+    /// new framebuffer could not be obtained.
+    fn rebuild_framebuffer(&mut self) -> bool {
         let new_fb = match Framebuffer::new() {
             Some(fb) => fb,
-            None => return,
+            None => return false,
         };
 
         let _ = shared_region_unmap(self.backbuffer_region);
@@ -2412,7 +2416,7 @@ impl Compositor {
             new_fb.bytes_per_pixel() as u32,
         ) {
             Some(fb) => fb,
-            None => return,
+            None => return false,
         };
 
         self.fb = new_fb;
@@ -2432,6 +2436,33 @@ impl Compositor {
             ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
 
         self.wallpaper_cache_valid = false;
+        true
+    }
+
+    /// Re-apply a persisted resolution by programming the video mode and
+    /// rebuilding the framebuffer. No-op when it already matches or the mode is
+    /// unavailable on this hardware (in which case the current mode is kept).
+    fn apply_resolution(&mut self, width: u32, height: u32) {
+        if width == self.fb.width() && height == self.fb.height() {
+            return;
+        }
+        if width == 0
+            || height == 0
+            || width > u16::MAX as u32
+            || height > u16::MAX as u32
+        {
+            return;
+        }
+        if atom_syscall::graphics::set_video_mode(width as u16, height as u16, 32).is_err() {
+            return;
+        }
+        self.rebuild_framebuffer();
+    }
+
+    fn handle_video_mode_changed(&mut self) {
+        if !self.rebuild_framebuffer() {
+            return;
+        }
         if matches!(self.current_wallpaper_source, CurrentWallpaperSource::Image { .. }) {
             self.wallpaper_recompute_pending = true;
         }
@@ -2595,6 +2626,16 @@ impl Compositor {
                 }
             }
         }
+
+        // Re-apply the persisted resolution first, so the wallpaper is scaled to
+        // the final display size. set_video_mode is a runtime change, so the saved
+        // mode must be programmed again on every boot. Then keep the in-memory
+        // config in sync with the resolution actually in effect (the saved mode
+        // may be unavailable on this hardware, in which case we keep the current).
+        self.apply_resolution(config.resolution.width, config.resolution.height);
+        config.resolution =
+            ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
+
         let _ = self.apply_config(config, false);
     }
 
