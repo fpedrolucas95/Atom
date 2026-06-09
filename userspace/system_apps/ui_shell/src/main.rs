@@ -636,6 +636,7 @@ fn window_title_for(executable: &str) -> &str {
         "fileman" => "File Manager",
         "terminal" => "Terminal",
         "display_settings" => "Display Settings",
+        "tinygl_demo" => "TinyGL Gears",
         other => other,
     }
 }
@@ -738,15 +739,23 @@ impl WindowManager {
     fn close_window(&mut self, id: WindowId) {
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
-            self.focused_id = self
-                .windows
-                .iter()
-                .filter(|w| w.visible && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.focused_id {
-                self.focus_window(new_focus);
-            }
+            self.refocus_topmost();
+        }
+    }
+
+    /// Give focus to the top-most eligible window. Resets `focused_id` first so
+    /// `focus_window` performs a real focus transition (sets the `focused` flag
+    /// and emits the `Focus` event) instead of short-circuiting on a stale id.
+    fn refocus_topmost(&mut self) {
+        self.focused_id = None;
+        let candidate = self
+            .windows
+            .iter()
+            .filter(|w| w.visible && w.state != WindowState::Minimized)
+            .last()
+            .map(|w| w.id);
+        if let Some(new_focus) = candidate {
+            self.focus_window(new_focus);
         }
     }
 
@@ -806,15 +815,7 @@ impl WindowManager {
             window.focused = false;
         }
         if self.focused_id == Some(id) {
-            self.focused_id = self
-                .windows
-                .iter()
-                .filter(|w| w.visible && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.focused_id {
-                self.focus_window(new_focus);
-            }
+            self.refocus_topmost();
         }
     }
 }
@@ -2317,16 +2318,9 @@ impl Compositor {
         }
 
         if self.wm.focused_id == Some(id) {
-            self.wm.focused_id = self
-                .wm
-                .windows
-                .iter()
-                .filter(|w| w.visible && w.id != id && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.wm.focused_id {
-                self.wm.focus_window(new_focus);
-            }
+            // The window is no longer visible (set above), so refocus_topmost
+            // will skip it and hand focus to the remaining top-most window.
+            self.wm.refocus_topmost();
         }
 
         self.pending_close.push(PendingClose {
@@ -3536,30 +3530,55 @@ impl Compositor {
     }
 
     fn draw_cursor(&self) {
-        let cursor_shape = [
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 2, 1, 0, 0, 0, 0, 0, 0, 0],
-            [1, 2, 2, 1, 0, 0, 0, 0, 0, 0],
-            [1, 2, 2, 2, 1, 0, 0, 0, 0, 0],
-            [1, 2, 2, 2, 2, 1, 0, 0, 0, 0],
-            [1, 2, 2, 2, 2, 2, 1, 0, 0, 0],
-            [1, 2, 2, 2, 2, 2, 2, 1, 0, 0],
-            [1, 2, 2, 2, 2, 2, 2, 2, 1, 0],
-            [1, 2, 2, 2, 2, 2, 2, 2, 2, 1],
-            [1, 2, 2, 2, 2, 1, 1, 1, 1, 1],
-            [1, 2, 1, 2, 1, 0, 0, 0, 0, 0],
-            [1, 1, 0, 1, 2, 1, 0, 0, 0, 0],
-            [0, 0, 0, 1, 2, 1, 0, 0, 0, 0],
-            [0, 0, 0, 0, 1, 2, 1, 0, 0, 0],
-            [0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+        // Classic arrow pointer. 0 = transparent, 1 = outline, 2 = fill.
+        // The hotspot is the tip at the top-left pixel (0,0), matching the
+        // coordinate used for click hit-testing.
+        const CURSOR_W: usize = 11;
+        let cursor_shape: [[u8; CURSOR_W]; 17] = [
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
+            [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+            [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0],
+            [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0],
+            [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+            [1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+            [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0],
         ];
+
+        let cx = self.cursor.x as u32;
+        let cy = self.cursor.y as u32;
+        let fb_w = self.backbuffer_fb.width();
+        let fb_h = self.backbuffer_fb.height();
+
+        // Soft drop shadow (offset by 1px) for depth and to keep the pointer
+        // legible over both dark wallpaper and light app surfaces.
+        for (row, cols) in cursor_shape.iter().enumerate() {
+            for (col, &pixel) in cols.iter().enumerate() {
+                if pixel == 0 {
+                    continue;
+                }
+                let px = cx + col as u32 + 1;
+                let py = cy + row as u32 + 1;
+                if px < fb_w && py < fb_h {
+                    self.backbuffer_fb.fill_rect_alpha(px, py, 1, 1, Color::BLACK, 70);
+                }
+            }
+        }
 
         for (row, cols) in cursor_shape.iter().enumerate() {
             for (col, &pixel) in cols.iter().enumerate() {
-                let px = self.cursor.x as u32 + col as u32;
-                let py = self.cursor.y as u32 + row as u32;
-                if px < self.backbuffer_fb.width() && py < self.backbuffer_fb.height() {
+                let px = cx + col as u32;
+                let py = cy + row as u32;
+                if px < fb_w && py < fb_h {
                     match pixel {
                         1 => self.backbuffer_fb.draw_pixel(px, py, theme::CURSOR_OUTLINE),
                         2 => self.backbuffer_fb.draw_pixel(px, py, theme::CURSOR_FILL),
