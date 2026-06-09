@@ -2021,8 +2021,14 @@ impl Compositor {
 
         if let Some(id) = self.wm.window_at(x, y) {
             if self.wm.focused_id != Some(id) {
+                let prev = self.wm.focused_id;
                 self.wm.focus_window(id);
-                self.dirty = true;
+                // Repaint both the newly focused window (it may have been behind
+                // others) and the one that lost focus (its frame tint changes).
+                if let Some(p) = prev {
+                    self.mark_window_dirty(p);
+                }
+                self.mark_window_dirty(id);
             }
 
             self.captured_window = Some(id);
@@ -2351,22 +2357,31 @@ impl Compositor {
         }
     }
 
-    /// Mark a window's full on-screen footprint (frame + drop shadow) dirty and
-    /// flag its content as ready.  Called whenever an app commits/presents a
-    /// frame so the freshly rendered surface is actually blitted to the screen —
-    /// without this the redraw is bounded by whatever stale `dirty_rect` was left
-    /// by the last cursor move, so the first frame only became visible once the
-    /// user happened to move the mouse over the window.
-    fn present_window(&mut self, window_id: WindowId) {
-        if let Some(window) = self.wm.get_window_mut(window_id) {
-            window.content_dirty = true;
-            window.surface_ready = true;
-        }
+    /// Mark a window's full on-screen footprint (frame + drop shadow) dirty so
+    /// the next `draw_all` actually repaints it. The redraw is otherwise bounded
+    /// by whatever stale `dirty_rect` the last cursor move left behind, which is
+    /// why a freshly presented or freshly raised window could stay invisible
+    /// until unrelated damage happened to cross it.
+    fn mark_window_dirty(&mut self, window_id: WindowId) {
         if let Some(w) = self.wm.get_window(window_id) {
             let rect = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
             self.mark_dirty_rect(rect);
         }
-        self.dirty = true;
+    }
+
+    /// Flag a window's freshly rendered surface as ready and mark its footprint
+    /// dirty. Called whenever an app commits/presents a frame. Uses a single
+    /// window lookup on this hot path.
+    fn present_window(&mut self, window_id: WindowId) {
+        let rect = match self.wm.get_window_mut(window_id) {
+            Some(window) => {
+                window.content_dirty = true;
+                window.surface_ready = true;
+                Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12)
+            }
+            None => return,
+        };
+        self.mark_dirty_rect(rect);
     }
 
     fn mark_dirty_rect(&mut self, rect: Rect) {
@@ -2391,23 +2406,29 @@ impl Compositor {
 
     /// Re-read the active framebuffer from the kernel and reallocate the
     /// backbuffer to match. Used after any video-mode change (runtime or the
-    /// one re-applied from persisted config at boot). Returns `false` if the
-    /// new framebuffer could not be obtained.
+    /// one re-applied from persisted config at boot). Returns `false` — leaving
+    /// the previous framebuffer untouched — if the new one could not be built,
+    /// so callers never run against a half-torn-down framebuffer.
     fn rebuild_framebuffer(&mut self) -> bool {
         let new_fb = match Framebuffer::new() {
             Some(fb) => fb,
             None => return false,
         };
 
-        let _ = shared_region_unmap(self.backbuffer_region);
-        let _ = shared_region_destroy(self.backbuffer_region);
-
+        // Allocate and map the new backbuffer *before* releasing the old one,
+        // so an allocation failure leaves the current framebuffer intact.
         let bb_size = (new_fb.stride() * new_fb.height() * 4) as usize;
-        let bb_region =
-            shared_region_create(bb_size).expect("Failed to realloc backbuffer region");
-        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE)
-            .expect("Failed to map new backbuffer") as *mut u32;
-
+        let bb_region = match shared_region_create(bb_size) {
+            Ok(region) => region,
+            Err(_) => return false,
+        };
+        let bb_ptr = match shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE) {
+            Ok(ptr) => ptr as *mut u32,
+            Err(_) => {
+                let _ = shared_region_destroy(bb_region);
+                return false;
+            }
+        };
         let new_backbuffer_fb = match Framebuffer::new_custom(
             bb_ptr as u64,
             new_fb.width(),
@@ -2416,13 +2437,20 @@ impl Compositor {
             new_fb.bytes_per_pixel() as u32,
         ) {
             Some(fb) => fb,
-            None => return false,
+            None => {
+                let _ = shared_region_unmap(bb_region);
+                let _ = shared_region_destroy(bb_region);
+                return false;
+            }
         };
 
+        let old_region = self.backbuffer_region;
         self.fb = new_fb;
         self.backbuffer_fb = new_backbuffer_fb;
         self.backbuffer_region = bb_region;
         self.backbuffer_ptr = bb_ptr;
+        let _ = shared_region_unmap(old_region);
+        let _ = shared_region_destroy(old_region);
 
         let w = self.fb.width() as i32;
         let h = self.fb.height() as i32;
@@ -2456,7 +2484,9 @@ impl Compositor {
         if atom_syscall::graphics::set_video_mode(width as u16, height as u16, 32).is_err() {
             return;
         }
-        self.rebuild_framebuffer();
+        if !self.rebuild_framebuffer() {
+            log("ui_shell: framebuffer rebuild failed after resolution change");
+        }
     }
 
     fn handle_video_mode_changed(&mut self) {
@@ -2985,7 +3015,8 @@ impl Compositor {
         let title = window_title_for(&executable);
 
         // If the app is already running, raise (and un-minimise) it instead of
-        // launching a second copy.
+        // launching a second copy. Minimized windows keep `visible == true`, so
+        // they are matched here and restored by `focus_window`.
         if let Some(id) = self
             .wm
             .windows
@@ -2993,8 +3024,17 @@ impl Compositor {
             .find(|w| w.visible && w.title == title)
             .map(|w| w.id)
         {
+            let prev = self.wm.focused_id;
             self.wm.focus_window(id);
-            self.dirty = true;
+            // Repaint the raised window's footprint (and the one that just lost
+            // focus) — focus_window only reorders/un-minimises, so the restored
+            // window would otherwise stay hidden until unrelated damage.
+            if let Some(p) = prev {
+                if p != id {
+                    self.mark_window_dirty(p);
+                }
+            }
+            self.mark_window_dirty(id);
             return;
         }
 
