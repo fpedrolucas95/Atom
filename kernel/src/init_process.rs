@@ -23,13 +23,13 @@
 // If the init process cannot be loaded, the system MUST fail loudly.
 
 use crate::boot::BootInfo;
-use crate::cap::{self, CapPermissions, InputDeviceType, ResourceType};
+use crate::cap;
 use crate::executable::{self, ExecError, LoadedExecutable, ATXF_MAGIC};
 use crate::mm::pmm::{self, align_up, PAGE_SIZE};
 use crate::mm::vm::{self, PageFlags};
 use crate::sched;
 use crate::thread::{self, CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
-use crate::{graphics, log_error, log_info, log_panic};
+use crate::{log_error, log_info, log_panic};
 
 const LOG_ORIGIN: &str = "init";
 
@@ -176,7 +176,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
 
     // Step 5: Grant capabilities to the init process
     // Init gets root capabilities so it can spawn and manage all services
-    grant_init_capabilities(pid, boot_info)?;
+    grant_init_capabilities(pid)?;
 
     log_info!(LOG_ORIGIN, "===========================================");
     log_info!(LOG_ORIGIN, "Init process ready for execution");
@@ -610,124 +610,23 @@ fn allocate_kernel_stack() -> Result<u64, InitError> {
 
 /// Grant capabilities to the init process.
 ///
-/// The init process needs broad capabilities since it spawns and
-/// orchestrates all other services. It gets framebuffer and input
-/// capabilities which it can delegate to child processes.
-fn grant_init_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<(), InitError> {
-    log_info!(LOG_ORIGIN, "Granting capabilities to init process");
+/// Least privilege (PR3): init is the bootstrap orchestrator and receives ONLY
+/// the bootstrap authority declared in the SystemServiceManifest
+/// (`SpawnSystemService` + `ReadKernelLog` + its `ServiceIdentity`). It does NOT
+/// receive framebuffer or input capabilities — those are owned by the
+/// compositor (ui_shell), granted directly from its own manifest profile at
+/// spawn. init never delegates ambient graphics/input authority.
+fn grant_init_capabilities(pid: ThreadId) -> Result<(), InitError> {
+    log_info!(LOG_ORIGIN, "Granting bootstrap capabilities to init process");
 
-    // Grant framebuffer capability (init delegates to ui_shell via spawn)
-    if boot_info.framebuffer_present {
-        let fb = &boot_info.framebuffer;
-        let fb_info = graphics::get_framebuffer_info();
-
-        if let Some((address, width, height, stride, bpp)) = fb_info {
-            let fb_resource = ResourceType::Framebuffer {
-                address: address as u64,
-                width,
-                height,
-                stride,
-                bytes_per_pixel: bpp as u8,
-            };
-
-            let fb_perms = CapPermissions::READ
-                .union(CapPermissions::WRITE)
-                .union(CapPermissions::GRANT);
-            match cap::create_root_capability(fb_resource, pid, fb_perms) {
-                Ok(cap) => {
-                    thread::add_thread_capability(pid, cap)
-                        .map_err(|_| InitError::CapabilityError)?;
-                    log_info!(
-                        LOG_ORIGIN,
-                        "Framebuffer capability granted: {}x{} @ 0x{:X}",
-                        width,
-                        height,
-                        address
-                    );
-                }
-                Err(e) => {
-                    log_error!(
-                        LOG_ORIGIN,
-                        "Failed to create framebuffer capability: {:?}",
-                        e
-                    );
-                    return Err(InitError::CapabilityError);
-                }
-            }
-        } else {
-            let fb_resource = ResourceType::Framebuffer {
-                address: fb.address,
-                width: fb.width,
-                height: fb.height,
-                stride: fb.pixels_per_scan_line,
-                bytes_per_pixel: 4,
-            };
-
-            let fb_perms = CapPermissions::READ
-                .union(CapPermissions::WRITE)
-                .union(CapPermissions::GRANT);
-            cap::create_root_capability(fb_resource, pid, fb_perms)
-                .map_err(|_| InitError::CapabilityError)
-                .and_then(|cap| {
-                    thread::add_thread_capability(pid, cap)
-                        .map_err(|_| InitError::CapabilityError)
-                })?;
-        }
-    }
-
-    // Grant keyboard input capability
-    let kbd_resource = ResourceType::InputDevice {
-        device_type: InputDeviceType::Keyboard,
-    };
-    let kbd_perms = CapPermissions::READ.union(CapPermissions::GRANT);
-    match cap::create_root_capability(kbd_resource, pid, kbd_perms) {
-        Ok(cap) => {
-            thread::add_thread_capability(pid, cap)
-                .map_err(|_| InitError::CapabilityError)?;
-            log_info!(LOG_ORIGIN, "Keyboard input capability granted");
-        }
-        Err(e) => {
-            log_error!(
-                LOG_ORIGIN,
-                "Failed to create keyboard capability: {:?}",
-                e
-            );
-            return Err(InitError::CapabilityError);
-        }
-    }
-
-    // Grant mouse input capability
-    let mouse_resource = ResourceType::InputDevice {
-        device_type: InputDeviceType::Mouse,
-    };
-    let mouse_perms = CapPermissions::READ.union(CapPermissions::GRANT);
-    match cap::create_root_capability(mouse_resource, pid, mouse_perms) {
-        Ok(cap) => {
-            thread::add_thread_capability(pid, cap)
-                .map_err(|_| InitError::CapabilityError)?;
-            log_info!(LOG_ORIGIN, "Mouse input capability granted");
-        }
-        Err(e) => {
-            log_error!(LOG_ORIGIN, "Failed to create mouse capability: {:?}", e);
-            return Err(InitError::CapabilityError);
-        }
-    }
-
-    // ── Establish the kernel-side trust root for init ──────────────────────
-    //
-    // init is the first userspace process, but it is NOT privileged by virtue
-    // of being first. Its authority comes from the SystemServiceManifest: the
-    // kernel loaded init directly from the boot image (SpawnKind::BootImage),
-    // assigns it the fixed SID_INIT identity, and grants exactly the
-    // capabilities the manifest declares for it (SpawnSystemService so it can
-    // start system services, and ReadKernelLog for boot diagnostics). It does
-    // NOT receive SpawnFromPath — application launches go through app_launcher.
+    // init is the first userspace process, but it is NOT privileged by virtue of
+    // being first. Its authority comes entirely from the SystemServiceManifest.
     grant_init_manifest_capabilities(pid)?;
 
     let stats = cap::get_capability_stats();
     log_info!(
         LOG_ORIGIN,
-        "Capability stats: {} total, {} framebuffer, {} input",
+        "Capability stats: {} total, {} framebuffer, {} input (init holds no fb/input)",
         stats.total,
         stats.framebuffer_caps,
         stats.input_caps

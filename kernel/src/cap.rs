@@ -279,6 +279,10 @@ pub enum ResourceType {
     ServiceIdentity {
         service_id: u32,
     },
+    /// Authority to change the active video mode via `SYS_SET_VIDEO_MODE`.
+    /// Distinct from framebuffer mapping; video-mode *queries* need no cap.
+    /// Non-inheritable.
+    DisplayModeSet,
 }
 
 /// Returns `true` for capabilities that confer process-creation or kernel-log
@@ -303,7 +307,16 @@ pub fn is_non_inheritable(resource: &ResourceType) -> bool {
     is_spawn_authority(resource)
         || matches!(
             resource,
-            ResourceType::ReservedPort { .. } | ResourceType::ServiceIdentity { .. }
+            ResourceType::ReservedPort { .. }
+                | ResourceType::ServiceIdentity { .. }
+                | ResourceType::Framebuffer { .. }
+                | ResourceType::DisplayModeSet
+                | ResourceType::InputDevice { .. }
+                | ResourceType::IoPort { .. }
+                | ResourceType::Device { .. }
+                | ResourceType::Irq { .. }
+                | ResourceType::DmaBuffer { .. }
+                | ResourceType::FsNamespace { .. }
         )
 }
 
@@ -805,7 +818,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 18];
+        let mut by_type = [0usize; 19];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -827,6 +840,7 @@ impl CapabilityManager {
                 ResourceType::ReadKernelLog => 15,
                 ResourceType::ReservedPort { .. } => 16,
                 ResourceType::ServiceIdentity { .. } => 17,
+                ResourceType::DisplayModeSet => 18,
             };
             by_type[idx] += 1;
         }

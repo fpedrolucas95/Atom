@@ -125,6 +125,7 @@ USERSPACE_APPS=(
     "hello_atxf"
     "timesync"
     "browser"
+    "security_smoke"
 )
 
 # =========================================================================

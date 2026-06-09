@@ -21,8 +21,12 @@ pub(super) enum CapRequirement {
     InputMouse,
     /// Caller must hold an InputDevice{Keyboard} cap with READ.
     InputKeyboard,
-    /// Caller must hold any Framebuffer cap (any dimensions) with READ.
-    AnyFramebuffer,
+    /// Caller must hold a Framebuffer (map) cap with READ. Gates obtaining the
+    /// framebuffer address and mapping it. Distinct from mode-set authority.
+    FramebufferMap,
+    /// Caller must hold a `DisplayModeSet` cap with EXECUTE. Gates changing the
+    /// active video mode. Video-mode *queries* are public.
+    DisplayModeSet,
     /// Caller must hold any FsNamespace cap with READ.
     /// Used to gate kernel-internal storage syscalls (200-212 except 203)
     /// so that only fsd can reach the raw filesystem driver.
@@ -81,11 +85,18 @@ pub(super) fn check_cap_requirement(req: CapRequirement) -> bool {
                 }),
             ),
 
-        CapRequirement::AnyFramebuffer =>
+        CapRequirement::FramebufferMap =>
             crate::thread::validate_thread_capability_by_type(
                 caller,
                 CapPermissions::READ,
                 |r| matches!(r, ResourceType::Framebuffer { .. }),
+            ),
+
+        CapRequirement::DisplayModeSet =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::EXECUTE,
+                |r| matches!(r, ResourceType::DisplayModeSet),
             ),
 
         CapRequirement::AnyFsNamespace =>
@@ -184,8 +195,10 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
 
         // ── Framebuffer / display ──────────────────────────────────────────
         // Gated by Framebuffer cap.  Same over-provisioning caveat applies.
-        SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER | SYS_SET_VIDEO_MODE
-            => Requires(AnyFramebuffer),
+        SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER
+            => Requires(FramebufferMap),
+        SYS_SET_VIDEO_MODE
+            => Requires(DisplayModeSet),
 
         // Video info queries — non-sensitive, public.
         SYS_GET_VIDEO_MODES | SYS_GET_CURRENT_VIDEO_MODE | SYS_VIDEO_MODE_COUNT

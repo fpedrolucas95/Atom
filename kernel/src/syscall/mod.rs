@@ -4556,7 +4556,11 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 
         if let Some(data) = crate::drivers::fat32::open(&path) {
             log_info!(LOG_ORIGIN, "Loaded {} bytes from filesystem", data.len());
-            return spawn_from_image(&data, name, Some(manifest_entry));
+            return spawn_from_image(
+                &data,
+                name,
+                crate::system_manifest::grants_for_entry(manifest_entry),
+            );
         }
         // Fall back to registry if not found in filesystem
         log_debug!(LOG_ORIGIN, "Not found in filesystem, trying registry");
@@ -4573,7 +4577,11 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
                 sections.bss_size,
                 sections.entry_offset
             );
-            match spawn_process_internal(name, &sections, Some(manifest_entry)) {
+            match spawn_process_internal(
+                name,
+                &sections,
+                crate::system_manifest::grants_for_entry(manifest_entry),
+            ) {
                 Ok(pid) => {
                     log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
                     pid.raw()
@@ -4592,7 +4600,7 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 fn spawn_from_image(
     data: &[u8],
     name: &str,
-    manifest_entry: Option<&'static crate::system_manifest::SystemServiceManifestEntry>,
+    grants: crate::system_manifest::SpawnGrants,
 ) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn";
 
@@ -4613,7 +4621,7 @@ fn spawn_from_image(
         sections.entry_offset
     );
 
-    match spawn_process_internal(name, &sections, manifest_entry) {
+    match spawn_process_internal(name, &sections, grants) {
         Ok(pid) => {
             log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
             pid.raw()
@@ -4687,11 +4695,10 @@ fn get_static_driver_name(name: &str) -> &'static str {
 fn spawn_process_internal(
     name: &str,
     sections: &crate::executable::ExecutableSections,
-    manifest_entry: Option<&'static crate::system_manifest::SystemServiceManifestEntry>,
+    grants: crate::system_manifest::SpawnGrants,
 ) -> Result<crate::thread::ThreadId, u64> {
     // Get static name for the thread
     let static_name = get_static_driver_name(name);
-    use crate::cap::{self, CapPermissions, InputDeviceType, ResourceType};
     use crate::executable::USER_EXEC_LOAD_BASE;
     use crate::mm::pmm::{self, align_up, PAGE_SIZE};
     use crate::mm::vm::{self, PageFlags};
@@ -5000,7 +5007,7 @@ fn spawn_process_internal(
         address_space: new_pml4_phys as u64,
         priority: ThreadPriority::Normal,
         name: static_name,
-        capability_table: cap::create_capability_table(pid),
+        capability_table: crate::cap::create_capability_table(pid),
         is_userspace: true,
         user_stack: Some(stack_layout),
     };
@@ -5010,124 +5017,14 @@ fn spawn_process_internal(
     // are complete so the thread cannot be scheduled before it has its caps.
     crate::thread::add_thread(thread);
 
-    // ── Manifest-driven identity + initial capabilities ────────────────────
+    // ── Manifest-driven grants (least privilege; PR3) ───────────
     //
-    // System services receive a kernel-defined identity and the exact set of
-    // initial capabilities declared in the SystemServiceManifest — nothing is
-    // derived from boot order or name. Applications spawned by path
-    // (`manifest_entry == None`) get NO system-service identity and NO spawn
-    // authority here; they only receive the ambient device caps granted below.
-    //
-    // This is done before the thread is marked schedulable so the new process
-    // can never run with a capability set that differs from its declaration.
-    if let Some(entry) = manifest_entry {
-        crate::system_manifest::assign_service_identity(process_id, entry.service_id);
-        for init_cap in entry.initial_capabilities {
-            match cap::create_root_capability(init_cap.resource, pid, init_cap.permissions) {
-                Ok(granted) => {
-                    let _ = crate::thread::add_thread_capability(pid, granted);
-                }
-                Err(e) => {
-                    log_error!(
-                        "spawn",
-                        "Failed to grant manifest capability {:?} to '{}': {:?}",
-                        init_cap.resource,
-                        name,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
-    // Grant capabilities
-    //
-    // Over-provisioning note (P1-A TODO):
-    //   Framebuffer, InputDevice, and IoPort caps are currently granted to ALL
-    //   processes so that the existing user-space stack continues to work while
-    //   the dispatcher policy gates (P2-A) are put in place.  Once the system is
-    //   stable with gates enforced, tighten the grants below to:
-    //     Framebuffer  → "ui_shell", "display" only
-    //     Keyboard     → "keyboard" only
-    //     Mouse        → "mouse" only
-    //     IoPort PS/2  → "keyboard", "mouse" only
-    //
-    // FsNamespace cap is already scoped: only "fsd" receives it.  All other
-    // processes must go through fsd via IPC to access the filesystem.
-
-    // FsNamespace capability — granted only to the filesystem daemon (fsd).
-    // This cap is the gate for SYS_KERN_FS_{READ_FILE,LIST_DIR,STAT_PATH}
-    // which fsd uses to communicate directly with the kernel FAT32 driver.
-    if name == "fsd" {
-        let fs_resource = ResourceType::FsNamespace { namespace_id: 0 };
-        let fs_perms = CapPermissions::READ.union(CapPermissions::WRITE).union(CapPermissions::GRANT);
-        if let Ok(cap) = cap::create_root_capability(fs_resource, pid, fs_perms) {
-            let _ = crate::thread::add_thread_capability(pid, cap);
-            log_info!("spawn", "Granted FsNamespace cap to fsd (pid={})", pid);
-        }
-    }
-
-    // PCI Device capabilities — grant all network devices (class 0x02) to nic_driver.
-    // The kernel does not know or care which specific NIC the driver supports;
-    // nic_driver uses SYS_PCI_QUERY_DEVICE to inspect each capability and decides
-    // which device to drive based on vendor/device ID.
-    if name == "nic_driver" {
-        let net_devs: alloc::vec::Vec<_> = crate::drivers::pci::get_devices_by_class(0x02)
-            .into_iter()
-            .collect();
-        if net_devs.is_empty() {
-            log_warn!("spawn", "No PCI network devices found for nic_driver");
-        }
-        for dev in net_devs {
-            let res = ResourceType::Device { bdf: dev.bdf() };
-            if let Ok(cap) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
-                let _ = crate::thread::add_thread_capability(pid, cap);
-                log_info!("spawn", "Granted DeviceCap({:02x}:{:02x}.{}) to nic_driver",
-                    dev.bus, dev.device, dev.function);
-            }
-        }
-    }
-
-    // Framebuffer capability
-    if let Some((address, width, height, stride, bpp)) = crate::graphics::get_framebuffer_info() {
-        let fb_resource = ResourceType::Framebuffer {
-            address: address as u64,
-            width,
-            height,
-            stride,
-            bytes_per_pixel: bpp as u8,
-        };
-        let fb_perms = CapPermissions::READ.union(CapPermissions::WRITE);
-        if let Ok(cap) = cap::create_root_capability(fb_resource, pid, fb_perms) {
-            let _ = crate::thread::add_thread_capability(pid, cap);
-        }
-    }
-
-    // Keyboard capability
-    let kbd_resource = ResourceType::InputDevice {
-        device_type: InputDeviceType::Keyboard,
-    };
-    if let Ok(cap) = cap::create_root_capability(kbd_resource, pid, CapPermissions::READ) {
-        let _ = crate::thread::add_thread_capability(pid, cap);
-    }
-
-    // Mouse capability
-    let mouse_resource = ResourceType::InputDevice {
-        device_type: InputDeviceType::Mouse,
-    };
-    if let Ok(cap) = cap::create_root_capability(mouse_resource, pid, CapPermissions::READ) {
-        let _ = crate::thread::add_thread_capability(pid, cap);
-    }
-
-    // I/O port capabilities for PS/2 hardware access
-    // TODO: restrict IoPort caps to PS/2 driver only (least privilege)
-    let io_perms = CapPermissions::READ.union(CapPermissions::WRITE);
-    for &port in &[0x60u16, 0x64u16] {
-        let io_resource = ResourceType::IoPort { port };
-        if let Ok(cap) = cap::create_root_capability(io_resource, pid, io_perms) {
-            let _ = crate::thread::add_thread_capability(pid, cap);
-        }
-    }
+    // There are NO ambient/default grants. The process receives EXACTLY the
+    // identity + capabilities declared for it:
+    //   * system services  -> SystemServiceManifest profile (caps + env grants);
+    //   * trusted apps      -> declared TrustedAppProfile;
+    //   * ordinary apps     -> nothing sensitive (SpawnGrants::NONE).
+    apply_spawn_grants(pid, process_id, name, grants);
 
     // Thread is fully initialized — mark it schedulable
     crate::sched::mark_thread_ready(pid);
@@ -5135,6 +5032,82 @@ fn spawn_process_internal(
     log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
 
     Ok(pid)
+}
+
+/// Apply the declared [`SpawnGrants`] to a freshly created process. This is the
+/// single, centralised grant path: identity, static capabilities, and
+/// environment-derived capabilities (framebuffer geometry, network device BDFs)
+/// all flow through here and nowhere else.
+fn apply_spawn_grants(
+    pid: crate::thread::ThreadId,
+    process_id: crate::process::ProcessId,
+    name: &str,
+    grants: crate::system_manifest::SpawnGrants,
+) {
+    use crate::cap::{self, CapPermissions, ResourceType};
+    use crate::system_manifest::EnvGrant;
+
+    if let Some(service_id) = grants.service_id {
+        crate::system_manifest::assign_service_identity(process_id, service_id);
+    }
+
+    for init_cap in grants.capabilities {
+        match cap::create_root_capability(init_cap.resource, pid, init_cap.permissions) {
+            Ok(granted) => {
+                let _ = crate::thread::add_thread_capability(pid, granted);
+            }
+            Err(e) => log_error!(
+                "spawn",
+                "Failed to grant capability {:?} to '{}': {:?}",
+                init_cap.resource,
+                name,
+                e
+            ),
+        }
+    }
+
+    for env in grants.environment_grants {
+        match env {
+            EnvGrant::FramebufferMap => {
+                if let Some((address, width, height, stride, bpp)) =
+                    crate::graphics::get_framebuffer_info()
+                {
+                    let fb = ResourceType::Framebuffer {
+                        address: address as u64,
+                        width,
+                        height,
+                        stride,
+                        bytes_per_pixel: bpp as u8,
+                    };
+                    let perms = CapPermissions::READ.union(CapPermissions::WRITE);
+                    if let Ok(c) = cap::create_root_capability(fb, pid, perms) {
+                        let _ = crate::thread::add_thread_capability(pid, c);
+                        log_info!("spawn", "Granted FramebufferMap to '{}' (pid={})", name, pid);
+                    }
+                } else {
+                    log_warn!("spawn", "FramebufferMap requested by '{}' but no framebuffer present", name);
+                }
+            }
+            EnvGrant::NetworkDevices => {
+                let net_devs: alloc::vec::Vec<_> =
+                    crate::drivers::pci::get_devices_by_class(0x02).into_iter().collect();
+                if net_devs.is_empty() {
+                    log_warn!("spawn", "NetworkDevices requested by '{}' but no PCI net device found", name);
+                }
+                for dev in net_devs {
+                    let res = ResourceType::Device { bdf: dev.bdf() };
+                    if let Ok(c) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
+                        let _ = crate::thread::add_thread_capability(pid, c);
+                        log_info!(
+                            "spawn",
+                            "Granted DeviceCap({:02x}:{:02x}.{}) to '{}'",
+                            dev.bus, dev.device, dev.function, name
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5313,8 +5286,11 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
 
     // Spawn with generic name — Thread::name is &'static str so we use "app".
     // The actual path is logged above for diagnostics. Applications launched by
-    // path receive NO system-service identity and NO spawn authority (None).
-    match spawn_process_internal("app", &sections, None) {
+    // path receive NO ambient authority; only a declared TrustedAppProfile
+    // (exact canonical path) grants a minimal cap set (e.g. display_settings ->
+    // DisplayModeSet). Everything else gets nothing.
+    let app_grants = crate::system_manifest::app_grants_for_path(path);
+    match spawn_process_internal("app", &sections, app_grants) {
         Ok(pid) => {
             log_info!(
                 LOG_ORIGIN,
