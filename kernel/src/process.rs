@@ -306,6 +306,10 @@ fn finalize_removed_process(process_id: ProcessId, pml4_phys: u64) {
     drop(pml4_map);
 
     crate::shared_mem::forget_process_shared_memory_cleanup(process_id);
+
+    // Drop any kernel-assigned system-service identity so authority can never
+    // be inherited via id/PID reuse by a future process.
+    crate::system_manifest::clear_service_identity(process_id);
 }
 
 pub fn detach_thread_from_process(process_id: ProcessId, thread_id: ThreadId) {

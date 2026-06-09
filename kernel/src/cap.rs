@@ -239,6 +239,40 @@ pub enum ResourceType {
     IoPort {
         port: u16,
     },
+    /// Authority to spawn declared system services via `SYS_SPAWN_PROCESS`.
+    ///
+    /// Abstract authority, not tied to a physical resource: the kernel grants
+    /// it only to the services declared in the `SystemServiceManifest`
+    /// (currently `init` and `service_manager`). Holding it is a *necessary*
+    /// condition for `SYS_SPAWN_PROCESS` — the handler still validates that the
+    /// requested service is declared in the manifest and is an allowed child of
+    /// the caller's identity. It must never authorise spawning arbitrary
+    /// application paths, and it is explicitly non-inheritable.
+    SpawnSystemService,
+    /// Authority to spawn applications by path via `SYS_SPAWN_FROM_PATH`.
+    ///
+    /// Granted only to `app_launcher`. It must never authorise spawning system
+    /// services, and it is explicitly non-inheritable.
+    SpawnFromPath,
+    /// Authority to read the kernel log via `SYS_READ_KLOG`.
+    ///
+    /// Replaces the former generic "privileged process" check. Granted to
+    /// `init` (and any future diagnostic service declared in the manifest);
+    /// it is explicitly non-inheritable.
+    ReadKernelLog,
+}
+
+/// Returns `true` for capabilities that confer process-creation or kernel-log
+/// authority. These are never copied implicitly to a child during `fork()` and
+/// are never inherited at spawn — they must be granted explicitly by the kernel
+/// from the `SystemServiceManifest`.
+pub fn is_spawn_authority(resource: &ResourceType) -> bool {
+    matches!(
+        resource,
+        ResourceType::SpawnSystemService
+            | ResourceType::SpawnFromPath
+            | ResourceType::ReadKernelLog
+    )
 }
 
 /// Type of input device for capability granting
@@ -739,7 +773,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 13];
+        let mut by_type = [0usize; 16];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -756,6 +790,9 @@ impl CapabilityManager {
                 ResourceType::FsDir { .. } => 10,
                 ResourceType::FsFile { .. } => 11,
                 ResourceType::IoPort { .. } => 12,
+                ResourceType::SpawnSystemService => 13,
+                ResourceType::SpawnFromPath => 14,
+                ResourceType::ReadKernelLog => 15,
             };
             by_type[idx] += 1;
         }
@@ -1524,6 +1561,22 @@ mod tests {
         install_capability(fixture, level4);
 
         root
+    }
+
+    #[test]
+    fn spawn_authority_caps_are_non_inheritable() {
+        // The three authority capabilities must be flagged non-inheritable so
+        // fork() never copies them to a child.
+        assert!(is_spawn_authority(&ResourceType::SpawnSystemService));
+        assert!(is_spawn_authority(&ResourceType::SpawnFromPath));
+        assert!(is_spawn_authority(&ResourceType::ReadKernelLog));
+
+        // Ordinary resources remain freely inheritable.
+        assert!(!is_spawn_authority(&ResourceType::IpcPort { port_id: 1 }));
+        assert!(!is_spawn_authority(&ResourceType::InputDevice {
+            device_type: InputDeviceType::Keyboard
+        }));
+        assert!(!is_spawn_authority(&ResourceType::Thread(ThreadId::from_raw(1))));
     }
 
     #[test]

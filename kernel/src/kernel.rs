@@ -69,6 +69,7 @@ mod shared_mem;
 mod system;
 mod executable;
 mod init_process;
+mod system_manifest;
 mod driver_registry;
 mod drivers;
 mod architectural_invariants_selftests;

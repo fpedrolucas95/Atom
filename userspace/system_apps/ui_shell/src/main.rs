@@ -20,7 +20,6 @@ use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{exit, yield_now};
 use atom_syscall::debug::log;
-use atom_syscall::process::{spawn_process, spawn_from_path};
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 use atom_syscall::fs;
 use atom_syscall::SyscallError;
@@ -29,7 +28,7 @@ use libipc::messages::{
     MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg,
     AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent,
     MouseButtonEvent, MouseButton, MouseScrollEvent, OpenInTabMsg, ApplyWallpaperMsg,
-    WallpaperAppliedMsg, WallpaperFailedMsg,
+    WallpaperAppliedMsg, WallpaperFailedMsg, AppLaunchRequestMsg,
 };
 use libipc::protocol::send_message_async;
 use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
@@ -3063,6 +3062,37 @@ impl Compositor {
         Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
     }
 
+    /// Ask the `app_launcher` service to start an application by path.
+    ///
+    /// ui_shell holds no spawn capability of its own — process creation is the
+    /// app_launcher's responsibility (it is the sole holder of `SpawnFromPath`).
+    /// We send an `AppLaunchRequest` and continue; the reply, if any, arrives on
+    /// `event_port` and is ignored by the message dispatch. Returns `true` if
+    /// the request was dispatched.
+    fn request_app_launch(&self, path: &str) -> bool {
+        let launcher_port = match libipc::protocol::lookup_service("app_launcher") {
+            Ok(p) => p,
+            Err(_) => {
+                log("ui_shell: app_launcher service not available; cannot launch app");
+                return false;
+            }
+        };
+        let req = match AppLaunchRequestMsg::new(self.event_port as u64, path) {
+            Some(r) => r,
+            None => {
+                log("ui_shell: launch path too long");
+                return false;
+            }
+        };
+        if send_message_async(launcher_port, MessageType::AppLaunchRequest, &req.to_bytes())
+            .is_err()
+        {
+            log("ui_shell: failed to send AppLaunchRequest to app_launcher");
+            return false;
+        }
+        true
+    }
+
     fn spawn_app(&mut self, name: &str) {
         match name {
             "terminal" => return self.spawn_terminal(),
@@ -3073,15 +3103,15 @@ impl Compositor {
 
         let user_path = alloc::format!("/apps/user/{}.atxf", name);
         if fs::stat(&user_path).is_ok() {
-            let _ = spawn_from_path(&user_path);
+            let _ = self.request_app_launch(&user_path);
             return;
         }
         let system_path = alloc::format!("/apps/system/{}.atxf", name);
         if fs::stat(&system_path).is_ok() {
-            let _ = spawn_from_path(&system_path);
+            let _ = self.request_app_launch(&system_path);
             return;
         }
-        let _ = spawn_process(name);
+        log("ui_shell: requested app not found under /apps/user or /apps/system");
     }
 
     fn spawn_hosted_window(
@@ -3110,21 +3140,21 @@ impl Compositor {
     }
 
     fn spawn_fileman(&mut self) {
-        if spawn_from_path("/apps/user/fileman.atxf").is_err() {
+        if !self.request_app_launch("/apps/user/fileman.atxf") {
             return;
         }
         self.spawn_hosted_window("File Manager", 100, 80, 30, 720, 480);
     }
 
     fn spawn_terminal(&mut self) {
-        if spawn_process("terminal").is_err() {
+        if !self.request_app_launch("/apps/system/terminal.atxf") {
             return;
         }
         self.spawn_hosted_window("Terminal", 150, 120, 30, 640, 420);
     }
 
     fn spawn_display_settings(&mut self) {
-        if spawn_process("display_settings").is_err() {
+        if !self.request_app_launch("/apps/system/display_settings.atxf") {
             return;
         }
         self.spawn_hosted_window("Display Settings", 200, 100, 20, 480, 420);

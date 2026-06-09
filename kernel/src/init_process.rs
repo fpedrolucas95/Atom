@@ -713,6 +713,17 @@ fn grant_init_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<(), In
         }
     }
 
+    // ── Establish the kernel-side trust root for init ──────────────────────
+    //
+    // init is the first userspace process, but it is NOT privileged by virtue
+    // of being first. Its authority comes from the SystemServiceManifest: the
+    // kernel loaded init directly from the boot image (SpawnKind::BootImage),
+    // assigns it the fixed SID_INIT identity, and grants exactly the
+    // capabilities the manifest declares for it (SpawnSystemService so it can
+    // start system services, and ReadKernelLog for boot diagnostics). It does
+    // NOT receive SpawnFromPath — application launches go through app_launcher.
+    grant_init_manifest_capabilities(pid)?;
+
     let stats = cap::get_capability_stats();
     log_info!(
         LOG_ORIGIN,
@@ -721,6 +732,43 @@ fn grant_init_capabilities(pid: ThreadId, boot_info: &BootInfo) -> Result<(), In
         stats.framebuffer_caps,
         stats.input_caps
     );
+
+    Ok(())
+}
+
+/// Assign init's kernel-defined identity and grant the capabilities declared
+/// for it in the [`crate::system_manifest::SystemServiceManifest`].
+fn grant_init_manifest_capabilities(pid: ThreadId) -> Result<(), InitError> {
+    use crate::system_manifest::{self, SID_INIT};
+
+    let process_id = crate::process::ProcessId::from(pid);
+    let entry = system_manifest::lookup_by_id(SID_INIT)
+        .expect("init must be declared in the SystemServiceManifest");
+
+    system_manifest::assign_service_identity(process_id, entry.service_id);
+
+    for init_cap in entry.initial_capabilities {
+        match cap::create_root_capability(init_cap.resource, pid, init_cap.permissions) {
+            Ok(granted) => {
+                thread::add_thread_capability(pid, granted)
+                    .map_err(|_| InitError::CapabilityError)?;
+                log_info!(
+                    LOG_ORIGIN,
+                    "Granted init manifest capability {:?}",
+                    init_cap.resource
+                );
+            }
+            Err(e) => {
+                log_error!(
+                    LOG_ORIGIN,
+                    "Failed to grant init manifest capability {:?}: {:?}",
+                    init_cap.resource,
+                    e
+                );
+                return Err(InitError::CapabilityError);
+            }
+        }
+    }
 
     Ok(())
 }

@@ -1628,6 +1628,20 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
             let Some(mut cloned_cap) = parent_process.capability_table.get(cap_handle).cloned() else {
                 continue;
             };
+            // Spawn / klog authority is never inherited implicitly. fork() is a
+            // process-creation path too, and copying these would let a service
+            // hand its spawn authority to an unprivileged fork — a bypass of the
+            // SystemServiceManifest. Such authority must always be granted
+            // explicitly by the kernel from the manifest.
+            if crate::cap::is_spawn_authority(&cloned_cap.resource) {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "fork: not propagating non-inheritable capability {:?} to child pid={}",
+                    cloned_cap.resource,
+                    child_pid
+                );
+                continue;
+            }
             cloned_cap.owner = child_pid;
             if crate::process::add_process_capability(child_pid, cloned_cap.clone()).is_ok() {
                 let _ = crate::thread::mirror_process_capability_to_threads(child_pid, cloned_cap);
@@ -4290,6 +4304,57 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
         }
     };
 
+    // ── Kernel-side authorization (SystemServiceManifest) ──────────────────
+    //
+    // The SpawnSystemService capability gate (syscall policy) is already
+    // satisfied at this point, but the capability is NOT sufficient on its
+    // own: the kernel must confirm that `name` is a declared system service
+    // and that the caller's kernel-assigned identity is allowed to start it.
+    // This is what stops a holder of SpawnSystemService from spawning an
+    // arbitrary path, and stops a service from starting a child it was not
+    // declared to manage.
+    let caller_tid = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => {
+            log_warn!(LOG_ORIGIN, "spawn_process: no current thread");
+            return EPERM;
+        }
+    };
+    let caller_pid = match crate::thread::get_thread_process_id(caller_tid) {
+        Some(pid) => pid,
+        None => {
+            log_warn!(LOG_ORIGIN, "spawn_process: caller has no process id");
+            return EPERM;
+        }
+    };
+    let manifest_entry =
+        match crate::system_manifest::authorize_system_service_spawn(caller_pid, name) {
+            Ok(entry) => entry,
+            Err(err) => {
+                use crate::system_manifest::SpawnAuthError;
+                match err {
+                    SpawnAuthError::NotDeclared => log_warn!(
+                        LOG_ORIGIN,
+                        "spawn denied: service '{}' not declared in manifest (caller pid={})",
+                        name,
+                        caller_pid
+                    ),
+                    SpawnAuthError::CallerNotService => log_warn!(
+                        LOG_ORIGIN,
+                        "spawn denied: caller pid={} has no system-service identity",
+                        caller_pid
+                    ),
+                    SpawnAuthError::NotAllowedChild => log_warn!(
+                        LOG_ORIGIN,
+                        "spawn denied: service '{}' not allowed child of caller pid={}",
+                        name,
+                        caller_pid
+                    ),
+                }
+                return EPERM;
+            }
+        };
+
     log_info!(LOG_ORIGIN, "Looking up driver: '{}'", name);
 
     // First try to load from filesystem (dynamic loading)
@@ -4301,7 +4366,7 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 
         if let Some(data) = crate::drivers::fat32::open(&path) {
             log_info!(LOG_ORIGIN, "Loaded {} bytes from filesystem", data.len());
-            return spawn_from_image(&data, name);
+            return spawn_from_image(&data, name, Some(manifest_entry));
         }
         // Fall back to registry if not found in filesystem
         log_debug!(LOG_ORIGIN, "Not found in filesystem, trying registry");
@@ -4318,7 +4383,7 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
                 sections.bss_size,
                 sections.entry_offset
             );
-            match spawn_process_internal(name, &sections) {
+            match spawn_process_internal(name, &sections, Some(manifest_entry)) {
                 Ok(pid) => {
                     log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
                     pid.raw()
@@ -4334,7 +4399,11 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 }
 
 /// Spawn a process from raw image data
-fn spawn_from_image(data: &[u8], name: &str) -> u64 {
+fn spawn_from_image(
+    data: &[u8],
+    name: &str,
+    manifest_entry: Option<&'static crate::system_manifest::SystemServiceManifestEntry>,
+) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn";
 
     let sections = match crate::executable::parse_image(data) {
@@ -4354,7 +4423,7 @@ fn spawn_from_image(data: &[u8], name: &str) -> u64 {
         sections.entry_offset
     );
 
-    match spawn_process_internal(name, &sections) {
+    match spawn_process_internal(name, &sections, manifest_entry) {
         Ok(pid) => {
             log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
             pid.raw()
@@ -4364,6 +4433,14 @@ fn spawn_from_image(data: &[u8], name: &str) -> u64 {
             e
         }
     }
+}
+
+/// Returns true if `path` points into a directory reserved for system-service
+/// images. Such images may only be started via `SYS_SPAWN_PROCESS` under the
+/// SystemServiceManifest, never via `SYS_SPAWN_FROM_PATH` (applications).
+fn is_system_service_path(path: &str) -> bool {
+    const SYSTEM_DIRS: [&str; 3] = ["/drivers/", "/bin/", "/sbin/"];
+    SYSTEM_DIRS.iter().any(|dir| path.starts_with(dir))
 }
 
 /// Load driver from boot-loaded registry
@@ -4420,6 +4497,7 @@ fn get_static_driver_name(name: &str) -> &'static str {
 fn spawn_process_internal(
     name: &str,
     sections: &crate::executable::ExecutableSections,
+    manifest_entry: Option<&'static crate::system_manifest::SystemServiceManifestEntry>,
 ) -> Result<crate::thread::ThreadId, u64> {
     // Get static name for the thread
     let static_name = get_static_driver_name(name);
@@ -4742,9 +4820,35 @@ fn spawn_process_internal(
     // are complete so the thread cannot be scheduled before it has its caps.
     crate::thread::add_thread(thread);
 
-    // Register the very first spawned process as privileged (init).
-    // PRIVILEGED_PID is guarded by compare_exchange so subsequent spawns are no-ops.
-    policy::register_privileged_process(pid);
+    // ── Manifest-driven identity + initial capabilities ────────────────────
+    //
+    // System services receive a kernel-defined identity and the exact set of
+    // initial capabilities declared in the SystemServiceManifest — nothing is
+    // derived from boot order or name. Applications spawned by path
+    // (`manifest_entry == None`) get NO system-service identity and NO spawn
+    // authority here; they only receive the ambient device caps granted below.
+    //
+    // This is done before the thread is marked schedulable so the new process
+    // can never run with a capability set that differs from its declaration.
+    if let Some(entry) = manifest_entry {
+        crate::system_manifest::assign_service_identity(process_id, entry.service_id);
+        for init_cap in entry.initial_capabilities {
+            match cap::create_root_capability(init_cap.resource, pid, init_cap.permissions) {
+                Ok(granted) => {
+                    let _ = crate::thread::add_thread_capability(pid, granted);
+                }
+                Err(e) => {
+                    log_error!(
+                        "spawn",
+                        "Failed to grant manifest capability {:?} to '{}': {:?}",
+                        init_cap.resource,
+                        name,
+                        e
+                    );
+                }
+            }
+        }
+    }
 
     // Grant capabilities
     //
@@ -4932,6 +5036,32 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
         return ENOTSUP;
     }
 
+    // ── 3a. Reject path-traversal and absolute-path violations ─────────────
+    // SpawnFromPath authorizes *applications*, never system services. The
+    // kernel enforces this independently of app_launcher's userspace checks so
+    // a SpawnFromPath holder can never reach a system-service image.
+    if !path.starts_with('/') || path.split('/').any(|c| c == "..") {
+        log_warn!(
+            LOG_ORIGIN,
+            "spawn_from_path: '{}' is not a valid absolute application path",
+            path
+        );
+        return EPERM;
+    }
+
+    // ── 3b. Reject system-service directories ──────────────────────────────
+    // System service images live under /drivers. SYS_SPAWN_FROM_PATH must not
+    // be a back door into spawning declared system services — those go through
+    // SYS_SPAWN_PROCESS + the SystemServiceManifest.
+    if is_system_service_path(path) {
+        log_warn!(
+            LOG_ORIGIN,
+            "spawn denied: '{}' is a system-service path, not an application",
+            path
+        );
+        return EPERM;
+    }
+
     log_info!(LOG_ORIGIN, "spawn_from_path: loading '{}'", path);
 
     // ── 4. Read file from FAT32 ────────────────────────────────────────────
@@ -4992,8 +5122,9 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     let app_name = basename.strip_suffix(".atxf").unwrap_or(basename);
 
     // Spawn with generic name — Thread::name is &'static str so we use "app".
-    // The actual path is logged above for diagnostics.
-    match spawn_process_internal("app", &sections) {
+    // The actual path is logged above for diagnostics. Applications launched by
+    // path receive NO system-service identity and NO spawn authority (None).
+    match spawn_process_internal("app", &sections, None) {
         Ok(pid) => {
             log_info!(
                 LOG_ORIGIN,

@@ -1,43 +1,14 @@
 use super::*;
-use core::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
 
 // ============================================================================
-// Privileged Process Registry
+// Trust root
 // ============================================================================
-
-static PRIVILEGED_PID: AtomicU64 = AtomicU64::new(0);
-
-/// Register the first spawned userspace process as the privileged (init) process.
-/// Must be called exactly once; subsequent calls are no-ops (logged as warnings).
-pub(super) fn register_privileged_process(pid: crate::thread::ThreadId) {
-    let result = PRIVILEGED_PID.compare_exchange(
-        0,
-        pid.raw(),
-        AtomicOrd::SeqCst,
-        AtomicOrd::SeqCst,
-    );
-    match result {
-        Ok(_) => log_info!("syscall", "Privileged process registered: pid={}", pid),
-        Err(existing) => log_warn!(
-            "syscall",
-            "register_privileged_process called again (existing={}, new={}) — ignored",
-            existing,
-            pid
-        ),
-    }
-}
-
-/// Returns true if the current thread is the registered privileged process (init).
-#[inline]
-pub(super) fn has_privilege() -> bool {
-    let privileged = PRIVILEGED_PID.load(AtomicOrd::SeqCst);
-    if privileged == 0 {
-        return false;
-    }
-    crate::sched::current_thread()
-        .map(|t| t.raw() == privileged)
-        .unwrap_or(false)
-}
+//
+// There is intentionally no "privileged process" concept here. Authority is
+// not derived from boot order, PID, or process name. Every sensitive syscall
+// is gated by a specific capability (see `CapRequirement`), and the authority
+// to create processes or read the kernel log comes exclusively from the
+// kernel-side `SystemServiceManifest` (`crate::system_manifest`).
 
 // ============================================================================
 // Syscall Policy Table
@@ -56,9 +27,17 @@ pub(super) enum CapRequirement {
     /// Used to gate kernel-internal storage syscalls (200-212 except 203)
     /// so that only fsd can reach the raw filesystem driver.
     AnyFsNamespace,
-    /// Caller must be the registered privileged process (init bootstrap).
-    /// Covers operations that produce sensitive system-wide information.
-    PrivilegedOnly,
+    /// Caller must hold a `SpawnSystemService` cap with EXECUTE.
+    /// Necessary (not sufficient) for `SYS_SPAWN_PROCESS`; the handler also
+    /// enforces the manifest declaration and `allowed_children` rules.
+    SpawnSystemService,
+    /// Caller must hold a `SpawnFromPath` cap with EXECUTE.
+    /// Necessary (not sufficient) for `SYS_SPAWN_FROM_PATH`; the handler also
+    /// enforces path/extension/system-directory rules.
+    SpawnFromPath,
+    /// Caller must hold a `ReadKernelLog` cap with READ.
+    /// Gates `SYS_READ_KLOG`, which exposes sensitive system-wide information.
+    ReadKernelLog,
 }
 
 /// Per-syscall policy decision returned by `syscall_policy`.
@@ -116,7 +95,26 @@ pub(super) fn check_cap_requirement(req: CapRequirement) -> bool {
                 |r| matches!(r, ResourceType::FsNamespace { .. }),
             ),
 
-        CapRequirement::PrivilegedOnly => has_privilege(),
+        CapRequirement::SpawnSystemService =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::EXECUTE,
+                |r| matches!(r, ResourceType::SpawnSystemService),
+            ),
+
+        CapRequirement::SpawnFromPath =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::EXECUTE,
+                |r| matches!(r, ResourceType::SpawnFromPath),
+            ),
+
+        CapRequirement::ReadKernelLog =>
+            crate::thread::validate_thread_capability_by_type(
+                caller,
+                CapPermissions::READ,
+                |r| matches!(r, ResourceType::ReadKernelLog),
+            ),
     }
 }
 
@@ -217,16 +215,19 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
             => ExplicitlyUnrestricted,
 
         // ── Process / spawn ───────────────────────────────────────────────
-        // TODO: restrict SYS_SPAWN_* to processes holding a future Spawn cap.
-        //       For now, service_manager and app_launcher call these without
-        //       a dedicated capability.
-        SYS_SPAWN_PROCESS | SYS_SPAWN_FROM_PATH
-            => ExplicitlyUnrestricted,
+        // Deny-by-default: spawn is a kernel-authorized operation. The cap is
+        // necessary but not sufficient — the handlers additionally enforce the
+        // SystemServiceManifest (declaration + allowed_children) for
+        // SYS_SPAWN_PROCESS and path/system-directory rules for
+        // SYS_SPAWN_FROM_PATH.
+        SYS_SPAWN_PROCESS   => Requires(SpawnSystemService),
+        SYS_SPAWN_FROM_PATH => Requires(SpawnFromPath),
 
         // ── Sensitive system information ───────────────────────────────────
         // Kernel log exposes internal addresses, thread states, and error
-        // details.  Restricted to the privileged (init) process.
-        SYS_READ_KLOG => Requires(PrivilegedOnly),
+        // details.  Gated by an explicit ReadKernelLog capability — no generic
+        // "privileged process" concept.
+        SYS_READ_KLOG => Requires(ReadKernelLog),
 
         // Process enumeration — used by service_manager for health monitoring.
         SYS_LIST_PROCESSES | SYS_GET_PROCESS_COUNT
@@ -417,10 +418,13 @@ pub(super) fn resolve_cap_create_resource(
     match resource_type {
         0 => {
             let tid = crate::thread::ThreadId::from_raw(resource_id);
-            if tid != caller && !has_privilege() {
+            // A thread may only mint a Thread capability for itself. Forging a
+            // Thread cap for another thread is denied by default — there is no
+            // privileged process that can bypass this.
+            if tid != caller {
                 log_warn!(
                     "syscall",
-                    "cap_create: DENIED — unprivileged attempt to forge Thread cap \
+                    "cap_create: DENIED — attempt to forge Thread cap \
                      for tid={} by caller={}",
                     resource_id,
                     caller
@@ -433,27 +437,19 @@ pub(super) fn resolve_cap_create_resource(
             Ok(crate::cap::ResourceType::IpcPort { port_id: resource_id })
         }
         3 => {
-            if !has_privilege() {
-                log_warn!(
-                    "syscall",
-                    "cap_create: DENIED — unprivileged attempt to create Irq cap \
-                     irq={} by caller={}",
-                    resource_id,
-                    caller
-                );
-                return Err(EPERM);
-            }
-            if resource_id > 255 {
-                log_warn!(
-                    "syscall",
-                    "cap_create: invalid IRQ number {}",
-                    resource_id
-                );
-                return Err(EINVAL);
-            }
-            Ok(crate::cap::ResourceType::Irq {
-                irq_num: resource_id as u8,
-            })
+            // IRQ capabilities are not mintable from userspace. They are issued
+            // by the kernel to drivers through dedicated paths; allowing
+            // userspace to forge them would grant arbitrary hardware authority.
+            // Denied by default now that the privileged-process escape hatch is
+            // gone.
+            log_warn!(
+                "syscall",
+                "cap_create: DENIED — userspace cannot forge Irq cap \
+                 irq={} (caller={})",
+                resource_id,
+                caller
+            );
+            Err(EPERM)
         }
         _ => {
             log_warn!(
@@ -617,4 +613,52 @@ pub(super) fn validate_fd_ownership_with_owner(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{syscall_policy, CapRequirement, SysPolicy};
+    use super::super::{SYS_READ_KLOG, SYS_SPAWN_FROM_PATH, SYS_SPAWN_PROCESS};
+
+    /// Spawn syscalls must NOT be unrestricted: they require a specific cap.
+    #[test]
+    fn spawn_syscalls_are_capability_gated() {
+        assert!(matches!(
+            syscall_policy(SYS_SPAWN_PROCESS),
+            SysPolicy::Requires(CapRequirement::SpawnSystemService)
+        ));
+        assert!(matches!(
+            syscall_policy(SYS_SPAWN_FROM_PATH),
+            SysPolicy::Requires(CapRequirement::SpawnFromPath)
+        ));
+    }
+
+    /// Reading the kernel log requires the explicit ReadKernelLog cap; there is
+    /// no generic "privileged process" gate any more.
+    #[test]
+    fn klog_requires_read_kernel_log_cap() {
+        assert!(matches!(
+            syscall_policy(SYS_READ_KLOG),
+            SysPolicy::Requires(CapRequirement::ReadKernelLog)
+        ));
+    }
+
+    /// Unknown syscalls remain fail-closed.
+    #[test]
+    fn unknown_syscall_is_denied() {
+        assert!(matches!(
+            syscall_policy(u64::MAX),
+            SysPolicy::ExplicitlyDenied(_)
+        ));
+    }
+
+    /// SYS_SPAWN_FROM_PATH must never be a back door to system-service images.
+    #[test]
+    fn system_service_paths_are_rejected_for_path_spawn() {
+        assert!(super::super::is_system_service_path("/drivers/fsd.atxf"));
+        assert!(super::super::is_system_service_path("/bin/init.atxf"));
+        assert!(super::super::is_system_service_path("/sbin/netd.atxf"));
+        assert!(!super::super::is_system_service_path("/apps/user/fileman.atxf"));
+        assert!(!super::super::is_system_service_path("/apps/system/terminal.atxf"));
+    }
 }
