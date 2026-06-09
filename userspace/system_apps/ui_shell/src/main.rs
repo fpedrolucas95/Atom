@@ -605,6 +605,42 @@ fn send_wm_window_event(
     let _ = send(port, &full[..MessageHeader::SIZE + libipc::messages::WmWindowEventMsg::SIZE]);
 }
 
+/// Size (px) of each window control button (close / maximise / minimise).
+const WINDOW_BTN_SIZE: i32 = 12;
+/// Horizontal stride between consecutive control buttons.
+const WINDOW_BTN_STRIDE: i32 = 20;
+/// Right inset of the close button from the window's right edge.
+const WINDOW_BTN_INSET: i32 = 22;
+/// Extra padding around each button that still counts as a click.
+const WINDOW_BTN_HIT_PAD: i32 = 4;
+
+/// Single source of truth for the window control-button geometry, shared by the
+/// renderer (`draw_window`) and the hit-tester (`handle_click`) so the two can
+/// never drift out of alignment.
+///
+/// Returns `(btn_y, size, close_x, max_x, min_x)` — all in absolute screen
+/// coordinates, ordered right-to-left as drawn (close is rightmost).
+fn window_button_layout(win_x: i32, win_y: i32, win_w: u32) -> (i32, i32, i32, i32, i32) {
+    let btn_y = win_y + (WINDOW_HEADER_HEIGHT as i32 - WINDOW_BTN_SIZE) / 2;
+    let close_x = win_x + win_w as i32 - WINDOW_BTN_INSET;
+    let max_x = close_x - WINDOW_BTN_STRIDE;
+    let min_x = max_x - WINDOW_BTN_STRIDE;
+    (btn_y, WINDOW_BTN_SIZE, close_x, max_x, min_x)
+}
+
+/// Map a dock entry's executable name to the window title its process registers,
+/// so the dock can detect already-running instances and raise them instead of
+/// spawning duplicates.
+fn window_title_for(executable: &str) -> &str {
+    match executable {
+        "fileman" => "File Manager",
+        "terminal" => "Terminal",
+        "display_settings" => "Display Settings",
+        "tinygl_demo" => "TinyGL Gears",
+        other => other,
+    }
+}
+
 struct WindowManager {
     windows: Vec<Window>,
     next_id: WindowId,
@@ -703,15 +739,23 @@ impl WindowManager {
     fn close_window(&mut self, id: WindowId) {
         self.windows.retain(|w| w.id != id);
         if self.focused_id == Some(id) {
-            self.focused_id = self
-                .windows
-                .iter()
-                .filter(|w| w.visible && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.focused_id {
-                self.focus_window(new_focus);
-            }
+            self.refocus_topmost();
+        }
+    }
+
+    /// Give focus to the top-most eligible window. Resets `focused_id` first so
+    /// `focus_window` performs a real focus transition (sets the `focused` flag
+    /// and emits the `Focus` event) instead of short-circuiting on a stale id.
+    fn refocus_topmost(&mut self) {
+        self.focused_id = None;
+        let candidate = self
+            .windows
+            .iter()
+            .filter(|w| w.visible && w.state != WindowState::Minimized)
+            .last()
+            .map(|w| w.id);
+        if let Some(new_focus) = candidate {
+            self.focus_window(new_focus);
         }
     }
 
@@ -771,15 +815,7 @@ impl WindowManager {
             window.focused = false;
         }
         if self.focused_id == Some(id) {
-            self.focused_id = self
-                .windows
-                .iter()
-                .filter(|w| w.visible && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.focused_id {
-                self.focus_window(new_focus);
-            }
+            self.refocus_topmost();
         }
     }
 }
@@ -818,7 +854,6 @@ struct DesktopIcon {
 }
 
 struct DockApp {
-    label: String,
     executable: String,
     color: Color,
     monogram: String,
@@ -1386,13 +1421,12 @@ impl Compositor {
             let exists = fs::stat(&sys_path).is_ok() || fs::stat(&user_path).is_ok();
 
             if exists {
-                let mono = if exec.len() >= 2 {
-                    alloc::format!("{}{}", exec.as_bytes()[0] as char, exec.as_bytes()[1] as char)
-                } else {
-                    String::from(*exec)
-                };
+                // A single, capitalised initial from the friendly name reads like
+                // an app-icon glyph instead of a cryptic 2-letter exec prefix.
+                let initial = label.chars().next().unwrap_or('?').to_ascii_uppercase();
+                let mut mono = String::new();
+                mono.push(initial);
                 apps.push(DockApp {
-                    label: String::from(*label),
                     executable: String::from(*exec),
                     color: *color,
                     monogram: mono,
@@ -1647,22 +1681,14 @@ impl Compositor {
                 if let Some(msg) =
                     libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..])
                 {
-                    if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                        window.content_dirty = true;
-                        window.surface_ready = true;
-                        self.dirty = true;
-                    }
+                    self.present_window(msg.window_id);
                 }
             }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
                     if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
-                        if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                            window.content_dirty = true;
-                            window.surface_ready = true;
-                            self.dirty = true;
-                        }
+                        self.present_window(msg.window_id);
                     }
                 }
             }
@@ -1737,11 +1763,7 @@ impl Compositor {
                 if let Some(msg) =
                     libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..])
                 {
-                    if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                        window.content_dirty = true;
-                        window.surface_ready = true;
-                        self.dirty = true;
-                    }
+                    self.present_window(msg.window_id);
                 }
             }
             MessageType::MouseMove => {
@@ -1790,11 +1812,7 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
                     if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
-                        if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                            window.content_dirty = true;
-                            window.surface_ready = true;
-                        }
-                        self.dirty = true;
+                        self.present_window(msg.window_id);
                     }
                 }
             }
@@ -1987,26 +2005,50 @@ impl Compositor {
             self.dirty = true;
         }
 
+        // The top bar and the dock are always rendered on top of every window,
+        // so they must also win hit-testing — otherwise a window sitting behind
+        // them would silently swallow the click.  Consume any click that lands
+        // on this chrome before consulting the window stack.
+        if self.is_on_panel(y) {
+            return;
+        }
+        if self.is_on_dock(x, y) {
+            if let Some(icon_index) = self.dock_icon_at(x, y) {
+                self.handle_dock_click(icon_index);
+            }
+            return;
+        }
+
         if let Some(id) = self.wm.window_at(x, y) {
             if self.wm.focused_id != Some(id) {
+                let prev = self.wm.focused_id;
                 self.wm.focus_window(id);
-                self.dirty = true;
+                // Repaint both the newly focused window (it may have been behind
+                // others) and the one that lost focus (its frame tint changes).
+                if let Some(p) = prev {
+                    self.mark_window_dirty(p);
+                }
+                self.mark_window_dirty(id);
             }
 
             self.captured_window = Some(id);
 
             if let Some(w) = self.wm.get_window(id) {
-                let btn_y = w.y + (WINDOW_HEADER_HEIGHT as i32 - 12) / 2;
-                let btn_size = 12;
-                let close_x = w.x + w.width as i32 - 22;
-                let max_x = close_x - 20;
-                let min_x = max_x - 20;
+                let (btn_y, btn_size, close_x, max_x, min_x) =
+                    window_button_layout(w.x, w.y, w.width);
+                let pad = WINDOW_BTN_HIT_PAD;
+                let hit = |bx: i32| {
+                    x >= bx - pad
+                        && x < bx + btn_size + pad
+                        && y >= btn_y - pad
+                        && y < btn_y + btn_size + pad
+                };
 
-                if y >= btn_y && y < btn_y + btn_size {
-                    if x >= close_x && x < close_x + btn_size {
+                if w.state != WindowState::Minimized {
+                    if hit(close_x) {
                         self.handle_close_window(id);
                         return;
-                    } else if x >= max_x && x < max_x + btn_size {
+                    } else if hit(max_x) {
                         let (wx, wy, ww, wh) = self.get_work_area();
                         let old_rect =
                             Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
@@ -2017,7 +2059,7 @@ impl Compositor {
                             self.dirty = true;
                         }
                         return;
-                    } else if x >= min_x && x < min_x + btn_size {
+                    } else if hit(min_x) {
                         let rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         self.wm.minimize_window(id);
                         self.mark_dirty_rect(rect);
@@ -2073,11 +2115,6 @@ impl Compositor {
             return;
         }
 
-        if let Some(icon_index) = self.dock_icon_at(x, y) {
-            self.handle_dock_click(icon_index);
-            return;
-        }
-
         if let Some(icon_idx) = self.icon_at(x, y) {
             let current = self.click_counter;
             if self.last_click_icon == Some(icon_idx)
@@ -2106,19 +2143,28 @@ impl Compositor {
                 let dx = x - start_mouse_x;
                 let dy = y - start_mouse_y;
 
-                let (old_rect, new_rect) = if let Some(w) = self.wm.get_window(window_id) {
-                    let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
-                    let nw_x = start_win_x + dx;
-                    let nw_y = start_win_y + dy;
-                    let new = Rect::new(nw_x - 4, nw_y - 4, w.width + 8, w.height + 8);
-                    (old, new)
-                } else {
-                    return;
-                };
+                let screen_w = self.fb.width() as i32;
+                let (old_rect, new_rect, clamped_x, clamped_y) =
+                    if let Some(w) = self.wm.get_window(window_id) {
+                        let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
+                        // Keep the title bar reachable. The framebuffer primitives
+                        // are u32-based and only clip on the high edge, so a
+                        // negative x would wrap and render nothing (the "transparent"
+                        // bug on the left). Pin the left edge at 0; the window may
+                        // still slide partly off the right, where clipping is sound.
+                        let min_visible = 80i32;
+                        let max_x = (screen_w - min_visible).max(0);
+                        let nx = (start_win_x + dx).clamp(0, max_x);
+                        let ny = (start_win_y + dy).max(PANEL_HEIGHT as i32);
+                        let new = Rect::new(nx - 4, ny - 4, w.width + 8, w.height + 8);
+                        (old, new, nx, ny)
+                    } else {
+                        return;
+                    };
 
                 if let Some(w) = self.wm.get_window_mut(window_id) {
-                    w.x = start_win_x + dx;
-                    w.y = start_win_y + dy;
+                    w.x = clamped_x;
+                    w.y = clamped_y;
                 }
 
                 self.mark_dirty_rect(old_rect);
@@ -2278,16 +2324,9 @@ impl Compositor {
         }
 
         if self.wm.focused_id == Some(id) {
-            self.wm.focused_id = self
-                .wm
-                .windows
-                .iter()
-                .filter(|w| w.visible && w.id != id && w.state != WindowState::Minimized)
-                .last()
-                .map(|w| w.id);
-            if let Some(new_focus) = self.wm.focused_id {
-                self.wm.focus_window(new_focus);
-            }
+            // The window is no longer visible (set above), so refocus_topmost
+            // will skip it and hand focus to the remaining top-most window.
+            self.wm.refocus_topmost();
         }
 
         self.pending_close.push(PendingClose {
@@ -2318,6 +2357,33 @@ impl Compositor {
         }
     }
 
+    /// Mark a window's full on-screen footprint (frame + drop shadow) dirty so
+    /// the next `draw_all` actually repaints it. The redraw is otherwise bounded
+    /// by whatever stale `dirty_rect` the last cursor move left behind, which is
+    /// why a freshly presented or freshly raised window could stay invisible
+    /// until unrelated damage happened to cross it.
+    fn mark_window_dirty(&mut self, window_id: WindowId) {
+        if let Some(w) = self.wm.get_window(window_id) {
+            let rect = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
+            self.mark_dirty_rect(rect);
+        }
+    }
+
+    /// Flag a window's freshly rendered surface as ready and mark its footprint
+    /// dirty. Called whenever an app commits/presents a frame. Uses a single
+    /// window lookup on this hot path.
+    fn present_window(&mut self, window_id: WindowId) {
+        let rect = match self.wm.get_window_mut(window_id) {
+            Some(window) => {
+                window.content_dirty = true;
+                window.surface_ready = true;
+                Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12)
+            }
+            None => return,
+        };
+        self.mark_dirty_rect(rect);
+    }
+
     fn mark_dirty_rect(&mut self, rect: Rect) {
         let screen = Rect::new(0, 0, self.fb.width(), self.fb.height());
         let x1 = rect.x.max(0);
@@ -2338,21 +2404,31 @@ impl Compositor {
         self.dirty = true;
     }
 
-    fn handle_video_mode_changed(&mut self) {
+    /// Re-read the active framebuffer from the kernel and reallocate the
+    /// backbuffer to match. Used after any video-mode change (runtime or the
+    /// one re-applied from persisted config at boot). Returns `false` — leaving
+    /// the previous framebuffer untouched — if the new one could not be built,
+    /// so callers never run against a half-torn-down framebuffer.
+    fn rebuild_framebuffer(&mut self) -> bool {
         let new_fb = match Framebuffer::new() {
             Some(fb) => fb,
-            None => return,
+            None => return false,
         };
 
-        let _ = shared_region_unmap(self.backbuffer_region);
-        let _ = shared_region_destroy(self.backbuffer_region);
-
+        // Allocate and map the new backbuffer *before* releasing the old one,
+        // so an allocation failure leaves the current framebuffer intact.
         let bb_size = (new_fb.stride() * new_fb.height() * 4) as usize;
-        let bb_region =
-            shared_region_create(bb_size).expect("Failed to realloc backbuffer region");
-        let bb_ptr = shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE)
-            .expect("Failed to map new backbuffer") as *mut u32;
-
+        let bb_region = match shared_region_create(bb_size) {
+            Ok(region) => region,
+            Err(_) => return false,
+        };
+        let bb_ptr = match shared_region_map(bb_region, 0, SharedMemFlags::READ_WRITE) {
+            Ok(ptr) => ptr as *mut u32,
+            Err(_) => {
+                let _ = shared_region_destroy(bb_region);
+                return false;
+            }
+        };
         let new_backbuffer_fb = match Framebuffer::new_custom(
             bb_ptr as u64,
             new_fb.width(),
@@ -2361,13 +2437,20 @@ impl Compositor {
             new_fb.bytes_per_pixel() as u32,
         ) {
             Some(fb) => fb,
-            None => return,
+            None => {
+                let _ = shared_region_unmap(bb_region);
+                let _ = shared_region_destroy(bb_region);
+                return false;
+            }
         };
 
+        let old_region = self.backbuffer_region;
         self.fb = new_fb;
         self.backbuffer_fb = new_backbuffer_fb;
         self.backbuffer_region = bb_region;
         self.backbuffer_ptr = bb_ptr;
+        let _ = shared_region_unmap(old_region);
+        let _ = shared_region_destroy(old_region);
 
         let w = self.fb.width() as i32;
         let h = self.fb.height() as i32;
@@ -2381,6 +2464,35 @@ impl Compositor {
             ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
 
         self.wallpaper_cache_valid = false;
+        true
+    }
+
+    /// Re-apply a persisted resolution by programming the video mode and
+    /// rebuilding the framebuffer. No-op when it already matches or the mode is
+    /// unavailable on this hardware (in which case the current mode is kept).
+    fn apply_resolution(&mut self, width: u32, height: u32) {
+        if width == self.fb.width() && height == self.fb.height() {
+            return;
+        }
+        if width == 0
+            || height == 0
+            || width > u16::MAX as u32
+            || height > u16::MAX as u32
+        {
+            return;
+        }
+        if atom_syscall::graphics::set_video_mode(width as u16, height as u16, 32).is_err() {
+            return;
+        }
+        if !self.rebuild_framebuffer() {
+            log("ui_shell: framebuffer rebuild failed after resolution change");
+        }
+    }
+
+    fn handle_video_mode_changed(&mut self) {
+        if !self.rebuild_framebuffer() {
+            return;
+        }
         if matches!(self.current_wallpaper_source, CurrentWallpaperSource::Image { .. }) {
             self.wallpaper_recompute_pending = true;
         }
@@ -2544,6 +2656,16 @@ impl Compositor {
                 }
             }
         }
+
+        // Re-apply the persisted resolution first, so the wallpaper is scaled to
+        // the final display size. set_video_mode is a runtime change, so the saved
+        // mode must be programmed again on every boot. Then keep the in-memory
+        // config in sync with the resolution actually in effect (the saved mode
+        // may be unavailable on this hardware, in which case we keep the current).
+        self.apply_resolution(config.resolution.width, config.resolution.height);
+        config.resolution =
+            ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
+
         let _ = self.apply_config(config, false);
     }
 
@@ -2886,10 +3008,37 @@ impl Compositor {
     }
 
     fn handle_dock_click(&mut self, icon_index: usize) {
-        if icon_index < self.dock_apps.len() {
-            let executable = self.dock_apps[icon_index].executable.clone();
-            self.spawn_app(&executable);
+        if icon_index >= self.dock_apps.len() {
+            return;
         }
+        let executable = self.dock_apps[icon_index].executable.clone();
+        let title = window_title_for(&executable);
+
+        // If the app is already running, raise (and un-minimise) it instead of
+        // launching a second copy. Minimized windows keep `visible == true`, so
+        // they are matched here and restored by `focus_window`.
+        if let Some(id) = self
+            .wm
+            .windows
+            .iter()
+            .find(|w| w.visible && w.title == title)
+            .map(|w| w.id)
+        {
+            let prev = self.wm.focused_id;
+            self.wm.focus_window(id);
+            // Repaint the raised window's footprint (and the one that just lost
+            // focus) — focus_window only reorders/un-minimises, so the restored
+            // window would otherwise stay hidden until unrelated damage.
+            if let Some(p) = prev {
+                if p != id {
+                    self.mark_window_dirty(p);
+                }
+            }
+            self.mark_window_dirty(id);
+            return;
+        }
+
+        self.spawn_app(&executable);
     }
 
     fn dock_layout(&self) -> Option<(i32, i32, u32, u32, i32, i32, i32, i32)> {
@@ -3026,11 +3175,6 @@ impl Compositor {
             }
         }
 
-        let panel_rect = Rect::new(0, 0, self.fb.width(), PANEL_HEIGHT);
-        if panel_rect.intersects(&draw_rect) {
-            self.draw_panel();
-        }
-
         for window in self.wm.windows.iter() {
             if window.visible {
                 let win_rect =
@@ -3039,6 +3183,13 @@ impl Compositor {
                     self.draw_window(window);
                 }
             }
+        }
+
+        // The top bar is drawn after the windows so it always stays on top —
+        // windows can no longer paint over it.
+        let panel_rect = Rect::new(0, 0, self.fb.width(), PANEL_HEIGHT);
+        if panel_rect.intersects(&draw_rect) {
+            self.draw_panel();
         }
 
         if let Some((dx, dy, dw, dh, _, _, _, _)) = self.dock_layout() {
@@ -3240,11 +3391,29 @@ impl Compositor {
         let w = window.width;
         let h = window.height;
 
-        if window.state != WindowState::Maximized {
-            self.backbuffer_fb
-                .fill_rect_rounded_alpha(x + 2, y + 4, w + 4, h + 4, 6, theme::SHADOW, 60);
-            self.backbuffer_fb
-                .fill_rect_rounded_alpha(x + 1, y + 2, w + 2, h + 2, 4, theme::SHADOW, 90);
+        // A maximised window fills the work area edge-to-edge, so rounded corners
+        // would only carve odd notches against the wallpaper — square it off and
+        // drop the shadow.
+        let maximized = window.state == WindowState::Maximized;
+        let radius = if maximized {
+            0
+        } else {
+            atom_theme::shell::WINDOW_RADIUS as u32
+        };
+
+        if !maximized {
+            // Soft, even drop shadow whose corner radius tracks the window's, so
+            // the halo hugs the frame instead of poking out at the corners.
+            let r = radius;
+            self.backbuffer_fb.fill_rect_rounded_alpha(
+                x.saturating_sub(3), y.saturating_sub(1), w + 6, h + 8, r + 3, theme::SHADOW, 28,
+            );
+            self.backbuffer_fb.fill_rect_rounded_alpha(
+                x.saturating_sub(2), y, w + 4, h + 6, r + 2, theme::SHADOW, 44,
+            );
+            self.backbuffer_fb.fill_rect_rounded_alpha(
+                x.saturating_sub(1), y + 1, w + 2, h + 4, r + 1, theme::SHADOW, 62,
+            );
         }
 
         let border_color = if window.focused {
@@ -3253,16 +3422,9 @@ impl Compositor {
             theme::WINDOW_BORDER
         };
 
-        self.backbuffer_fb.fill_rect_rounded_aa(
-            x,
-            y,
-            w,
-            h,
-            atom_theme::shell::WINDOW_RADIUS as u32,
-            border_color,
-        );
+        self.backbuffer_fb.fill_rect_rounded_aa(x, y, w, h, radius, border_color);
 
-        let inner_r = atom_theme::shell::WINDOW_RADIUS as u32 - WINDOW_BORDER_WIDTH;
+        let inner_r = radius.saturating_sub(WINDOW_BORDER_WIDTH);
         let header_color = if window.focused {
             theme::WINDOW_HEADER_FOCUSED
         } else {
@@ -3293,12 +3455,14 @@ impl Compositor {
         self.backbuffer_fb
             .draw_string(x + 16, title_y, &window.title, title_color, header_color);
 
-        let btn_y = y + (WINDOW_HEADER_HEIGHT - 12) / 2;
-        let btn_size = 12u32;
-        let btn_radius = 6u32;
-        let close_x = x + w - 22;
-        let max_x = close_x - 20;
-        let min_x = max_x - 20;
+        let (btn_y_i, btn_size_i, close_xi, max_xi, min_xi) =
+            window_button_layout(window.x, window.y, w);
+        let btn_y = btn_y_i as u32;
+        let btn_size = btn_size_i as u32;
+        let btn_radius = btn_size / 2;
+        let close_x = close_xi as u32;
+        let max_x = max_xi as u32;
+        let min_x = min_xi as u32;
 
         if window.focused {
             self.backbuffer_fb
@@ -3367,20 +3531,38 @@ impl Compositor {
         self.backbuffer_fb
             .fill_rect(dock_x + dock_r, dock_y, dock_width - dock_r * 2, 1, theme::DOCK_BORDER);
 
+        let tile_r = atom_theme::shell::DOCK_ITEM_RADIUS as u32;
         for (i, app) in self.dock_apps.iter().enumerate() {
             let ix = start_x + (i as u32 * (icon_size + spacing));
+
+            // Rounded, colour-filled app tile — reads like a real app icon and
+            // gives each entry a clear, aligned click target.
+            self.backbuffer_fb
+                .fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, tile_r, app.color);
+
+            // Pick a glyph colour that stays legible on the tile's fill.
+            let lum = (app.color.r as u32 * 299
+                + app.color.g as u32 * 587
+                + app.color.b as u32 * 114)
+                / 1000;
+            let glyph = if lum > 150 {
+                atom_theme::colors::ATOM_COLOR_BG
+            } else {
+                Color::WHITE
+            };
 
             let label_len = app.monogram.len() as u32 * 8;
             let lx = ix + (icon_size - label_len) / 2;
             let ly = icon_y + (icon_size - 8) / 2;
             self.backbuffer_fb
-                .draw_string(lx, ly, &app.monogram, app.color, theme::DOCK_BG);
+                .draw_string(lx, ly, &app.monogram, glyph, app.color);
 
+            let running_title = window_title_for(&app.executable);
             if self
                 .wm
                 .windows
                 .iter()
-                .any(|w| w.title == app.label && w.visible)
+                .any(|w| w.visible && w.title == running_title)
             {
                 let dot_x = ix + icon_size / 2 - 2;
                 let dot_y = icon_y + icon_size + 3;
@@ -3429,30 +3611,55 @@ impl Compositor {
     }
 
     fn draw_cursor(&self) {
-        let cursor_shape = [
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 2, 1, 0, 0, 0, 0, 0, 0, 0],
-            [1, 2, 2, 1, 0, 0, 0, 0, 0, 0],
-            [1, 2, 2, 2, 1, 0, 0, 0, 0, 0],
-            [1, 2, 2, 2, 2, 1, 0, 0, 0, 0],
-            [1, 2, 2, 2, 2, 2, 1, 0, 0, 0],
-            [1, 2, 2, 2, 2, 2, 2, 1, 0, 0],
-            [1, 2, 2, 2, 2, 2, 2, 2, 1, 0],
-            [1, 2, 2, 2, 2, 2, 2, 2, 2, 1],
-            [1, 2, 2, 2, 2, 1, 1, 1, 1, 1],
-            [1, 2, 1, 2, 1, 0, 0, 0, 0, 0],
-            [1, 1, 0, 1, 2, 1, 0, 0, 0, 0],
-            [0, 0, 0, 1, 2, 1, 0, 0, 0, 0],
-            [0, 0, 0, 0, 1, 2, 1, 0, 0, 0],
-            [0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+        // Classic arrow pointer. 0 = transparent, 1 = outline, 2 = fill.
+        // The hotspot is the tip at the top-left pixel (0,0), matching the
+        // coordinate used for click hit-testing.
+        const CURSOR_W: usize = 11;
+        let cursor_shape: [[u8; CURSOR_W]; 17] = [
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+            [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
+            [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+            [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0],
+            [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0],
+            [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+            [1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+            [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0],
         ];
+
+        let cx = self.cursor.x as u32;
+        let cy = self.cursor.y as u32;
+        let fb_w = self.backbuffer_fb.width();
+        let fb_h = self.backbuffer_fb.height();
+
+        // Soft drop shadow (offset by 1px) for depth and to keep the pointer
+        // legible over both dark wallpaper and light app surfaces.
+        for (row, cols) in cursor_shape.iter().enumerate() {
+            for (col, &pixel) in cols.iter().enumerate() {
+                if pixel == 0 {
+                    continue;
+                }
+                let px = cx + col as u32 + 1;
+                let py = cy + row as u32 + 1;
+                if px < fb_w && py < fb_h {
+                    self.backbuffer_fb.fill_rect_alpha(px, py, 1, 1, Color::BLACK, 70);
+                }
+            }
+        }
 
         for (row, cols) in cursor_shape.iter().enumerate() {
             for (col, &pixel) in cols.iter().enumerate() {
-                let px = self.cursor.x as u32 + col as u32;
-                let py = self.cursor.y as u32 + row as u32;
-                if px < self.backbuffer_fb.width() && py < self.backbuffer_fb.height() {
+                let px = cx + col as u32;
+                let py = cy + row as u32;
+                if px < fb_w && py < fb_h {
                     match pixel {
                         1 => self.backbuffer_fb.draw_pixel(px, py, theme::CURSOR_OUTLINE),
                         2 => self.backbuffer_fb.draw_pixel(px, py, theme::CURSOR_FILL),
