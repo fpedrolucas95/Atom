@@ -145,6 +145,17 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         | SYS_IPC_WAIT_ANY | SYS_IPC_CREATE_PORT_WITH_ID
             => ExplicitlyUnrestricted,
 
+        // ── Authenticated IPC support (PR2) ───────────────────────────────
+        // recv_envelope only reveals who sent to the caller's OWN port, so it
+        // is no more sensitive than recv. The query syscalls expose read-only
+        // facts (manifest name allowlist, port owner, process liveness) that
+        // namesvc needs to authorise registration; none grant authority.
+        // SYS_IPC_CREATE_PORT_WITH_ID additionally enforces the ReservedPort
+        // capability inside its handler for ids 1..=255.
+        SYS_IPC_RECV_ENVELOPE | SYS_SERVICE_NAME_ALLOWED
+        | SYS_IPC_PORT_OWNER | SYS_PROCESS_ALIVE
+            => ExplicitlyUnrestricted,
+
         // ── Capability management ──────────────────────────────────────────
         // Individual handlers enforce ownership / derivation rules.
         // (sys_cap_create is additionally guarded in its own body.)
@@ -619,6 +630,30 @@ pub(super) fn validate_fd_ownership_with_owner(
 mod tests {
     use super::{syscall_policy, CapRequirement, SysPolicy};
     use super::super::{SYS_READ_KLOG, SYS_SPAWN_FROM_PATH, SYS_SPAWN_PROCESS};
+    use super::super::{
+        SYS_IPC_CREATE_PORT_WITH_ID, SYS_IPC_PORT_OWNER, SYS_IPC_RECV_ENVELOPE,
+        SYS_PROCESS_ALIVE, SYS_SERVICE_NAME_ALLOWED,
+    };
+
+    /// The authenticated-IPC support syscalls must be classified (never
+    /// fail-closed/denied). Reserved-port enforcement happens inside the
+    /// create_port_with_id handler, so it stays "unrestricted" at the table.
+    #[test]
+    fn authenticated_ipc_syscalls_are_classified() {
+        for num in [
+            SYS_IPC_RECV_ENVELOPE,
+            SYS_SERVICE_NAME_ALLOWED,
+            SYS_IPC_PORT_OWNER,
+            SYS_PROCESS_ALIVE,
+            SYS_IPC_CREATE_PORT_WITH_ID,
+        ] {
+            assert!(
+                matches!(syscall_policy(num), SysPolicy::ExplicitlyUnrestricted),
+                "syscall {} must be classified as unrestricted at the table",
+                num
+            );
+        }
+    }
 
     /// Spawn syscalls must NOT be unrestricted: they require a specific cap.
     #[test]

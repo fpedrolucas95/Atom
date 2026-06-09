@@ -101,6 +101,10 @@ pub struct PortId(u64);
 /// Dynamic allocation starts at 256.
 const RESERVED_PORT_RANGE: u64 = 256;
 
+/// Highest reserved port id (inclusive). Ports `1..=MAX_RESERVED_PORT` require a
+/// specific `ReservedPort` capability to bind via `SYS_IPC_CREATE_PORT_WITH_ID`.
+pub const MAX_RESERVED_PORT: u64 = RESERVED_PORT_RANGE - 1;
+
 impl PortId {
     pub fn new() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(RESERVED_PORT_RANGE);

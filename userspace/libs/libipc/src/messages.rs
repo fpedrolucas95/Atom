@@ -1697,6 +1697,33 @@ impl NsResponseMsg {
     }
 }
 
+/// Message to unregister a service from the name service.
+///
+/// Authorisation is performed by namesvc using the kernel IPC envelope (the
+/// sender must be the current owner of the registration), never the payload.
+#[derive(Debug, Clone, Copy)]
+pub struct NsUnregisterMsg {
+    /// The name of the service to unregister (fixed-size, null padded).
+    pub name: [u8; 32],
+}
+
+impl NsUnregisterMsg {
+    pub const SIZE: usize = 32;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.name
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        let mut name = [0u8; 32];
+        name.copy_from_slice(&bytes[0..32]);
+        Some(Self { name })
+    }
+}
+
 // ============================================================================
 // App Launcher Protocol Messages (1200-1299)
 // ============================================================================

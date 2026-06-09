@@ -131,6 +131,71 @@ pub fn try_recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<Option<usize>>
     }
 }
 
+/// Kernel-generated metadata describing the sender of a received message.
+/// Re-exported from the shared ABI so receivers don't trust self-reported
+/// identity in the payload.
+pub use atom_abi::IpcEnvelope;
+
+/// Receive a message together with its kernel-generated [`IpcEnvelope`].
+///
+/// Non-blocking. On success returns the number of payload bytes copied into
+/// `buffer` and fills `envelope` with the authenticated sender identity. The
+/// envelope's `sender_process`, `sender_thread`, `sender_service_id` and
+/// `transferred_capability` come straight from kernel state and cannot be
+/// forged by the sender. Returns `Ok(None)` when no message is queued.
+pub fn recv_envelope(
+    port: PortId,
+    envelope: &mut IpcEnvelope,
+    buffer: &mut [u8],
+) -> SyscallResult<Option<usize>> {
+    let result = unsafe {
+        syscall4(
+            SYS_IPC_RECV_ENVELOPE,
+            port,
+            envelope as *mut IpcEnvelope as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )
+    };
+
+    if result == EWOULDBLOCK {
+        Ok(None)
+    } else if crate::error::is_syscall_error(result) {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(Some(result as usize))
+    }
+}
+
+/// Ask the kernel whether `name` is the canonical name or a declared alias for
+/// `service_id`, per the SystemServiceManifest. Authoritative allowlist used by
+/// namesvc to authorise a registration request.
+pub fn service_name_allowed(service_id: u64, name: &str) -> bool {
+    use crate::raw::syscall3;
+    let result = unsafe {
+        syscall3(
+            SYS_SERVICE_NAME_ALLOWED,
+            service_id,
+            name.as_ptr() as u64,
+            name.len() as u64,
+        )
+    };
+    result == 1
+}
+
+/// Return the process id that owns `port`, or 0 if the port has no owner.
+/// Used to verify that a service announcing a port actually owns it.
+pub fn port_owner(port: PortId) -> u64 {
+    unsafe { syscall1(SYS_IPC_PORT_OWNER, port) }
+}
+
+/// Return `true` if process `pid` exists and has not terminated. Used to
+/// confirm a previous registration owner is gone before allowing replacement.
+pub fn process_alive(pid: u64) -> bool {
+    let result = unsafe { syscall1(SYS_PROCESS_ALIVE, pid) };
+    result == 1
+}
+
 /// Send a message asynchronously
 ///
 /// Returns immediately without waiting for delivery.

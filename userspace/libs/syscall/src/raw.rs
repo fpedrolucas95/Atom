@@ -142,6 +142,16 @@ pub mod numbers {
     pub const SYS_MPROTECT:  u64 = 102;
     pub const SYS_BRK:       u64 = 103;
     pub const SYS_FORK:      u64 = 104;
+
+    // Authenticated IPC (PR2)
+    /// recv_envelope(port, env_ptr, buf_ptr, buf_len) -> payload_len | errno
+    pub const SYS_IPC_RECV_ENVELOPE:    u64 = 105;
+    /// service_name_allowed(service_id, name_ptr, name_len) -> 1 | 0
+    pub const SYS_SERVICE_NAME_ALLOWED: u64 = 106;
+    /// ipc_port_owner(port_id) -> owner_process_raw | 0
+    pub const SYS_IPC_PORT_OWNER:       u64 = 107;
+    /// process_alive(pid) -> 1 | 0
+    pub const SYS_PROCESS_ALIVE:        u64 = 108;
 }
 
 pub fn pci_get_bar(dev_cap: u64, index: u8, info: &mut atom_abi::PciBarInfo) -> u64 {

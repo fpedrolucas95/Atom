@@ -260,6 +260,25 @@ pub enum ResourceType {
     /// `init` (and any future diagnostic service declared in the manifest);
     /// it is explicitly non-inheritable.
     ReadKernelLog,
+    /// Authority to create a specific reserved IPC port (id in 1..=255) via
+    /// `SYS_IPC_CREATE_PORT_WITH_ID`.
+    ///
+    /// Specific per-port: holding `ReservedPort { port_id: 2 }` does NOT
+    /// authorise creating port 1 or 3. Granted only via the
+    /// `SystemServiceManifest`; explicitly non-inheritable.
+    ReservedPort {
+        port_id: u64,
+    },
+    /// Kernel-defined stable identity of a system service, mirroring the
+    /// `ServiceId` assigned at spawn from the `SystemServiceManifest`.
+    ///
+    /// The process cannot choose its own `service_id`; it is granted by the
+    /// kernel. Used as the capability-model form of service identity; the
+    /// authoritative runtime lookup for IPC envelopes is the kernel identity
+    /// table in `crate::system_manifest`. Explicitly non-inheritable.
+    ServiceIdentity {
+        service_id: u32,
+    },
 }
 
 /// Returns `true` for capabilities that confer process-creation or kernel-log
@@ -273,6 +292,19 @@ pub fn is_spawn_authority(resource: &ResourceType) -> bool {
             | ResourceType::SpawnFromPath
             | ResourceType::ReadKernelLog
     )
+}
+
+/// Returns `true` for capabilities that must never be propagated to a child
+/// implicitly (e.g. via `fork()`). This is a superset of
+/// [`is_spawn_authority`] that also covers reserved-port and service-identity
+/// authority: those bind a process to a specific port or kernel identity and
+/// must only ever be granted explicitly by the kernel from the manifest.
+pub fn is_non_inheritable(resource: &ResourceType) -> bool {
+    is_spawn_authority(resource)
+        || matches!(
+            resource,
+            ResourceType::ReservedPort { .. } | ResourceType::ServiceIdentity { .. }
+        )
 }
 
 /// Type of input device for capability granting
@@ -773,7 +805,7 @@ impl CapabilityManager {
         let caps = self.global_caps.lock();
         let total = caps.len();
 
-        let mut by_type = [0usize; 16];
+        let mut by_type = [0usize; 18];
 
         for cap in caps.values() {
             let idx = match cap.resource {
@@ -793,6 +825,8 @@ impl CapabilityManager {
                 ResourceType::SpawnSystemService => 13,
                 ResourceType::SpawnFromPath => 14,
                 ResourceType::ReadKernelLog => 15,
+                ResourceType::ReservedPort { .. } => 16,
+                ResourceType::ServiceIdentity { .. } => 17,
             };
             by_type[idx] += 1;
         }

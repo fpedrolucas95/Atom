@@ -202,6 +202,26 @@ pub const SYS_BRK: u64 = 103;
 pub const SYS_FORK: u64 = 104;
 
 // ---------------------------------------------------------------------------
+// Authenticated IPC (PR2) — kernel-generated sender identity + reserved-port
+// and service-identity queries used by namesvc to authorise registration.
+// ---------------------------------------------------------------------------
+
+/// recv_envelope(port, env_ptr, buf_ptr, buf_len) -> payload_len | errno.
+/// Non-blocking. Writes a kernel-generated `IpcEnvelope` (sender process/thread,
+/// sender service id, transferred capability) before the payload. Userspace
+/// cannot forge any envelope field.
+pub const SYS_IPC_RECV_ENVELOPE: u64 = 105;
+/// service_name_allowed(service_id, name_ptr, name_len) -> 1 | 0.
+/// Kernel checks the SystemServiceManifest: is `name` the canonical name or a
+/// declared alias for `service_id`?
+pub const SYS_SERVICE_NAME_ALLOWED: u64 = 106;
+/// ipc_port_owner(port_id) -> owner_process_raw | 0.
+/// Returns the process that owns `port_id`, or 0 if the port has no owner.
+pub const SYS_IPC_PORT_OWNER: u64 = 107;
+/// process_alive(pid) -> 1 | 0. True if the process exists and is not terminated.
+pub const SYS_PROCESS_ALIVE: u64 = 108;
+
+// ---------------------------------------------------------------------------
 // Kernel FS backend syscalls — used exclusively by fsd to access the
 // kernel's FAT32 driver.  These are *not* general-purpose filesystem
 // syscalls; applications use SYS_FS_OPEN etc. which route through fsd.
@@ -828,6 +848,10 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_READ_KLOG => sys_read_klog(arg0, arg1 as usize),
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
+        SYS_IPC_RECV_ENVELOPE => sys_ipc_recv_envelope(arg0, arg1, arg2, arg3 as usize),
+        SYS_SERVICE_NAME_ALLOWED => sys_service_name_allowed(arg0, arg1, arg2 as usize),
+        SYS_IPC_PORT_OWNER => sys_ipc_port_owner(arg0),
+        SYS_PROCESS_ALIVE => sys_process_alive(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0, arg1 as usize),
         SYS_GET_CPU_ID => sys_get_cpu_id(),
         SYS_GET_CPU_COUNT => sys_get_cpu_count(),
@@ -1628,12 +1652,12 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
             let Some(mut cloned_cap) = parent_process.capability_table.get(cap_handle).cloned() else {
                 continue;
             };
-            // Spawn / klog authority is never inherited implicitly. fork() is a
-            // process-creation path too, and copying these would let a service
-            // hand its spawn authority to an unprivileged fork — a bypass of the
-            // SystemServiceManifest. Such authority must always be granted
-            // explicitly by the kernel from the manifest.
-            if crate::cap::is_spawn_authority(&cloned_cap.resource) {
+            // Spawn / klog / reserved-port / service-identity authority is never
+            // inherited implicitly. fork() is a process-creation path too, and
+            // copying these would let a service hand its authority to an
+            // unprivileged fork — a bypass of the SystemServiceManifest. Such
+            // authority must always be granted explicitly by the kernel.
+            if crate::cap::is_non_inheritable(&cloned_cap.resource) {
                 log_warn!(
                     LOG_ORIGIN,
                     "fork: not propagating non-inheritable capability {:?} to child pid={}",
@@ -1754,8 +1778,37 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
         }
     };
 
+    // Reserved ports (1..=255) are not first-come-first-served. Binding one
+    // requires a specific `ReservedPort { port_id }` capability granted by the
+    // SystemServiceManifest. Without it, a common process — or even a service
+    // holding a *different* reserved-port cap — is denied with EPERM.
+    if (1..=crate::ipc::MAX_RESERVED_PORT).contains(&requested_id) {
+        let has_reserved_cap = crate::thread::validate_thread_capability_by_type(
+            owner,
+            crate::cap::CapPermissions::WRITE,
+            |r| matches!(r, crate::cap::ResourceType::ReservedPort { port_id } if *port_id == requested_id),
+        );
+        if !has_reserved_cap {
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id denied: caller={} lacks ReservedPort({}) capability",
+                owner,
+                requested_id
+            );
+            return EPERM;
+        }
+    }
+
     let port_id = match crate::ipc::create_port_with_id(owner, requested_id) {
         Ok(id) => id,
+        Err(crate::ipc::IpcError::PortBusy) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id failed: port id={} already in use",
+                requested_id
+            );
+            return EEXIST;
+        }
         Err(e) => {
             log_warn!(
                 LOG_ORIGIN,
@@ -1799,6 +1852,143 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
     }
 
     port_id.raw()
+}
+
+/// Non-blocking receive that also delivers a kernel-generated `IpcEnvelope`.
+///
+/// Layout: `(port, env_ptr, buf_ptr, buf_size)`. On success the envelope is
+/// written to `env_ptr` (sender process/thread, sender service id, transferred
+/// capability, payload_len) and up to `buf_size` payload bytes to `buf_ptr`;
+/// the return value is the payload length. Returns `EWOULDBLOCK` when the port
+/// is empty. Every envelope field comes from kernel state and cannot be forged.
+fn sys_ipc_recv_envelope(
+    port_id_raw: u64,
+    env_ptr: u64,
+    buf_ptr: u64,
+    buf_size: usize,
+) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    // Validate the envelope output pointer up front.
+    let env_user = match validate_user_addr(env_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(env_user.as_u64(), core::mem::size_of::<atom_abi::IpcEnvelope>()).is_err() {
+        return EINVAL;
+    }
+
+    let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+
+    let msg = match crate::ipc::try_receive_message(port_id, caller) {
+        Ok(Some(msg)) => msg,
+        Ok(None) => return EWOULDBLOCK,
+        Err(crate::ipc::IpcError::InvalidPort) => return EINVAL,
+        Err(e) => {
+            log_warn!(LOG_ORIGIN, "ipc_recv_envelope error {:?} (port={})", e, port_id);
+            return EINVAL;
+        }
+    };
+
+    // Derive non-forgeable sender identity from kernel state.
+    let sender_thread = msg.sender;
+    let sender_process = crate::thread::get_thread_process_id(sender_thread);
+    let sender_service_id = sender_process
+        .and_then(crate::system_manifest::service_identity_of)
+        .map(|sid| sid.0 as u64)
+        .unwrap_or(0);
+    let transferred_capability = match &msg.capability {
+        Some(crate::ipc::IpcCapability::Grant { cap_handle, .. }) => cap_handle.raw(),
+        Some(crate::ipc::IpcCapability::Move { cap_handle }) => cap_handle.raw(),
+        None => 0,
+    };
+
+    let bytes_to_copy = core::cmp::min(msg.payload.len(), buf_size);
+    if bytes_to_copy > 0 && buf_ptr != 0 {
+        let buf_user = match validate_user_ptr::<u8>(buf_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        let buf_range = match validate_user_byte_range(buf_user, bytes_to_copy) {
+            Ok(range) => range,
+            Err(e) => return e,
+        };
+        if let Err(e) = write_buffer_to_user(buf_range, &msg.payload[..bytes_to_copy]) {
+            return e;
+        }
+    }
+
+    let envelope = atom_abi::IpcEnvelope {
+        sender_process: sender_process.map(|p| p.raw()).unwrap_or(0),
+        sender_thread: sender_thread.raw(),
+        sender_service_id,
+        transferred_capability,
+        payload_len: bytes_to_copy as u64,
+    };
+
+    // SAFETY: env_user was validated as a writable user range of the struct size.
+    unsafe {
+        core::ptr::write(env_user.as_mut_ptr::<atom_abi::IpcEnvelope>(), envelope);
+    }
+
+    bytes_to_copy as u64
+}
+
+/// `(service_id, name_ptr, name_len) -> 1 | 0`. Kernel-authoritative check of
+/// whether `name` is the canonical name or a declared alias for `service_id`,
+/// per the SystemServiceManifest. Used by namesvc to authorise registration.
+fn sys_service_name_allowed(service_id_raw: u64, name_ptr: u64, name_len: usize) -> u64 {
+    if name_len == 0 || name_len > 64 {
+        return 0;
+    }
+    let name_ptr = match validate_user_ptr::<u8>(name_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return 0,
+    };
+    let name_range = match validate_user_byte_range(name_ptr, name_len) {
+        Ok(range) => range,
+        Err(_) => return 0,
+    };
+    // SAFETY: name_range is ABI-validated and canonical.
+    let name_bytes = unsafe {
+        core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len())
+    };
+    let name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s.trim_end_matches('\0'),
+        Err(_) => return 0,
+    };
+
+    let service_id = crate::system_manifest::ServiceId(service_id_raw as u32);
+    if crate::system_manifest::service_name_allowed(service_id, name) {
+        1
+    } else {
+        0
+    }
+}
+
+/// `(port_id) -> owner_process_raw | 0`. Reports which process owns `port_id`.
+fn sys_ipc_port_owner(port_id_raw: u64) -> u64 {
+    let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+    crate::ipc::get_port_authority_process(port_id)
+        .map(|p| p.raw())
+        .unwrap_or(0)
+}
+
+/// `(pid) -> 1 | 0`. True if the process exists and has not terminated. Used by
+/// namesvc to confirm a previous registration owner is really gone before
+/// allowing a replacement (no timeout-based takeover).
+fn sys_process_alive(pid_raw: u64) -> u64 {
+    let pid = crate::process::ProcessId::from_raw(pid_raw);
+    if crate::process::get_process(pid).is_some() && !crate::process::is_process_terminated(pid) {
+        1
+    } else {
+        0
+    }
 }
 
 fn sys_ipc_close_port(port_id_raw: u64) -> u64 {

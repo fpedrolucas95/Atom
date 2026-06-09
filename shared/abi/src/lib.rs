@@ -484,6 +484,31 @@ pub const USER_STACK_TOP: UserVirtAddr = 0x0000_8000_0000;
 // Infrastructure syscall structures (Phase 1 Networking)
 // ---------------------------------------------------------------------------
 
+/// Kernel-generated metadata accompanying a received IPC message.
+///
+/// Filled in by `SYS_IPC_RECV_ENVELOPE` from kernel state — every field is
+/// authoritative and cannot be forged by the sender's payload. Receivers (e.g.
+/// `namesvc`) use this to authenticate who is talking to them instead of
+/// trusting self-reported identity in the message body.
+///
+/// `sender_service_id == 0` means the sender has no kernel-assigned system
+/// service identity (an ordinary process). `transferred_capability == 0` means
+/// no capability accompanied the message.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IpcEnvelope {
+    /// Process that sent the message.
+    pub sender_process: u64,
+    /// Thread that sent the message.
+    pub sender_thread: u64,
+    /// Sender's kernel-assigned `ServiceId`, or 0 if none.
+    pub sender_service_id: u64,
+    /// Capability handle transferred with the message, or 0 if none.
+    pub transferred_capability: u64,
+    /// Number of payload bytes delivered into the receive buffer.
+    pub payload_len: u64,
+}
+
 /// Information about a PCI Base Address Register (BAR).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

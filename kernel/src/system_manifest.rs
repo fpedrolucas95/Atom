@@ -91,6 +91,13 @@ pub struct SystemServiceManifestEntry {
     pub image_hash: Option<[u8; 32]>,
     /// How this service is allowed to be created.
     pub spawn_kind: SpawnKind,
+    /// Additional names this service may register in `namesvc` besides its
+    /// canonical name. Authoritative allowlist — a service may never register a
+    /// name that is neither its canonical name nor one of these aliases.
+    pub aliases: &'static [&'static str],
+    /// Reserved IPC port ids (1..=255) this service is allowed to bind. Mirrors
+    /// the `ReservedPort` capabilities granted in `initial_capabilities`.
+    pub reserved_ports: &'static [u64],
     /// Capabilities granted by the kernel when this service is created.
     pub initial_capabilities: &'static [InitialCapability],
     /// Services this service is permitted to start (by identity).
@@ -112,17 +119,49 @@ pub const SID_DISPLAY: ServiceId = ServiceId(9);
 // Permission shorthands evaluated at compile time.
 const SPAWN_PERM: CapPermissions = CapPermissions::EXECUTE;
 const KLOG_PERM: CapPermissions = CapPermissions::READ;
+const IDENTITY_PERM: CapPermissions = CapPermissions::READ;
+const RESERVED_PORT_PERM: CapPermissions = CapPermissions::WRITE;
 
-// Capability bundles.
+const fn identity(sid: ServiceId) -> InitialCapability {
+    InitialCapability::new(ResourceType::ServiceIdentity { service_id: sid.0 }, IDENTITY_PERM)
+}
+const fn reserved(port_id: u64) -> InitialCapability {
+    InitialCapability::new(ResourceType::ReservedPort { port_id }, RESERVED_PORT_PERM)
+}
+
+// Capability bundles. Every system service carries its own ServiceIdentity;
+// spawn/klog/reserved-port authority is added only where the role requires it.
 const INIT_CAPS: &[InitialCapability] = &[
     InitialCapability::new(ResourceType::SpawnSystemService, SPAWN_PERM),
     InitialCapability::new(ResourceType::ReadKernelLog, KLOG_PERM),
+    identity(SID_INIT),
 ];
-const SERVICE_MANAGER_CAPS: &[InitialCapability] =
-    &[InitialCapability::new(ResourceType::SpawnSystemService, SPAWN_PERM)];
-const APP_LAUNCHER_CAPS: &[InitialCapability] =
-    &[InitialCapability::new(ResourceType::SpawnFromPath, SPAWN_PERM)];
-const NO_CAPS: &[InitialCapability] = &[];
+const SERVICE_MANAGER_CAPS: &[InitialCapability] = &[
+    InitialCapability::new(ResourceType::SpawnSystemService, SPAWN_PERM),
+    identity(SID_SERVICE_MANAGER),
+    reserved(2),
+];
+const APP_LAUNCHER_CAPS: &[InitialCapability] = &[
+    InitialCapability::new(ResourceType::SpawnFromPath, SPAWN_PERM),
+    identity(SID_APP_LAUNCHER),
+];
+const NAMESVC_CAPS: &[InitialCapability] = &[identity(SID_NAMESVC), reserved(1)];
+const FSD_CAPS: &[InitialCapability] = &[identity(SID_FSD), reserved(3)];
+const NIC_DRIVER_CAPS: &[InitialCapability] = &[identity(SID_NIC_DRIVER)];
+const NETD_CAPS: &[InitialCapability] = &[identity(SID_NETD)];
+const UI_SHELL_CAPS: &[InitialCapability] = &[identity(SID_UI_SHELL)];
+const DISPLAY_CAPS: &[InitialCapability] = &[identity(SID_DISPLAY)];
+
+// Alias allowlists (names a service may register in namesvc beyond canonical).
+const NO_ALIASES: &[&str] = &[];
+// ui_shell is the compositor: it registers its compositor.* service names.
+const UI_SHELL_ALIASES: &[&str] = &["compositor", "compositor.register", "compositor.wm"];
+
+// Reserved port allowlists.
+const NO_PORTS: &[u64] = &[];
+const NAMESVC_PORTS: &[u64] = &[1];
+const SERVICE_MANAGER_PORTS: &[u64] = &[2];
+const FSD_PORTS: &[u64] = &[3];
 
 // Children sets.
 //
@@ -160,6 +199,8 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "boot:init.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::BootImage,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
         initial_capabilities: INIT_CAPS,
         allowed_children: INIT_CHILDREN,
     },
@@ -169,6 +210,8 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/service_manager.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
+        aliases: NO_ALIASES,
+        reserved_ports: SERVICE_MANAGER_PORTS,
         initial_capabilities: SERVICE_MANAGER_CAPS,
         allowed_children: SERVICE_MANAGER_CHILDREN,
     },
@@ -178,6 +221,8 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/app_launcher.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
         initial_capabilities: APP_LAUNCHER_CAPS,
         allowed_children: NO_CHILDREN,
     },
@@ -187,7 +232,9 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/namesvc.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
-        initial_capabilities: NO_CAPS,
+        aliases: NO_ALIASES,
+        reserved_ports: NAMESVC_PORTS,
+        initial_capabilities: NAMESVC_CAPS,
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
@@ -196,7 +243,9 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/fsd.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
-        initial_capabilities: NO_CAPS,
+        aliases: NO_ALIASES,
+        reserved_ports: FSD_PORTS,
+        initial_capabilities: FSD_CAPS,
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
@@ -205,7 +254,9 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/nic_driver.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
-        initial_capabilities: NO_CAPS,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
+        initial_capabilities: NIC_DRIVER_CAPS,
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
@@ -214,7 +265,9 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/netd.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
-        initial_capabilities: NO_CAPS,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
+        initial_capabilities: NETD_CAPS,
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
@@ -223,7 +276,9 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/ui_shell.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
-        initial_capabilities: NO_CAPS,
+        aliases: UI_SHELL_ALIASES,
+        reserved_ports: NO_PORTS,
+        initial_capabilities: UI_SHELL_CAPS,
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
@@ -232,7 +287,9 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         canonical_image: "/drivers/display.atxf",
         image_hash: None,
         spawn_kind: SpawnKind::SystemService,
-        initial_capabilities: NO_CAPS,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
+        initial_capabilities: DISPLAY_CAPS,
         allowed_children: NO_CHILDREN,
     },
 ];
@@ -249,6 +306,25 @@ pub fn lookup_by_id(id: ServiceId) -> Option<&'static SystemServiceManifestEntry
     SYSTEM_SERVICE_MANIFEST
         .iter()
         .find(|entry| entry.service_id == id)
+}
+
+/// Returns `true` if `name` is the canonical name or a declared alias for the
+/// service identified by `service_id`. This is the authoritative allowlist the
+/// kernel exposes to `namesvc`: a service may only register names that resolve
+/// to its own kernel-assigned identity.
+pub fn service_name_allowed(service_id: ServiceId, name: &str) -> bool {
+    match lookup_by_id(service_id) {
+        Some(entry) => entry.canonical_name == name || entry.aliases.contains(&name),
+        None => false,
+    }
+}
+
+/// Returns `true` if `service_id` is declared to bind reserved `port_id`.
+pub fn service_owns_reserved_port(service_id: ServiceId, port_id: u64) -> bool {
+    match lookup_by_id(service_id) {
+        Some(entry) => entry.reserved_ports.contains(&port_id),
+        None => false,
+    }
 }
 
 // ── Runtime identity table ──────────────────────────────────────────────────
@@ -376,11 +452,57 @@ mod tests {
 
     #[test]
     fn leaf_services_carry_no_spawn_authority() {
+        // Leaf services carry a ServiceIdentity (and maybe a ReservedPort), but
+        // must never hold process-creation or klog authority, and must not be
+        // allowed to start children.
         for id in [SID_NAMESVC, SID_FSD, SID_NIC_DRIVER, SID_NETD, SID_UI_SHELL, SID_DISPLAY] {
             let entry = lookup_by_id(id).expect("leaf service must be declared");
-            assert!(entry.initial_capabilities.is_empty());
+            assert!(!entry
+                .initial_capabilities
+                .iter()
+                .any(|c| is_spawn_authority(&c.resource)));
             assert!(entry.allowed_children.is_empty());
         }
+    }
+
+    #[test]
+    fn reserved_ports_match_capabilities() {
+        // Every reserved port in `reserved_ports` must be backed by a matching
+        // ReservedPort capability, and vice versa.
+        for entry in SYSTEM_SERVICE_MANIFEST.iter() {
+            for &p in entry.reserved_ports {
+                assert!(
+                    entry
+                        .initial_capabilities
+                        .iter()
+                        .any(|c| matches!(c.resource, ResourceType::ReservedPort { port_id } if port_id == p)),
+                    "service {:?} lists reserved port {} without a ReservedPort cap",
+                    entry.service_id,
+                    p
+                );
+            }
+        }
+        // Critical bootstrap ports are bound to the expected services only.
+        assert!(service_owns_reserved_port(SID_NAMESVC, 1));
+        assert!(service_owns_reserved_port(SID_SERVICE_MANAGER, 2));
+        assert!(service_owns_reserved_port(SID_FSD, 3));
+        assert!(!service_owns_reserved_port(SID_SERVICE_MANAGER, 1));
+        assert!(!service_owns_reserved_port(SID_FSD, 1));
+    }
+
+    #[test]
+    fn service_name_allowlist_enforced() {
+        // Canonical names resolve to their own identity.
+        assert!(service_name_allowed(SID_FSD, "fsd"));
+        assert!(service_name_allowed(SID_APP_LAUNCHER, "app_launcher"));
+        // ui_shell's compositor aliases are declared.
+        assert!(service_name_allowed(SID_UI_SHELL, "compositor.wm"));
+        assert!(service_name_allowed(SID_UI_SHELL, "compositor"));
+        // Cross-identity registration is rejected: nic_driver cannot be "fsd".
+        assert!(!service_name_allowed(SID_NIC_DRIVER, "fsd"));
+        // Undeclared alias is rejected even for the right service.
+        assert!(!service_name_allowed(SID_FSD, "filesystem"));
+        assert!(!service_name_allowed(SID_DISPLAY, "compositor.wm"));
     }
 
     #[test]
