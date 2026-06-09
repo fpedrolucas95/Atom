@@ -60,6 +60,11 @@ disk.img
 debug.log
 userspace/apps/fileman/build.log
 userspace/apps/fs_test/build.log
+
+# PR3: image + serial + per-app build logs (generated)
+userspace/apps/*/build.log
+build/*.img
+serial.log
 .kiro/specs/display-settings-wallpaper-evolution/tasks.md
 .kiro/specs/display-settings-wallpaper-evolution/requirements.md
 .kiro/specs/display-settings-wallpaper-evolution/design.md
