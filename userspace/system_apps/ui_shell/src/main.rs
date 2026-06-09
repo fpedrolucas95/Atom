@@ -1680,22 +1680,14 @@ impl Compositor {
                 if let Some(msg) =
                     libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..])
                 {
-                    if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                        window.content_dirty = true;
-                        window.surface_ready = true;
-                        self.dirty = true;
-                    }
+                    self.present_window(msg.window_id);
                 }
             }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
                     if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
-                        if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                            window.content_dirty = true;
-                            window.surface_ready = true;
-                            self.dirty = true;
-                        }
+                        self.present_window(msg.window_id);
                     }
                 }
             }
@@ -1770,11 +1762,7 @@ impl Compositor {
                 if let Some(msg) =
                     libipc::messages::WmCommitFrameMsg::from_bytes(&data[MessageHeader::SIZE..])
                 {
-                    if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                        window.content_dirty = true;
-                        window.surface_ready = true;
-                        self.dirty = true;
-                    }
+                    self.present_window(msg.window_id);
                 }
             }
             MessageType::MouseMove => {
@@ -1823,11 +1811,7 @@ impl Compositor {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
                     if let Some(msg) = SurfacePresentMsg::from_bytes(&data[payload_start..]) {
-                        if let Some(window) = self.wm.get_window_mut(msg.window_id) {
-                            window.content_dirty = true;
-                            window.surface_ready = true;
-                        }
-                        self.dirty = true;
+                        self.present_window(msg.window_id);
                     }
                 }
             }
@@ -2156,11 +2140,14 @@ impl Compositor {
                 let (old_rect, new_rect, clamped_x, clamped_y) =
                     if let Some(w) = self.wm.get_window(window_id) {
                         let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
-                        // Keep the title bar reachable: never let it slide under the
-                        // top bar, and always leave a strip on screen horizontally.
+                        // Keep the title bar reachable. The framebuffer primitives
+                        // are u32-based and only clip on the high edge, so a
+                        // negative x would wrap and render nothing (the "transparent"
+                        // bug on the left). Pin the left edge at 0; the window may
+                        // still slide partly off the right, where clipping is sound.
                         let min_visible = 80i32;
-                        let nx = (start_win_x + dx)
-                            .clamp(min_visible - w.width as i32, screen_w - min_visible);
+                        let max_x = (screen_w - min_visible).max(0);
+                        let nx = (start_win_x + dx).clamp(0, max_x);
                         let ny = (start_win_y + dy).max(PANEL_HEIGHT as i32);
                         let new = Rect::new(nx - 4, ny - 4, w.width + 8, w.height + 8);
                         (old, new, nx, ny)
@@ -2368,6 +2355,24 @@ impl Compositor {
         if reaped {
             self.dirty = true;
         }
+    }
+
+    /// Mark a window's full on-screen footprint (frame + drop shadow) dirty and
+    /// flag its content as ready.  Called whenever an app commits/presents a
+    /// frame so the freshly rendered surface is actually blitted to the screen —
+    /// without this the redraw is bounded by whatever stale `dirty_rect` was left
+    /// by the last cursor move, so the first frame only became visible once the
+    /// user happened to move the mouse over the window.
+    fn present_window(&mut self, window_id: WindowId) {
+        if let Some(window) = self.wm.get_window_mut(window_id) {
+            window.content_dirty = true;
+            window.surface_ready = true;
+        }
+        if let Some(w) = self.wm.get_window(window_id) {
+            let rect = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
+            self.mark_dirty_rect(rect);
+        }
+        self.dirty = true;
     }
 
     fn mark_dirty_rect(&mut self, rect: Rect) {
