@@ -62,6 +62,12 @@
 
 mod policy;
 
+/// Boot self-test entry point for the syscall policy invariants (the policy
+/// module itself is private to this module tree).
+pub fn run_security_policy_selftests() {
+    policy::run_security_policy_selftests();
+}
+
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
 use crate::{log_debug, log_info, log_warn, log_error, log_panic};
@@ -4588,7 +4594,7 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
         Ok(image) => {
             log_info!(
                 LOG_ORIGIN,
-                "ATXF v2 authenticated: segments={} relocations={} entry=0x{:X}",
+                "ATXF v3 authenticated: segments={} relocations={} entry=0x{:X}",
                 image.segments.len(),
                 image.relocations.len(),
                 image.entry_offset
@@ -4630,7 +4636,7 @@ fn spawn_from_image(
 
     log_info!(
         LOG_ORIGIN,
-        "ATXF v2 authenticated: segments={} relocations={} entry=0x{:X}",
+        "ATXF v3 authenticated: segments={} relocations={} entry=0x{:X}",
         image.segments.len(),
         image.relocations.len(),
         image.entry_offset
@@ -4758,7 +4764,7 @@ fn spawn_process_internal(
 
     let loaded = crate::executable::load_into_process(image, new_pml4_phys, process_id)
         .map_err(|error| {
-            log_error!("spawn", "ATXF v2 load failed for '{}': {:?}", name, error);
+            log_error!("spawn", "ATXF v3 load failed for '{}': {:?}", name, error);
             EINVAL
         })?;
 
@@ -5138,7 +5144,7 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
 
     log_info!(
         LOG_ORIGIN,
-        "spawn_from_path: ATXF v2 authenticated — segments={} relocations={} entry=0x{:X}",
+        "spawn_from_path: ATXF v3 authenticated — segments={} relocations={} entry=0x{:X}",
         image.segments.len(),
         image.relocations.len(),
         image.entry_offset

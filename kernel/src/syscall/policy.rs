@@ -654,6 +654,61 @@ pub(super) fn validate_fd_ownership_with_owner(
     Ok(())
 }
 
+/// Runtime mirror of the `#[cfg(test)]` policy invariants below: the kernel
+/// library builds with `test = false`, so these security-critical assertions
+/// also execute as boot self-tests under the QEMU CI gate (a panic here trips
+/// the smoke gate's forbidden markers).
+pub(super) fn run_security_policy_selftests() {
+    use super::{
+        SYS_IPC_CREATE_PORT_WITH_ID, SYS_IPC_PORT_OWNER, SYS_IPC_RECV_ENVELOPE,
+        SYS_PROCESS_ALIVE, SYS_READ_KLOG, SYS_SERVICE_NAME_ALLOWED, SYS_SPAWN_FROM_PATH,
+        SYS_SPAWN_PROCESS,
+    };
+
+    // Authenticated-IPC support syscalls stay classified (never fail-closed).
+    for num in [
+        SYS_IPC_RECV_ENVELOPE,
+        SYS_SERVICE_NAME_ALLOWED,
+        SYS_IPC_PORT_OWNER,
+        SYS_PROCESS_ALIVE,
+        SYS_IPC_CREATE_PORT_WITH_ID,
+    ] {
+        assert!(
+            matches!(syscall_policy(num), SysPolicy::ExplicitlyUnrestricted),
+            "syscall {} must be classified as unrestricted at the table",
+            num
+        );
+    }
+
+    // Spawn must be capability-gated, never ambient.
+    assert!(matches!(
+        syscall_policy(SYS_SPAWN_PROCESS),
+        SysPolicy::Requires(CapRequirement::SpawnSystemService)
+    ));
+    assert!(matches!(
+        syscall_policy(SYS_SPAWN_FROM_PATH),
+        SysPolicy::Requires(CapRequirement::SpawnFromPath)
+    ));
+
+    // Kernel log requires the explicit cap; no generic privileged gate.
+    assert!(matches!(
+        syscall_policy(SYS_READ_KLOG),
+        SysPolicy::Requires(CapRequirement::ReadKernelLog)
+    ));
+
+    // Unknown syscalls stay fail-closed.
+    assert!(matches!(
+        syscall_policy(u64::MAX),
+        SysPolicy::ExplicitlyDenied(_)
+    ));
+
+    // SYS_SPAWN_FROM_PATH must never reach system-service images.
+    assert!(super::is_system_service_path("/drivers/fsd.atxf"));
+    assert!(super::is_system_service_path("/bin/init.atxf"));
+    assert!(!super::is_system_service_path("/apps/user/fileman.atxf"));
+    assert!(!super::is_system_service_path("/apps/system/terminal.atxf"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::{syscall_policy, CapRequirement, SysPolicy};
