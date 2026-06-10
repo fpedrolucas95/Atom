@@ -968,6 +968,7 @@ pub extern "C" fn rust_timer_interrupt_handler(frame: *const InterruptFrame) {
 
     IRQ_TIMER_COUNT.fetch_add(1, Ordering::Relaxed);
     TICKS.fetch_add(1, Ordering::Relaxed);
+    sched::account_timer_tick();
 
     ipc::on_timer_tick(get_ticks());
     sched::wake_sleeping_threads();

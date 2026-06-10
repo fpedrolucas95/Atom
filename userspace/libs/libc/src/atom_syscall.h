@@ -47,6 +47,7 @@ typedef uint64_t atom_user_offset_t;
 #define SYS_GET_CPU_COUNT    91
 #define SYS_SET_THREAD_AFFINITY 92
 #define SYS_GET_THREAD_AFFINITY 93
+#define SYS_GET_RESOURCE_USAGE 94
 
 /* Filesystem (53–76) */
 #define SYS_FS_OPEN          53

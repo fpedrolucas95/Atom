@@ -6,6 +6,31 @@
 use super::{CommandContext, CommandResult};
 use crate::parser::{parse_number, ParsedCommand};
 use crate::window::Theme;
+use atom_syscall::debug::{
+    get_resource_usage, ProcessResourceUsage, SystemResourceUsage, MAX_RESOURCE_CPUS,
+};
+use atom_syscall::graphics::Color;
+use atom_syscall::thread::sleep_ms;
+
+const MAX_RESOURCE_PROCESSES: usize = 32;
+const RESOURCE_BAR_WIDTH: usize = 52;
+
+#[derive(Clone, Copy)]
+struct ResourceSegment<'a> {
+    name: &'a str,
+    value_kb: u64,
+    color: Color,
+}
+
+impl<'a> ResourceSegment<'a> {
+    const fn empty() -> Self {
+        Self {
+            name: "",
+            value_kb: 0,
+            color: Theme::TEXT_NORMAL,
+        }
+    }
+}
 
 /// ps command - list running processes
 pub fn cmd_ps(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
@@ -146,91 +171,363 @@ pub fn cmd_exec(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
 
 /// mem command
 pub fn cmd_memory(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let mut system = SystemResourceUsage::empty();
+    let mut processes = [ProcessResourceUsage::empty(); MAX_RESOURCE_PROCESSES];
+    let process_count = get_resource_usage(&mut system, &mut processes).min(processes.len());
+
+    if system.total_ram_kb == 0 {
+        ctx.error("Unable to read memory accounting from kernel");
+        return CommandResult::Error;
+    }
+
+    let used_ram_kb = system.total_ram_kb.saturating_sub(system.free_ram_kb);
+    let process_private_kb = processes[..process_count]
+        .iter()
+        .map(|process| process.private_memory_kb)
+        .fold(0u64, u64::saturating_add);
+    let system_kb = used_ram_kb
+        .saturating_sub(process_private_kb)
+        .saturating_sub(system.shared_memory_kb);
+    let total_resources_kb = system.total_ram_kb.saturating_add(system.framebuffer_kb);
+
     ctx.println("");
     ctx.println_colored("Memory Usage", Theme::TEXT_INFO);
     ctx.println("------------");
     ctx.println("");
 
-    let (total_kb, used_kb, free_kb) = ctx.ipc.query_memory();
-
-    let mut line = [0u8; 64];
-    let mut pos = 0;
-    for byte in "Total:     ".bytes() {
-        line[pos] = byte;
-        pos += 1;
+    print_value_line(ctx, "RAM total", system.total_ram_kb, system.total_ram_kb);
+    print_value_line(ctx, "RAM used", used_ram_kb, system.total_ram_kb);
+    print_value_line(ctx, "RAM free", system.free_ram_kb, system.total_ram_kb);
+    if system.framebuffer_kb > 0 {
+        print_value_line(
+            ctx,
+            "Framebuffer",
+            system.framebuffer_kb,
+            total_resources_kb,
+        );
     }
-    pos += format_size_kb(total_kb, &mut line[pos..]);
-    ctx.println(unsafe { core::str::from_utf8_unchecked(&line[..pos]) });
-
-    pos = 0;
-    for byte in "Used:      ".bytes() {
-        line[pos] = byte;
-        pos += 1;
-    }
-    pos += format_size_kb(used_kb, &mut line[pos..]);
-
-    let percent = if total_kb > 0 {
-        (used_kb * 100 / total_kb) as u8
-    } else {
-        0
-    };
-
-    for byte in " (".bytes() {
-        line[pos] = byte;
-        pos += 1;
-    }
-    pos += format_number(percent as u64, &mut line[pos..]);
-    for byte in "%)".bytes() {
-        line[pos] = byte;
-        pos += 1;
-    }
-
-    ctx.println(unsafe { core::str::from_utf8_unchecked(&line[..pos]) });
-
-    pos = 0;
-    for byte in "Free:      ".bytes() {
-        line[pos] = byte;
-        pos += 1;
-    }
-    pos += format_size_kb(free_kb, &mut line[pos..]);
-    ctx.println(unsafe { core::str::from_utf8_unchecked(&line[..pos]) });
-
     ctx.println("");
 
-    let bar_width = 40usize;
-    let used_bars = if total_kb > 0 {
-        ((used_kb * bar_width as u64) / total_kb) as usize
-    } else {
-        0
-    };
+    let mut segments = [ResourceSegment::empty(); MAX_RESOURCE_PROCESSES + 4];
+    let mut segment_count = 0usize;
+    push_segment(
+        &mut segments,
+        &mut segment_count,
+        ResourceSegment {
+            name: "System",
+            value_kb: system_kb,
+            color: Theme::RESOURCE_SYSTEM,
+        },
+    );
+    push_segment(
+        &mut segments,
+        &mut segment_count,
+        ResourceSegment {
+            name: "Framebuffer",
+            value_kb: system.framebuffer_kb,
+            color: Theme::RESOURCE_FRAMEBUFFER,
+        },
+    );
+    push_segment(
+        &mut segments,
+        &mut segment_count,
+        ResourceSegment {
+            name: "Shared memory",
+            value_kb: system.shared_memory_kb,
+            color: Theme::RESOURCE_SHARED,
+        },
+    );
 
-    let mut bar = [0u8; 64];
-    pos = 0;
-    bar[pos] = b'[';
-    pos += 1;
-
-    for i in 0..bar_width {
-        bar[pos] = if i < used_bars { b'#' } else { b'-' };
-        pos += 1;
+    for (index, process) in processes[..process_count].iter().enumerate() {
+        if process.private_memory_kb == 0 {
+            continue;
+        }
+        push_segment(
+            &mut segments,
+            &mut segment_count,
+            ResourceSegment {
+                name: process.name_str(),
+                value_kb: process.private_memory_kb,
+                color: app_color(index),
+            },
+        );
     }
 
-    bar[pos] = b']';
-    pos += 1;
+    push_segment(
+        &mut segments,
+        &mut segment_count,
+        ResourceSegment {
+            name: "Free",
+            value_kb: system.free_ram_kb,
+            color: Theme::RESOURCE_FREE,
+        },
+    );
 
-    let bar_str = unsafe { core::str::from_utf8_unchecked(&bar[..pos]) };
-
-    let theme = if percent < 50 {
-        Theme::TEXT_SUCCESS
-    } else if percent < 80 {
-        Theme::TEXT_WARNING
-    } else {
-        Theme::TEXT_ERROR
-    };
-
-    ctx.println_colored(bar_str, theme);
+    draw_segmented_bar(ctx, &segments[..segment_count], total_resources_kb);
+    ctx.println("");
+    for segment in &segments[..segment_count] {
+        print_legend_line(ctx, *segment, total_resources_kb);
+    }
+    ctx.println_colored(
+        "Framebuffer is device memory; process values are private resident RAM.",
+        Theme::TEXT_DIM,
+    );
     ctx.println("");
 
     CommandResult::Ok
+}
+
+pub fn cmd_cpu(_cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> CommandResult {
+    let mut before_system = SystemResourceUsage::empty();
+    let mut before_processes = [ProcessResourceUsage::empty(); MAX_RESOURCE_PROCESSES];
+    let before_count =
+        get_resource_usage(&mut before_system, &mut before_processes).min(before_processes.len());
+
+    // The global tick counter advances once per online CPU.
+    let sample_scale = before_system.cpu_count.clamp(1, MAX_RESOURCE_CPUS as u64);
+    sleep_ms(250 * sample_scale);
+
+    let mut after_system = SystemResourceUsage::empty();
+    let mut after_processes = [ProcessResourceUsage::empty(); MAX_RESOURCE_PROCESSES];
+    let after_count =
+        get_resource_usage(&mut after_system, &mut after_processes).min(after_processes.len());
+
+    let cpu_count = (after_system.cpu_count as usize).min(MAX_RESOURCE_CPUS);
+    if cpu_count == 0 {
+        ctx.error("Unable to read CPU accounting from kernel");
+        return CommandResult::Error;
+    }
+
+    let mut total_delta = 0u64;
+    let mut idle_delta = 0u64;
+    for cpu in 0..cpu_count {
+        total_delta = total_delta.saturating_add(
+            after_system.cpu_total_ticks[cpu].saturating_sub(before_system.cpu_total_ticks[cpu]),
+        );
+        idle_delta = idle_delta.saturating_add(
+            after_system.cpu_idle_ticks[cpu].saturating_sub(before_system.cpu_idle_ticks[cpu]),
+        );
+    }
+    let busy_delta = total_delta.saturating_sub(idle_delta);
+
+    ctx.println("");
+    ctx.println_colored("CPU Usage (250 ms sample)", Theme::TEXT_INFO);
+    ctx.println("-------------------------");
+    ctx.println("");
+    print_cpu_line(ctx, "Total", busy_delta, total_delta, Theme::TEXT_SUCCESS);
+
+    for cpu in 0..cpu_count {
+        let cpu_total =
+            after_system.cpu_total_ticks[cpu].saturating_sub(before_system.cpu_total_ticks[cpu]);
+        let cpu_idle =
+            after_system.cpu_idle_ticks[cpu].saturating_sub(before_system.cpu_idle_ticks[cpu]);
+        let mut label = [0u8; 16];
+        let mut pos = 0;
+        for byte in "CPU ".bytes() {
+            label[pos] = byte;
+            pos += 1;
+        }
+        pos += format_number(cpu as u64, &mut label[pos..]);
+        let label = unsafe { core::str::from_utf8_unchecked(&label[..pos]) };
+        print_cpu_line(
+            ctx,
+            label,
+            cpu_total.saturating_sub(cpu_idle),
+            cpu_total,
+            app_color(cpu),
+        );
+    }
+
+    ctx.println("");
+    ctx.println_colored("By process", Theme::TEXT_INFO);
+
+    let mut process_busy = 0u64;
+    for (index, process) in after_processes[..after_count].iter().enumerate() {
+        let previous_ticks = before_processes[..before_count]
+            .iter()
+            .find(|previous| previous.pid == process.pid)
+            .map(|previous| previous.cpu_ticks)
+            .unwrap_or(process.cpu_ticks);
+        let delta = process.cpu_ticks.saturating_sub(previous_ticks);
+        if delta == 0 {
+            continue;
+        }
+        process_busy = process_busy.saturating_add(delta);
+        print_cpu_line(
+            ctx,
+            process.name_str(),
+            delta,
+            total_delta,
+            app_color(index),
+        );
+    }
+
+    let kernel_delta = busy_delta.saturating_sub(process_busy);
+    if kernel_delta > 0 {
+        print_cpu_line(
+            ctx,
+            "System",
+            kernel_delta,
+            total_delta,
+            Theme::RESOURCE_SYSTEM,
+        );
+    }
+    ctx.println("");
+
+    CommandResult::Ok
+}
+
+fn push_segment<'a>(
+    segments: &mut [ResourceSegment<'a>],
+    count: &mut usize,
+    segment: ResourceSegment<'a>,
+) {
+    if segment.value_kb == 0 || *count >= segments.len() {
+        return;
+    }
+    segments[*count] = segment;
+    *count += 1;
+}
+
+fn app_color(index: usize) -> Color {
+    match index % 4 {
+        0 => Theme::RESOURCE_APP_1,
+        1 => Theme::RESOURCE_APP_2,
+        2 => Theme::RESOURCE_APP_3,
+        _ => Theme::RESOURCE_APP_4,
+    }
+}
+
+fn draw_segmented_bar(
+    ctx: &mut CommandContext<'_>,
+    segments: &[ResourceSegment<'_>],
+    total_kb: u64,
+) {
+    ctx.print("[");
+    let mut cumulative = 0u64;
+    let mut segment_index = 0usize;
+
+    for column in 0..RESOURCE_BAR_WIDTH {
+        let sample = if total_kb == 0 {
+            0
+        } else {
+            ((column as u64 * 2 + 1) * total_kb) / (RESOURCE_BAR_WIDTH as u64 * 2)
+        };
+        while segment_index + 1 < segments.len()
+            && sample >= cumulative.saturating_add(segments[segment_index].value_kb)
+        {
+            cumulative = cumulative.saturating_add(segments[segment_index].value_kb);
+            segment_index += 1;
+        }
+        let color = segments
+            .get(segment_index)
+            .map(|segment| segment.color)
+            .unwrap_or(Theme::RESOURCE_FREE);
+        ctx.print_colored("#", color);
+    }
+    ctx.println("]");
+}
+
+fn print_legend_line(ctx: &mut CommandContext<'_>, segment: ResourceSegment<'_>, total_kb: u64) {
+    ctx.print_colored("# ", segment.color);
+    let mut line = [0u8; 128];
+    let mut pos = copy_bytes(segment.name.as_bytes(), &mut line, 0);
+    if pos < line.len() {
+        line[pos] = b':';
+        pos += 1;
+    }
+    if pos < line.len() {
+        line[pos] = b' ';
+        pos += 1;
+    }
+    pos += format_size_kb(segment.value_kb, &mut line[pos..]);
+    pos = append_percent(segment.value_kb, total_kb, &mut line, pos);
+    ctx.println(unsafe { core::str::from_utf8_unchecked(&line[..pos]) });
+}
+
+fn print_value_line(ctx: &mut CommandContext<'_>, name: &str, value: u64, total: u64) {
+    let mut line = [0u8; 96];
+    let mut pos = copy_bytes(name.as_bytes(), &mut line, 0);
+    if pos < 14 {
+        while pos < 14 {
+            line[pos] = b' ';
+            pos += 1;
+        }
+    }
+    pos += format_size_kb(value, &mut line[pos..]);
+    pos = append_percent(value, total, &mut line, pos);
+    ctx.println(unsafe { core::str::from_utf8_unchecked(&line[..pos]) });
+}
+
+fn print_cpu_line(
+    ctx: &mut CommandContext<'_>,
+    name: &str,
+    busy_ticks: u64,
+    total_ticks: u64,
+    color: Color,
+) {
+    let percent = if total_ticks == 0 {
+        0
+    } else {
+        busy_ticks.saturating_mul(100) / total_ticks
+    };
+    let width = 30usize;
+    let used = ((percent.min(100) * width as u64) / 100) as usize;
+
+    let mut label = [0u8; 40];
+    let mut pos = copy_bytes(name.as_bytes(), &mut label, 0);
+    while pos < 16 {
+        label[pos] = b' ';
+        pos += 1;
+    }
+    ctx.print(unsafe { core::str::from_utf8_unchecked(&label[..pos]) });
+    ctx.print("[");
+    for column in 0..width {
+        if column < used {
+            ctx.print_colored("#", color);
+        } else {
+            ctx.print_colored("-", Theme::RESOURCE_FREE);
+        }
+    }
+    ctx.print("] ");
+    let mut percent_text = [0u8; 8];
+    let len = format_number(percent, &mut percent_text);
+    ctx.print(unsafe { core::str::from_utf8_unchecked(&percent_text[..len]) });
+    ctx.println("%");
+}
+
+fn append_percent(value: u64, total: u64, buffer: &mut [u8], mut pos: usize) -> usize {
+    let percent = if total == 0 {
+        0
+    } else {
+        value.saturating_mul(100) / total
+    };
+    for byte in " (".bytes() {
+        if pos < buffer.len() {
+            buffer[pos] = byte;
+            pos += 1;
+        }
+    }
+    pos += format_number(percent, &mut buffer[pos..]);
+    for byte in "%)".bytes() {
+        if pos < buffer.len() {
+            buffer[pos] = byte;
+            pos += 1;
+        }
+    }
+    pos
+}
+
+fn copy_bytes(source: &[u8], destination: &mut [u8], start: usize) -> usize {
+    let mut pos = start;
+    for byte in source {
+        if pos >= destination.len() {
+            break;
+        }
+        destination[pos] = *byte;
+        pos += 1;
+    }
+    pos
 }
 
 /// services command - list registered services

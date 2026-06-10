@@ -1049,6 +1049,15 @@ pub fn get_stats() -> SharedMemStats {
     SHARED_MEM_MANAGER.get_stats()
 }
 
+/// Count physical pages owned by live shared-memory regions exactly once.
+pub fn resident_pages() -> usize {
+    let regions = SHARED_MEM_MANAGER.regions.lock();
+    regions
+        .values()
+        .map(|region| region.physical_pages.len())
+        .sum()
+}
+
 /// Return the physical address of the first page of a region.
 ///
 /// The kernel uses this to access region data via the identity map

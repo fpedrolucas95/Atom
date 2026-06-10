@@ -80,7 +80,7 @@ pub fn cmd_help(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Comman
                 ],
             ),
             ("Network", &["ping", "ifconfig"]),
-            ("Process", &["ps", "kill", "exec", "mem", "services"]),
+            ("Process", &["ps", "kill", "exec", "mem", "cpu", "services"]),
             (
                 "Navigation & Read",
                 &[

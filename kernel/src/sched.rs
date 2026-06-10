@@ -100,6 +100,8 @@ struct CpuSchedulerState {
     current: Option<ThreadId>,
     idle: Option<ThreadId>,
     local_ticks: u64,
+    timer_ticks: u64,
+    idle_ticks: u64,
     resched_pending: bool,
     context_switches: u64,
     steals: u64,
@@ -117,6 +119,8 @@ impl CpuSchedulerState {
             current: None,
             idle: None,
             local_ticks: 0,
+            timer_ticks: 0,
+            idle_ticks: 0,
             resched_pending: false,
             context_switches: 0,
             steals: 0,
@@ -132,6 +136,7 @@ struct SchedulerInner {
     effective_priorities: BTreeMap<ThreadId, ThreadPriority>,
     affinity_masks: BTreeMap<ThreadId, u64>,
     ownership: BTreeMap<ThreadId, usize>,
+    runtime_ticks: BTreeMap<ThreadId, u64>,
     sleep_queue: Vec<(ThreadId, u64)>,
 }
 
@@ -149,6 +154,7 @@ impl SchedulerInner {
             effective_priorities: BTreeMap::new(),
             affinity_masks: BTreeMap::new(),
             ownership: BTreeMap::new(),
+            runtime_ticks: BTreeMap::new(),
             sleep_queue: Vec::new(),
         }
     }
@@ -332,6 +338,7 @@ impl SchedulerInner {
         self.effective_priorities.remove(&id);
         self.affinity_masks.remove(&id);
         self.ownership.remove(&id);
+        self.runtime_ticks.remove(&id);
 
         for cpu in self.cpus.iter_mut() {
             if cpu.current == Some(id) {
@@ -488,6 +495,7 @@ impl Scheduler {
             .insert(idle_id, ThreadPriority::Idle);
         inner.affinity_masks.insert(idle_id, 1u64 << cpu_id.min(63));
         inner.ownership.insert(idle_id, cpu_id);
+        inner.runtime_ticks.insert(idle_id, 0);
         inner.remove_from_all_ready_queues(idle_id);
 
         inner.cpus[cpu_id].idle = Some(idle_id);
@@ -512,6 +520,7 @@ impl Scheduler {
         let all_cpu_mask = inner.all_cpu_mask();
         inner.affinity_masks.insert(id, all_cpu_mask);
         inner.ownership.insert(id, NO_CPU_OWNER);
+        inner.runtime_ticks.insert(id, 0);
 
         if matches!(initial_state, ThreadState::Ready) {
             let target_cpu = inner.enqueue_ready_locked(id, None);
@@ -772,6 +781,40 @@ impl Scheduler {
         inner.cpus[cpu_id].current
     }
 
+    fn account_timer_tick(&self) {
+        let mut inner = self.inner.lock();
+        let cpu_id = self.local_cpu_id(&inner);
+        let current = inner.cpus[cpu_id].current;
+
+        inner.cpus[cpu_id].timer_ticks = inner.cpus[cpu_id].timer_ticks.saturating_add(1);
+
+        if current == inner.cpus[cpu_id].idle {
+            inner.cpus[cpu_id].idle_ticks = inner.cpus[cpu_id].idle_ticks.saturating_add(1);
+        } else if let Some(thread_id) = current {
+            if let Some(ticks) = inner.runtime_ticks.get_mut(&thread_id) {
+                *ticks = ticks.saturating_add(1);
+            }
+        }
+    }
+
+    fn accounting_snapshot(&self) -> CpuAccountingSnapshot {
+        let inner = self.inner.lock();
+        let mut snapshot = CpuAccountingSnapshot::empty();
+        snapshot.cpu_count = inner.cpu_count().min(crate::smp::MAX_CPUS);
+
+        for cpu_id in 0..snapshot.cpu_count {
+            snapshot.total_ticks[cpu_id] = inner.cpus[cpu_id].timer_ticks;
+            snapshot.idle_ticks[cpu_id] = inner.cpus[cpu_id].idle_ticks;
+        }
+
+        snapshot.thread_ticks = inner
+            .runtime_ticks
+            .iter()
+            .map(|(thread_id, ticks)| (*thread_id, *ticks))
+            .collect();
+        snapshot
+    }
+
     fn clear_pending_switch_from(&self) {
         let mut inner = self.inner.lock();
         let cpu_id = self.local_cpu_id(&inner);
@@ -903,6 +946,41 @@ pub fn on_timer_tick() -> (Option<ThreadId>, Option<ThreadId>) {
         scheduler_opt()
             .map(|sched| sched.schedule_local(true))
             .unwrap_or((None, None))
+    })
+}
+
+#[derive(Debug)]
+pub struct CpuAccountingSnapshot {
+    pub cpu_count: usize,
+    pub total_ticks: [u64; crate::smp::MAX_CPUS],
+    pub idle_ticks: [u64; crate::smp::MAX_CPUS],
+    pub thread_ticks: Vec<(ThreadId, u64)>,
+}
+
+impl CpuAccountingSnapshot {
+    fn empty() -> Self {
+        Self {
+            cpu_count: 0,
+            total_ticks: [0; crate::smp::MAX_CPUS],
+            idle_ticks: [0; crate::smp::MAX_CPUS],
+            thread_ticks: Vec::new(),
+        }
+    }
+}
+
+pub fn account_timer_tick() {
+    without_interrupts(|| {
+        if let Some(sched) = scheduler_opt() {
+            sched.account_timer_tick();
+        }
+    });
+}
+
+pub fn cpu_accounting_snapshot() -> CpuAccountingSnapshot {
+    without_interrupts(|| {
+        scheduler_opt()
+            .map(|sched| sched.accounting_snapshot())
+            .unwrap_or_else(CpuAccountingSnapshot::empty)
     })
 }
 

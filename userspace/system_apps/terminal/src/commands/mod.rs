@@ -39,6 +39,9 @@ impl<'a> CommandContext<'a> {
     pub fn print(&mut self, text: &str) {
         self.display.write_str(text, Theme::TEXT_NORMAL);
     }
+    pub fn print_colored(&mut self, text: &str, color: atom_syscall::graphics::Color) {
+        self.display.write_str(text, color);
+    }
     pub fn error(&mut self, text: &str) {
         self.display.writeln(text, Theme::TEXT_ERROR);
     }
@@ -111,6 +114,9 @@ pub fn execute(cmd: &ParsedCommand<'_>, ctx: &mut CommandContext<'_>) -> Command
     }
     if cmd_eq(c, "mem") || cmd_eq(c, "memory") {
         return process::cmd_memory(cmd, ctx);
+    }
+    if cmd_eq(c, "cpu") || cmd_eq(c, "top") {
+        return process::cmd_cpu(cmd, ctx);
     }
     if cmd_eq(c, "services") || cmd_eq(c, "svc") {
         return process::cmd_services(cmd, ctx);
@@ -226,6 +232,7 @@ static COMMANDS: &[(&str, &str, &str)] = &[
     ("kill", "kill <pid>", "Terminate a process"),
     ("exec", "exec <program>", "Launch a program"),
     ("mem", "mem", "Memory usage statistics"),
+    ("cpu", "cpu", "CPU usage by core and process"),
     ("services", "services", "List registered services"),
     // ── Filesystem – read ─────────────────────────────────────────────────
     ("ls", "ls [-l] [-a] [path]", "List directory contents"),

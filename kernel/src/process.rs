@@ -121,6 +121,19 @@ pub struct Process {
 
 pub static PROCESS_REGISTRY: Mutex<BTreeMap<ProcessId, Process>> = Mutex::new(BTreeMap::new());
 pub static PML4_TO_PROCESS: Mutex<BTreeMap<u64, ProcessId>> = Mutex::new(BTreeMap::new());
+static PROCESS_DISPLAY_NAMES: Mutex<BTreeMap<ProcessId, [u8; 32]>> = Mutex::new(BTreeMap::new());
+
+pub fn set_process_display_name(process_id: ProcessId, name: &str) {
+    let mut stored = [0u8; 32];
+    let bytes = name.as_bytes();
+    let copy_len = bytes.len().min(stored.len() - 1);
+    stored[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    PROCESS_DISPLAY_NAMES.lock().insert(process_id, stored);
+}
+
+pub fn get_process_display_name(process_id: ProcessId) -> Option<[u8; 32]> {
+    PROCESS_DISPLAY_NAMES.lock().get(&process_id).copied()
+}
 
 fn debug_assert_capability_store_owner(process: &Process) {
     debug_assert_eq!(
@@ -290,6 +303,7 @@ fn finalize_removed_process(process_id: ProcessId, pml4_phys: u64) {
         pml4_map.remove(&pml4_phys);
     }
     drop(pml4_map);
+    PROCESS_DISPLAY_NAMES.lock().remove(&process_id);
 
     crate::shared_mem::forget_process_shared_memory_cleanup(process_id);
 

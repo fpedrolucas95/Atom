@@ -290,7 +290,8 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         | SYS_GET_CPU_ID
         | SYS_GET_CPU_COUNT
         | SYS_SET_THREAD_AFFINITY
-        | SYS_GET_THREAD_AFFINITY => ExplicitlyUnrestricted,
+        | SYS_GET_THREAD_AFFINITY
+        | SYS_GET_RESOURCE_USAGE => ExplicitlyUnrestricted,
 
         // Debug log — no cap required (process names its own output).
         SYS_DEBUG_LOG => ExplicitlyUnrestricted,

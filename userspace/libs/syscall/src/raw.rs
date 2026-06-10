@@ -64,6 +64,7 @@ pub mod numbers {
     pub const SYS_GET_CPU_COUNT: u64 = 91;
     pub const SYS_SET_THREAD_AFFINITY: u64 = 92;
     pub const SYS_GET_THREAD_AFFINITY: u64 = 93;
+    pub const SYS_GET_RESOURCE_USAGE: u64 = 94;
 
     // ---------------------------------------------------------------------------
     // Infrastructure / Networking Phase 1 syscalls

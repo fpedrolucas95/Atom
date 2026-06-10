@@ -133,6 +133,28 @@ pub const SYS_GET_CPU_ID: u64 = 90;
 pub const SYS_GET_CPU_COUNT: u64 = 91;
 pub const SYS_SET_THREAD_AFFINITY: u64 = 92;
 pub const SYS_GET_THREAD_AFFINITY: u64 = 93;
+pub const SYS_GET_RESOURCE_USAGE: u64 = 94;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SystemResourceUsage {
+    total_ram_kb: u64,
+    free_ram_kb: u64,
+    framebuffer_kb: u64,
+    shared_memory_kb: u64,
+    cpu_count: u64,
+    cpu_total_ticks: [u64; crate::smp::MAX_CPUS],
+    cpu_idle_ticks: [u64; crate::smp::MAX_CPUS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessResourceUsage {
+    pid: u64,
+    private_memory_kb: u64,
+    cpu_ticks: u64,
+    name: [u8; 32],
+}
 
 // ---------------------------------------------------------------------------
 // Infrastructure / Networking Phase 1 syscalls
@@ -881,6 +903,7 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_GET_CPU_COUNT => sys_get_cpu_count(),
         SYS_SET_THREAD_AFFINITY => sys_set_thread_affinity(arg0, arg1),
         SYS_GET_THREAD_AFFINITY => sys_get_thread_affinity(arg0),
+        SYS_GET_RESOURCE_USAGE => sys_get_resource_usage(arg0, arg1, arg2 as usize),
 
         // Virtual memory management syscalls
         SYS_MMAP => sys_mmap(arg0, arg1, arg2, arg3),
@@ -4732,6 +4755,7 @@ fn spawn_process_internal(
     // into its capability table. mark_thread_ready is deferred until all grants
     // are complete so the thread cannot be scheduled before it has its caps.
     crate::thread::add_thread(thread);
+    crate::process::set_process_display_name(process_id, name);
 
     // ── Manifest-driven grants (least privilege; PR3) ───────────
     //
@@ -5040,6 +5064,10 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     let app_grants = crate::system_manifest::app_grants_for_path(path);
     match spawn_process_internal("app", &image, app_grants) {
         Ok(pid) => {
+            crate::process::set_process_display_name(
+                crate::process::ProcessId::from(pid),
+                app_name,
+            );
             log_info!(
                 LOG_ORIGIN,
                 "spawn_from_path: '{}' started as pid={}",
@@ -5243,6 +5271,124 @@ fn sys_get_thread_affinity(thread_id: u64) -> u64 {
     };
 
     crate::sched::get_thread_affinity(tid)
+}
+
+fn sys_get_resource_usage(system_ptr: u64, process_ptr: u64, max_processes: usize) -> u64 {
+    let system_ptr = match validate_user_addr(system_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(
+        system_ptr.as_u64(),
+        core::mem::size_of::<SystemResourceUsage>(),
+    )
+    .is_err()
+    {
+        return EINVAL;
+    }
+
+    let process_ptr = if max_processes > 0 {
+        let ptr = match validate_user_addr(process_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        let bytes = match max_processes.checked_mul(core::mem::size_of::<ProcessResourceUsage>()) {
+            Some(bytes) => bytes,
+            None => return EINVAL,
+        };
+        if validate_user_range(ptr.as_u64(), bytes).is_err() {
+            return EINVAL;
+        }
+        Some(ptr)
+    } else {
+        None
+    };
+
+    let (total_ram_kb, free_ram_kb) = crate::mm::pmm::get_memory_stats();
+    let framebuffer_kb = crate::graphics::get_framebuffer_info()
+        .map(|(_, _, height, stride, bytes_per_pixel)| {
+            let bytes = (height as u64)
+                .saturating_mul(stride as u64)
+                .saturating_mul(bytes_per_pixel as u64);
+            bytes.saturating_add(1023) / 1024
+        })
+        .unwrap_or(0);
+    let shared_memory_kb =
+        (crate::shared_mem::resident_pages() * crate::mm::pmm::PAGE_SIZE / 1024) as u64;
+    let cpu = crate::sched::cpu_accounting_snapshot();
+
+    let mut system = SystemResourceUsage {
+        total_ram_kb,
+        free_ram_kb,
+        framebuffer_kb,
+        shared_memory_kb,
+        cpu_count: cpu.cpu_count as u64,
+        cpu_total_ticks: [0; crate::smp::MAX_CPUS],
+        cpu_idle_ticks: [0; crate::smp::MAX_CPUS],
+    };
+    system.cpu_total_ticks[..cpu.cpu_count].copy_from_slice(&cpu.total_ticks[..cpu.cpu_count]);
+    system.cpu_idle_ticks[..cpu.cpu_count].copy_from_slice(&cpu.idle_ticks[..cpu.cpu_count]);
+
+    unsafe {
+        *system_ptr.as_mut_ptr::<SystemResourceUsage>() = system;
+    }
+
+    let process_memory = crate::process::collect_process_memory_snapshot();
+    let threads = crate::thread::get_all_thread_info();
+    let mut written = 0usize;
+
+    for process in process_memory.iter() {
+        if written >= max_processes {
+            break;
+        }
+        if process.terminated {
+            continue;
+        }
+
+        let mut name =
+            crate::process::get_process_display_name(process.process_id).unwrap_or([0u8; 32]);
+        if name[0] == 0 {
+            if let Some((_, thread_name, _, _)) =
+                threads.iter().find(|(thread_id, _, process_id, _)| {
+                    thread_id.raw() == process.process_id.raw()
+                        || *process_id == Some(process.process_id)
+                })
+            {
+                let bytes = thread_name.as_bytes();
+                let copy_len = bytes.len().min(name.len() - 1);
+                name[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            }
+        }
+
+        let cpu_ticks = threads
+            .iter()
+            .filter(|(_, _, process_id, _)| *process_id == Some(process.process_id))
+            .map(|(thread_id, _, _, _)| {
+                cpu.thread_ticks
+                    .iter()
+                    .find(|(accounted_id, _)| accounted_id == thread_id)
+                    .map(|(_, ticks)| *ticks)
+                    .unwrap_or(0)
+            })
+            .fold(0u64, u64::saturating_add);
+
+        let entry = ProcessResourceUsage {
+            pid: process.process_id.raw(),
+            private_memory_kb: (process.resident_private_pages * crate::mm::pmm::PAGE_SIZE / 1024)
+                as u64,
+            cpu_ticks,
+            name,
+        };
+
+        if let Some(ptr) = process_ptr {
+            unsafe {
+                *ptr.as_mut_ptr::<ProcessResourceUsage>().add(written) = entry;
+            }
+        }
+        written += 1;
+    }
+
+    written as u64
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,14 @@ impl Theme {
     pub const TEXT_SUCCESS: Color = Color::new(72, 199, 142); // Success messages
     pub const TEXT_INFO: Color = Color::new(86, 182, 245); // Info messages
     pub const TEXT_WARNING: Color = Color::new(245, 189, 65); // Warning messages
+    pub const RESOURCE_SYSTEM: Color = Color::new(99, 143, 255);
+    pub const RESOURCE_FRAMEBUFFER: Color = Color::new(200, 120, 255);
+    pub const RESOURCE_SHARED: Color = Color::new(65, 205, 190);
+    pub const RESOURCE_FREE: Color = Color::new(70, 76, 94);
+    pub const RESOURCE_APP_1: Color = Color::new(245, 189, 65);
+    pub const RESOURCE_APP_2: Color = Color::new(240, 105, 120);
+    pub const RESOURCE_APP_3: Color = Color::new(72, 199, 142);
+    pub const RESOURCE_APP_4: Color = Color::new(255, 145, 75);
 
     // Prompt colors
     pub const PROMPT_USER: Color = Color::new(99, 143, 255); // User part of prompt
