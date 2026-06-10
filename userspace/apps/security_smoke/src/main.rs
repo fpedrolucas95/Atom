@@ -1,4 +1,4 @@
-//! security_smoke — adversarial least-privilege smoke test (PR3)
+//! security_smoke — adversarial least-privilege and W^X smoke test
 //!
 //! This is an *ordinary* application: it is launched by path via
 //! `app_launcher` + `SYS_SPAWN_FROM_PATH`, so under the PR3 least-privilege
@@ -40,7 +40,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use atom_syscall::debug::log;
 use atom_syscall::error::EPERM;
 use atom_syscall::raw::numbers::*;
-use atom_syscall::raw::{syscall1, syscall2, syscall4};
+use atom_syscall::raw::{syscall1, syscall2, syscall3, syscall4, syscall5};
 use atom_syscall::thread::exit;
 
 // ============================================================================
@@ -107,6 +107,18 @@ fn expect_denied(name: &str, ret: u64) -> u32 {
     }
 }
 
+fn expect_success(name: &str, ret: u64) -> u32 {
+    if !atom_syscall::atom_abi::is_syscall_error(ret) {
+        log("security_smoke: ALLOWED (ok) ->");
+        log(name);
+        0
+    } else {
+        log("security_smoke: UNEXPECTED ERROR (FAIL) ->");
+        log(name);
+        1
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     log("security_smoke: start (ordinary app — every sensitive syscall must be EPERM)");
@@ -115,28 +127,34 @@ pub extern "C" fn _start() -> ! {
     let mut fails: u32 = 0;
 
     // Framebuffer map authority.
-    fails += expect_denied("SYS_GET_FRAMEBUFFER", unsafe { syscall1(SYS_GET_FRAMEBUFFER, p) });
-    fails += expect_denied("SYS_MAP_FRAMEBUFFER", unsafe { syscall1(SYS_MAP_FRAMEBUFFER, p) });
+    fails += expect_denied("SYS_GET_FRAMEBUFFER", unsafe {
+        syscall1(SYS_GET_FRAMEBUFFER, p)
+    });
+    fails += expect_denied("SYS_MAP_FRAMEBUFFER", unsafe {
+        syscall1(SYS_MAP_FRAMEBUFFER, p)
+    });
 
     // Video-mode change authority (queries are public and intentionally not here).
-    fails += expect_denied("SYS_SET_VIDEO_MODE", unsafe { syscall2(SYS_SET_VIDEO_MODE, 0, 0) });
+    fails += expect_denied("SYS_SET_VIDEO_MODE", unsafe {
+        syscall2(SYS_SET_VIDEO_MODE, 0, 0)
+    });
 
     // Input authority.
-    fails += expect_denied("SYS_KEYBOARD_POLL", unsafe { syscall1(SYS_KEYBOARD_POLL, p) });
+    fails += expect_denied("SYS_KEYBOARD_POLL", unsafe {
+        syscall1(SYS_KEYBOARD_POLL, p)
+    });
     fails += expect_denied("SYS_MOUSE_POLL", unsafe { syscall1(SYS_MOUSE_POLL, p) });
 
     // Kernel log.
     fails += expect_denied("SYS_READ_KLOG", unsafe { syscall2(SYS_READ_KLOG, p, 16) });
 
     // Raw filesystem backend (fsd-only).
-    fails += expect_denied(
-        "SYS_KERN_FS_READ_FILE",
-        unsafe { syscall4(SYS_KERN_FS_READ_FILE, p, 1, p, 1) },
-    );
-    fails += expect_denied(
-        "SYS_KERN_FS_WRITE_FILE",
-        unsafe { syscall4(SYS_KERN_FS_WRITE_FILE, p, 1, p, 1) },
-    );
+    fails += expect_denied("SYS_KERN_FS_READ_FILE", unsafe {
+        syscall4(SYS_KERN_FS_READ_FILE, p, 1, p, 1)
+    });
+    fails += expect_denied("SYS_KERN_FS_WRITE_FILE", unsafe {
+        syscall4(SYS_KERN_FS_WRITE_FILE, p, 1, p, 1)
+    });
 
     // Reserved bootstrap ports — an app must not be able to squat Port(1/2/3).
     fails += expect_denied("SYS_IPC_CREATE_PORT_WITH_ID(1)", unsafe {
@@ -146,8 +164,55 @@ pub extern "C" fn _start() -> ! {
         syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 3)
     });
 
+    const PAGE: u64 = 4096;
+    const MMAP_FLAGS: u64 =
+        atom_syscall::atom_abi::MAP_ANONYMOUS | atom_syscall::atom_abi::MAP_PRIVATE;
+    const R: u64 = atom_syscall::atom_abi::PROT_READ;
+    const W: u64 = atom_syscall::atom_abi::PROT_WRITE;
+    const X: u64 = atom_syscall::atom_abi::PROT_EXEC;
+
+    fails += expect_denied("mmap(RWX)", unsafe {
+        syscall4(SYS_MMAP, 0, PAGE, R | W | X, MMAP_FLAGS)
+    });
+
+    let rw = unsafe { syscall4(SYS_MMAP, 0, PAGE, R | W, MMAP_FLAGS) };
+    fails += expect_success("mmap(RW)", rw);
+    if !atom_syscall::atom_abi::is_syscall_error(rw) {
+        fails += expect_denied("mprotect(RW -> RWX)", unsafe {
+            syscall3(SYS_MPROTECT, rw, PAGE, R | W | X)
+        });
+        fails += expect_success("mprotect(RW -> R)", unsafe {
+            syscall3(SYS_MPROTECT, rw, PAGE, R)
+        });
+        fails += expect_success("munmap(R)", unsafe { syscall2(SYS_MUNMAP, rw, PAGE) });
+    }
+
+    let rx = unsafe { syscall4(SYS_MMAP, 0, PAGE, R | X, MMAP_FLAGS) };
+    fails += expect_success("mmap(RX)", rx);
+    if !atom_syscall::atom_abi::is_syscall_error(rx) {
+        fails += expect_success("mprotect(RX -> R)", unsafe {
+            syscall3(SYS_MPROTECT, rx, PAGE, R)
+        });
+        fails += expect_success("munmap(RX)", unsafe { syscall2(SYS_MUNMAP, rx, PAGE) });
+    }
+
+    let shared = unsafe { syscall1(SYS_SHARED_REGION_CREATE, PAGE) };
+    fails += expect_success("shared_region_create", shared);
+    if !atom_syscall::atom_abi::is_syscall_error(shared) {
+        fails += expect_denied("shared_region_map(EXEC)", unsafe {
+            syscall3(SYS_SHARED_REGION_MAP, shared, 0, 0x5)
+        });
+        fails += expect_success("shared_region_destroy", unsafe {
+            syscall1(SYS_SHARED_REGION_DESTROY, shared)
+        });
+    }
+
+    fails += expect_denied("map_region(WRITE|EXEC)", unsafe {
+        syscall5(SYS_MAP_REGION, 0, 0x4000, 0x4000, PAGE, 0x2)
+    });
+
     if fails == 0 {
-        log("security_smoke: PASS — all sensitive syscalls denied for ordinary app");
+        log("security_smoke: PASS — least privilege and W^X enforced");
         exit(0);
     } else {
         log("security_smoke: FAIL — a sensitive syscall was NOT denied (least-privilege regression)");

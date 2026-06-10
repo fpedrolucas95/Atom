@@ -1,64 +1,76 @@
-/* Userspace Linker Script for Atom OS
+/* Atom userspace PIE layout.
  *
- * This script ensures userspace binaries are linked at the correct base
- * address (0x800000) to match where the kernel loads them.
- *
- * The kernel's USER_EXEC_LOAD_BASE is 0x0080_0000 (8 MiB).
- * This must be above the kernel heap ceiling (~0x66A000).
+ * Every loadable region starts at a page boundary and receives a dedicated
+ * PT_LOAD with final permissions. elf2atxf preserves these permissions and
+ * converts .rela.dyn into ATXF v2 relocations.
  */
 
 OUTPUT_FORMAT("elf64-x86-64")
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-/* Base address must match kernel's USER_EXEC_LOAD_BASE */
-USER_BASE = 0x800000;
+PHDRS
+{
+    text    PT_LOAD FLAGS(5); /* R X */
+    rodata  PT_LOAD FLAGS(4); /* R   */
+    data    PT_LOAD FLAGS(6); /* R W */
+    dynamic PT_DYNAMIC FLAGS(6);
+}
 
 SECTIONS
 {
-    /* Start at USER_BASE */
-    . = USER_BASE;
+    . = 0;
 
-    /* Code section - includes .rodata so it's part of executable segment */
-    .text : ALIGN(4K)
+    . = ALIGN(4K);
+    .text :
     {
         *(.text .text.*)
-        /* Include rodata in text segment so it's captured by elf2atxf */
-        *(.rodata .rodata.*)
-    }
+    } :text
 
-    /* Initialized data - include relocation-related sections */
-    .data : ALIGN(4K)
+    . = ALIGN(4K);
+    .rodata :
+    {
+        *(.rodata .rodata.*)
+        *(.eh_frame_hdr)
+        *(.eh_frame)
+    } :rodata
+
+    . = ALIGN(4K);
+    .data :
     {
         *(.data .data.*)
         *(.data.rel.ro .data.rel.ro.*)
         *(.got .got.*)
         *(.got.plt .got.plt.*)
-    }
+    } :data
 
-    /* Zero-initialized data */
-    .bss : ALIGN(4K)
+    .dynamic :
+    {
+        *(.dynamic)
+    } :data :dynamic
+
+    .rela.dyn :
+    {
+        *(.rela.dyn)
+        *(.rela.plt)
+    } :data
+
+    . = ALIGN(4K);
+    .bss (NOLOAD) :
     {
         *(.bss .bss.*)
         *(COMMON)
-    }
+    } :data
 
-    /* Discard unneeded sections - especially dynamic linking infrastructure */
     /DISCARD/ :
     {
         *(.comment)
         *(.note*)
-        *(.eh_frame*)
-        *(.eh_frame_hdr*)
         *(.debug*)
-        /* Discard dynamic linking sections - we're fully static */
         *(.dynsym)
         *(.gnu.hash)
         *(.hash)
         *(.dynstr)
-        *(.dynamic)
-        *(.rela.dyn)
-        *(.rela.plt)
         *(.plt)
         *(.plt.got)
         *(.relro_padding)

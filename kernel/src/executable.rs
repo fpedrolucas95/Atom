@@ -1,480 +1,791 @@
-// User executable loading and format handling
-//
-// This module implements support for user-space executables in the kernel,
-// including format validation, section layout, and safe loading into a
-// user address space.
-//
-// Key responsibilities:
-// - Define and validate the ATXF executable format
-// - Parse executable headers and sections (.text, .data, .bss)
-// - Load executables into user address spaces
-// - Allocate and map physical memory for code and data
-// - Provide automatic rollback on partial failure
-//
-// MICROKERNEL ARCHITECTURE:
-// - The bootloader MUST provide a valid ui_shell.atxf payload
-// - There is NO embedded fallback image
-// - If the payload is missing or invalid, the system MUST fail
-// - This enforces proper separation of kernel and userspace
-//
-// Design and implementation:
-// - Simple format with a fixed header and explicit offsets
-// - Sections aligned to page boundaries (4 KiB)
-// - Fixed load base for user executables
-// - Explicit use of PMM and VMM for allocation and mapping
-// - RollbackGuard ensures consistent cleanup on failures
-//
-// Safety and correctness notes:
-// - Executables are validated before any mapping occurs
-// - Layout is checked against canonical user address limits
-// - Mapping failures release all previously allocated memory
-// - Raw pointers are used only for controlled data copying
-//
-// Limitations and future considerations:
-// - No relocation or ASLR support
-// - Format supports only a single text and data segment
-// - No explicit executable permission enforcement
-// - Loading assumes a trusted executable from boot/init
-//
-// Public interface:
-// - `load_boot_payload` to load init provided at boot
-// - `load_into_address_space` to load generic executables
-// - `ExecError` for detailed failure diagnostics
-
 use alloc::vec::Vec;
-use core::mem::size_of;
-use core::ptr;
 
-use crate::boot::ExecutableImage;
-use crate::mm::{addrspace, pmm, vm};
-use crate::mm::addrspace::AddressSpaceId;
-use crate::mm::vm::PageFlags;
-use crate::thread::ThreadId;
-use crate::{log_error, log_info, log_warn};
+use atom_atxf::{
+    verify_image_mac, AtxfV2Header, AtxfV2Relocation, AtxfV2Segment, ATXF_FLAG_PIE,
+    ATXF_KNOWN_FLAGS, ATXF_MAGIC, ATXF_PAGE_SIZE, ATXF_SIGNATURE_SIZE, ATXF_VERSION, HEADER_SIZE,
+    KNOWN_PERMISSIONS, PERM_EXECUTE, PERM_READ, PERM_WRITE, RELOCATION_RELATIVE64, RELOCATION_SIZE,
+    SEGMENT_BSS, SEGMENT_DATA, SEGMENT_RODATA, SEGMENT_SIZE, SEGMENT_TEXT, SEGMENT_TLS,
+};
 
-#[allow(dead_code)]
+use crate::log_info;
+use crate::mm::pmm::{self, PAGE_SIZE};
+use crate::mm::vm::{self, PageFlags};
+use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
+use crate::process::ProcessId;
+
 const LOG_ORIGIN: &str = "exec";
+const MAX_SEGMENTS: usize = 32;
+const MAX_RELOCATIONS: usize = 1_000_000;
 
-/// ATXF executable format magic number: "ATXF" in little-endian
-pub const ATXF_MAGIC: u32 = 0x4154_5846;
-
-/// Current ATXF format version
-pub const ATXF_VERSION: u16 = 1;
-
-/// Base address where user executables are loaded.
-/// Must be above the kernel heap ceiling (~0x66A000) to avoid PTE conflicts.
-pub const USER_EXEC_LOAD_BASE: usize = 0x0080_0000;
-
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecError {
-    MissingImage,
     InvalidMagic,
     UnsupportedVersion(u16),
     Truncated,
-    MisalignedSection,
-    OverlappingSection,
+    InvalidHeader,
+    InvalidFlags,
+    InvalidSignature,
+    MissingSignature,
+    InvalidSegment,
+    MisalignedSegment,
+    OverlappingSegment,
+    InvalidPermissions,
     EntryOutOfBounds,
+    InvalidRelocation,
+    ArithmeticOverflow,
     OutOfMemory,
-    AddressSpace(addrspace::AddressSpaceError),
+    MappingFailed,
+    VmaFailed,
     NonCanonicalLayout,
+    EntropyUnavailable,
 }
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct AtxfHeader {
-    magic: u32,
-    version: u16,
-    header_size: u16,
-    entry_offset: u32,
-    text_offset: u32,
-    text_size: u32,
-    data_offset: u32,
-    data_size: u32,
-    bss_size: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentKind {
+    Text,
+    Rodata,
+    Data,
+    Bss,
+    Tls,
 }
 
-#[derive(Clone, Copy)]
-pub struct ExecutableSections<'a> {
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutableSegment<'a> {
+    pub kind: SegmentKind,
+    pub permissions: u32,
+    pub file_data: &'a [u8],
+    pub mem_size: usize,
+    pub virtual_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutableRelocation {
+    pub offset: usize,
+    pub addend: i64,
+}
+
+#[derive(Debug)]
+pub struct ExecutableImageV2<'a> {
     pub entry_offset: usize,
-    pub text: &'a [u8],
-    pub data: &'a [u8],
-    pub bss_size: usize,
+    pub segments: Vec<ExecutableSegment<'a>>,
+    pub relocations: Vec<ExecutableRelocation>,
+    pub image_span: usize,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
 pub struct LoadedExecutable {
     pub entry_point: usize,
-    pub text_base: usize,
-    pub data_base: usize,
-    pub bss_base: usize,
+    pub image_base: usize,
+    pub image_end: usize,
 }
 
-#[allow(dead_code)]
-pub fn log_format_overview() {
-    log_info!(
-        LOG_ORIGIN,
-        "Executable format active: magic=0x{:X}, version={}, sections=.text/.data/.bss",
-        ATXF_MAGIC,
-        ATXF_VERSION
-    );
-    log_info!(
-        LOG_ORIGIN,
-        "Load base: 0x{:X}, page size: {} bytes, entry offset relative to base",
-        USER_EXEC_LOAD_BASE,
-        pmm::PAGE_SIZE
-    );
-}
-
-#[allow(dead_code)]
-pub fn summarize_boot_payload(payload: &ExecutableImage) {
-    if !payload.is_present() {
-        log_warn!(LOG_ORIGIN, "Bootloader did not provide a user executable payload");
-        return;
-    }
-
-    log_info!(
-        LOG_ORIGIN,
-        "Boot payload located at 0x{:X} ({} bytes)",
-        payload.ptr as usize,
-        payload.size
-    );
-
-    match parse_boot_image(payload) {
-        Ok(sections) => {
-            log_info!(
-                LOG_ORIGIN,
-                "Payload validated: text={} bytes, data={} bytes, bss={} bytes, entry offset=0x{:X}",
-                sections.text.len(),
-                sections.data.len(),
-                sections.bss_size,
-                sections.entry_offset
-            );
-        }
-        Err(err) => {
-            log_error!(LOG_ORIGIN, "Payload validation failed: {:?}", err);
-        }
-    }
-}
-
-pub fn parse_boot_image(payload: &ExecutableImage) -> Result<ExecutableSections<'_>, ExecError> {
-    if !payload.is_present() {
-        return Err(ExecError::MissingImage);
-    }
-
-    let bytes = unsafe { core::slice::from_raw_parts(payload.ptr, payload.size) };
-    parse_image(bytes)
-}
-
-pub fn parse_image<'a>(image: &'a [u8]) -> Result<ExecutableSections<'a>, ExecError> {
-    if image.len() < size_of::<AtxfHeader>() {
-        return Err(ExecError::Truncated);
-    }
-
-    let mut raw = AtxfHeader {
-        magic: 0,
-        version: 0,
-        header_size: 0,
-        entry_offset: 0,
-        text_offset: 0,
-        text_size: 0,
-        data_offset: 0,
-        data_size: 0,
-        bss_size: 0,
-    };
-
-    unsafe {
-        let header_bytes = core::slice::from_raw_parts_mut(
-            &mut raw as *mut AtxfHeader as *mut u8,
-            size_of::<AtxfHeader>(),
-        );
-        header_bytes.copy_from_slice(&image[..size_of::<AtxfHeader>()]);
-    }
-
-    if raw.magic != ATXF_MAGIC {
+pub fn parse_image(image: &[u8]) -> Result<ExecutableImageV2<'_>, ExecError> {
+    let header = read_header(image)?;
+    if header.magic != ATXF_MAGIC {
         return Err(ExecError::InvalidMagic);
     }
-
-    if raw.version != ATXF_VERSION {
-        return Err(ExecError::UnsupportedVersion(raw.version));
+    if header.version != ATXF_VERSION {
+        return Err(ExecError::UnsupportedVersion(header.version));
     }
-
-    let header_size = raw.header_size as usize;
-    if header_size < size_of::<AtxfHeader>() {
-        return Err(ExecError::Truncated);
-    }
-
-    if !(raw.text_offset as usize).is_multiple_of(pmm::PAGE_SIZE) || !(raw.data_offset as usize).is_multiple_of(pmm::PAGE_SIZE) {
-        return Err(ExecError::MisalignedSection);
-    }
-
-    if (raw.text_offset as usize) < header_size || (raw.data_offset as usize) < header_size {
-        return Err(ExecError::OverlappingSection);
-    }
-
-    if raw.text_offset as usize + raw.text_size as usize > image.len() {
-        return Err(ExecError::Truncated);
-    }
-
-    let data_end = raw.data_offset as usize + raw.data_size as usize;
-    if data_end > image.len() {
-        return Err(ExecError::Truncated);
-    }
-
-    if (raw.text_offset <= raw.data_offset && raw.text_offset + raw.text_size > raw.data_offset)
-        || (raw.data_offset <= raw.text_offset && raw.data_offset + raw.data_size > raw.text_offset)
+    if header.header_size as usize != HEADER_SIZE
+        || header.reserved != 0
+        || header.image_size as usize != image.len()
     {
-        return Err(ExecError::OverlappingSection);
+        return Err(ExecError::InvalidHeader);
+    }
+    if header.flags != ATXF_FLAG_PIE || header.flags & !ATXF_KNOWN_FLAGS != 0 {
+        return Err(ExecError::InvalidFlags);
     }
 
-    if raw.entry_offset as usize >= raw.text_size as usize {
+    let signature_offset =
+        usize::try_from(header.signature_offset).map_err(|_| ExecError::ArithmeticOverflow)?;
+    let signature_size = header.signature_size as usize;
+    if signature_size == 0 {
+        return Err(ExecError::MissingSignature);
+    }
+    if signature_size != ATXF_SIGNATURE_SIZE
+        || !verify_image_mac(image, signature_offset, signature_size)
+    {
+        return Err(ExecError::InvalidSignature);
+    }
+
+    let segment_count = header.segment_count as usize;
+    let relocation_count = header.relocation_count as usize;
+    if segment_count == 0 || segment_count > MAX_SEGMENTS || relocation_count > MAX_RELOCATIONS {
+        return Err(ExecError::InvalidHeader);
+    }
+    let segment_table_offset =
+        usize::try_from(header.segment_table_offset).map_err(|_| ExecError::ArithmeticOverflow)?;
+    let relocation_table_offset = usize::try_from(header.relocation_table_offset)
+        .map_err(|_| ExecError::ArithmeticOverflow)?;
+    validate_table(
+        image,
+        segment_table_offset,
+        segment_count,
+        SEGMENT_SIZE,
+        signature_offset,
+    )?;
+    validate_table(
+        image,
+        relocation_table_offset,
+        relocation_count,
+        RELOCATION_SIZE,
+        signature_offset,
+    )?;
+
+    let mut segments = Vec::with_capacity(segment_count);
+    let mut image_span = 0usize;
+    for index in 0..segment_count {
+        let offset = segment_table_offset
+            .checked_add(
+                index
+                    .checked_mul(SEGMENT_SIZE)
+                    .ok_or(ExecError::ArithmeticOverflow)?,
+            )
+            .ok_or(ExecError::ArithmeticOverflow)?;
+        let raw = read_segment(image, offset)?;
+        let kind = parse_kind(raw.kind)?;
+        validate_segment_permissions(kind, raw.permissions)?;
+        if raw.permissions & !KNOWN_PERMISSIONS != 0
+            || raw.align != ATXF_PAGE_SIZE
+            || raw.virtual_offset % ATXF_PAGE_SIZE != 0
+            || raw.mem_size == 0
+            || raw.mem_size < raw.file_size
+        {
+            return Err(ExecError::InvalidSegment);
+        }
+
+        let virtual_offset =
+            usize::try_from(raw.virtual_offset).map_err(|_| ExecError::ArithmeticOverflow)?;
+        let mem_size = usize::try_from(raw.mem_size).map_err(|_| ExecError::ArithmeticOverflow)?;
+        let file_size =
+            usize::try_from(raw.file_size).map_err(|_| ExecError::ArithmeticOverflow)?;
+        if kind == SegmentKind::Bss && file_size != 0 {
+            return Err(ExecError::InvalidSegment);
+        }
+        let file_data = if file_size == 0 {
+            &image[0..0]
+        } else {
+            let file_offset =
+                usize::try_from(raw.file_offset).map_err(|_| ExecError::ArithmeticOverflow)?;
+            if file_offset % PAGE_SIZE != 0 {
+                return Err(ExecError::MisalignedSegment);
+            }
+            checked_slice(image, file_offset, file_size)?
+        };
+        let segment_end = virtual_offset
+            .checked_add(align_up(mem_size)?)
+            .ok_or(ExecError::ArithmeticOverflow)?;
+        image_span = image_span.max(segment_end);
+        segments.push(ExecutableSegment {
+            kind,
+            permissions: raw.permissions,
+            file_data,
+            mem_size,
+            virtual_offset,
+        });
+    }
+    segments.sort_by_key(|segment| segment.virtual_offset);
+    for pair in segments.windows(2) {
+        let left_end = pair[0]
+            .virtual_offset
+            .checked_add(align_up(pair[0].mem_size)?)
+            .ok_or(ExecError::ArithmeticOverflow)?;
+        if left_end > pair[1].virtual_offset {
+            return Err(ExecError::OverlappingSegment);
+        }
+    }
+
+    let entry_offset =
+        usize::try_from(header.entry_offset).map_err(|_| ExecError::ArithmeticOverflow)?;
+    if !segments.iter().any(|segment| {
+        segment.permissions & PERM_EXECUTE != 0
+            && entry_offset >= segment.virtual_offset
+            && entry_offset < segment.virtual_offset.saturating_add(segment.mem_size)
+    }) {
         return Err(ExecError::EntryOutOfBounds);
     }
 
-    if image.len() < header_size {
-        return Err(ExecError::Truncated);
+    let mut relocations = Vec::with_capacity(relocation_count);
+    for index in 0..relocation_count {
+        let offset = relocation_table_offset
+            .checked_add(
+                index
+                    .checked_mul(RELOCATION_SIZE)
+                    .ok_or(ExecError::ArithmeticOverflow)?,
+            )
+            .ok_or(ExecError::ArithmeticOverflow)?;
+        let raw = read_relocation(image, offset)?;
+        if raw.kind != RELOCATION_RELATIVE64 || raw.reserved != 0 {
+            return Err(ExecError::InvalidRelocation);
+        }
+        let target = usize::try_from(raw.offset).map_err(|_| ExecError::ArithmeticOverflow)?;
+        let valid_target = segments.iter().any(|segment| {
+            segment.permissions & PERM_WRITE != 0
+                && target >= segment.virtual_offset
+                && target
+                    .checked_add(8)
+                    .is_some_and(|end| end <= segment.virtual_offset + segment.mem_size)
+        });
+        if !valid_target {
+            return Err(ExecError::InvalidRelocation);
+        }
+        relocations.push(ExecutableRelocation {
+            offset: target,
+            addend: raw.addend,
+        });
     }
 
-    let text = &image[raw.text_offset as usize..raw.text_offset as usize + raw.text_size as usize];
-    let data = &image[raw.data_offset as usize..raw.data_offset as usize + raw.data_size as usize];
-
-    Ok(ExecutableSections {
-        entry_offset: raw.entry_offset as usize,
-        text,
-        data,
-        bss_size: raw.bss_size as usize,
+    Ok(ExecutableImageV2 {
+        entry_offset,
+        segments,
+        relocations,
+        image_span,
     })
 }
 
-// NOTE: No embedded fallback image is provided.
-// The bootloader MUST supply a valid ui_shell.atxf payload.
-// If the payload is missing or invalid, the system will halt.
-// This enforces proper microkernel architecture where all UI runs in userspace.
-
-#[allow(dead_code)]
-pub fn load_into_address_space(
-    image: &[u8],
-    address_space: AddressSpaceId,
-    owner: ThreadId,
+pub fn load_into_process(
+    image: &ExecutableImageV2<'_>,
+    pml4_phys: usize,
+    process_id: ProcessId,
 ) -> Result<LoadedExecutable, ExecError> {
-    let sections = parse_image(image)?;
-    do_load(sections, address_space, owner)
-}
-
-#[allow(dead_code)]
-pub fn load_boot_payload(
-    payload: &ExecutableImage,
-    address_space: AddressSpaceId,
-    owner: ThreadId,
-) -> Result<LoadedExecutable, ExecError> {
-    let sections = parse_boot_image(payload)?;
-    do_load(sections, address_space, owner)
-}
-
-fn do_load(
-    sections: ExecutableSections,
-    address_space: AddressSpaceId,
-    owner: ThreadId,
-) -> Result<LoadedExecutable, ExecError> {
-    let text_base = USER_EXEC_LOAD_BASE;
-    let text_size = pmm::align_up(sections.text.len());
-    let data_base = pmm::align_up(text_base + text_size);
-    let data_size = pmm::align_up(sections.data.len());
-    let bss_base = pmm::align_up(data_base + data_size);
-    let bss_size = pmm::align_up(sections.bss_size);
-
-    let highest_virt = match bss_base.checked_add(bss_size) {
-        Some(top) => top,
-        None => {
-            log_error!(LOG_ORIGIN, "Executable layout overflowed while computing top VA");
-            return Err(ExecError::NonCanonicalLayout);
-        }
-    };
-    let layout_size = match highest_virt.checked_sub(text_base) {
-        Some(size) => size,
-        None => {
-            log_error!(
-                LOG_ORIGIN,
-                "Executable layout underflow: text_base=0x{:X} highest_virt=0x{:X}",
-                text_base,
-                highest_virt
-            );
-            return Err(ExecError::NonCanonicalLayout);
-        }
-    };
-
-    if let Err(err) = atom_abi::validate_user_range(text_base, layout_size) {
-        log_error!(
-            LOG_ORIGIN,
-            "Executable layout violates ABI userspace range: base=0x{:X} top=0x{:X} size={} err={:?}",
-            text_base,
-            highest_virt,
-            layout_size,
-            err
-        );
+    let image_base =
+        crate::random::random_user_base(image.image_span).ok_or(ExecError::EntropyUnavailable)?;
+    let image_end = image_base
+        .checked_add(image.image_span)
+        .ok_or(ExecError::ArithmeticOverflow)?;
+    if image_end >= atom_abi::USER_HEAP_START as usize
+        || atom_abi::validate_user_range(image_base, image.image_span).is_err()
+    {
         return Err(ExecError::NonCanonicalLayout);
     }
 
-    let mut rollback = RollbackGuard::new(address_space, owner);
-
-    if let Some(mapping) = map_segment(
-        address_space,
-        owner,
-        text_base,
-        sections.text,
-        PageFlags::PRESENT | PageFlags::USER,
-    )? {
-        rollback.track(mapping);
+    let mut allocated = Vec::with_capacity(image.segments.len());
+    for segment in &image.segments {
+        let size = align_up(segment.mem_size)?;
+        let pages = size / PAGE_SIZE;
+        let virt = image_base
+            .checked_add(segment.virtual_offset)
+            .ok_or(ExecError::ArithmeticOverflow)?;
+        let phys = pmm::alloc_pages_zeroed(pages).ok_or_else(|| {
+            release_allocations(&allocated);
+            ExecError::OutOfMemory
+        })?;
+        if !segment.file_data.is_empty() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    segment.file_data.as_ptr(),
+                    vm::phys_to_virt_ptr(phys) as *mut u8,
+                    segment.file_data.len(),
+                );
+            }
+        }
+        allocated.push(AllocatedSegment {
+            segment: *segment,
+            virt,
+            phys,
+            pages,
+            mapped_pages: 0,
+        });
     }
 
-    if let Some(mapping) = map_segment(
-        address_space,
-        owner,
-        data_base,
-        sections.data,
-        PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
-    )? {
-        rollback.track(mapping);
+    if let Err(error) = apply_relocations(image, image_base, &allocated) {
+        release_allocations(&allocated);
+        return Err(error);
     }
 
-    if sections.bss_size > 0 {
-        if let Some(mapping) = map_zeroed_segment(
-            address_space,
-            owner,
-            bss_base,
-            bss_size,
-            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
-        )? {
-            rollback.track(mapping);
+    for index in 0..allocated.len() {
+        let virt = allocated[index].virt;
+        let phys = allocated[index].phys;
+        let pages = allocated[index].pages;
+        let segment = allocated[index].segment;
+        let flags = segment_page_flags(segment.permissions)?;
+        for page in 0..pages {
+            if vm::map_page_in_pml4(
+                pml4_phys,
+                virt + page * PAGE_SIZE,
+                phys + page * PAGE_SIZE,
+                flags,
+            )
+            .is_err()
+            {
+                rollback_mappings(pml4_phys, &allocated);
+                return Err(ExecError::MappingFailed);
+            }
+            allocated[index].mapped_pages += 1;
+        }
+
+        let end = virt
+            .checked_add(pages * PAGE_SIZE)
+            .ok_or(ExecError::ArithmeticOverflow)?;
+        if vma::insert_bootstrap_process_vma(
+            process_id,
+            pml4_phys,
+            Vma {
+                start: virt,
+                end,
+                perms: segment_vma_permissions(segment.permissions),
+                backing: VmaBacking::Anonymous,
+                label: segment_label(segment.kind),
+            },
+        )
+        .is_err()
+        {
+            rollback_mappings(pml4_phys, &allocated);
+            return Err(ExecError::VmaFailed);
+        }
+        if vma::account_pre_mapped_range(process_id, pml4_phys, virt, end, PageSource::Anonymous)
+            .is_err()
+        {
+            rollback_mappings(pml4_phys, &allocated);
+            return Err(ExecError::VmaFailed);
         }
     }
 
-    let entry_point = USER_EXEC_LOAD_BASE + sections.entry_offset;
+    if verify_segment_mappings(pml4_phys, &allocated).is_err() {
+        rollback_mappings(pml4_phys, &allocated);
+        return Err(ExecError::MappingFailed);
+    }
 
+    let entry_point = image_base
+        .checked_add(image.entry_offset)
+        .ok_or(ExecError::ArithmeticOverflow)?;
     log_info!(
         LOG_ORIGIN,
-        "Executable loaded: text=0x{:X}-0x{:X}, data=0x{:X}-0x{:X}, bss=0x{:X}-0x{:X}",
-        text_base,
-        text_base + text_size,
-        data_base,
-        data_base + data_size,
-        bss_base,
-        bss_base + bss_size
+        "ATXF v2 loaded: base=0x{:X} entry=0x{:X} segments={} relocations={} W^X=enabled",
+        image_base,
+        entry_point,
+        image.segments.len(),
+        image.relocations.len()
     );
-
-    log_info!(LOG_ORIGIN, "Entry point set to 0x{:X}", entry_point);
-
-    rollback.disarm();
-
     Ok(LoadedExecutable {
         entry_point,
-        text_base,
-        data_base,
-        bss_base,
+        image_base,
+        image_end,
     })
 }
 
-fn map_segment(
-    address_space: AddressSpaceId,
-    owner: ThreadId,
-    virt_start: usize,
-    data: &[u8],
-    flags: PageFlags,
-) -> Result<Option<(usize, usize, usize)>, ExecError> {
-    if data.is_empty() {
-        return Ok(None);
-    }
+#[derive(Clone, Copy)]
+struct AllocatedSegment<'a> {
+    segment: ExecutableSegment<'a>,
+    virt: usize,
+    phys: usize,
+    pages: usize,
+    mapped_pages: usize,
+}
 
-    let size = pmm::align_up(data.len());
-    let pages = size / pmm::PAGE_SIZE;
-    let phys_base = pmm::alloc_pages_zeroed(pages).ok_or(ExecError::OutOfMemory)?;
-    let user_range = atom_abi::validate_user_range(virt_start, size)
-        .map_err(|_| ExecError::NonCanonicalLayout)?;
-
-    // Use higher-half address to avoid broken identity mapping in user address spaces
-    unsafe {
-        ptr::copy_nonoverlapping(data.as_ptr(), vm::phys_to_virt_ptr(phys_base) as *mut u8, data.len());
-    }
-
-    match addrspace::map_region(address_space, owner, user_range, phys_base, flags) {
-        Ok(()) => {
-            Ok(Some((virt_start, phys_base, size)))
+fn apply_relocations(
+    image: &ExecutableImageV2<'_>,
+    image_base: usize,
+    allocated: &[AllocatedSegment<'_>],
+) -> Result<(), ExecError> {
+    for relocation in &image.relocations {
+        let allocation = allocated
+            .iter()
+            .find(|allocation| {
+                relocation.offset >= allocation.segment.virtual_offset
+                    && relocation.offset.checked_add(8).is_some_and(|end| {
+                        end <= allocation.segment.virtual_offset + allocation.segment.mem_size
+                    })
+            })
+            .ok_or(ExecError::InvalidRelocation)?;
+        if allocation.segment.permissions & PERM_WRITE == 0 {
+            return Err(ExecError::InvalidRelocation);
         }
-        Err(err) => {
-            let _ = pmm::free_pages(phys_base, pages);
-            Err(ExecError::AddressSpace(err))
+        let within = relocation.offset - allocation.segment.virtual_offset;
+        let value = (image_base as i128)
+            .checked_add(relocation.addend as i128)
+            .filter(|value| *value >= 0 && *value <= u64::MAX as i128)
+            .ok_or(ExecError::ArithmeticOverflow)? as u64;
+        unsafe {
+            let target = vm::phys_to_virt_ptr(allocation.phys + within) as *mut u64;
+            target.write_unaligned(value);
         }
+    }
+    Ok(())
+}
+
+fn segment_page_flags(permissions: u32) -> Result<PageFlags, ExecError> {
+    if permissions & PERM_WRITE != 0 && permissions & PERM_EXECUTE != 0 {
+        return Err(ExecError::InvalidPermissions);
+    }
+    let mut flags = PageFlags::PRESENT | PageFlags::USER;
+    if permissions & PERM_WRITE != 0 {
+        flags |= PageFlags::WRITABLE;
+    }
+    if permissions & PERM_EXECUTE == 0 {
+        flags |= PageFlags::NO_EXECUTE;
+    }
+    vm::validate_user_page_flags(flags).map_err(|_| ExecError::InvalidPermissions)?;
+    Ok(flags)
+}
+
+fn segment_vma_permissions(permissions: u32) -> VmaPermissions {
+    let mut result = VmaPermissions::NONE;
+    if permissions & PERM_READ != 0 {
+        result = result.union(VmaPermissions::READ);
+    }
+    if permissions & PERM_WRITE != 0 {
+        result = result.union(VmaPermissions::WRITE);
+    }
+    if permissions & PERM_EXECUTE != 0 {
+        result = result.union(VmaPermissions::EXEC);
+    }
+    result
+}
+
+fn segment_label(kind: SegmentKind) -> &'static str {
+    match kind {
+        SegmentKind::Text => "text",
+        SegmentKind::Rodata => "rodata",
+        SegmentKind::Data => "data",
+        SegmentKind::Bss => "bss",
+        SegmentKind::Tls => "tls",
     }
 }
 
-fn map_zeroed_segment(
-    address_space: AddressSpaceId,
-    owner: ThreadId,
-    virt_start: usize,
-    size: usize,
-    flags: PageFlags,
-) -> Result<Option<(usize, usize, usize)>, ExecError> {
-    if size == 0 {
-        return Ok(None);
+fn validate_segment_permissions(kind: SegmentKind, permissions: u32) -> Result<(), ExecError> {
+    let expected = match kind {
+        SegmentKind::Text => PERM_READ | PERM_EXECUTE,
+        SegmentKind::Rodata => PERM_READ,
+        SegmentKind::Data | SegmentKind::Bss | SegmentKind::Tls => PERM_READ | PERM_WRITE,
+    };
+    if permissions != expected || permissions & PERM_WRITE != 0 && permissions & PERM_EXECUTE != 0 {
+        return Err(ExecError::InvalidPermissions);
     }
+    Ok(())
+}
 
-    let aligned_size = pmm::align_up(size);
-    let pages = aligned_size / pmm::PAGE_SIZE;
-    let phys_base = pmm::alloc_pages_zeroed(pages).ok_or(ExecError::OutOfMemory)?;
-    let user_range = atom_abi::validate_user_range(virt_start, aligned_size)
-        .map_err(|_| ExecError::NonCanonicalLayout)?;
-
-    match addrspace::map_region(address_space, owner, user_range, phys_base, flags) {
-        Ok(()) => {
-            Ok(Some((virt_start, phys_base, aligned_size)))
-        }
-        Err(err) => {
-            let _ = pmm::free_pages(phys_base, pages);
-            Err(ExecError::AddressSpace(err))
-        }
+fn parse_kind(kind: u32) -> Result<SegmentKind, ExecError> {
+    match kind {
+        SEGMENT_TEXT => Ok(SegmentKind::Text),
+        SEGMENT_RODATA => Ok(SegmentKind::Rodata),
+        SEGMENT_DATA => Ok(SegmentKind::Data),
+        SEGMENT_BSS => Ok(SegmentKind::Bss),
+        SEGMENT_TLS => Ok(SegmentKind::Tls),
+        _ => Err(ExecError::InvalidSegment),
     }
 }
 
-impl Drop for RollbackGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
+fn validate_table(
+    image: &[u8],
+    offset: usize,
+    count: usize,
+    entry_size: usize,
+    signature_offset: usize,
+) -> Result<(), ExecError> {
+    if offset < HEADER_SIZE {
+        return Err(ExecError::InvalidHeader);
+    }
+    let end = offset
+        .checked_add(
+            count
+                .checked_mul(entry_size)
+                .ok_or(ExecError::ArithmeticOverflow)?,
+        )
+        .ok_or(ExecError::ArithmeticOverflow)?;
+    if end > image.len() || end > signature_offset {
+        return Err(ExecError::Truncated);
+    }
+    Ok(())
+}
 
-        log_warn!(LOG_ORIGIN, "Rolling back partially mapped executable");
+fn checked_slice(image: &[u8], offset: usize, size: usize) -> Result<&[u8], ExecError> {
+    let end = offset
+        .checked_add(size)
+        .ok_or(ExecError::ArithmeticOverflow)?;
+    image.get(offset..end).ok_or(ExecError::Truncated)
+}
 
-        for &(virt, phys, size) in self.mapped.iter().rev() {
-            let pages = size / pmm::PAGE_SIZE;
-            if let Ok(user_range) = atom_abi::validate_user_range(virt, size) {
-                let _ = addrspace::unmap_region(self.address_space, self.owner, user_range);
+fn align_up(value: usize) -> Result<usize, ExecError> {
+    value
+        .checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+        .ok_or(ExecError::ArithmeticOverflow)
+}
+
+fn release_allocations(allocated: &[AllocatedSegment<'_>]) {
+    for allocation in allocated {
+        let _ = pmm::free_pages(allocation.phys, allocation.pages);
+    }
+}
+
+fn verify_segment_mappings(
+    pml4_phys: usize,
+    allocated: &[AllocatedSegment<'_>],
+) -> Result<(), ExecError> {
+    for allocation in allocated {
+        let expected_writable = allocation.segment.permissions & PERM_WRITE != 0;
+        let expected_executable = allocation.segment.permissions & PERM_EXECUTE != 0;
+        for page in 0..allocation.pages {
+            let (_, flags) =
+                vm::query_mapping_in_pml4(pml4_phys, allocation.virt + page * PAGE_SIZE)
+                    .map_err(|_| ExecError::MappingFailed)?;
+            let writable = flags.contains(PageFlags::WRITABLE);
+            let executable = !flags.contains(PageFlags::NO_EXECUTE);
+            if !flags.contains(PageFlags::USER)
+                || writable != expected_writable
+                || executable != expected_executable
+                || writable && executable
+            {
+                return Err(ExecError::InvalidPermissions);
             }
-            let _ = pmm::free_pages(phys, pages);
         }
+    }
+    Ok(())
+}
+
+fn rollback_mappings(pml4_phys: usize, allocated: &[AllocatedSegment<'_>]) {
+    for allocation in allocated {
+        for page in 0..allocation.mapped_pages {
+            let virt = allocation.virt + page * PAGE_SIZE;
+            let _ = vma::take_materialized_page(pml4_phys, virt);
+            let _ = vm::unmap_page_in_pml4(pml4_phys, virt);
+        }
+        let _ = vma::remove_vma(pml4_phys, allocation.virt);
+        let _ = pmm::free_pages(allocation.phys, allocation.pages);
     }
 }
 
-struct RollbackGuard {
-    mapped: Vec<(usize, usize, usize)>,
-    address_space: AddressSpaceId,
-    owner: ThreadId,
-    active: bool,
+fn read_header(image: &[u8]) -> Result<AtxfV2Header, ExecError> {
+    if image.len() < HEADER_SIZE {
+        return Err(ExecError::Truncated);
+    }
+    Ok(AtxfV2Header {
+        magic: read_u32(image, 0)?,
+        version: read_u16(image, 4)?,
+        header_size: read_u16(image, 6)?,
+        flags: read_u32(image, 8)?,
+        entry_offset: read_u64(image, 12)?,
+        segment_count: read_u32(image, 20)?,
+        relocation_count: read_u32(image, 24)?,
+        segment_table_offset: read_u64(image, 28)?,
+        relocation_table_offset: read_u64(image, 36)?,
+        signature_offset: read_u64(image, 44)?,
+        signature_size: read_u32(image, 52)?,
+        reserved: read_u32(image, 56)?,
+        image_size: read_u64(image, 60)?,
+    })
 }
 
-impl RollbackGuard {
-    fn new(address_space: AddressSpaceId, owner: ThreadId) -> Self {
-        Self {
-            mapped: Vec::new(),
-            address_space,
-            owner,
-            active: true,
-        }
+fn read_segment(image: &[u8], offset: usize) -> Result<AtxfV2Segment, ExecError> {
+    Ok(AtxfV2Segment {
+        kind: read_u32(image, offset)?,
+        permissions: read_u32(image, offset + 4)?,
+        file_offset: read_u64(image, offset + 8)?,
+        file_size: read_u64(image, offset + 16)?,
+        mem_size: read_u64(image, offset + 24)?,
+        virtual_offset: read_u64(image, offset + 32)?,
+        align: read_u64(image, offset + 40)?,
+    })
+}
+
+fn read_relocation(image: &[u8], offset: usize) -> Result<AtxfV2Relocation, ExecError> {
+    Ok(AtxfV2Relocation {
+        offset: read_u64(image, offset)?,
+        kind: read_u32(image, offset + 8)?,
+        reserved: read_u32(image, offset + 12)?,
+        addend: read_i64(image, offset + 16)?,
+    })
+}
+
+fn read_u16(image: &[u8], offset: usize) -> Result<u16, ExecError> {
+    Ok(u16::from_le_bytes(
+        checked_slice(image, offset, 2)?.try_into().unwrap(),
+    ))
+}
+
+fn read_u32(image: &[u8], offset: usize) -> Result<u32, ExecError> {
+    Ok(u32::from_le_bytes(
+        checked_slice(image, offset, 4)?.try_into().unwrap(),
+    ))
+}
+
+fn read_u64(image: &[u8], offset: usize) -> Result<u64, ExecError> {
+    Ok(u64::from_le_bytes(
+        checked_slice(image, offset, 8)?.try_into().unwrap(),
+    ))
+}
+
+fn read_i64(image: &[u8], offset: usize) -> Result<i64, ExecError> {
+    Ok(i64::from_le_bytes(
+        checked_slice(image, offset, 8)?.try_into().unwrap(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atom_atxf::compute_image_mac;
+
+    const SEGMENTS_OFFSET: usize = HEADER_SIZE;
+    const RELOCATIONS_OFFSET: usize = SEGMENTS_OFFSET + 2 * SEGMENT_SIZE;
+    const TEXT_FILE_OFFSET: usize = PAGE_SIZE;
+    const DATA_FILE_OFFSET: usize = 2 * PAGE_SIZE;
+    const SIGNATURE_OFFSET: usize = 3 * PAGE_SIZE;
+
+    fn write_u16(image: &mut [u8], offset: usize, value: u16) {
+        image[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
 
-    fn track(&mut self, mapping: (usize, usize, usize)) {
-        self.mapped.push(mapping);
+    fn write_u32(image: &mut [u8], offset: usize, value: u32) {
+        image[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
 
-    fn disarm(&mut self) {
-        self.active = false;
+    fn write_u64(image: &mut [u8], offset: usize, value: u64) {
+        image[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_i64(image: &mut [u8], offset: usize, value: i64) {
+        image[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_segment(
+        image: &mut [u8],
+        offset: usize,
+        kind: u32,
+        permissions: u32,
+        file_offset: usize,
+        file_size: usize,
+        mem_size: usize,
+        virtual_offset: usize,
+    ) {
+        write_u32(image, offset, kind);
+        write_u32(image, offset + 4, permissions);
+        write_u64(image, offset + 8, file_offset as u64);
+        write_u64(image, offset + 16, file_size as u64);
+        write_u64(image, offset + 24, mem_size as u64);
+        write_u64(image, offset + 32, virtual_offset as u64);
+        write_u64(image, offset + 40, PAGE_SIZE as u64);
+    }
+
+    fn resign(image: &mut [u8]) {
+        image[SIGNATURE_OFFSET..SIGNATURE_OFFSET + ATXF_SIGNATURE_SIZE].fill(0);
+        let signature = compute_image_mac(image, SIGNATURE_OFFSET, ATXF_SIGNATURE_SIZE).unwrap();
+        image[SIGNATURE_OFFSET..SIGNATURE_OFFSET + ATXF_SIGNATURE_SIZE].copy_from_slice(&signature);
+    }
+
+    fn valid_image() -> Vec<u8> {
+        let mut image = alloc::vec![0u8; SIGNATURE_OFFSET + ATXF_SIGNATURE_SIZE];
+        let image_len = image.len();
+        write_u32(&mut image, 0, ATXF_MAGIC);
+        write_u16(&mut image, 4, ATXF_VERSION);
+        write_u16(&mut image, 6, HEADER_SIZE as u16);
+        write_u32(&mut image, 8, ATXF_FLAG_PIE);
+        write_u64(&mut image, 12, 0);
+        write_u32(&mut image, 20, 2);
+        write_u32(&mut image, 24, 1);
+        write_u64(&mut image, 28, SEGMENTS_OFFSET as u64);
+        write_u64(&mut image, 36, RELOCATIONS_OFFSET as u64);
+        write_u64(&mut image, 44, SIGNATURE_OFFSET as u64);
+        write_u32(&mut image, 52, ATXF_SIGNATURE_SIZE as u32);
+        write_u32(&mut image, 56, 0);
+        write_u64(&mut image, 60, image_len as u64);
+
+        write_segment(
+            &mut image,
+            SEGMENTS_OFFSET,
+            SEGMENT_TEXT,
+            PERM_READ | PERM_EXECUTE,
+            TEXT_FILE_OFFSET,
+            1,
+            PAGE_SIZE,
+            0,
+        );
+        write_segment(
+            &mut image,
+            SEGMENTS_OFFSET + SEGMENT_SIZE,
+            SEGMENT_DATA,
+            PERM_READ | PERM_WRITE,
+            DATA_FILE_OFFSET,
+            8,
+            PAGE_SIZE,
+            PAGE_SIZE,
+        );
+        write_u64(&mut image, RELOCATIONS_OFFSET, PAGE_SIZE as u64);
+        write_u32(&mut image, RELOCATIONS_OFFSET + 8, RELOCATION_RELATIVE64);
+        write_u32(&mut image, RELOCATIONS_OFFSET + 12, 0);
+        write_i64(&mut image, RELOCATIONS_OFFSET + 16, 16);
+        image[TEXT_FILE_OFFSET] = 0xc3;
+        resign(&mut image);
+        image
+    }
+
+    #[test]
+    fn accepts_valid_v2() {
+        assert!(parse_image(&valid_image()).is_ok());
+    }
+
+    #[test]
+    fn rejects_v1_without_fallback() {
+        let mut image = valid_image();
+        write_u16(&mut image, 4, 1);
+        assert_eq!(
+            parse_image(&image).unwrap_err(),
+            ExecError::UnsupportedVersion(1)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_invalid_and_tampered_signatures() {
+        let mut missing = valid_image();
+        write_u32(&mut missing, 52, 0);
+        assert_eq!(
+            parse_image(&missing).unwrap_err(),
+            ExecError::MissingSignature
+        );
+
+        let mut invalid = valid_image();
+        invalid[SIGNATURE_OFFSET] ^= 1;
+        assert_eq!(
+            parse_image(&invalid).unwrap_err(),
+            ExecError::InvalidSignature
+        );
+
+        let mut tampered = valid_image();
+        tampered[TEXT_FILE_OFFSET] ^= 1;
+        assert_eq!(
+            parse_image(&tampered).unwrap_err(),
+            ExecError::InvalidSignature
+        );
+    }
+
+    #[test]
+    fn rejects_wx_overlap_and_non_executable_entry() {
+        let mut wx = valid_image();
+        write_u32(
+            &mut wx,
+            SEGMENTS_OFFSET + 4,
+            PERM_READ | PERM_WRITE | PERM_EXECUTE,
+        );
+        resign(&mut wx);
+        assert_eq!(parse_image(&wx).unwrap_err(), ExecError::InvalidPermissions);
+
+        let mut overlap = valid_image();
+        write_u64(&mut overlap, SEGMENTS_OFFSET + SEGMENT_SIZE + 32, 0);
+        resign(&mut overlap);
+        assert_eq!(
+            parse_image(&overlap).unwrap_err(),
+            ExecError::OverlappingSegment
+        );
+
+        let mut bad_entry = valid_image();
+        write_u64(&mut bad_entry, 12, PAGE_SIZE as u64);
+        resign(&mut bad_entry);
+        assert_eq!(
+            parse_image(&bad_entry).unwrap_err(),
+            ExecError::EntryOutOfBounds
+        );
+    }
+
+    #[test]
+    fn rejects_relocation_outside_writable_segment() {
+        let mut image = valid_image();
+        write_u64(&mut image, RELOCATIONS_OFFSET, 0);
+        resign(&mut image);
+        assert_eq!(
+            parse_image(&image).unwrap_err(),
+            ExecError::InvalidRelocation
+        );
     }
 }

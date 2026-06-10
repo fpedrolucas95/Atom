@@ -10,5 +10,6 @@ description = "Convert ELF binaries to Atom ATXF executable format"
 name = "elf2atxf"
 path = "src/main.rs"
 
-# No external dependencies - we parse ELF manually
 [dependencies]
+hmac = "0.12"
+sha2 = "0.10"

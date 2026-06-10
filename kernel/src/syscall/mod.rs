@@ -3539,6 +3539,15 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     );
 
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
+    if flags_raw & !0x7 != 0 {
+        log_warn!(
+            "syscall",
+            "shared_region_map rejected unknown permission bits: {:#x}",
+            flags_raw
+        );
+        return EINVAL;
+    }
+
     let flags = crate::shared_mem::RegionFlags::from_raw(flags_raw);
     let requested_addr = if virt_addr == 0 {
         None
@@ -3604,6 +3613,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
                 crate::shared_mem::SharedMemError::AddressInUse => EBUSY,
                 crate::shared_mem::SharedMemError::OutOfMemory => ENOMEM,
                 crate::shared_mem::SharedMemError::NoFreeVirtualAddress => ENOMEM,
+                crate::shared_mem::SharedMemError::PermissionDenied => EPERM,
                 _ => EINVAL,
             }
         }
@@ -3845,6 +3855,13 @@ fn sys_map_region(
 
     let mut flags = crate::mm::vm::PageFlags::from_bits(flags_raw);
     flags |= crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::USER;
+    if !flags.contains(crate::mm::vm::PageFlags::NO_EXECUTE) {
+        log_warn!(
+            "syscall",
+            "map_region denied: executable cross-address-space mappings are loader-only"
+        );
+        return EPERM;
+    }
 
     match crate::mm::addrspace::map_region(
         as_id,
@@ -4568,18 +4585,17 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 
     // Load from boot-loaded driver registry
     match load_from_registry(name) {
-        Ok(sections) => {
+        Ok(image) => {
             log_info!(
                 LOG_ORIGIN,
-                "Executable parsed: text={} bytes, data={} bytes, bss={} bytes, entry=0x{:X}",
-                sections.text.len(),
-                sections.data.len(),
-                sections.bss_size,
-                sections.entry_offset
+                "ATXF v2 authenticated: segments={} relocations={} entry=0x{:X}",
+                image.segments.len(),
+                image.relocations.len(),
+                image.entry_offset
             );
             match spawn_process_internal(
                 name,
-                &sections,
+                &image,
                 crate::system_manifest::grants_for_entry(manifest_entry),
             ) {
                 Ok(pid) => {
@@ -4604,7 +4620,7 @@ fn spawn_from_image(
 ) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn";
 
-    let sections = match crate::executable::parse_image(data) {
+    let image = match crate::executable::parse_image(data) {
         Ok(s) => s,
         Err(e) => {
             log_error!(LOG_ORIGIN, "spawn_process: failed to parse executable: {:?}", e);
@@ -4614,14 +4630,13 @@ fn spawn_from_image(
 
     log_info!(
         LOG_ORIGIN,
-        "Executable parsed: text={} bytes, data={} bytes, bss={} bytes, entry=0x{:X}",
-        sections.text.len(),
-        sections.data.len(),
-        sections.bss_size,
-        sections.entry_offset
+        "ATXF v2 authenticated: segments={} relocations={} entry=0x{:X}",
+        image.segments.len(),
+        image.relocations.len(),
+        image.entry_offset
     );
 
-    match spawn_process_internal(name, &sections, grants) {
+    match spawn_process_internal(name, &image, grants) {
         Ok(pid) => {
             log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
             pid.raw()
@@ -4642,7 +4657,7 @@ fn is_system_service_path(path: &str) -> bool {
 }
 
 /// Load driver from boot-loaded registry
-fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections<'_>, u64> {
+fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableImageV2<'_>, u64> {
     let driver_image = crate::driver_registry::get_driver_image(name)
         .ok_or(ENOTFOUND)?;
 
@@ -4694,13 +4709,12 @@ fn get_static_driver_name(name: &str) -> &'static str {
 /// - A heap VMA is pre-registered for brk() support
 fn spawn_process_internal(
     name: &str,
-    sections: &crate::executable::ExecutableSections,
+    image: &crate::executable::ExecutableImageV2<'_>,
     grants: crate::system_manifest::SpawnGrants,
 ) -> Result<crate::thread::ThreadId, u64> {
     // Get static name for the thread
     let static_name = get_static_driver_name(name);
-    use crate::executable::USER_EXEC_LOAD_BASE;
-    use crate::mm::pmm::{self, align_up, PAGE_SIZE};
+    use crate::mm::pmm::{self, PAGE_SIZE};
     use crate::mm::vm::{self, PageFlags};
     use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
@@ -4711,19 +4725,15 @@ fn spawn_process_internal(
     let pid = ThreadId::new();
     let process_id = crate::process::ProcessId::from(pid);
 
-    // Each process gets its own address space - load at the standard base address
-    // since each process has isolated virtual memory
-    let text_base = USER_EXEC_LOAD_BASE;
     let user_stack_top = USER_STACK_TOP;
     let stack_layout = crate::thread::UserStackMetadata::default_for_top(user_stack_top);
     let user_stack_base = stack_layout.usable_base as usize;
 
     log_info!(
         "spawn",
-        "Creating process '{}' (pid={}) at text=0x{:X}, stack=0x{:X}",
+        "Creating process '{}' (pid={}) with ASLR, stack=0x{:X}",
         name,
         pid,
-        text_base,
         user_stack_top
     );
 
@@ -4746,143 +4756,11 @@ fn spawn_process_internal(
         new_pml4_phys
     );
 
-    // Allocate and map text section in the NEW address space
-    let text_size = align_up(sections.text.len().max(1));
-    let text_pages = text_size / PAGE_SIZE;
-
-    let text_phys = pmm::alloc_pages_zeroed(text_pages)
-        .ok_or(ENOMEM)?;
-
-    // Copy text section content (use higher-half address to avoid broken identity mapping)
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            sections.text.as_ptr(),
-            vm::phys_to_virt_ptr(text_phys) as *mut u8,
-            sections.text.len(),
-        );
-    }
-
-    for i in 0..text_pages {
-        let virt = text_base + i * PAGE_SIZE;
-        let phys = text_phys + i * PAGE_SIZE;
-        vm::remap_page_in_pml4(new_pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
-            .map_err(|_| ENOMEM)?;
-    }
-
-    // Register text VMA
-    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-        start: text_base,
-        end: text_base + text_size,
-        perms: VmaPermissions::read_exec(),
-        backing: VmaBacking::Anonymous,
-        label: "text",
-    }).map_err(|e| {
-        log_error!("spawn", "Failed to insert text VMA for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
-    vma::account_pre_mapped_range(
-        process_id,
-        new_pml4_phys,
-        text_base,
-        text_base + text_size,
-        PageSource::Anonymous,
-    ).map_err(|e| {
-        log_error!("spawn", "Failed to account text pages for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
-
-    // Allocate and map data section
-    let data_base = align_up(text_base + text_size);
-    let data_size = align_up(sections.data.len().max(1));
-    let data_pages = data_size / PAGE_SIZE;
-
-    if !sections.data.is_empty() {
-        let data_phys = pmm::alloc_pages_zeroed(data_pages)
-            .ok_or(ENOMEM)?;
-
-        // Copy data section content
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                sections.data.as_ptr(),
-                vm::phys_to_virt_ptr(data_phys) as *mut u8,
-                sections.data.len(),
-            );
-        }
-
-        for i in 0..data_pages {
-            let virt = data_base + i * PAGE_SIZE;
-            let phys = data_phys + i * PAGE_SIZE;
-            vm::remap_page_in_pml4(
-                new_pml4_phys,
-                virt,
-                phys,
-                PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
-            ).map_err(|_| ENOMEM)?;
-        }
-
-        // Register data VMA
-        vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-            start: data_base,
-            end: data_base + data_size,
-            perms: VmaPermissions::read_write(),
-            backing: VmaBacking::Anonymous,
-            label: "data",
-        }).map_err(|e| {
-            log_error!("spawn", "Failed to insert data VMA for '{}': {:?}", name, e);
-            ENOMEM
+    let loaded = crate::executable::load_into_process(image, new_pml4_phys, process_id)
+        .map_err(|error| {
+            log_error!("spawn", "ATXF v2 load failed for '{}': {:?}", name, error);
+            EINVAL
         })?;
-        vma::account_pre_mapped_range(
-            process_id,
-            new_pml4_phys,
-            data_base,
-            data_base + data_size,
-            PageSource::Anonymous,
-        ).map_err(|e| {
-            log_error!("spawn", "Failed to account data pages for '{}': {:?}", name, e);
-            ENOMEM
-        })?;
-    }
-
-    // Allocate and map BSS section
-    let bss_base = align_up(data_base + data_size);
-    let bss_size = sections.bss_size.max(1);
-    let bss_pages = align_up(bss_size) / PAGE_SIZE;
-
-    let bss_phys = pmm::alloc_pages_zeroed(bss_pages)
-        .ok_or(ENOMEM)?;
-
-    for i in 0..bss_pages {
-        let virt = bss_base + i * PAGE_SIZE;
-        let phys = bss_phys + i * PAGE_SIZE;
-        vm::remap_page_in_pml4(
-            new_pml4_phys,
-            virt,
-            phys,
-            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
-        ).map_err(|_| ENOMEM)?;
-    }
-
-    // Register BSS VMA
-    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-        start: bss_base,
-        end: bss_base + align_up(bss_size),
-        perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Anonymous,
-        label: "bss",
-    }).map_err(|e| {
-        log_error!("spawn", "Failed to insert bss VMA for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
-    vma::account_pre_mapped_range(
-        process_id,
-        new_pml4_phys,
-        bss_base,
-        bss_base + align_up(bss_size),
-        PageSource::Anonymous,
-    ).map_err(|e| {
-        log_error!("spawn", "Failed to account bss pages for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
 
     // Allocate the full userspace stack while leaving the guard page unmapped.
     let stack_phys = pmm::alloc_pages_zeroed(atom_abi::DEFAULT_USER_STACK_PAGES)
@@ -4895,7 +4773,7 @@ fn spawn_process_internal(
             new_pml4_phys,
             virt,
             phys,
-            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
         ).map_err(|_| ENOMEM)?;
     }
 
@@ -4923,17 +4801,6 @@ fn spawn_process_internal(
 
     // Register a heap VMA (starts empty, grows via brk())
     let heap_start = atom_abi::USER_HEAP_START as usize;
-    let bss_end = bss_base + align_up(bss_size);
-    if bss_end > heap_start {
-        log_error!(
-            "spawn",
-            "Executable '{}' too large: BSS end 0x{:X} exceeds USER_HEAP_START 0x{:X}",
-            name,
-            bss_end,
-            heap_start
-        );
-        return Err(ENOMEM);
-    }
     vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: heap_start,
         end: heap_start + PAGE_SIZE, // Minimal initial size
@@ -4952,16 +4819,13 @@ fn spawn_process_internal(
     let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
 
-    // Calculate entry point
-    let entry_point = text_base + sections.entry_offset;
+    let entry_point = loaded.entry_point;
 
     log_info!(
         "spawn",
-        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, stack_guard=0x{:X}-0x{:X}, stack=0x{:X}-0x{:X} ({}KB), entry=0x{:X}",
-        text_base,
-        text_base + text_size,
-        data_base,
-        bss_base,
+        "Process memory: image=0x{:X}-0x{:X}, stack_guard=0x{:X}-0x{:X}, stack=0x{:X}-0x{:X} ({}KB), entry=0x{:X}",
+        loaded.image_base,
+        loaded.image_end,
         stack_layout.guard_base,
         stack_layout.usable_base,
         user_stack_base,
@@ -5249,7 +5113,7 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     );
 
     // ── 5. Parse the ATXF image ────────────────────────────────────────────
-    let sections = match crate::executable::parse_image(&image_data) {
+    let image = match crate::executable::parse_image(&image_data) {
         Ok(s) => s,
         Err(crate::executable::ExecError::InvalidMagic) => {
             log_warn!(LOG_ORIGIN, "spawn_from_path: '{}' is not a valid ATXF file (bad magic)", path);
@@ -5272,11 +5136,10 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
 
     log_info!(
         LOG_ORIGIN,
-        "spawn_from_path: ATXF validated — text={} data={} bss={} entry=0x{:X}",
-        sections.text.len(),
-        sections.data.len(),
-        sections.bss_size,
-        sections.entry_offset
+        "spawn_from_path: ATXF v2 authenticated — segments={} relocations={} entry=0x{:X}",
+        image.segments.len(),
+        image.relocations.len(),
+        image.entry_offset
     );
 
     // ── 6. Derive a display name from the filename ─────────────────────────
@@ -5290,7 +5153,7 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     // (exact canonical path) grants a minimal cap set (e.g. display_settings ->
     // DisplayModeSet). Everything else gets nothing.
     let app_grants = crate::system_manifest::app_grants_for_path(path);
-    match spawn_process_internal("app", &sections, app_grants) {
+    match spawn_process_internal("app", &image, app_grants) {
         Ok(pid) => {
             log_info!(
                 LOG_ORIGIN,
@@ -5601,6 +5464,12 @@ fn sys_mmap(
 
     let length = length as usize;
     if length == 0 {
+        return EINVAL;
+    }
+    if prot & atom_abi::PROT_WRITE != 0 && prot & atom_abi::PROT_EXEC != 0 {
+        return EPERM;
+    }
+    if prot & !(atom_abi::PROT_READ | atom_abi::PROT_WRITE | atom_abi::PROT_EXEC) != 0 {
         return EINVAL;
     }
 
@@ -5969,6 +5838,12 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
+    if prot & atom_abi::PROT_WRITE != 0 && prot & atom_abi::PROT_EXEC != 0 {
+        return EPERM;
+    }
+    if prot & !(atom_abi::PROT_READ | atom_abi::PROT_WRITE | atom_abi::PROT_EXEC) != 0 {
+        return EINVAL;
+    }
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let user_range = match atom_abi::validate_user_range(addr, length) {
@@ -5999,6 +5874,22 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     }
     if prot & atom_abi::PROT_EXEC != 0 {
         perms = perms.union(VmaPermissions::EXEC);
+    }
+
+    // There is no JIT policy: mprotect may remove execute permission, but
+    // cannot add it to a region that was not executable at creation time.
+    if perms.contains(VmaPermissions::EXEC) {
+        let mut cursor = addr;
+        while cursor < end {
+            let existing = match vma::find_process_vma(process_id, cursor) {
+                Some(existing) => existing,
+                None => return EINVAL,
+            };
+            if !existing.perms.contains(VmaPermissions::EXEC) {
+                return EPERM;
+            }
+            cursor = existing.end.min(end);
+        }
     }
 
     match vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
@@ -8865,7 +8756,10 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
     };
 
     // Map into userspace
-    let flags = crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::WRITABLE | crate::mm::vm::PageFlags::USER;
+    let flags = crate::mm::vm::PageFlags::PRESENT
+        | crate::mm::vm::PageFlags::WRITABLE
+        | crate::mm::vm::PageFlags::USER
+        | crate::mm::vm::PageFlags::NO_EXECUTE;
 
     let pml4 = match crate::thread::get_thread_address_space(caller) {
         Some(p) => p,
@@ -8986,7 +8880,11 @@ fn sys_map_mmio(mmio_cap_handle: u64, out_addr_ptr: u64) -> u64 {
         }
     };
 
-    let flags = crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::WRITABLE | crate::mm::vm::PageFlags::USER | crate::mm::vm::PageFlags::CACHE_DISABLE;
+    let flags = crate::mm::vm::PageFlags::PRESENT
+        | crate::mm::vm::PageFlags::WRITABLE
+        | crate::mm::vm::PageFlags::USER
+        | crate::mm::vm::PageFlags::CACHE_DISABLE
+        | crate::mm::vm::PageFlags::NO_EXECUTE;
 
     for i in 0..pages {
         let v = user_va + i * crate::mm::pmm::PAGE_SIZE;

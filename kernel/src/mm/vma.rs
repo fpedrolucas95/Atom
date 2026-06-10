@@ -217,8 +217,8 @@ impl VmaPermissions {
         Self(Self::READ.0 | Self::EXEC.0)
     }
 
-    pub const fn read_write_exec() -> Self {
-        Self(Self::READ.0 | Self::WRITE.0 | Self::EXEC.0)
+    pub const fn violates_wx(self) -> bool {
+        self.contains(Self::WRITE) && self.contains(Self::EXEC)
     }
 }
 
@@ -336,6 +336,9 @@ impl VmaMap {
         }
         if vma.start >= vma.end {
             return Err(VmaError::InvalidRange);
+        }
+        if vma.perms.violates_wx() {
+            return Err(VmaError::PermissionDenied);
         }
 
         self.assert_no_overlap(vma.start, vma.end)?;
@@ -623,6 +626,9 @@ impl VmaMap {
     pub fn set_permissions(&mut self, start: usize, end: usize, perms: VmaPermissions) -> Result<(), VmaError> {
         if !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) || start >= end {
             return Err(VmaError::InvalidRange);
+        }
+        if perms.violates_wx() {
+            return Err(VmaError::PermissionDenied);
         }
 
         // Collect the keys of all VMAs that overlap [start, end).

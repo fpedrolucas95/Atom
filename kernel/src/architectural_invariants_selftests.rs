@@ -128,6 +128,14 @@ fn setup_process_fixture(seed: u64, extra_threads: usize) -> ProcessFixture {
 }
 
 fn cleanup_process_fixture(fixture: &ProcessFixture) {
+    // A fixture terminated through the production path has already transferred
+    // address-space ownership to the reaper. Its physical PML4 frame may have
+    // been reused by now, so a second unregister/free would corrupt the new
+    // owner rather than merely being redundant.
+    if process::get_process(fixture.pid).is_none() {
+        return;
+    }
+
     let _ = cap::revoke_all_process_capabilities(fixture.pid);
 
     let tracked_pages = vma::drain_materialized_pages(fixture.pml4);

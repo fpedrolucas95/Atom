@@ -133,64 +133,22 @@ impl RegionFlags {
         }
     }
 
-    pub const fn read_exec() -> Self {
-        Self {
-            read: true,
-            write: false,
-            execute: true,
-        }
-    }
-
-    pub const fn read_write_exec() -> Self {
-        Self {
-            read: true,
-            write: true,
-            execute: true,
-        }
-    }
-
     pub fn page_flags(self) -> vm::PageFlags {
-        let mut flags = vm::PageFlags::PRESENT;
+        let mut flags = vm::PageFlags::PRESENT | vm::PageFlags::NO_EXECUTE;
 
         if self.write {
             flags |= vm::PageFlags::WRITABLE;
-        }
-
-        if !self.execute {
-            flags = flags.with_nx();
         }
 
         flags | vm::PageFlags::USER
     }
 
     pub fn from_raw(raw: u64) -> Self {
-        let bits = raw & 0x7;
-
-        let (read, write, execute) = if bits == raw {
-            let elf_read = (bits & 0x4) != 0;
-            let elf_write = (bits & 0x2) != 0;
-            let elf_exec = (bits & 0x1) != 0;
-
-            let custom_read = (bits & 0x1) != 0;
-            let custom_write = (bits & 0x2) != 0;
-            let custom_exec = (bits & 0x4) != 0;
-
-            let looks_like_elf = elf_exec && !custom_exec;
-
-            if looks_like_elf {
-                (elf_read, elf_write, elf_exec)
-            } else {
-                (custom_read, custom_write, custom_exec)
-            }
-        } else {
-            (
-                (raw & 0x1) != 0,
-                (raw & 0x2) != 0,
-                (raw & 0x4) != 0,
-            )
-        };
-
-        Self { read, write, execute }
+        Self {
+            read: raw & 0x1 != 0,
+            write: raw & 0x2 != 0,
+            execute: raw & 0x4 != 0,
+        }
     }
 
     pub fn raw_bits(self) -> u64 {
@@ -703,6 +661,9 @@ impl SharedMemManager {
         virt_addr: Option<UserVAddr>,
         flags: RegionFlags,
     ) -> Result<usize, SharedMemError> {
+        if flags.execute {
+            return Err(SharedMemError::PermissionDenied);
+        }
         let pml4_phys = process_pml4(process_id)?;
         let mut regions = self.regions.lock();
 
@@ -740,6 +701,9 @@ impl SharedMemManager {
         virt_addr: Option<UserVAddr>,
         flags: RegionFlags,
     ) -> Result<usize, SharedMemError> {
+        if flags.execute {
+            return Err(SharedMemError::PermissionDenied);
+        }
         debug_assert_process_pml4_alignment(process_id, pml4_phys);
         let mut regions = self.regions.lock();
 

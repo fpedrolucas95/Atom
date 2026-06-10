@@ -193,6 +193,7 @@ const LOG_ORIGIN: &str = "vmm";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmError {
     Validation(ValidationError),
+    PermissionDenied,
     AlreadyMapped,
     NotMapped,
     OutOfMemory,
@@ -280,6 +281,16 @@ impl PageFlags {
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
+}
+
+pub fn validate_user_page_flags(flags: PageFlags) -> Result<(), VmError> {
+    let is_user = flags.contains(PageFlags::USER);
+    let is_writable = flags.contains(PageFlags::WRITABLE);
+    let is_executable = !flags.contains(PageFlags::NO_EXECUTE);
+    if is_user && is_writable && is_executable {
+        return Err(VmError::PermissionDenied);
+    }
+    Ok(())
 }
 
 impl core::ops::BitOr for PageFlags {
@@ -616,6 +627,64 @@ pub fn map_page(virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmErro
     result
 }
 
+/// Map a physical MMIO range into the shared kernel higher half.
+///
+/// MMIO must not be installed in the lower identity-mapped half: that half is
+/// deep-copied into process address spaces and later reclaimed by the reaper.
+/// Keeping device mappings here also makes the returned pointer valid under
+/// every process CR3.
+pub fn map_kernel_mmio(phys: usize, size: usize) -> Result<usize, VmError> {
+    if size == 0 {
+        return Err(VmError::Validation(ValidationError::InvalidSize {
+            size,
+            max_size: usize::MAX,
+        }));
+    }
+
+    let last = phys
+        .checked_add(size - 1)
+        .ok_or(VmError::Validation(ValidationError::OutOfBounds {
+            addr: phys,
+            min: 0,
+            max: usize::MAX,
+        }))?;
+    let first_page = pmm::align_down(phys);
+    let end_page = pmm::align_down(last);
+    let flags = PageFlags::kernel_rw_nx() | PageFlags::CACHE_DISABLE;
+
+    for page in (first_page..=end_page).step_by(pmm::PAGE_SIZE) {
+        let virt = HIGHER_HALF_BASE
+            .checked_add(page)
+            .ok_or(VmError::Validation(ValidationError::OutOfBounds {
+                addr: page,
+                min: 0,
+                max: usize::MAX - HIGHER_HALF_BASE,
+            }))?;
+
+        match map_page(virt, page, flags) {
+            Ok(()) => {}
+            Err(VmError::AlreadyMapped) => {
+                let (mapped_phys, _) = query_mapping_in_pml4(
+                    ACTIVE_PML4.load(Ordering::Relaxed),
+                    virt,
+                )?;
+                if mapped_phys != page {
+                    return Err(VmError::AlreadyMapped);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    HIGHER_HALF_BASE
+        .checked_add(phys)
+        .ok_or(VmError::Validation(ValidationError::OutOfBounds {
+            addr: phys,
+            min: 0,
+            max: usize::MAX - HIGHER_HALF_BASE,
+        }))
+}
+
 pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(phys)?;
@@ -658,6 +727,7 @@ pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: Pag
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(phys)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
+    validate_user_page_flags(flags)?;
 
     // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
     let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;
@@ -684,6 +754,7 @@ pub fn remap_page_flags_in_pml4(
 ) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
+    validate_user_page_flags(new_flags)?;
     let _lock = PAGE_TABLE_LOCK.lock();
     let (entry, _created_table) = walk_to_entry_with_root_user(pml4_phys, virt, false, false)?;
     if !entry.is_present() {
@@ -1000,23 +1071,6 @@ fn repair_leaf_pte(pml4_phys: usize, virt: usize, raw_pte: u64) {
     }
 }
 
-pub fn unmap_page(virt: usize) -> Result<(), VmError> {
-    crate::mm::validate_page_alignment(virt)?;
-    let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
-    let _lock = PAGE_TABLE_LOCK.lock();
-    let (entry, _) = walk_to_entry(virt, false)?;
-    let was_present = entry.is_present();
-
-    if !was_present {
-        return Err(VmError::NotMapped);
-    }
-
-    entry.clear();
-    MAPPED_PAGES.fetch_sub(1, Ordering::Relaxed);
-    invalidate_tlb_for_pml4_page(pml4_phys, virt);
-    Ok(())
-}
-
 pub fn unmap_page_in_pml4(pml4_phys: usize, virt: usize) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
@@ -1096,6 +1150,7 @@ pub fn remap_page_flags(virt: usize, additional_flags: PageFlags) -> Result<(), 
     let current_flags = PageFlags(raw & !ADDR_MASK);
 
     let new_flags = PageFlags(current_flags.bits() | additional_flags.bits());
+    validate_user_page_flags(new_flags)?;
 
     entry.set(phys, new_flags);
     invalidate_tlb_for_pml4_page(pml4_phys, virt);
@@ -1122,6 +1177,7 @@ pub fn query_mapping_in_pml4(pml4_phys: usize, virt: usize) -> Result<(usize, Pa
 pub fn remap_page(virt: usize, new_phys: usize, flags: PageFlags) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(new_phys)?;
+    validate_user_page_flags(flags)?;
     let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
     let _lock = PAGE_TABLE_LOCK.lock();
 
@@ -1153,6 +1209,7 @@ fn map_page_internal(
 ) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(phys)?;
+    validate_user_page_flags(flags)?;
 
     // Se for mapeamento user, precisamos que TODOS os níveis tenham USER
     let user_access = (flags.bits() & PageFlags::USER.bits()) != 0;

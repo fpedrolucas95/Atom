@@ -786,7 +786,7 @@ if [ "$RUN" = true ]; then
     
     qemu-system-x86_64 \
         -machine q35 \
-        -cpu qemu64 \
+        -cpu qemu64,+rdrand \
         -smp "$SMP_CPUS" \
         -m 512M \
         -bios "$OVMF_PATH" \

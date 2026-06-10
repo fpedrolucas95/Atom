@@ -49,8 +49,8 @@ CFLAGS = \
     -m64 \
     -ffreestanding \
     -fno-stack-protector \
-    -fno-pie \
-    -fno-pic \
+    -fPIE \
+    -fPIC \
     -mno-red-zone \
     -nostdlib \
     -nostdinc \

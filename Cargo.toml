@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "shared/abi",
+    "shared/atxf",
     "kernel",
     "userspace/libs/syscall",
     "userspace/libs/libipc",
