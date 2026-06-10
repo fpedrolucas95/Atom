@@ -164,6 +164,9 @@ const BTN_H:  u32 = 28;
 const BTN_W:  u32 = 90;
 const RBTN_W: u32 = 128;
 
+// Info card key column — wide enough for "Architecture" (12 × 8 px = 96 px) + gap
+const INFO_KW: u32 = 112;
+
 // About page icon size
 const ICON_R: u32 = 28;  // outer icon radius
 
@@ -369,12 +372,15 @@ struct SysInfo {
     cpu_buf: [u8; 64], cpu_len: usize,
     cores:   u64,
     mem_total: u64, mem_used: u64,
+    storage_total: u64, storage_used: u64,
     up_buf:  [u8; 32], up_len: usize,
 }
 impl SysInfo {
     fn empty() -> Self {
         Self { cpu_buf: [0;64], cpu_len: 0, cores: 0,
-               mem_total: 0, mem_used: 0, up_buf: [0;32], up_len: 0 }
+               mem_total: 0, mem_used: 0,
+               storage_total: 0, storage_used: 0,
+               up_buf: [0;32], up_len: 0 }
     }
     fn collect_static(&mut self) {
         self.cpu_len = get_cpu_brand(&mut self.cpu_buf);
@@ -382,6 +388,11 @@ impl SysInfo {
         let (total, free) = get_memory_info();
         self.mem_total = total;
         self.mem_used  = total.saturating_sub(free);
+        if let Ok(sv) = atom_syscall::fs::statvfs("/") {
+            let bs = sv.frsize.max(sv.bsize).max(512);
+            self.storage_total = sv.blocks.saturating_mul(bs);
+            self.storage_used  = sv.blocks.saturating_sub(sv.bfree).saturating_mul(bs);
+        }
     }
     fn refresh_uptime(&mut self) {
         self.up_len = fmt_uptime(&mut self.up_buf);
@@ -859,10 +870,25 @@ impl App {
     //
     // Layout:
     //   Page title
-    //   Status bar (dot + text: Connected / No connection)
-    //   Card: IP / Netmask / Gateway / MAC
-    //   DNS card: current DNS + three preset buttons [Auto] [8.8.8.8] [1.1.1.1]
+    //   Status indicator (dot + "Connected" / "No connection")
+    //   Card 1 – Connection: IP / Subnet Mask / Gateway
+    //   Card 2 – DNS: current server + preset buttons [Auto] [8.8.8.8] [1.1.1.1]
+    //   Card 3 – Hardware: Interface / Type / MAC / Link
     //   [Refresh] button (bottom-right)
+    //
+    // net_dns_btn_geom() centralises the DNS button positions so draw and click
+    // share exactly the same geometry.
+
+    fn net_dns_btn_geom(&self) -> (u32, u32, u32, u32, u32) {
+        let st_y    = PTITLE_H + 10;
+        let row     = CH + 10;
+        let card1_h = 4 + row * 3 + 4;   // 3 rows: IP, Mask, GW
+        let card2_y = st_y + CH + 16 + card1_h + 12;
+        let dns_kv_y = card2_y + 6;
+        let btn_y    = dns_kv_y + row + 8;
+        let kx       = self.cx() + PAD + 10;
+        (kx, btn_y, 90, 24, 8) // (kx, btn_y, btn_w, btn_h, btn_gap)
+    }
 
     fn draw_network(&self, s: &SharedSurface) {
         let cx = self.cx();
@@ -870,10 +896,10 @@ impl App {
         self.draw_page_title(s, "Network");
 
         // ── Status indicator ─────────────────────────────────────────────────
-        let st_y = PTITLE_H + 10;
-        let dot_x = cx + PAD; let dot_y = st_y + (CH - 8) / 2;
+        let st_y  = PTITLE_H + 10;
+        let dot_x = cx + PAD;
         let dot_col = if self.net.connected { theme::NET_OK } else { theme::NET_FAIL };
-        s.fill_rect_rounded_aa(dot_x, dot_y, 8, 8, 4, dot_col);
+        s.fill_rect_rounded_aa(dot_x, st_y, 8, 8, 4, dot_col);
         let st_lbl = if self.net.connected { "Connected" } else { "No connection" };
         s.draw_string(dot_x + 12, st_y, st_lbl, theme::TEXT, theme::BG);
 
@@ -882,51 +908,55 @@ impl App {
             return;
         }
 
-        // ── Network info card ─────────────────────────────────────────────────
-        let card1_y = st_y + CH + 16;
-        let row     = CH + 10;
-        let card1_h = 4 + row * 4 + 4;
-        self.draw_card(s, card1_y, card1_h);
+        let row = CH + 10;
+        let kx  = cx + PAD + 10;
+        let vx  = kx + INFO_KW + 8;
 
-        let kx = cx + PAD + 10;
-        let kw = 80u32;
-        let vx = kx + kw + 4;
-        let mut ry = card1_y + 6;
-        let kv = |s: &SharedSurface, ry: u32, k: &str, v: &str| {
-            s.draw_string(kx,  ry + (CH/2).saturating_sub(0), k, theme::INFO_KEY, theme::CARD_BG);
-            s.draw_string(vx,  ry + (CH/2).saturating_sub(0), v, theme::INFO_VAL, theme::CARD_BG);
+        let kv = |s: &SharedSurface, y: u32, k: &str, v: &str| {
+            s.draw_string(kx, y, k, theme::INFO_KEY,  theme::CARD_BG);
+            s.draw_string(vx, y, v, theme::INFO_VAL, theme::CARD_BG);
         };
+
+        // ── Card 1 – Connection ──────────────────────────────────────────────
+        let card1_y = st_y + CH + 16;
+        let card1_h = 4 + row * 3 + 4;
+        self.draw_card(s, card1_y, card1_h);
+        let mut ry = card1_y + 6;
         kv(s, ry, "IP Address",  self.net.ip_str());  ry += row;
         kv(s, ry, "Subnet Mask", self.net.nm_str());  ry += row;
-        kv(s, ry, "Gateway",     self.net.gw_str());  ry += row;
-        kv(s, ry, "MAC",         self.net.mac_str());
+        kv(s, ry, "Gateway",     self.net.gw_str());
 
-        // ── DNS card ─────────────────────────────────────────────────────────
+        // ── Card 2 – DNS ─────────────────────────────────────────────────────
         let card2_y = card1_y + card1_h + 12;
-        let dns_btn_h: u32 = 24;
-        let card2_h   = 4 + row + 8 + dns_btn_h + 4;
+        let (_, dns_btn_y, dns_btn_w, dns_btn_h, dns_btn_g) = self.net_dns_btn_geom();
+        let card2_h = 4 + row + 8 + dns_btn_h + 4;
         self.draw_card(s, card2_y, card2_h);
 
         let dns_kv_y = card2_y + 6;
-        s.draw_string(kx, dns_kv_y, "DNS Server", theme::INFO_KEY, theme::CARD_BG);
-        s.draw_string(vx, dns_kv_y, self.net.dns_str(), theme::INFO_VAL, theme::CARD_BG);
+        kv(s, dns_kv_y, "DNS Server", self.net.dns_str());
 
-        // DNS preset buttons
-        let dns_btn_y  = dns_kv_y + row + 8;
-        let dns_btn_w  = 90u32;
-        let dns_btn_g  = 8u32;
         let presets    = ["Auto", "8.8.8.8", "1.1.1.1"];
         let preset_dns = [self.net.auto_dns, 0x0808_0808u32, 0x0101_0101u32];
         for (i, lbl) in presets.iter().enumerate() {
             let bx = kx + i as u32 * (dns_btn_w + dns_btn_g);
             let active = preset_dns[i] == self.net.dns_raw && self.net.dns_raw != 0;
-            let bg     = if active { theme::SEL_BG   } else { theme::BTN_GHOST };
-            let border = if active { theme::ACCENT    } else { theme::BORDER };
+            let bg     = if active { theme::SEL_BG  } else { theme::BTN_GHOST };
+            let border = if active { theme::ACCENT   } else { theme::BORDER };
             s.fill_rect_rounded_aa(bx, dns_btn_y, dns_btn_w, dns_btn_h, 5, bg);
             s.draw_rect_rounded_aa(bx, dns_btn_y, dns_btn_w, dns_btn_h, 5, border);
             let tx = bx + (dns_btn_w.saturating_sub(lbl.len() as u32 * CW)) / 2;
             s.draw_string(tx, dns_btn_y + (dns_btn_h - CH) / 2, lbl, theme::TEXT, bg);
         }
+
+        // ── Card 3 – Hardware ────────────────────────────────────────────────
+        let card3_y = card2_y + card2_h + 12;
+        let card3_h = 4 + row * 4 + 4;
+        self.draw_card(s, card3_y, card3_h);
+        ry = card3_y + 6;
+        kv(s, ry, "Interface", "eth0");                                                 ry += row;
+        kv(s, ry, "Type",      "Ethernet");                                             ry += row;
+        kv(s, ry, "MAC",       self.net.mac_str());                                     ry += row;
+        kv(s, ry, "Link",      if self.net.connected { "Up" } else { "Down" });
 
         // ── Refresh button ────────────────────────────────────────────────────
         let (ax, ay) = self.apply_btn();
@@ -1005,93 +1035,79 @@ impl App {
     //     Uptime / IP Address
 
     fn draw_about(&self, s: &SharedSurface) {
-        let cx  = self.cx();
-        let cw  = self.cw();
+        let cx = self.cx();
+        let cw = self.cw();
 
         self.draw_page_title(s, "About System");
 
         // ── Logo icon (concentric rings) ──────────────────────────────────────
         let icon_cx = cx + cw / 2;
         let icon_y  = PTITLE_H + 10;
-        let ic      = icon_cx; let iy = icon_y + ICON_R;
-
-        // Outer ring
+        let ic = icon_cx; let iy = icon_y + ICON_R;
         s.draw_rect_rounded_aa(ic.saturating_sub(ICON_R), iy.saturating_sub(ICON_R),
                                ICON_R*2, ICON_R*2, ICON_R, theme::ACCENT_DIM);
-        // Middle ring
         let mr = ICON_R * 2 / 3;
         s.draw_rect_rounded_aa(ic.saturating_sub(mr), iy.saturating_sub(mr),
                                mr*2, mr*2, mr, theme::ACCENT_DIM);
-        // Nucleus
         let nr = ICON_R / 4;
         s.fill_rect_rounded_aa(ic.saturating_sub(nr), iy.saturating_sub(nr),
                                nr*2, nr*2, nr, theme::ACCENT);
 
         // ── OS name ───────────────────────────────────────────────────────────
         let name_y = icon_y + ICON_R * 2 + 12;
-        let name   = "Atom OS";
-        // Draw twice with 1 px horizontal offset for pseudo-bold
+        let name = "Atom OS";
         let nx = cx + (cw.saturating_sub(name.len() as u32 * CW)) / 2;
         s.draw_string(nx + 1, name_y, name, theme::TEXT, theme::BG);
         s.draw_string(nx,     name_y, name, theme::TEXT, theme::BG);
-
-        // Version + codename
         let sub = "v0.2.0  Beryllium";
-        let sx  = cx + (cw.saturating_sub(sub.len() as u32 * CW)) / 2;
+        let sx = cx + (cw.saturating_sub(sub.len() as u32 * CW)) / 2;
         s.draw_string(sx, name_y + CH + 6, sub, theme::TEXT_SEC, theme::BG);
 
-        // Thin divider
         let div_y = name_y + CH * 2 + 18;
         s.fill_rect(cx + PAD, div_y, cw.saturating_sub(PAD*2), 1, theme::DIVIDER);
 
         // ── Info cards ────────────────────────────────────────────────────────
+        // INFO_KW ensures the key column is wide enough for "Architecture"
+        // (12 chars × 8 px = 96 px) with a comfortable gap before the value.
         let row  = CH + 8;
-        let kw   = 90u32;
-        let voff = kw + 8;
-
+        let kx   = cx + PAD + 10;
+        let vx   = kx + INFO_KW + 8;
+        let max_c = (cw.saturating_sub(PAD * 2 + 10 + INFO_KW + 8 + PAD) / CW) as usize;
         let mut y = div_y + 10;
 
-        // Helper closures use shared references – capture as parameters instead.
-        let draw_kv = |s: &SharedSurface, y: u32, bg: Color, kx: u32, vx: u32, k: &str, v: &str| {
-            s.draw_string(kx, y, k, theme::INFO_KEY, bg);
-            s.draw_string(vx, y, v, theme::INFO_VAL, bg);
+        let kv = |s: &SharedSurface, y: u32, k: &str, v: &str| {
+            s.draw_string(kx, y, k, theme::INFO_KEY,  theme::CARD_BG);
+            s.draw_string(vx, y, v, theme::INFO_VAL, theme::CARD_BG);
         };
 
         // Card 1 – System
-        let c1h = 4 + row * 3 + 2;
-        self.draw_card(s, y, c1h);
-        let kx = cx + PAD + 10; let vx = kx + voff;
+        self.draw_card(s, y, 4 + row * 3 + 2);
         let mut ry = y + 6;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "OS",           "Atom OS 0.2.0");  ry += row;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "Kernel",       "0.2.0-smp");      ry += row;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "Architecture", "x86_64");
-        y += c1h + 8;
+        kv(s, ry, "OS",           "Atom OS 0.2.0"); ry += row;
+        kv(s, ry, "Kernel",       "0.2.0-smp");     ry += row;
+        kv(s, ry, "Architecture", "x86_64");
+        y += 4 + row * 3 + 2 + 8;
 
         // Card 2 – Hardware
         let cpu_raw = self.sinfo.cpu();
-        let max_c   = (self.cw().saturating_sub(PAD * 2 + 10 + voff + PAD) / CW) as usize;
-        let cpu     = if cpu_raw.len() > max_c { &cpu_raw[..max_c] } else { cpu_raw };
-        let mut cb = [0u8; 8]; let cl = fmt_u64(&mut cb, self.sinfo.cores);
-        let cores_str = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
-        let mut mb = [0u8; 48];
-        let ml = fmt_mem(&mut mb, self.sinfo.mem_used, self.sinfo.mem_total);
-        let mem_str = core::str::from_utf8(&mb[..ml]).unwrap_or("?");
-
-        let c2h = 4 + row * 3 + 2;
-        self.draw_card(s, y, c2h);
+        let cpu = if cpu_raw.len() > max_c { &cpu_raw[..max_c] } else { cpu_raw };
+        let mut cb = [0u8;  8]; let cl = fmt_u64(&mut cb, self.sinfo.cores);
+        let mut mb = [0u8; 48]; let ml = fmt_mem(&mut mb, self.sinfo.mem_used, self.sinfo.mem_total);
+        let mut sb = [0u8; 48]; let sl = fmt_storage(&mut sb, self.sinfo.storage_used, self.sinfo.storage_total);
+        self.draw_card(s, y, 4 + row * 4 + 2);
         ry = y + 6;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "Processor", cpu);          ry += row;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "CPU Cores", cores_str);    ry += row;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "Memory",    mem_str);
-        y += c2h + 8;
+        kv(s, ry, "Processor", cpu);                                                         ry += row;
+        kv(s, ry, "CPU Cores", core::str::from_utf8(&cb[..cl]).unwrap_or("?"));              ry += row;
+        kv(s, ry, "Memory",    core::str::from_utf8(&mb[..ml]).unwrap_or("?"));              ry += row;
+        kv(s, ry, "Storage",   core::str::from_utf8(&sb[..sl]).unwrap_or("?"));
+        y += 4 + row * 4 + 2 + 8;
 
         // Card 3 – Runtime
-        let c3h = 4 + row * 2 + 2;
-        self.draw_card(s, y, c3h);
-        ry = y + 6;
         let ip = if self.net.connected { self.net.ip_str() } else { "unavailable" };
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "Uptime",     self.sinfo.uptime()); ry += row;
-        draw_kv(s, ry, theme::CARD_BG, kx, vx, "IP Address", ip);
+        self.draw_card(s, y, 4 + row * 2 + 2);
+        ry = y + 6;
+        kv(s, ry, "Uptime",     self.sinfo.uptime()); ry += row;
+        kv(s, ry, "IP Address", ip);
     }
 
     // ── Status bar ────────────────────────────────────────────────────────────
@@ -1210,17 +1226,8 @@ impl App {
 
         if !self.deferred_done { return; }
 
-        // DNS preset buttons (same geometry as in draw_network)
-        let cx   = self.cx();
-        let st_y = PTITLE_H + 10;
-        let row  = (CH + 10) as u32;
-        let card1_y = st_y + CH + 16;
-        let card1_h = 4 + row * 4 + 4;
-        let card2_y = card1_y + card1_h + 12;
-        let dns_kv_y = card2_y + 6;
-        let dns_btn_y = dns_kv_y + row + 8;
-        let dns_btn_w = 90u32; let dns_btn_h = 24u32; let dns_btn_g = 8u32;
-        let kx = cx + PAD + 10;
+        // DNS preset buttons — delegate geometry to the same helper draw_network uses.
+        let (kx, dns_btn_y, dns_btn_w, dns_btn_h, dns_btn_g) = self.net_dns_btn_geom();
 
         let presets    = [self.net.auto_dns, 0x0808_0808u32, 0x0101_0101u32];
         for (i, &dns) in presets.iter().enumerate() {
@@ -1473,6 +1480,20 @@ fn fmt_mem(buf: &mut [u8; 48], used: u64, total: u64) -> usize {
     let mid=b" MB / "; for b in mid { buf[p]=*b; p+=1; }
     p += fmt_u64(&mut buf[p..], total/1024);
     let suf=b" MB"; for b in suf { buf[p]=*b; p+=1; }
+    p
+}
+
+fn fmt_storage(buf: &mut [u8; 48], used: u64, total: u64) -> usize {
+    if total == 0 {
+        let m = b"N/A"; buf[..m.len()].copy_from_slice(m); return m.len();
+    }
+    let used_mb  = used  / (1024 * 1024);
+    let total_mb = total / (1024 * 1024);
+    let mut p = 0;
+    p += fmt_u64(&mut buf[p..], used_mb);
+    let mid = b" MB / "; for b in mid { buf[p]=*b; p+=1; }
+    p += fmt_u64(&mut buf[p..], total_mb);
+    let suf = b" MB"; for b in suf { buf[p]=*b; p+=1; }
     p
 }
 
