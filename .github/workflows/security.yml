@@ -5,8 +5,11 @@ name: Security
 # regression must break the build.
 
 on:
+  # Run on pushes to main and on every pull request. Feature branches are
+  # covered by their PR run, so we don't also run on push to "**" (that double-ran
+  # the security gates for every PR'd branch — once for push, once for pull_request).
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
     branches: ["**"]
 

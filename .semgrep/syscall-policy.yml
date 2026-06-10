@@ -9,32 +9,12 @@
 # before the ABI/policy sets diverge.
 
 rules:
-  # ────────────────────────────────────────────────────────────────────────
-  # An `ExplicitlyUnrestricted` policy decision must be justified by a comment.
-  # A bare, comment-less ExplicitlyUnrestricted is how a sensitive syscall
-  # silently loses its gate.
-  # ────────────────────────────────────────────────────────────────────────
-  - id: explicitly-unrestricted-needs-comment
-    languages: [rust]
-    severity: ERROR
-    message: >
-      `ExplicitlyUnrestricted` must be preceded by a comment justifying why this
-      syscall needs no capability gate (e.g. "handler-gated by IoPort cap", or
-      "public, non-sensitive"). Add a justification or change the classification.
-    paths:
-      include:
-        - kernel/src/syscall/policy.rs
-    patterns:
-      - pattern: ExplicitlyUnrestricted
-      - pattern-not-inside: |
-          // ...
-          $X => ExplicitlyUnrestricted,
-      - pattern-not-inside: |
-          // ...
-          $A | $B => ExplicitlyUnrestricted,
-      - pattern-not: SysPolicy::ExplicitlyUnrestricted
-      - pattern-not: |
-          enum $E { ... }
+  # NOTE: the per-arm "ExplicitlyUnrestricted must carry a justification comment"
+  # check used to live here as rule `explicitly-unrestricted-needs-comment`, but
+  # newer semgrep dropped Rust comment-pattern matching (`// ...`) and now fails
+  # to *parse* such a rule. That check is therefore enforced deterministically in
+  # scripts/ci/check-syscall-policy.sh instead (version-stable, no semgrep
+  # dependency). The authoritative ABI-vs-policy diff also lives in that script.
 
   # ────────────────────────────────────────────────────────────────────────
   # A sensitive-resource handler must perform an authorization check
@@ -51,7 +31,7 @@ rules:
       policy table gates it, or add an in-handler check.
     paths:
       include:
-        - kernel/src/syscall/mod.rs
+        - /kernel/src/syscall/mod.rs
     patterns:
       - pattern: |
           fn $HANDLER(...) -> u64 { ... }
@@ -90,7 +70,7 @@ rules:
       Ed25519) with authenticity verified before mapping. Remove the fallback.
     paths:
       include:
-        - kernel/src/**
-        - shared/atxf/**
+        - /kernel/src/**
+        - /shared/atxf/**
     patterns:
       - pattern-regex: (?i)(allow[_ ]?unsigned|skip[_ ]?(sig|signature|verif)|atxf[_ ]?v1[_ ]?fallback|insecure[_ ]?fallback)

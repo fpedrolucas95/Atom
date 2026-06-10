@@ -60,12 +60,45 @@ if ! grep -qE '_\s*=>\s*ExplicitlyDenied' "$POLICY_FILE"; then
 fi
 ok "fail-closed wildcard present"
 
-# Heuristic: every ExplicitlyUnrestricted block should carry a justifying
-# comment in the same window. We flag bare arms that are not preceded by a
-# comment within 3 lines.
+# Every ExplicitlyUnrestricted arm must carry a justifying comment: a bare,
+# comment-less ExplicitlyUnrestricted is how a sensitive syscall silently loses
+# its gate. We flag any arm whose first match line is not preceded by a `//`
+# comment within 3 lines (and that has no inline `//` on the arm itself).
+#
+# This used to be delegated to the semgrep rule
+# `explicitly-unrestricted-needs-comment`, but newer semgrep dropped Rust
+# comment-pattern matching (`// ...`), so the check now lives here where it is
+# deterministic and version-stable.
 step "Checking ExplicitlyUnrestricted arms carry a justification..."
-if grep -nE 'ExplicitlyUnrestricted' "$POLICY_FILE" >/dev/null; then
-  ok "ExplicitlyUnrestricted usage present (per-arm justification checked by semgrep rule explicitly-unrestricted-needs-comment)"
+eu_report="$(awk '
+  /fn syscall_policy/                            { infn = 1 }
+  { line[NR] = $0; body[NR] = infn }
+  /pub\(super\) fn authorize_syscall_class/      { infn = 0 }
+  END {
+    for (i = 1; i <= NR; i++) {
+      if (!body[i]) continue
+      if (line[i] !~ /ExplicitlyUnrestricted/) continue
+      if (line[i] ~ /SysPolicy::ExplicitlyUnrestricted/) continue
+      # Walk up to the first match line of this arm (SYS_* / `|` continuations).
+      s = i
+      while (s > 1 && (line[s-1] ~ /SYS_[A-Z]/ || line[s-1] ~ /^[[:space:]]*\|/)) s--
+      has = 0
+      for (k = s; k <= i; k++) if (line[k] ~ /\/\//) has = 1          # inline comment
+      for (k = s-1; k >= s-3 && k >= 1; k--) if (line[k] ~ /^[[:space:]]*\/\//) has = 1
+      if (!has) printf("    %s:%d  %s\n", FILENAME, s, line[s])
+    }
+  }
+' "$POLICY_FILE")"
+
+if [[ -n "$eu_report" ]]; then
+  fail "ExplicitlyUnrestricted arm(s) without a justifying comment:"
+  echo "$eu_report"
+  echo ""
+  echo "Each ExplicitlyUnrestricted arm must be preceded by a comment explaining"
+  echo "why the syscall needs no capability gate (e.g. \"handler-gated by IoPort"
+  echo "cap\", or \"public, non-sensitive\")."
+  exit 1
 fi
+ok "every ExplicitlyUnrestricted arm carries a justification"
 
 ok "syscall policy gate passed"
