@@ -4987,11 +4987,13 @@ fn apply_spawn_grants(
 //   binary that is present on the filesystem at runtime.
 //
 // Security model:
-//   This syscall does NOT perform caller-identity checks itself.  Privilege
-//   restriction is enforced at the IPC layer: only app_launcher (a trusted
-//   system service) is expected to call this syscall.  In a future hardening
-//   pass a capability check (ResourceType::Spawn or similar) can be added
-//   here to prevent rogue processes from abusing it.
+//   Gated by the SpawnFromPath capability in the syscall policy table
+//   (syscall_policy -> Requires(SpawnFromPath)). That capability is granted only
+//   to app_launcher via the SystemServiceManifest, so any other caller is
+//   denied EPERM before this handler runs. The handler additionally rejects
+//   path traversal and system-service image paths (is_system_service_path), so
+//   SpawnFromPath can never be used as a back door to start a privileged
+//   service image.
 //
 // Error returns:
 //   EINVAL   — path is NULL, empty, too long, or not valid UTF-8
