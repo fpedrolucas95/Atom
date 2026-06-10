@@ -9,6 +9,13 @@ description = "Init process (PID 1) - orchestrates boot sequence"
 atom_syscall = { path = "../../libs/syscall" }
 libipc = { path = "../../libs/libipc" }
 
+[features]
+# When enabled, init asks app_launcher to spawn the unprivileged
+# security_smoke app at the end of boot, so the QEMU adversarial runner can
+# observe `SECURITY_SMOKE PASS all` on the serial log. OFF by default: normal
+# boots never auto-launch it. Enabled by scripts/ci/qemu-smoke.sh.
+smoke = []
+
 [[bin]]
 name = "init"
 path = "src/main.rs"

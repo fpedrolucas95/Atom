@@ -368,7 +368,16 @@ if [ "$KERNEL_ONLY" != true ]; then
         step "  Building $service service..."
         pushd "$service_path" > /dev/null
 
-        if cargo build --release 2>build.log; then
+        # Smoke builds: init auto-launches security_smoke at the end of boot so
+        # the QEMU adversarial runner can observe SECURITY_SMOKE PASS all. This
+        # is opt-in via SMOKE_BUILD=1 and never affects normal builds.
+        svc_features=""
+        if [ "$service" = "init" ] && [ "${SMOKE_BUILD:-0}" = "1" ]; then
+            svc_features="--features smoke"
+            warning "  init: enabling 'smoke' feature (security_smoke autostart)"
+        fi
+
+        if cargo build --release $svc_features 2>build.log; then
             popd > /dev/null
 
             bin_name=$(grep -A5 '\[\[bin\]\]' "$service_path/Cargo.toml" | grep 'name' | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr -d '\r' || echo "$service")

@@ -211,6 +211,15 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         | SYS_IRQ_ACK | SYS_PCI_QUERY_DEVICE
             => ExplicitlyUnrestricted,
 
+        // ── Raw I/O ports ─────────────────────────────────────────────────
+        // Gated in-handler by `validate_io_port_access`, which requires an
+        // explicit IoPort (or containing Device) capability with the matching
+        // permission. An ordinary process holds none and is denied EPERM by the
+        // handler. Classified here explicitly so these syscalls do not rely on
+        // the fail-closed wildcard (which would make the handler unreachable).
+        SYS_IO_PORT_READ | SYS_IO_PORT_WRITE
+            => ExplicitlyUnrestricted,
+
         // ── IRQ management ────────────────────────────────────────────────
         // Handler uses ALLOWED_IRQS allowlist today; no additional class gate.
         SYS_REGISTER_IRQ_HANDLER | SYS_UNREGISTER_IRQ_HANDLER | SYS_GET_IRQ_COUNT
