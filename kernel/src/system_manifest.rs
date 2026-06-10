@@ -367,14 +367,14 @@ pub struct TrustedAppProfile {
     pub environment_grants: &'static [EnvGrant],
 }
 
-// display_settings legitimately changes resolution → DisplayModeSet only.
+// system_settings legitimately changes resolution → DisplayModeSet only.
 // Video-mode queries are public, so it needs no further capability. It gets no
 // framebuffer map and no input.
-const DISPLAY_SETTINGS_CAPS: &[InitialCapability] = &[MODESET];
+const SYSTEM_SETTINGS_CAPS: &[InitialCapability] = &[MODESET];
 
 pub static TRUSTED_APPS: &[TrustedAppProfile] = &[TrustedAppProfile {
-    canonical_path: "/apps/system/display_settings.atxf",
-    capabilities: DISPLAY_SETTINGS_CAPS,
+    canonical_path: "/apps/system/system_settings.atxf",
+    capabilities: SYSTEM_SETTINGS_CAPS,
     environment_grants: NO_ENV,
 }];
 
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn trusted_apps_are_exact_path_and_minimal() {
-        let p = lookup_trusted_app("/apps/system/display_settings.atxf").unwrap();
+        let p = lookup_trusted_app("/apps/system/system_settings.atxf").unwrap();
         assert!(p
             .capabilities
             .iter()
