@@ -480,6 +480,12 @@ struct Window {
     front_ptr: *mut u32,
     front_width: u32,
     front_height: u32,
+    /// Set when the app commits a frame; the actual snapshot copy is deferred
+    /// to once per compositor loop pass (`flush_pending_snapshots`). Copying
+    /// inside the IPC drain loop lets a client that commits in a tight loop
+    /// outpace the compositor, which then never exits the drain loop and the
+    /// screen freezes while the rest of the system keeps running.
+    pending_snapshot: bool,
     saved_x: i32,
     saved_y: i32,
     saved_width: u32,
@@ -507,6 +513,7 @@ impl Window {
             front_ptr: core::ptr::null_mut(),
             front_width: 0,
             front_height: 0,
+            pending_snapshot: false,
             saved_x: x,
             saved_y: y,
             saved_width: width,
@@ -555,6 +562,7 @@ impl Window {
             front_ptr: core::ptr::null_mut(),
             front_width: 0,
             front_height: 0,
+            pending_snapshot: false,
             saved_x: x,
             saved_y: y,
             saved_width: width,
@@ -1524,22 +1532,35 @@ impl Compositor {
 
         let mut reg_buffer = [0u8; 64];
 
+        // Per-pass budget on drained IPC messages. The drain loops must not be
+        // unbounded: a client that sends in a tight loop can keep the queue
+        // non-empty forever, and the compositor would never get back to
+        // drawing (frozen screen while the system stays alive).
+        const MAX_MSGS_PER_PASS: usize = 64;
+
         loop {
             let ports = [self.register_port, self.event_port];
 
-            while let Ok(Some(len)) = try_recv(self.register_port, &mut reg_buffer) {
-                self.handle_register_message(&reg_buffer[..len]);
+            for _ in 0..MAX_MSGS_PER_PASS {
+                match try_recv(self.register_port, &mut reg_buffer) {
+                    Ok(Some(len)) => self.handle_register_message(&reg_buffer[..len]),
+                    _ => break,
+                }
             }
 
             let mut event_buffer = [0u8; 64];
-            while let Ok(Some(len)) = try_recv(self.event_port, &mut event_buffer) {
-                self.handle_app_event(&event_buffer[..len]);
+            for _ in 0..MAX_MSGS_PER_PASS {
+                match try_recv(self.event_port, &mut event_buffer) {
+                    Ok(Some(len)) => self.handle_app_event(&event_buffer[..len]),
+                    _ => break,
+                }
             }
 
             self.poll_input();
 
             self.reap_pending_closes();
             self.flush_deferred_desktop_work();
+            self.flush_pending_snapshots();
 
             if self.dirty {
                 self.draw_all();
@@ -2068,6 +2089,7 @@ impl Compositor {
                 window.surface_region_id = Some(region_id);
                 window.content_dirty = false;
                 window.surface_ready = false;
+                window.pending_snapshot = false;
                 window.event_port.map(|port| (port, window.x, window.y))
             } else {
                 None
@@ -2472,21 +2494,37 @@ impl Compositor {
         }
     }
 
-    /// Snapshot a window's freshly committed frame into its compositor-owned
-    /// front buffer and mark its footprint dirty. Called whenever an app
-    /// commits/presents a frame. Uses a single window lookup on this hot path.
+    /// Record that an app committed/presented a frame and mark its footprint
+    /// dirty. The snapshot copy itself is deferred to `flush_pending_snapshots`
+    /// so that any number of commits received in one loop pass cost one copy:
+    /// this handler must stay cheap because it runs inside the IPC drain loop,
+    /// where a client presenting in a tight loop can otherwise feed messages
+    /// faster than full-surface copies can drain them (compositor livelock).
     fn present_window(&mut self, window_id: WindowId) {
         let rect = match self.wm.get_window_mut(window_id) {
             Some(window) => {
                 window.content_dirty = true;
-                if window.snapshot_surface() {
-                    window.surface_ready = true;
-                }
+                window.pending_snapshot = true;
                 Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12)
             }
             None => return,
         };
         self.mark_dirty_rect(rect);
+    }
+
+    /// Perform the deferred front-buffer snapshots for every window that
+    /// committed a frame since the last pass. Runs once per compositor loop,
+    /// right before drawing, so each window is copied at most once per frame
+    /// regardless of how many commits it sent.
+    fn flush_pending_snapshots(&mut self) {
+        for window in self.wm.windows.iter_mut() {
+            if window.pending_snapshot {
+                window.pending_snapshot = false;
+                if window.snapshot_surface() {
+                    window.surface_ready = true;
+                }
+            }
+        }
     }
 
     /// Mark the entire screen dirty so the next `draw_all` repaints everything.

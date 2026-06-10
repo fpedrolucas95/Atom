@@ -491,7 +491,10 @@ impl FileManager {
         surface.draw_string(spacing::MD, y + 8, &self.status_msg, ds::ATOM_COLOR_TEXT_SECONDARY, ds::ATOM_COLOR_SURFACE);
     }
 
-    fn handle_event(&mut self) {
+    /// Drain one pending event. Returns whether an event was consumed, so the
+    /// main loop only re-renders (and re-presents) when state may have changed
+    /// — presenting unconditionally floods the compositor with commits.
+    fn handle_event(&mut self) -> bool {
         let mut buf = [0u8; 1024];
         if let Ok(Some(_len)) = try_recv(self.local_port, &mut buf) {
             let hdr = MessageHeader::from_bytes(&buf[..MessageHeader::SIZE]).unwrap();
@@ -517,7 +520,9 @@ impl FileManager {
                 }
                 _ => {}
             }
+            return true;
         }
+        false
     }
 
     fn handle_click(&mut self) {
@@ -779,22 +784,33 @@ fn main() -> ! {
     let compositor_port = libipc::protocol::lookup_service("compositor").unwrap();
 
     let mut fm: Option<FileManager> = None;
+    // First frame after the surface is assigned must be painted even with no
+    // input; afterwards, render+present only in response to events. Presenting
+    // on every loop pass floods the compositor with commit messages faster
+    // than it can snapshot them, freezing the whole screen.
+    let mut needs_paint = false;
 
     loop {
         if let Some(ref mut f) = fm {
-            f.handle_event();
-            f.render();
-            
-            // Present surface
-            let pres = SurfacePresentMsg { window_id: f.window_id };
-            let hdr = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
-            let mut buf = [0u8; 64];
-            buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
-            buf[MessageHeader::SIZE..MessageHeader::SIZE + SurfacePresentMsg::SIZE].copy_from_slice(&pres.to_bytes());
-            let total = MessageHeader::SIZE + SurfacePresentMsg::SIZE;
-            if send(compositor_port, &buf[..total]).is_err() {
-                yield_now();
-                continue;
+            if f.handle_event() {
+                needs_paint = true;
+            }
+            if needs_paint {
+                f.render();
+
+                // Present surface
+                let pres = SurfacePresentMsg { window_id: f.window_id };
+                let hdr = MessageHeader::new(MessageType::SurfacePresent, SurfacePresentMsg::SIZE as u32);
+                let mut buf = [0u8; 64];
+                buf[..MessageHeader::SIZE].copy_from_slice(&hdr.to_bytes());
+                buf[MessageHeader::SIZE..MessageHeader::SIZE + SurfacePresentMsg::SIZE].copy_from_slice(&pres.to_bytes());
+                let total = MessageHeader::SIZE + SurfacePresentMsg::SIZE;
+                if send(compositor_port, &buf[..total]).is_err() {
+                    // Keep needs_paint set so the present is retried.
+                    yield_now();
+                    continue;
+                }
+                needs_paint = false;
             }
         } else {
             let mut buf = [0u8; 1024];
@@ -804,6 +820,7 @@ fn main() -> ! {
                     let msg = SurfaceAssignMsg::from_bytes(&buf[MessageHeader::SIZE..]).unwrap();
                     let surface = SharedSurface::from_region(msg.region_id, msg.width, msg.height).unwrap();
                     fm = Some(FileManager::new(msg.window_id, compositor_port, local_port, surface));
+                    needs_paint = true;
                 }
             }
         }
