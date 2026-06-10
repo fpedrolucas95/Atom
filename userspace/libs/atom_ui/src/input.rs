@@ -18,28 +18,28 @@
 extern crate alloc;
 use alloc::string::String;
 
-use libgui::color::Color;
-use libgui::event::{KeyEvent, MouseEvent, MouseButton};
-use libgui::font::{FONT_WIDTH, FONT_HEIGHT};
-use libgui::surface::Surface;
+use crate::widget::WidgetEvent;
 use atom_theme::colors::*;
 use atom_theme::radius;
 use atom_theme::spacing;
-use crate::widget::WidgetEvent;
+use libgui::color::Color;
+use libgui::event::{KeyEvent, MouseButton, MouseEvent};
+use libgui::font::{FONT_HEIGHT, FONT_WIDTH};
+use libgui::surface::Surface;
 
 /// Single-line text input field.
 pub struct Input {
-    pub x:       u32,
-    pub y:       u32,
-    pub width:   u32,
-    pub height:  u32,
-    pub text:    String,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub text: String,
     /// Placeholder hint shown when `text` is empty and field is unfocused.
     pub placeholder: String,
-    pub focused:     bool,
-    pub disabled:    bool,
+    pub focused: bool,
+    pub disabled: bool,
     /// Cursor position (byte index into `text`).
-    pub cursor:      usize,
+    pub cursor: usize,
     /// Whether the caret glyph is currently visible (for blink).
     pub caret_visible: bool,
     /// Horizontal scroll offset in pixels (for overflow).
@@ -50,7 +50,10 @@ impl Input {
     /// Create an input field.
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
-            x, y, width, height,
+            x,
+            y,
+            width,
+            height,
             text: String::new(),
             placeholder: String::new(),
             focused: false,
@@ -63,7 +66,8 @@ impl Input {
 
     /// Set placeholder hint text.
     pub fn placeholder(mut self, s: impl Into<String>) -> Self {
-        self.placeholder = s.into(); self
+        self.placeholder = s.into();
+        self
     }
 
     /// Set the current text value.
@@ -75,24 +79,35 @@ impl Input {
     }
 
     /// Mark as disabled.
-    pub fn disabled(mut self) -> Self { self.disabled = true; self }
+    pub fn disabled(mut self) -> Self {
+        self.disabled = true;
+        self
+    }
 
     /// Toggle caret visibility (call from a ~500 ms timer for blinking).
-    pub fn set_caret_visible(&mut self, v: bool) { self.caret_visible = v; }
+    pub fn set_caret_visible(&mut self, v: bool) {
+        self.caret_visible = v;
+    }
 
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x as i32
             && y >= self.y as i32
-            && x < (self.x + self.width)  as i32
+            && x < (self.x + self.width) as i32
             && y < (self.y + self.height) as i32
     }
 
     // ── Input handling ────────────────────────────────────────────────────
 
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> WidgetEvent {
-        if self.disabled { return WidgetEvent::None; }
+        if self.disabled {
+            return WidgetEvent::None;
+        }
         match event {
-            MouseEvent::ButtonDown { button: MouseButton::Left, x, y } => {
+            MouseEvent::ButtonDown {
+                button: MouseButton::Left,
+                x,
+                y,
+            } => {
                 let was_focused = self.focused;
                 self.focused = self.contains(*x, *y);
                 if self.focused && !was_focused {
@@ -111,7 +126,9 @@ impl Input {
     /// Process a key event when the field is focused.
     /// Returns `WidgetEvent::ValueChanged` if the text was modified.
     pub fn handle_key(&mut self, event: &KeyEvent) -> WidgetEvent {
-        if !self.focused || self.disabled || !event.pressed { return WidgetEvent::None; }
+        if !self.focused || self.disabled || !event.pressed {
+            return WidgetEvent::None;
+        }
 
         let ch = event.character;
 
@@ -139,25 +156,37 @@ impl Input {
 
         // Left arrow
         if event.scancode == 0x4B {
-            if self.cursor > 0 { self.cursor -= 1; }
+            if self.cursor > 0 {
+                self.cursor -= 1;
+            }
             self.update_scroll();
             return WidgetEvent::None;
         }
 
         // Right arrow
         if event.scancode == 0x4D {
-            if self.cursor < self.text.len() { self.cursor += 1; }
+            if self.cursor < self.text.len() {
+                self.cursor += 1;
+            }
             self.update_scroll();
             return WidgetEvent::None;
         }
 
         // Home
-        if event.scancode == 0x47 { self.cursor = 0; self.update_scroll(); return WidgetEvent::None; }
+        if event.scancode == 0x47 {
+            self.cursor = 0;
+            self.update_scroll();
+            return WidgetEvent::None;
+        }
         // End
-        if event.scancode == 0x4F { self.cursor = self.text.len(); self.update_scroll(); return WidgetEvent::None; }
+        if event.scancode == 0x4F {
+            self.cursor = self.text.len();
+            self.update_scroll();
+            return WidgetEvent::None;
+        }
 
         // Printable ASCII
-        if ch >= 0x20 && ch < 0x7F {
+        if (0x20..0x7F).contains(&ch) {
             self.text.insert(self.cursor, ch as char);
             self.cursor += 1;
             self.update_scroll();
@@ -201,8 +230,11 @@ impl Input {
             surface.fill_rect_rounded_alpha(
                 self.x.saturating_sub(2),
                 self.y.saturating_sub(2),
-                self.width + 4, self.height + 4,
-                r + 2, glow, 35,
+                self.width + 4,
+                self.height + 4,
+                r + 2,
+                glow,
+                35,
             );
         }
 
@@ -243,7 +275,9 @@ impl Input {
 
         // Caret
         if self.focused && !self.disabled && self.caret_visible {
-            let caret_char = self.cursor.saturating_sub((self.scroll_x / FONT_WIDTH) as usize);
+            let caret_char = self
+                .cursor
+                .saturating_sub((self.scroll_x / FONT_WIDTH) as usize);
             let cx = tx + caret_char as u32 * FONT_WIDTH;
             if cx < self.x + self.width.saturating_sub(pad) {
                 let cc: Color = ATOM_COLOR_ACCENT.into();

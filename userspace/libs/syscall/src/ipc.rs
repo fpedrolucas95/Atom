@@ -1,7 +1,10 @@
 // IPC (Inter-Process Communication) syscalls
 
-use crate::error::{ESUCCESS, EPERM, EINVAL, ENOTFOUND, EWOULDBLOCK, EMSGSIZE, ETIMEDOUT, SyscallError, SyscallResult};
-use crate::raw::{syscall0, syscall1, syscall4, numbers::*};
+use crate::error::{
+    SyscallError, SyscallResult, EINVAL, EMSGSIZE, ENOTFOUND, EPERM, ESUCCESS, ETIMEDOUT,
+    EWOULDBLOCK,
+};
+use crate::raw::{numbers::*, syscall0, syscall1, syscall4};
 
 /// Port identifier
 pub type PortId = u64;
@@ -24,7 +27,7 @@ pub fn create_port() -> SyscallResult<PortId> {
 /// Used by well-known system services (e.g., namesvc on Port 1) to get
 /// deterministic, pre-assigned port IDs instead of sequentially allocated ones.
 pub fn create_port_with_id(id: PortId) -> SyscallResult<PortId> {
-    use crate::raw::{syscall1, numbers::SYS_IPC_CREATE_PORT_WITH_ID};
+    use crate::raw::{numbers::SYS_IPC_CREATE_PORT_WITH_ID, syscall1};
     let result = unsafe { syscall1(SYS_IPC_CREATE_PORT_WITH_ID, id) };
 
     if result == 0 || crate::error::is_syscall_error(result) {
@@ -52,7 +55,13 @@ pub fn send(port: PortId, data: &[u8]) -> SyscallResult<()> {
     // Use send_async syscall which properly handles data payload
     // Arguments: port, msg_type (0 = raw data), payload_ptr, payload_len
     let result = unsafe {
-        syscall4(SYS_IPC_SEND_ASYNC, port, 0, data.as_ptr() as u64, data.len() as u64)
+        syscall4(
+            SYS_IPC_SEND_ASYNC,
+            port,
+            0,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        )
     };
 
     match result {
@@ -73,7 +82,13 @@ pub fn send(port: PortId, data: &[u8]) -> SyscallResult<()> {
 pub fn recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<usize> {
     // Arguments: port, buffer_ptr, buffer_len, timeout_ms (0 = block forever)
     let result = unsafe {
-        syscall4(SYS_IPC_RECV, port, buffer.as_mut_ptr() as u64, buffer.len() as u64, 0)
+        syscall4(
+            SYS_IPC_RECV,
+            port,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+        )
     };
 
     if crate::error::is_syscall_error(result) {
@@ -96,7 +111,13 @@ pub fn recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<usize> {
 pub fn recv_with_timeout(port: PortId, buffer: &mut [u8], timeout_ms: u64) -> SyscallResult<usize> {
     // Arguments: port, buffer_ptr, buffer_len, timeout_ms
     let result = unsafe {
-        syscall4(SYS_IPC_RECV, port, buffer.as_mut_ptr() as u64, buffer.len() as u64, timeout_ms)
+        syscall4(
+            SYS_IPC_RECV,
+            port,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            timeout_ms,
+        )
     };
 
     if crate::error::is_syscall_error(result) {
@@ -119,7 +140,12 @@ pub fn try_recv(port: PortId, buffer: &mut [u8]) -> SyscallResult<Option<usize>>
     use crate::raw::syscall3;
     // Arguments: port, buffer_ptr, buffer_len (non-blocking - no timeout arg)
     let result = unsafe {
-        syscall3(SYS_IPC_TRY_RECV, port, buffer.as_mut_ptr() as u64, buffer.len() as u64)
+        syscall3(
+            SYS_IPC_TRY_RECV,
+            port,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )
     };
 
     if result == EWOULDBLOCK {
@@ -202,7 +228,13 @@ pub fn process_alive(pid: u64) -> bool {
 pub fn send_async(port: PortId, data: &[u8]) -> SyscallResult<()> {
     // Arguments: port, msg_type (0 = raw data), payload_ptr, payload_len
     let result = unsafe {
-        syscall4(SYS_IPC_SEND_ASYNC, port, 0, data.as_ptr() as u64, data.len() as u64)
+        syscall4(
+            SYS_IPC_SEND_ASYNC,
+            port,
+            0,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        )
     };
 
     match result {
@@ -221,8 +253,8 @@ pub fn send_async(port: PortId, data: &[u8]) -> SyscallResult<()> {
 /// Blocks until one of the ports has a message available.
 /// Returns the index of the port with data.
 pub fn wait_any(ports: &[PortId], timeout_ms: u64) -> SyscallResult<usize> {
-    use crate::raw::syscall3;
     use crate::raw::numbers::SYS_IPC_WAIT_ANY;
+    use crate::raw::syscall3;
 
     if ports.is_empty() || ports.len() > 64 {
         return Err(SyscallError::InvalidArgument);

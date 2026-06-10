@@ -68,9 +68,9 @@ pub fn run_security_policy_selftests() {
     policy::run_security_policy_selftests();
 }
 
-use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
-use crate::{log_debug, log_info, log_warn, log_error, log_panic};
+use crate::{log_debug, log_error, log_info, log_panic, log_warn};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const MSR_STAR: u32 = 0xC000_0081;
 const MSR_LSTAR: u32 = 0xC000_0082;
@@ -102,9 +102,9 @@ pub const SYS_IPC_RECV_BATCH: u64 = 22;
 pub const SYS_IPC_SEND_ASYNC: u64 = 23;
 pub const SYS_IPC_TRY_RECV: u64 = 24;
 pub const SYS_IPC_TRACE_READ: u64 = 25;
-pub const SYS_IPC_PORT_STATS: u64 = 26; 
+pub const SYS_IPC_PORT_STATS: u64 = 26;
 pub const SYS_ADDRSPACE_CREATE: u64 = 27;
-pub const SYS_ADDRSPACE_DESTROY: u64 = 28; 
+pub const SYS_ADDRSPACE_DESTROY: u64 = 28;
 pub const SYS_MAP_REGION: u64 = 29;
 pub const SYS_UNMAP_REGION: u64 = 30;
 pub const SYS_REMAP_REGION: u64 = 31;
@@ -119,7 +119,7 @@ pub const SYS_DEBUG_LOG: u64 = 39;
 pub const SYS_REGISTER_IRQ_HANDLER: u64 = 40;
 pub const SYS_MAP_FRAMEBUFFER: u64 = 41;
 pub const SYS_UNREGISTER_IRQ_HANDLER: u64 = 42;
-pub const SYS_IPC_WAIT_ANY: u64 = 43;  // Wait on multiple ports for any event
+pub const SYS_IPC_WAIT_ANY: u64 = 43; // Wait on multiple ports for any event
 pub const SYS_GET_IRQ_COUNT: u64 = 44; // Get IRQ occurrence count for a registered handler
 pub const SYS_SPAWN_PROCESS: u64 = 45; // Spawn a new process from a registered driver
 pub const SYS_GET_MEMORY_INFO: u64 = 46; // Get system memory information
@@ -137,18 +137,18 @@ pub const SYS_GET_THREAD_AFFINITY: u64 = 93;
 // ---------------------------------------------------------------------------
 // Infrastructure / Networking Phase 1 syscalls
 // ---------------------------------------------------------------------------
-pub const SYS_PCI_GET_BAR:            u64 = 81;
-pub const SYS_DEVICE_BIND_IRQ:        u64 = 82;
-pub const SYS_IRQ_LISTEN:             u64 = 83;
-pub const SYS_DMA_ALLOC:              u64 = 84;
-pub const SYS_DMA_MAP:                u64 = 85;
-pub const SYS_DMA_FREE:               u64 = 86;
-pub const SYS_MAP_MMIO:               u64 = 87;
-pub const SYS_IRQ_ACK:                u64 = 88;
+pub const SYS_PCI_GET_BAR: u64 = 81;
+pub const SYS_DEVICE_BIND_IRQ: u64 = 82;
+pub const SYS_IRQ_LISTEN: u64 = 83;
+pub const SYS_DMA_ALLOC: u64 = 84;
+pub const SYS_DMA_MAP: u64 = 85;
+pub const SYS_DMA_FREE: u64 = 86;
+pub const SYS_MAP_MMIO: u64 = 87;
+pub const SYS_IRQ_ACK: u64 = 88;
 /// Query PCI device identity (vendor/device/class) from a DeviceCap.
 /// Allows userspace drivers to discover what hardware they hold without
 /// the kernel needing to know which driver handles which device.
-pub const SYS_PCI_QUERY_DEVICE:       u64 = 89;
+pub const SYS_PCI_QUERY_DEVICE: u64 = 89;
 
 // ---------------------------------------------------------------------------
 // Video mode management syscalls (BGA/VBE_DISPI)
@@ -324,13 +324,31 @@ pub const SYS_FS_STATVFS: u64 = 76;
 
 // Error codes — re-exported from the shared ABI crate (single source of truth).
 pub use atom_abi::{
-    ESUCCESS, EINVAL, ENOSYS, ENOMEM, EPERM, EBUSY,
-    EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
-    // Filesystem error codes
-    ENOENT, EISDIR, ENOTDIR, EBADF, ENAMETOOLONG, EIO,
-    EMFILE, EEXIST, EACCES, EXDEV, ENOTEMPTY,
-    ENOTSUP,
+    EACCES,
+    EBADF,
+    EBUSY,
+    EDEADLK,
+    EEXIST,
+    EINVAL,
+    EIO,
+    EISDIR,
+    EMFILE,
+    EMSGSIZE,
+    ENAMETOOLONG,
     ENODEV,
+    // Filesystem error codes
+    ENOENT,
+    ENOMEM,
+    ENOSYS,
+    ENOTDIR,
+    ENOTEMPTY,
+    ENOTFOUND,
+    ENOTSUP,
+    EPERM,
+    ESUCCESS,
+    ETIMEDOUT,
+    EWOULDBLOCK,
+    EXDEV,
     // FS limits
     FS_MAX_PATH_LEN,
 };
@@ -467,15 +485,15 @@ impl SyscallError {
     /// Returns a non-zero value for every variant (zero = success).
     pub fn to_errno(self) -> u64 {
         match self {
-            SyscallError::AddressSpaceDrift          => EINVAL,
-            SyscallError::ProcessMetadataCorrupted   => EINVAL,
-            SyscallError::ThreadProcessMismatch      => EINVAL,
-            SyscallError::InvalidUserReturnAddress   => EINVAL,
-            SyscallError::AdmissionDenied            => ENOMEM,
-            SyscallError::CapabilityRevokePartial    => EBUSY,
-            SyscallError::InvalidPointer             => EINVAL,
-            SyscallError::PermissionDenied           => EPERM,
-            SyscallError::InternalInconsistency(_)   => EINVAL,
+            SyscallError::AddressSpaceDrift => EINVAL,
+            SyscallError::ProcessMetadataCorrupted => EINVAL,
+            SyscallError::ThreadProcessMismatch => EINVAL,
+            SyscallError::InvalidUserReturnAddress => EINVAL,
+            SyscallError::AdmissionDenied => ENOMEM,
+            SyscallError::CapabilityRevokePartial => EBUSY,
+            SyscallError::InvalidPointer => EINVAL,
+            SyscallError::PermissionDenied => EPERM,
+            SyscallError::InternalInconsistency(_) => EINVAL,
         }
     }
 }
@@ -546,10 +564,10 @@ pub fn validate_syscall_context(
 /// Map a `SyscallContextError` to a numeric reason code for use in termination.
 fn context_error_code(error: SyscallContextError) -> u64 {
     match error {
-        SyscallContextError::ProcessContextMismatch   => 1,
+        SyscallContextError::ProcessContextMismatch => 1,
         SyscallContextError::InvalidUserReturnAddress => 2,
-        SyscallContextError::MissingAddressSpace      => 3,
-        SyscallContextError::ThreadMetadataDrift      => 4,
+        SyscallContextError::MissingAddressSpace => 3,
+        SyscallContextError::ThreadMetadataDrift => 4,
     }
 }
 
@@ -558,9 +576,8 @@ fn context_error_kind(error: SyscallContextError) -> KernelOperationalError {
         SyscallContextError::ProcessContextMismatch | SyscallContextError::MissingAddressSpace => {
             KernelOperationalError::AddressSpaceCorruption
         }
-        SyscallContextError::InvalidUserReturnAddress | SyscallContextError::ThreadMetadataDrift => {
-            KernelOperationalError::ContextCorruption
-        }
+        SyscallContextError::InvalidUserReturnAddress
+        | SyscallContextError::ThreadMetadataDrift => KernelOperationalError::ContextCorruption,
     }
 }
 
@@ -610,8 +627,7 @@ pub fn init() {
         //   CS  = (STAR[63:48] + 16) | 3 = USER_CODE_SELECTOR (GDT[0x20]|3 = 0x23)
         // KERNEL_DATA_SELECTOR (0x10) satisfies: 0x10+8=0x18 and 0x10+16=0x20.
         let star_value =
-            ((KERNEL_DATA_SELECTOR as u64) << 48) |
-            ((KERNEL_CODE_SELECTOR as u64) << 32);
+            ((KERNEL_DATA_SELECTOR as u64) << 48) | ((KERNEL_CODE_SELECTOR as u64) << 32);
         wrmsr(MSR_STAR, star_value);
 
         let entry_addr = syscall_entry as *const () as u64;
@@ -626,10 +642,7 @@ pub fn init() {
         wrmsr(efer_msr, efer);
     }
 
-    log_info!(
-        LOG_ORIGIN,
-        "Syscall subsystem initialized"
-    );
+    log_info!(LOG_ORIGIN, "Syscall subsystem initialized");
 
     log_debug!(
         LOG_ORIGIN,
@@ -678,10 +691,10 @@ unsafe fn rdmsr(msr: u32) -> u64 {
 fn normalize_syscall_result(errno: u64) -> Option<SyscallError> {
     match errno {
         e if e == ENOMEM => Some(SyscallError::AdmissionDenied),
-        e if e == EPERM  => Some(SyscallError::PermissionDenied),
-        e if e == EBUSY  => Some(SyscallError::CapabilityRevokePartial),
+        e if e == EPERM => Some(SyscallError::PermissionDenied),
+        e if e == EBUSY => Some(SyscallError::CapabilityRevokePartial),
         e if e == EINVAL => Some(SyscallError::InvalidPointer),
-        _                => None,
+        _ => None,
     }
 }
 
@@ -794,7 +807,12 @@ extern "win64" fn rust_syscall_dispatcher(
         frame.user_rip,
         frame.user_rsp,
         entry_cr3,
-        arg0, arg1, arg2, arg3, arg4, arg5
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5
     );
 
     if let Some(early_return) = policy::authorize_syscall_class(syscall_num, LOG_ORIGIN) {
@@ -872,72 +890,74 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_FORK => sys_fork(frame),
 
         // Kernel FS backend syscalls (for fsd only)
-        SYS_KERN_FS_READ_FILE  => sys_kern_fs_read_file(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_KERN_FS_LIST_DIR   => sys_kern_fs_list_dir(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_KERN_FS_STAT_PATH  => sys_kern_fs_stat_path(arg0, arg1 as usize, arg2),
+        SYS_KERN_FS_READ_FILE => sys_kern_fs_read_file(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_LIST_DIR => sys_kern_fs_list_dir(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_STAT_PATH => sys_kern_fs_stat_path(arg0, arg1 as usize, arg2),
         SYS_KERN_FS_WRITE_FILE => sys_kern_fs_write_file(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_KERN_FS_MKDIR      => sys_kern_fs_mkdir(arg0, arg1 as usize),
-        SYS_KERN_FS_RMDIR      => sys_kern_fs_rmdir(arg0, arg1 as usize),
-        SYS_KERN_FS_UNLINK     => sys_kern_fs_unlink(arg0, arg1 as usize),
-        SYS_KERN_FS_RENAME     => sys_kern_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_KERN_FS_SYNC       => sys_kern_fs_sync(),
-        SYS_KERN_BLOCK_READ    => sys_kern_block_read(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_KERN_BLOCK_WRITE   => sys_kern_block_write(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_KERN_BLOCK_FLUSH   => sys_kern_block_flush(),
-
+        SYS_KERN_FS_MKDIR => sys_kern_fs_mkdir(arg0, arg1 as usize),
+        SYS_KERN_FS_RMDIR => sys_kern_fs_rmdir(arg0, arg1 as usize),
+        SYS_KERN_FS_UNLINK => sys_kern_fs_unlink(arg0, arg1 as usize),
+        SYS_KERN_FS_RENAME => sys_kern_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_FS_SYNC => sys_kern_fs_sync(),
+        SYS_KERN_BLOCK_READ => sys_kern_block_read(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_BLOCK_WRITE => sys_kern_block_write(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_KERN_BLOCK_FLUSH => sys_kern_block_flush(),
 
         // Filesystem syscalls — forwarded to fsd via IPC
-        SYS_FS_OPEN     => fsd_sys_fs_open(arg0, arg1 as usize, arg2 as u32, arg3 as u32),
-        SYS_FS_CLOSE    => fsd_sys_fs_close(arg0),
-        SYS_FS_READ     => fsd_sys_fs_read(arg0, arg1, arg2 as usize),
-        SYS_FS_WRITE    => fsd_sys_fs_write(arg0, arg1, arg2 as usize),
-        SYS_FS_SEEK     => fsd_sys_fs_seek(arg0, arg1 as i64, arg2 as u32),
-        SYS_FS_STAT     => fsd_sys_fs_stat(arg0, arg1 as usize, arg2),
-        SYS_FS_FSTAT    => fsd_sys_fs_fstat(arg0, arg1),
-        SYS_FS_MKDIR    => fsd_sys_fs_mkdir(arg0, arg1 as usize, arg2 as u32),
-        SYS_FS_RMDIR    => fsd_sys_fs_rmdir(arg0, arg1 as usize),
-        SYS_FS_UNLINK   => fsd_sys_fs_unlink(arg0, arg1 as usize),
-        SYS_FS_RENAME   => fsd_sys_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_FS_READDIR  => fsd_sys_fs_readdir(arg0, arg1, arg2 as usize),
+        SYS_FS_OPEN => fsd_sys_fs_open(arg0, arg1 as usize, arg2 as u32, arg3 as u32),
+        SYS_FS_CLOSE => fsd_sys_fs_close(arg0),
+        SYS_FS_READ => fsd_sys_fs_read(arg0, arg1, arg2 as usize),
+        SYS_FS_WRITE => fsd_sys_fs_write(arg0, arg1, arg2 as usize),
+        SYS_FS_SEEK => fsd_sys_fs_seek(arg0, arg1 as i64, arg2 as u32),
+        SYS_FS_STAT => fsd_sys_fs_stat(arg0, arg1 as usize, arg2),
+        SYS_FS_FSTAT => fsd_sys_fs_fstat(arg0, arg1),
+        SYS_FS_MKDIR => fsd_sys_fs_mkdir(arg0, arg1 as usize, arg2 as u32),
+        SYS_FS_RMDIR => fsd_sys_fs_rmdir(arg0, arg1 as usize),
+        SYS_FS_UNLINK => fsd_sys_fs_unlink(arg0, arg1 as usize),
+        SYS_FS_RENAME => fsd_sys_fs_rename(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_READDIR => fsd_sys_fs_readdir(arg0, arg1, arg2 as usize),
         SYS_FS_TRUNCATE => fsd_sys_fs_truncate(arg0, arg1),
-        SYS_FS_FSYNC    => fsd_sys_fs_fsync(arg0),
-        SYS_FS_MOUNT    => sys_fs_mount(arg0, arg1 as usize, arg2, arg3 as usize, arg4, arg5 as usize),
-        SYS_FS_UMOUNT   => sys_fs_umount(arg0, arg1 as usize),
-        SYS_FS_CHMOD    => sys_fs_chmod(arg0, arg1 as usize, arg2 as u32),
-        SYS_FS_DUP      => sys_fs_dup(arg0),
-        SYS_FS_DUP2     => sys_fs_dup2(arg0, arg1),
-        SYS_FS_LINK     => sys_fs_link(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_FS_SYMLINK  => sys_fs_symlink(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_FSYNC => fsd_sys_fs_fsync(arg0),
+        SYS_FS_MOUNT => sys_fs_mount(
+            arg0,
+            arg1 as usize,
+            arg2,
+            arg3 as usize,
+            arg4,
+            arg5 as usize,
+        ),
+        SYS_FS_UMOUNT => sys_fs_umount(arg0, arg1 as usize),
+        SYS_FS_CHMOD => sys_fs_chmod(arg0, arg1 as usize, arg2 as u32),
+        SYS_FS_DUP => sys_fs_dup(arg0),
+        SYS_FS_DUP2 => sys_fs_dup2(arg0, arg1),
+        SYS_FS_LINK => sys_fs_link(arg0, arg1 as usize, arg2, arg3 as usize),
+        SYS_FS_SYMLINK => sys_fs_symlink(arg0, arg1 as usize, arg2, arg3 as usize),
         SYS_FS_READLINK => sys_fs_readlink(arg0, arg1 as usize, arg2, arg3 as usize),
-        SYS_FS_UTIMES   => sys_fs_utimes(arg0, arg1 as usize, arg2 as i64, arg3 as i64),
-        SYS_FS_STATVFS  => sys_fs_statvfs(arg0, arg1 as usize, arg2),
+        SYS_FS_UTIMES => sys_fs_utimes(arg0, arg1 as usize, arg2 as i64, arg3 as i64),
+        SYS_FS_STATVFS => sys_fs_statvfs(arg0, arg1 as usize, arg2),
 
         // App launcher — spawn ATXF by path
         SYS_SPAWN_FROM_PATH => sys_spawn_from_path(arg0, arg1 as usize),
 
         // Infrastructure / Networking Phase 1
-        SYS_PCI_GET_BAR     => sys_pci_get_bar(arg0, arg1 as u8, arg2),
+        SYS_PCI_GET_BAR => sys_pci_get_bar(arg0, arg1 as u8, arg2),
         SYS_DEVICE_BIND_IRQ => sys_device_bind_irq(arg0, arg1),
-        SYS_IRQ_LISTEN      => sys_irq_listen(arg0, arg1),
-        SYS_DMA_ALLOC       => sys_dma_alloc(arg0, arg1),
-        SYS_DMA_MAP         => sys_dma_map(arg0, arg1),
-        SYS_DMA_FREE        => sys_dma_free(arg0),
-        SYS_MAP_MMIO        => sys_map_mmio(arg0, arg1),
-        SYS_IRQ_ACK         => sys_irq_ack(arg0),
+        SYS_IRQ_LISTEN => sys_irq_listen(arg0, arg1),
+        SYS_DMA_ALLOC => sys_dma_alloc(arg0, arg1),
+        SYS_DMA_MAP => sys_dma_map(arg0, arg1),
+        SYS_DMA_FREE => sys_dma_free(arg0),
+        SYS_MAP_MMIO => sys_map_mmio(arg0, arg1),
+        SYS_IRQ_ACK => sys_irq_ack(arg0),
         SYS_PCI_QUERY_DEVICE => sys_pci_query_device(arg0, arg1),
 
         // Video mode management (BGA/VBE_DISPI)
-        SYS_SET_VIDEO_MODE         => sys_set_video_mode(arg0, arg1),
-        SYS_GET_VIDEO_MODES        => sys_get_video_modes(arg0, arg1 as usize),
+        SYS_SET_VIDEO_MODE => sys_set_video_mode(arg0, arg1),
+        SYS_GET_VIDEO_MODES => sys_get_video_modes(arg0, arg1 as usize),
         SYS_GET_CURRENT_VIDEO_MODE => sys_get_current_video_mode(arg0),
-        SYS_VIDEO_MODE_COUNT       => sys_video_mode_count(),
+        SYS_VIDEO_MODE_COUNT => sys_video_mode_count(),
 
         _ => {
-            log_warn!(
-                "syscall",
-                "Unknown syscall number: {}",
-                syscall_num
-            );
+            log_warn!("syscall", "Unknown syscall number: {}", syscall_num);
             ENOSYS
         }
     };
@@ -964,15 +984,21 @@ extern "win64" fn rust_syscall_dispatcher(
             (0, "?")
         };
         let syscall_name = match syscall_num {
-            SYS_THREAD_YIELD    => "yield",
-            SYS_IPC_WAIT_ANY    => "ipc_wait_any",
-            SYS_IPC_TRY_RECV    => "ipc_try_recv",
-            _                   => "?",
+            SYS_THREAD_YIELD => "yield",
+            SYS_IPC_WAIT_ANY => "ipc_wait_any",
+            SYS_IPC_TRY_RECV => "ipc_try_recv",
+            _ => "?",
         };
         log_debug!(
             "hotloop",
             "[hotloop] tid={:?} pid={} proc={} cr3={:#x} syscall={} rip={:#x} ret={:#x}",
-            tid, pid_raw, proc_name, entry_cr3, syscall_name, frame.user_rip, result
+            tid,
+            pid_raw,
+            proc_name,
+            entry_cr3,
+            syscall_name,
+            frame.user_rip,
+            result
         );
     }
 
@@ -990,8 +1016,11 @@ extern "win64" fn rust_syscall_dispatcher(
     //   EINVAL → SyscallError::InvalidPointer (invalid userspace pointer)
     //   other  → no classification (pass through)
     // ----------------------------------------------------------------
-    if result != ESUCCESS && result != ENOSYS && result != EWOULDBLOCK
-        && result != ETIMEDOUT && result != ENOTFOUND
+    if result != ESUCCESS
+        && result != ENOSYS
+        && result != EWOULDBLOCK
+        && result != ETIMEDOUT
+        && result != ENOTFOUND
     {
         let classified = normalize_syscall_result(result);
         if let Some(err) = classified {
@@ -1167,12 +1196,12 @@ fn sys_get_framebuffer(info_ptr: u64) -> u64 {
     if validate_user_range(info_ptr.as_u64(), 5 * core::mem::size_of::<u64>()).is_err() {
         return EINVAL;
     }
-    
+
     if let Some((width, height)) = crate::graphics::get_dimensions() {
         if let Some(addr) = crate::graphics::get_framebuffer_address() {
             let stride = crate::graphics::get_stride();
             let bpp = crate::graphics::get_bytes_per_pixel();
-            let len = stride as usize * height as usize * bpp as usize;
+            let len = stride as usize * height as usize * bpp;
             let proc_name = current_thread_name_for_log();
             let info_ptr = info_ptr.as_mut_ptr::<u64>();
             unsafe {
@@ -1222,7 +1251,8 @@ fn sys_debug_log(msg_ptr: u64, len: usize) -> u64 {
     };
 
     // SAFETY: msg_range is ABI-validated and guaranteed canonical.
-    let msg = unsafe { core::slice::from_raw_parts(msg_range.base().as_ptr::<u8>(), msg_range.len()) };
+    let msg =
+        unsafe { core::slice::from_raw_parts(msg_range.base().as_ptr::<u8>(), msg_range.len()) };
 
     if let Ok(s) = core::str::from_utf8(msg) {
         log_info!("userspace", "{}", s);
@@ -1234,10 +1264,7 @@ fn sys_debug_log(msg_ptr: u64, len: usize) -> u64 {
 fn sys_thread_yield() -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
-    log_debug!(
-        LOG_ORIGIN,
-        "thread_yield()"
-    );
+    log_debug!(LOG_ORIGIN, "thread_yield()");
 
     let (prev, next) = crate::sched::on_timer_tick();
     if let (Some(prev_id), Some(next_id)) = (prev, next) {
@@ -1251,18 +1278,14 @@ fn sys_thread_yield() -> u64 {
 fn sys_thread_exit(exit_code: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
-    log_info!(
-        LOG_ORIGIN,
-        "thread_exit(code=0x{:X})",
-        exit_code
-    );
+    log_info!(LOG_ORIGIN, "thread_exit(code=0x{:X})", exit_code);
 
     if let Some(tid) = crate::sched::current_thread() {
         // Terminate entity with comprehensive cleanup
         // This is the unified termination path for normal exits
         crate::thread::terminate_entity(
             tid,
-            crate::thread::TerminationReason::NormalExit { exit_code }
+            crate::thread::TerminationReason::NormalExit { exit_code },
         );
 
         // Schedule next thread - this should never return since our thread is gone
@@ -1289,11 +1312,7 @@ fn sys_thread_exit(exit_code: u64) -> u64 {
 fn sys_thread_sleep(milliseconds: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
-    log_debug!(
-        LOG_ORIGIN,
-        "thread_sleep(ms={})",
-        milliseconds
-    );
+    log_debug!(LOG_ORIGIN, "thread_sleep(ms={})", milliseconds);
 
     if milliseconds == 0 {
         return sys_thread_yield();
@@ -1345,10 +1364,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "thread_create rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "thread_create rejected: no current thread");
             return EINVAL;
         }
     };
@@ -1357,7 +1373,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         return e;
     }
 
-    const KERNEL_STACK_SIZE: usize = 64 * 1024;  // 64KB to handle deep call stacks with logging/IPC
+    const KERNEL_STACK_SIZE: usize = 64 * 1024; // 64KB to handle deep call stacks with logging/IPC
     let kernel_stack_phys = match crate::mm::pmm::alloc_pages(KERNEL_STACK_SIZE / 4096) {
         Some(addr) => addr,
         None => {
@@ -1435,7 +1451,12 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
         return EINVAL;
     }
 
-    if crate::mm::vm::query_mapping_in_pml4(caller_addr_space as usize, user_stack.guard_base as usize).is_ok() {
+    if crate::mm::vm::query_mapping_in_pml4(
+        caller_addr_space as usize,
+        user_stack.guard_base as usize,
+    )
+    .is_ok()
+    {
         log_warn!(
             LOG_ORIGIN,
             "thread_create rejected: stack guard page 0x{:X} is already mapped",
@@ -1460,11 +1481,8 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
     // Create a userspace (Ring 3) context for the child thread.
     // sys_thread_create is only callable from userspace, so child threads
     // must also run in Ring 3 with the process primary address space.
-    let context = crate::thread::CpuContext::new_user(
-        entry_point,
-        stack_ptr.as_u64(),
-        caller_addr_space,
-    );
+    let context =
+        crate::thread::CpuContext::new_user(entry_point, stack_ptr.as_u64(), caller_addr_space);
 
     let tid = crate::thread::ThreadId::new();
     let cap_table = crate::cap::create_capability_table(tid);
@@ -1495,11 +1513,7 @@ fn sys_thread_create(entry_point: u64, stack_ptr: u64, flags: u64) -> u64 {
     crate::thread::add_thread(thread);
     crate::sched::mark_thread_ready(tid);
 
-    log_info!(
-        LOG_ORIGIN,
-        "thread_create succeeded: new thread id={}",
-        tid
-    );
+    log_info!(LOG_ORIGIN, "thread_create succeeded: new thread id={}", tid);
 
     tid.raw()
 }
@@ -1516,8 +1530,12 @@ fn cleanup_failed_fork_child_address_space(child_pml4: usize) {
     });
 }
 
-fn build_fork_child_context(frame: &SyscallSavedFrame, child_pml4: u64) -> crate::thread::CpuContext {
-    let mut context = crate::thread::CpuContext::new_user(frame.user_rip, frame.user_rsp, child_pml4);
+fn build_fork_child_context(
+    frame: &SyscallSavedFrame,
+    child_pml4: u64,
+) -> crate::thread::CpuContext {
+    let mut context =
+        crate::thread::CpuContext::new_user(frame.user_rip, frame.user_rsp, child_pml4);
     context.rax = 0;
     context.rbx = frame.user_rbx;
     context.rcx = 0;
@@ -1557,7 +1575,11 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
     };
 
     if !crate::thread::is_userspace_thread(parent_tid) {
-        log_warn!(LOG_ORIGIN, "fork rejected: caller {} is not userspace", parent_tid);
+        log_warn!(
+            LOG_ORIGIN,
+            "fork rejected: caller {} is not userspace",
+            parent_tid
+        );
         return EINVAL;
     }
 
@@ -1652,10 +1674,12 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
     crate::thread::add_thread(child_thread);
 
     if let Some(parent_process) = crate::process::get_process(parent_pid) {
-        let _ = crate::process::set_process_memory_limit(child_pid, parent_process.memory_limit_pages);
+        let _ =
+            crate::process::set_process_memory_limit(child_pid, parent_process.memory_limit_pages);
 
         for cap_handle in parent_process.capability_table.list() {
-            let Some(mut cloned_cap) = parent_process.capability_table.get(cap_handle).cloned() else {
+            let Some(mut cloned_cap) = parent_process.capability_table.get(cap_handle).cloned()
+            else {
                 continue;
             };
             // Spawn / klog / reserved-port / service-identity authority is never
@@ -1701,56 +1725,43 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
 fn sys_ipc_create_port() -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
-    log_debug!(
-        LOG_ORIGIN,
-        "ipc_create_port()"
-    );
+    log_debug!(LOG_ORIGIN, "ipc_create_port()");
 
     let owner = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_create_port rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_create_port rejected: no current thread");
             return EINVAL;
         }
     };
 
     let port_id = crate::ipc::create_port(owner);
 
-    log_info!(
-        LOG_ORIGIN,
-        "ipc_create_port succeeded: port_id={}",
-        port_id
-    );
+    log_info!(LOG_ORIGIN, "ipc_create_port succeeded: port_id={}", port_id);
 
     let ipc_resource = crate::cap::ResourceType::IpcPort {
         port_id: port_id.raw(),
     };
 
-    let permissions =
-        crate::cap::CapPermissions::READ.union(crate::cap::CapPermissions::WRITE);
+    let permissions = crate::cap::CapPermissions::READ.union(crate::cap::CapPermissions::WRITE);
 
     match crate::cap::create_root_capability(ipc_resource, owner, permissions) {
-        Ok(cap) => {
-            match crate::thread::add_thread_capability(owner, cap) {
-                Ok(cap_handle) => {
-                    log_debug!(
-                        LOG_ORIGIN,
-                        "ipc_create_port: auto-granted IPC capability handle={}",
-                        cap_handle
-                    );
-                }
-                Err(_) => {
-                    log_warn!(
-                        LOG_ORIGIN,
-                        "ipc_create_port: failed to attach capability to thread {}",
-                        owner
-                    );
-                }
+        Ok(cap) => match crate::thread::add_thread_capability(owner, cap) {
+            Ok(cap_handle) => {
+                log_debug!(
+                    LOG_ORIGIN,
+                    "ipc_create_port: auto-granted IPC capability handle={}",
+                    cap_handle
+                );
             }
-        }
+            Err(_) => {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "ipc_create_port: failed to attach capability to thread {}",
+                    owner
+                );
+            }
+        },
         Err(_) => {
             log_error!(
                 LOG_ORIGIN,
@@ -1767,11 +1778,7 @@ fn sys_ipc_create_port() -> u64 {
 fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
-    log_debug!(
-        LOG_ORIGIN,
-        "ipc_create_port_with_id(id={})",
-        requested_id
-    );
+    log_debug!(LOG_ORIGIN, "ipc_create_port_with_id(id={})", requested_id);
 
     let owner = match crate::sched::current_thread() {
         Some(tid) => tid,
@@ -1819,7 +1826,8 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
             log_warn!(
                 LOG_ORIGIN,
                 "ipc_create_port_with_id failed for id={}: {}",
-                requested_id, e
+                requested_id,
+                e
             );
             return EINVAL;
         }
@@ -1836,8 +1844,7 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
         port_id: port_id.raw(),
     };
 
-    let permissions =
-        crate::cap::CapPermissions::READ.union(crate::cap::CapPermissions::WRITE);
+    let permissions = crate::cap::CapPermissions::READ.union(crate::cap::CapPermissions::WRITE);
 
     match crate::cap::create_root_capability(ipc_resource, owner, permissions) {
         Ok(cap) => {
@@ -1867,12 +1874,7 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
 /// capability, payload_len) and up to `buf_size` payload bytes to `buf_ptr`;
 /// the return value is the payload length. Returns `EWOULDBLOCK` when the port
 /// is empty. Every envelope field comes from kernel state and cannot be forged.
-fn sys_ipc_recv_envelope(
-    port_id_raw: u64,
-    env_ptr: u64,
-    buf_ptr: u64,
-    buf_size: usize,
-) -> u64 {
+fn sys_ipc_recv_envelope(port_id_raw: u64, env_ptr: u64, buf_ptr: u64, buf_size: usize) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     let caller = match crate::sched::current_thread() {
@@ -1885,7 +1887,12 @@ fn sys_ipc_recv_envelope(
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(env_user.as_u64(), core::mem::size_of::<atom_abi::IpcEnvelope>()).is_err() {
+    if validate_user_range(
+        env_user.as_u64(),
+        core::mem::size_of::<atom_abi::IpcEnvelope>(),
+    )
+    .is_err()
+    {
         return EINVAL;
     }
 
@@ -1896,7 +1903,12 @@ fn sys_ipc_recv_envelope(
         Ok(None) => return EWOULDBLOCK,
         Err(crate::ipc::IpcError::InvalidPort) => return EINVAL,
         Err(e) => {
-            log_warn!(LOG_ORIGIN, "ipc_recv_envelope error {:?} (port={})", e, port_id);
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_recv_envelope error {:?} (port={})",
+                e,
+                port_id
+            );
             return EINVAL;
         }
     };
@@ -1961,9 +1973,8 @@ fn sys_service_name_allowed(service_id_raw: u64, name_ptr: u64, name_len: usize)
         Err(_) => return 0,
     };
     // SAFETY: name_range is ABI-validated and canonical.
-    let name_bytes = unsafe {
-        core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len())
-    };
+    let name_bytes =
+        unsafe { core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len()) };
     let name = match core::str::from_utf8(name_bytes) {
         Ok(s) => s.trim_end_matches('\0'),
         Err(_) => return 0,
@@ -2000,19 +2011,12 @@ fn sys_process_alive(pid_raw: u64) -> u64 {
 fn sys_ipc_close_port(port_id_raw: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
-    log_debug!(
-        LOG_ORIGIN,
-        "ipc_close_port(port_id={})",
-        port_id_raw
-    );
+    log_debug!(LOG_ORIGIN, "ipc_close_port(port_id={})", port_id_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_close_port rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_close_port rejected: no current thread");
             return EINVAL;
         }
     };
@@ -2062,12 +2066,7 @@ fn sys_ipc_close_port(port_id_raw: u64) -> u64 {
     }
 }
 
-fn sys_ipc_send(
-    port_id_raw: u64,
-    msg_type: u64,
-    payload_len: u64,
-    timeout_ms: u64,
-) -> u64 {
+fn sys_ipc_send(port_id_raw: u64, msg_type: u64, payload_len: u64, timeout_ms: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     log_debug!(
@@ -2092,10 +2091,7 @@ fn sys_ipc_send(
     let sender = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_send rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_send rejected: no current thread");
             return EINVAL;
         }
     };
@@ -2126,24 +2122,16 @@ fn sys_ipc_send(
         }
 
         Err(crate::ipc::IpcError::InvalidPort) => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_send failed: invalid port_id={}",
-                port_id
-            );
+            log_warn!(LOG_ORIGIN, "ipc_send failed: invalid port_id={}", port_id);
             EINVAL
         }
 
         Err(crate::ipc::IpcError::MessageTooLarge) => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_send failed: message too large after copy"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_send failed: message too large after copy");
             EMSGSIZE
         }
 
-        Err(crate::ipc::IpcError::QueueFull) |
-        Err(crate::ipc::IpcError::WouldBlock) => {
+        Err(crate::ipc::IpcError::QueueFull) | Err(crate::ipc::IpcError::WouldBlock) => {
             if timeout_ms == 0 {
                 log_debug!(
                     LOG_ORIGIN,
@@ -2177,12 +2165,7 @@ fn sys_ipc_send(
     }
 }
 
-fn sys_ipc_recv(
-    port_id_raw: u64,
-    buffer_ptr: u64,
-    buffer_size: u64,
-    timeout_ms: u64,
-) -> u64 {
+fn sys_ipc_recv(port_id_raw: u64, buffer_ptr: u64, buffer_size: u64, timeout_ms: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     log_debug!(
@@ -2196,10 +2179,7 @@ fn sys_ipc_recv(
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_recv rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_recv rejected: no current thread");
             return EINVAL;
         }
     };
@@ -2230,8 +2210,7 @@ fn sys_ipc_recv(
     };
 
     let copy_message = |msg: crate::ipc::Message| -> u64 {
-        let bytes_to_copy =
-            core::cmp::min(msg.payload.len(), buffer_size as usize);
+        let bytes_to_copy = core::cmp::min(msg.payload.len(), buffer_size as usize);
 
         if bytes_to_copy > 0 {
             if let Some(user_buf_ptr) = user_buffer_ptr {
@@ -2239,7 +2218,8 @@ fn sys_ipc_recv(
                     Ok(range) => range,
                     Err(e) => return e,
                 };
-                if let Err(e) = write_buffer_to_user(user_buf_range, &msg.payload[..bytes_to_copy]) {
+                if let Err(e) = write_buffer_to_user(user_buf_range, &msg.payload[..bytes_to_copy])
+                {
                     return e;
                 }
             }
@@ -2257,9 +2237,7 @@ fn sys_ipc_recv(
     };
 
     match crate::ipc::try_receive_message(port_id, caller) {
-        Ok(Some(msg)) => {
-            copy_message(msg)
-        }
+        Ok(Some(msg)) => copy_message(msg),
 
         Ok(None) => {
             if timeout_ms == 0 {
@@ -2283,10 +2261,7 @@ fn sys_ipc_recv(
 
             match crate::ipc::block_receive(port_id, caller, priority, deadline) {
                 Ok(_) => {
-                    crate::thread::set_thread_state(
-                        caller,
-                        crate::thread::ThreadState::Blocked
-                    );
+                    crate::thread::set_thread_state(caller, crate::thread::ThreadState::Blocked);
 
                     // SMP TOCTOU guard: a sender on another CPU may have fired between
                     // block_receive() (which set receiver_blocked while caller was Running)
@@ -2376,11 +2351,7 @@ fn sys_ipc_recv(
         }
 
         Err(crate::ipc::IpcError::InvalidPort) => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_recv failed: invalid port_id={}",
-                port_id
-            );
+            log_warn!(LOG_ORIGIN, "ipc_recv failed: invalid port_id={}", port_id);
             EINVAL
         }
 
@@ -2397,12 +2368,7 @@ fn sys_ipc_recv(
     }
 }
 
-fn sys_ipc_send_async(
-    port_id_raw: u64,
-    msg_type: u64,
-    payload_ptr: u64,
-    payload_len: u64,
-) -> u64 {
+fn sys_ipc_send_async(port_id_raw: u64, msg_type: u64, payload_ptr: u64, payload_len: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     log_debug!(
@@ -2426,10 +2392,7 @@ fn sys_ipc_send_async(
     let sender = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_send_async rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_send_async rejected: no current thread");
             return EINVAL;
         }
     };
@@ -2450,10 +2413,12 @@ fn sys_ipc_send_async(
             Ok(ptr) => ptr,
             Err(e) => return e,
         };
-        Some(match validate_user_byte_range(payload_ptr, payload_len as usize) {
-            Ok(range) => range,
-            Err(e) => return e,
-        })
+        Some(
+            match validate_user_byte_range(payload_ptr, payload_len as usize) {
+                Ok(range) => range,
+                Err(e) => return e,
+            },
+        )
     };
     let payload = match payload_range {
         Some(range) => match copy_buffer_from_user(range, crate::ipc::MAX_MESSAGE_SIZE) {
@@ -2493,8 +2458,7 @@ fn sys_ipc_send_async(
             EMSGSIZE
         }
 
-        Err(crate::ipc::IpcError::QueueFull) |
-        Err(crate::ipc::IpcError::WouldBlock) => {
+        Err(crate::ipc::IpcError::QueueFull) | Err(crate::ipc::IpcError::WouldBlock) => {
             log_debug!(
                 LOG_ORIGIN,
                 "ipc_send_async would block (caller={}, port_id={})",
@@ -2517,11 +2481,7 @@ fn sys_ipc_send_async(
     }
 }
 
-fn sys_ipc_try_recv(
-    port_id_raw: u64,
-    buffer_ptr: u64,
-    buffer_size: u64,
-) -> u64 {
+fn sys_ipc_try_recv(port_id_raw: u64, buffer_ptr: u64, buffer_size: u64) -> u64 {
     const LOG_ORIGIN: &str = "syscall";
 
     log_debug!(
@@ -2534,10 +2494,7 @@ fn sys_ipc_try_recv(
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                LOG_ORIGIN,
-                "ipc_try_recv rejected: no current thread"
-            );
+            log_warn!(LOG_ORIGIN, "ipc_try_recv rejected: no current thread");
             return EINVAL;
         }
     };
@@ -2554,8 +2511,7 @@ fn sys_ipc_try_recv(
 
     match crate::ipc::try_receive_message(port_id, caller) {
         Ok(Some(msg)) => {
-            let bytes_to_copy =
-                core::cmp::min(msg.payload.len(), buffer_size as usize);
+            let bytes_to_copy = core::cmp::min(msg.payload.len(), buffer_size as usize);
 
             if bytes_to_copy > 0 {
                 if let Some(buffer_ptr) = user_buffer_ptr {
@@ -2563,7 +2519,9 @@ fn sys_ipc_try_recv(
                         Ok(range) => range,
                         Err(e) => return e,
                     };
-                    if let Err(e) = write_buffer_to_user(buffer_range, &msg.payload[..bytes_to_copy]) {
+                    if let Err(e) =
+                        write_buffer_to_user(buffer_range, &msg.payload[..bytes_to_copy])
+                    {
                         return e;
                     }
                 }
@@ -2744,19 +2702,11 @@ fn sys_ipc_port_stats(port_id_raw: u64, stats_ptr: u64) -> u64 {
             ESUCCESS
         }
         Err(crate::ipc::IpcError::InvalidPort) => {
-            log_warn!(
-                "syscall",
-                "ipc_port_stats: invalid port id={}",
-                port_id_raw
-            );
+            log_warn!("syscall", "ipc_port_stats: invalid port id={}", port_id_raw);
             EINVAL
         }
         Err(err) => {
-            log_error!(
-                "syscall",
-                "ipc_port_stats: unexpected error: {:?}",
-                err
-            );
+            log_error!("syscall", "ipc_port_stats: unexpected error: {:?}", err);
             EINVAL
         }
     }
@@ -2770,7 +2720,11 @@ fn ipc_send_batch_core(
 ) -> Result<usize, crate::ipc::IpcError> {
     let mut messages = alloc::vec::Vec::with_capacity(count);
     for i in 0..count {
-        messages.push(crate::ipc::Message::new(sender, i as u32, alloc::vec![i as u8]));
+        messages.push(crate::ipc::Message::new(
+            sender,
+            i as u32,
+            alloc::vec![i as u8],
+        ));
     }
     crate::ipc::send_batch(port_id, messages)
 }
@@ -2822,10 +2776,7 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
     let sender = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "ipc_send_batch: no current thread"
-            );
+            log_error!("syscall", "ipc_send_batch: no current thread");
             return EINVAL;
         }
     };
@@ -2834,11 +2785,7 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
 
     match ipc_send_batch_core(port_id, sender, messages_ptr, batch_count) {
         Ok(sent_count) => {
-            log_debug!(
-                "syscall",
-                "ipc_send_batch: sent {} messages",
-                sent_count
-            );
+            log_debug!("syscall", "ipc_send_batch: sent {} messages", sent_count);
             sent_count as u64
         }
 
@@ -2855,11 +2802,7 @@ fn sys_ipc_send_batch(port_id_raw: u64, messages_ptr: u64, count: u64) -> u64 {
             EWOULDBLOCK
         }
         Err(err) => {
-            log_error!(
-                "syscall",
-                "ipc_send_batch: unexpected error: {:?}",
-                err
-            );
+            log_error!("syscall", "ipc_send_batch: unexpected error: {:?}", err);
             EINVAL
         }
     }
@@ -2912,11 +2855,7 @@ fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 
 
     match ipc_recv_batch_core(port_id, caller, buffer_ptr, batch_max_count) {
         Ok(count) => {
-            log_debug!(
-                "syscall",
-                "ipc_recv_batch: received {} messages",
-                count
-            );
+            log_debug!("syscall", "ipc_recv_batch: received {} messages", count);
             count as u64
         }
 
@@ -2925,11 +2864,7 @@ fn sys_ipc_recv_batch(port_id_raw: u64, buffer_ptr: u64, max_count: u64) -> u64 
             EINVAL
         }
         Err(err) => {
-            log_error!(
-                "syscall",
-                "ipc_recv_batch: unexpected error: {:?}",
-                err
-            );
+            log_error!("syscall", "ipc_recv_batch: unexpected error: {:?}", err);
             EINVAL
         }
     }
@@ -2988,12 +2923,7 @@ fn sys_ipc_send_with_cap(
             "syscall",
             "ipc_send_with_cap: delegating capability via MOVE"
         );
-        crate::ipc::Message::new_with_move(
-            sender,
-            msg_type as u32,
-            payload,
-            cap_handle,
-        )
+        crate::ipc::Message::new_with_move(sender, msg_type as u32, payload, cap_handle)
     } else {
         let reduced_perms = crate::cap::CapPermissions::from_bits(mode_or_perms as u32);
         log_debug!(
@@ -3020,15 +2950,14 @@ fn sys_ipc_send_with_cap(
             EINVAL
         }
         Err(crate::ipc::IpcError::MessageTooLarge) => {
-            log_warn!("syscall", "ipc_send_with_cap: message too large (post-check)");
+            log_warn!(
+                "syscall",
+                "ipc_send_with_cap: message too large (post-check)"
+            );
             EMSGSIZE
         }
         Err(err) => {
-            log_error!(
-                "syscall",
-                "ipc_send_with_cap: unexpected error: {:?}",
-                err
-            );
+            log_error!("syscall", "ipc_send_with_cap: unexpected error: {:?}", err);
             EINVAL
         }
     }
@@ -3113,22 +3042,29 @@ fn sys_cap_check(handle_raw: u64, required_perms: u64) -> u64 {
 
     match crate::thread::validate_thread_capability(caller, handle, perms) {
         Ok(()) => {
-            log_debug!("syscall", "cap_check: validated handle={:#x} perms={:#x}", handle_raw, required_perms);
+            log_debug!(
+                "syscall",
+                "cap_check: validated handle={:#x} perms={:#x}",
+                handle_raw,
+                required_perms
+            );
             1
         }
         Err(e) => {
-            log_warn!("syscall", "cap_check: denied handle={:#x} perms={:#x} reason={:?}", handle_raw, required_perms, e);
+            log_warn!(
+                "syscall",
+                "cap_check: denied handle={:#x} perms={:#x} reason={:?}",
+                handle_raw,
+                required_perms,
+                e
+            );
             0
         }
     }
 }
 
 fn sys_cap_revoke(handle_raw: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "cap_revoke(handle={:#x})",
-        handle_raw
-    );
+    log_info!("syscall", "cap_revoke(handle={:#x})", handle_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
@@ -3174,7 +3110,9 @@ fn sys_cap_derive(parent_handle_raw: u64, new_owner_raw: u64, reduced_perms: u64
     log_info!(
         "syscall",
         "cap_derive(parent={:#x}, owner={}, perms={:#x})",
-        parent_handle_raw, new_owner_raw, reduced_perms
+        parent_handle_raw,
+        new_owner_raw,
+        reduced_perms
     );
 
     let caller = match crate::sched::current_thread() {
@@ -3272,11 +3210,7 @@ fn sys_cap_transfer(cap_handle_raw: u64, target_tid_raw: u64) -> u64 {
             EPERM
         }
         Err(err) => {
-            log_error!(
-                "syscall",
-                "cap_transfer: unexpected error: {:?}",
-                err
-            );
+            log_error!("syscall", "cap_transfer: unexpected error: {:?}", err);
             EINVAL
         }
     }
@@ -3306,7 +3240,9 @@ fn sys_cap_list(buffer_ptr: u64, buffer_size: u64) -> u64 {
 
         let out = buf_ptr.as_mut_ptr::<u64>();
         for (i, h) in handles.iter().take(to_write).enumerate() {
-            unsafe { *out.add(i) = h.raw(); }
+            unsafe {
+                *out.add(i) = h.raw();
+            }
         }
     }
 
@@ -3314,11 +3250,7 @@ fn sys_cap_list(buffer_ptr: u64, buffer_size: u64) -> u64 {
 }
 
 fn sys_cap_query_parent(handle_raw: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "cap_query_parent(handle={:#x})",
-        handle_raw
-    );
+    log_info!("syscall", "cap_query_parent(handle={:#x})", handle_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
@@ -3330,12 +3262,9 @@ fn sys_cap_query_parent(handle_raw: u64) -> u64 {
 
     let handle = crate::cap::CapHandle::from_raw(handle_raw);
 
-    if let Err(e) = policy::validate_cap_query_ownership(
-        caller,
-        handle,
-        handle_raw,
-        "cap_query_parent",
-    ) {
+    if let Err(e) =
+        policy::validate_cap_query_ownership(caller, handle, handle_raw, "cap_query_parent")
+    {
         return e;
     }
 
@@ -3349,10 +3278,7 @@ fn sys_cap_query_parent(handle_raw: u64) -> u64 {
             parent_handle.raw()
         }
         Ok(None) => {
-            log_debug!(
-                "syscall",
-                "cap_query_parent: root capability"
-            );
+            log_debug!("syscall", "cap_query_parent: root capability");
             0
         }
         Err(err) => {
@@ -3385,23 +3311,16 @@ fn sys_cap_query_children(handle_raw: u64, buffer_ptr: u64, buffer_size: u64) ->
 
     let handle = crate::cap::CapHandle::from_raw(handle_raw);
 
-    if let Err(e) = policy::validate_cap_query_ownership(
-        caller,
-        handle,
-        handle_raw,
-        "cap_query_children",
-    ) {
+    if let Err(e) =
+        policy::validate_cap_query_ownership(caller, handle, handle_raw, "cap_query_children")
+    {
         return e;
     }
 
     match crate::cap::query_children(handle) {
         Ok(children) => {
             let count = children.len();
-            log_debug!(
-                "syscall",
-                "cap_query_children: found {} children",
-                count
-            );
+            log_debug!("syscall", "cap_query_children: found {} children", count);
 
             if buffer_ptr != 0 && buffer_size > 0 {
                 let to_copy = core::cmp::min(count, buffer_size as usize);
@@ -3443,19 +3362,12 @@ fn sys_cap_query_children(handle_raw: u64, buffer_ptr: u64, buffer_size: u64) ->
 }
 
 fn sys_shared_region_create(size: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "shared_region_create(size={})",
-        size
-    );
+    log_info!("syscall", "shared_region_create(size={})", size);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "shared_region_create: no current thread"
-            );
+            log_error!("syscall", "shared_region_create: no current thread");
             return EINVAL;
         }
     };
@@ -3478,11 +3390,7 @@ fn sys_shared_region_create(size: u64) -> u64 {
             region_id.raw()
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "shared_region_create: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "shared_region_create: failed - {:?}", e);
             match e {
                 crate::shared_mem::SharedMemError::InvalidSize => EINVAL,
                 crate::shared_mem::SharedMemError::OutOfMemory => ENOMEM,
@@ -3504,10 +3412,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "shared_region_map: no current thread"
-            );
+            log_error!("syscall", "shared_region_map: no current thread");
             return EINVAL;
         }
     };
@@ -3522,7 +3427,11 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     let caller_pml4 = match crate::thread::get_thread_address_space(caller) {
         Some(pml4) => pml4,
         None => {
-            log_error!("syscall", "shared_region_map: caller thread {} not found", caller);
+            log_error!(
+                "syscall",
+                "shared_region_map: caller thread {} not found",
+                caller
+            );
             return EINVAL;
         }
     };
@@ -3534,7 +3443,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         cr3
     };
     let current_pml4 = crate::arch::cr3_to_pml4_phys(current_cr3);
-    
+
     log_info!(
         "syscall",
         "shared_region_map: current_cr3={:#X} current_pml4={:#X} caller_pml4={:#X} match={}",
@@ -3564,7 +3473,13 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
         }
     };
 
-    match crate::shared_mem::map_region_in_pml4(region_id, caller_process, caller_pml4, requested_addr, flags) {
+    match crate::shared_mem::map_region_in_pml4(
+        region_id,
+        caller_process,
+        caller_pml4,
+        requested_addr,
+        flags,
+    ) {
         Ok(mapped_va) => {
             // Sanity-check: the kernel must never hand userspace the null address.
             // find_free_va starts above the identity-map ceiling (>= 0x20000000)
@@ -3607,11 +3522,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
             mapped_va as u64
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "shared_region_map: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "shared_region_map: failed - {:?}", e);
             match e {
                 crate::shared_mem::SharedMemError::InvalidRegion => EINVAL,
                 crate::shared_mem::SharedMemError::Unaligned => EINVAL,
@@ -3627,19 +3538,12 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
 }
 
 fn sys_shared_region_unmap(region_id_raw: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "shared_region_unmap(region={})",
-        region_id_raw
-    );
+    log_info!("syscall", "shared_region_unmap(region={})", region_id_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "shared_region_unmap: no current thread"
-            );
+            log_error!("syscall", "shared_region_unmap: no current thread");
             return EINVAL;
         }
     };
@@ -3674,11 +3578,7 @@ fn sys_shared_region_unmap(region_id_raw: u64) -> u64 {
             ESUCCESS
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "shared_region_unmap: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "shared_region_unmap: failed - {:?}", e);
             match e {
                 crate::shared_mem::SharedMemError::InvalidRegion => EINVAL,
                 crate::shared_mem::SharedMemError::NotMapped => EINVAL,
@@ -3689,19 +3589,12 @@ fn sys_shared_region_unmap(region_id_raw: u64) -> u64 {
 }
 
 fn sys_shared_region_destroy(region_id_raw: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "shared_region_destroy(region={})",
-        region_id_raw
-    );
+    log_info!("syscall", "shared_region_destroy(region={})", region_id_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "shared_region_destroy: no current thread"
-            );
+            log_error!("syscall", "shared_region_destroy: no current thread");
             return EINVAL;
         }
     };
@@ -3724,11 +3617,7 @@ fn sys_shared_region_destroy(region_id_raw: u64) -> u64 {
             ESUCCESS
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "shared_region_destroy: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "shared_region_destroy: failed - {:?}", e);
             match e {
                 crate::shared_mem::SharedMemError::InvalidRegion => EINVAL,
                 crate::shared_mem::SharedMemError::PermissionDenied => EPERM,
@@ -3740,18 +3629,12 @@ fn sys_shared_region_destroy(region_id_raw: u64) -> u64 {
 }
 
 fn sys_addrspace_create() -> u64 {
-    log_info!(
-        "syscall",
-        "addrspace_create()"
-    );
+    log_info!("syscall", "addrspace_create()");
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "addrspace_create: no current thread"
-            );
+            log_error!("syscall", "addrspace_create: no current thread");
             return EINVAL;
         }
     };
@@ -3766,11 +3649,7 @@ fn sys_addrspace_create() -> u64 {
             as_id.raw()
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "addrspace_create: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "addrspace_create: failed - {:?}", e);
             match e {
                 crate::mm::addrspace::AddressSpaceError::OutOfMemory => ENOMEM,
                 _ => EINVAL,
@@ -3780,19 +3659,12 @@ fn sys_addrspace_create() -> u64 {
 }
 
 fn sys_addrspace_destroy(as_id_raw: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "addrspace_destroy(as={})",
-        as_id_raw
-    );
+    log_info!("syscall", "addrspace_destroy(as={})", as_id_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "addrspace_destroy: no current thread"
-            );
+            log_error!("syscall", "addrspace_destroy: no current thread");
             return EINVAL;
         }
     };
@@ -3809,11 +3681,7 @@ fn sys_addrspace_destroy(as_id_raw: u64) -> u64 {
             ESUCCESS
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "addrspace_destroy: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "addrspace_destroy: failed - {:?}", e);
             match e {
                 crate::mm::addrspace::AddressSpaceError::NotFound => EINVAL,
                 crate::mm::addrspace::AddressSpaceError::PermissionDenied => EPERM,
@@ -3869,13 +3737,7 @@ fn sys_map_region(
         return EPERM;
     }
 
-    match crate::mm::addrspace::map_region(
-        as_id,
-        caller,
-        user_range,
-        phys_addr as usize,
-        flags,
-    ) {
+    match crate::mm::addrspace::map_region(as_id, caller, user_range, phys_addr as usize, flags) {
         Ok(()) => {
             log_debug!("syscall", "map_region: success");
             ESUCCESS
@@ -3904,10 +3766,7 @@ fn sys_unmap_region(as_id_raw: u64, virt_addr: u64, size: u64) -> u64 {
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "unmap_region: no current thread"
-            );
+            log_error!("syscall", "unmap_region: no current thread");
             return EINVAL;
         }
     };
@@ -3922,24 +3781,13 @@ fn sys_unmap_region(as_id_raw: u64, virt_addr: u64, size: u64) -> u64 {
     // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
     // range-based redesign is future work.
 
-    match crate::mm::addrspace::unmap_region(
-        as_id,
-        caller,
-        user_range,
-    ) {
+    match crate::mm::addrspace::unmap_region(as_id, caller, user_range) {
         Ok(()) => {
-            log_debug!(
-                "syscall",
-                "unmap_region: success"
-            );
+            log_debug!("syscall", "unmap_region: success");
             ESUCCESS
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "unmap_region: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "unmap_region: failed - {:?}", e);
             match e {
                 crate::mm::addrspace::AddressSpaceError::NotFound => EINVAL,
                 crate::mm::addrspace::AddressSpaceError::PermissionDenied => EPERM,
@@ -3965,10 +3813,7 @@ fn sys_remap_region(as_id_raw: u64, old_virt: u64, new_virt: u64, size: u64) -> 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_error!(
-                "syscall",
-                "remap_region: no current thread"
-            );
+            log_error!("syscall", "remap_region: no current thread");
             return EINVAL;
         }
     };
@@ -3987,25 +3832,13 @@ fn sys_remap_region(as_id_raw: u64, old_virt: u64, new_virt: u64, size: u64) -> 
     // (addrspace.rs:311). MemoryRegion caps use exact-match and are never granted;
     // range-based redesign is future work.
 
-    match crate::mm::addrspace::remap_region(
-        as_id,
-        caller,
-        old_range,
-        new_range,
-    ) {
+    match crate::mm::addrspace::remap_region(as_id, caller, old_range, new_range) {
         Ok(()) => {
-            log_debug!(
-                "syscall",
-                "remap_region: success"
-            );
+            log_debug!("syscall", "remap_region: success");
             ESUCCESS
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "remap_region: failed - {:?}",
-                e
-            );
+            log_warn!("syscall", "remap_region: failed - {:?}", e);
             match e {
                 crate::mm::addrspace::AddressSpaceError::NotFound => EINVAL,
                 crate::mm::addrspace::AddressSpaceError::PermissionDenied => EPERM,
@@ -4020,19 +3853,12 @@ fn sys_remap_region(as_id_raw: u64, old_virt: u64, new_virt: u64, size: u64) -> 
 }
 
 fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
-    log_info!(
-        "syscall",
-        "register_fault_handler(port={})",
-        port_id_raw
-    );
+    log_info!("syscall", "register_fault_handler(port={})", port_id_raw);
 
     let caller = match crate::sched::current_thread() {
         Some(tid) => tid,
         None => {
-            log_warn!(
-                "syscall",
-                "register_fault_handler: no current thread"
-            );
+            log_warn!("syscall", "register_fault_handler: no current thread");
             return EINVAL;
         }
     };
@@ -4049,11 +3875,7 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
             ESUCCESS
         }
         Err(e) => {
-            log_warn!(
-                "syscall",
-                "register_fault_handler failed: {:?}",
-                e
-            );
+            log_warn!("syscall", "register_fault_handler failed: {:?}", e);
             match e {
                 crate::mm::policy::MemoryPolicyError::InvalidPort => EINVAL,
                 crate::mm::policy::MemoryPolicyError::PermissionDenied => EPERM,
@@ -4067,8 +3889,8 @@ fn sys_register_fault_handler(port_id_raw: u64) -> u64 {
 // IRQ Handler Registration for Userspace Drivers
 // ============================================================================
 
-use spin::Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
+use spin::Mutex;
 
 struct IrqBinding {
     owner: crate::thread::ThreadId,
@@ -4100,20 +3922,19 @@ fn sys_register_irq_handler(irq: u8, notification_port: u64) -> u64 {
     let mut bindings = IRQ_BINDINGS.lock();
 
     if bindings.contains_key(&irq) {
-        log_warn!(
-            "syscall",
-            "IRQ {} already has registered handler",
-            irq
-        );
+        log_warn!("syscall", "IRQ {} already has registered handler", irq);
         return EBUSY;
     }
 
-    bindings.insert(irq, IrqBinding {
-        owner: caller,
-        port: notification_port,
-        pending: AtomicBool::new(false),
-        requires_ack: false, // legacy path: no ACK required, deliver every IRQ
-    });
+    bindings.insert(
+        irq,
+        IrqBinding {
+            owner: caller,
+            port: notification_port,
+            pending: AtomicBool::new(false),
+            requires_ack: false, // legacy path: no ACK required, deliver every IRQ
+        },
+    );
 
     log_info!(
         "syscall",
@@ -4173,9 +3994,11 @@ pub fn notify_irq_handler(irq: u8) {
         if let Some(binding) = bindings.get(&irq) {
             if binding.requires_ack {
                 // Coalesced delivery: skip if a notification is already in flight.
-                if binding.pending.compare_exchange(
-                    false, true, Ordering::SeqCst, Ordering::SeqCst,
-                ).is_err() {
+                if binding
+                    .pending
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -4206,25 +4029,16 @@ pub fn notify_irq_handler(irq: u8) {
     //   [version u32][msg_type u32][payload_size u32][sequence u32]
     // followed by 1 byte carrying the IRQ number.
     let mut payload = alloc::vec![0u8; 17];
-    payload[0..4].copy_from_slice(&1u32.to_le_bytes());   // version = 1
-    payload[4..8].copy_from_slice(&20u32.to_le_bytes());  // IrqNotification
-    payload[8..12].copy_from_slice(&1u32.to_le_bytes());  // payload_size = 1
-    // sequence [12..16] = 0
+    payload[0..4].copy_from_slice(&1u32.to_le_bytes()); // version = 1
+    payload[4..8].copy_from_slice(&20u32.to_le_bytes()); // IrqNotification
+    payload[8..12].copy_from_slice(&1u32.to_le_bytes()); // payload_size = 1
+                                                         // sequence [12..16] = 0
     payload[16] = irq;
 
-    let msg = crate::ipc::Message::new(
-        crate::thread::ThreadId::from_raw(0),
-        20u32,
-        payload,
-    );
+    let msg = crate::ipc::Message::new(crate::thread::ThreadId::from_raw(0), 20u32, payload);
 
     if let Err(e) = crate::ipc::send_message_async(port_id, msg) {
-        log_debug!(
-            "syscall",
-            "Failed to notify IRQ {} handler: {:?}",
-            irq,
-            e
-        );
+        log_debug!("syscall", "Failed to notify IRQ {} handler: {:?}", irq, e);
         // Reset pending so the next IRQ can be delivered.
         let bindings = IRQ_BINDINGS.lock();
         if let Some(binding) = bindings.get(&irq) {
@@ -4508,7 +4322,8 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 
     // Copy name from userspace
     // SAFETY: name_range is ABI-validated and guaranteed canonical.
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len()) };
+    let name_bytes =
+        unsafe { core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len()) };
     let name = match core::str::from_utf8(name_bytes) {
         Ok(s) => s.trim_end_matches('\0'),
         Err(_) => {
@@ -4605,7 +4420,12 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
                 crate::system_manifest::grants_for_entry(manifest_entry),
             ) {
                 Ok(pid) => {
-                    log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
+                    log_info!(
+                        LOG_ORIGIN,
+                        "Process '{}' spawned successfully with PID {}",
+                        name,
+                        pid
+                    );
                     pid.raw()
                 }
                 Err(e) => {
@@ -4619,17 +4439,17 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 }
 
 /// Spawn a process from raw image data
-fn spawn_from_image(
-    data: &[u8],
-    name: &str,
-    grants: crate::system_manifest::SpawnGrants,
-) -> u64 {
+fn spawn_from_image(data: &[u8], name: &str, grants: crate::system_manifest::SpawnGrants) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn";
 
     let image = match crate::executable::parse_image(data) {
         Ok(s) => s,
         Err(e) => {
-            log_error!(LOG_ORIGIN, "spawn_process: failed to parse executable: {:?}", e);
+            log_error!(
+                LOG_ORIGIN,
+                "spawn_process: failed to parse executable: {:?}",
+                e
+            );
             return EINVAL;
         }
     };
@@ -4644,7 +4464,12 @@ fn spawn_from_image(
 
     match spawn_process_internal(name, &image, grants) {
         Ok(pid) => {
-            log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
+            log_info!(
+                LOG_ORIGIN,
+                "Process '{}' spawned successfully with PID {}",
+                name,
+                pid
+            );
             pid.raw()
         }
         Err(e) => {
@@ -4664,8 +4489,7 @@ fn is_system_service_path(path: &str) -> bool {
 
 /// Load driver from boot-loaded registry
 fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableImageV2<'_>, u64> {
-    let driver_image = crate::driver_registry::get_driver_image(name)
-        .ok_or(ENOTFOUND)?;
+    let driver_image = crate::driver_registry::get_driver_image(name).ok_or(ENOTFOUND)?;
 
     log_info!(
         "syscall:spawn",
@@ -4675,9 +4499,7 @@ fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableImageV2
         driver_image.size
     );
 
-    let image_bytes = unsafe {
-        core::slice::from_raw_parts(driver_image.ptr, driver_image.size)
-    };
+    let image_bytes = unsafe { core::slice::from_raw_parts(driver_image.ptr, driver_image.size) };
 
     crate::executable::parse_image(image_bytes).map_err(|e| {
         log_error!("syscall:spawn", "Failed to parse executable: {:?}", e);
@@ -4725,7 +4547,7 @@ fn spawn_process_internal(
     use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
 
-    const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
+    const KERNEL_STACK_PAGES: usize = 16; // 64KB kernel stack to handle deep call stacks
     const USER_STACK_TOP: usize = atom_abi::USER_STACK_TOP as usize;
 
     let pid = ThreadId::new();
@@ -4762,15 +4584,15 @@ fn spawn_process_internal(
         new_pml4_phys
     );
 
-    let loaded = crate::executable::load_into_process(image, new_pml4_phys, process_id)
-        .map_err(|error| {
+    let loaded = crate::executable::load_into_process(image, new_pml4_phys, process_id).map_err(
+        |error| {
             log_error!("spawn", "ATXF v3 load failed for '{}': {:?}", name, error);
             EINVAL
-        })?;
+        },
+    )?;
 
     // Allocate the full userspace stack while leaving the guard page unmapped.
-    let stack_phys = pmm::alloc_pages_zeroed(atom_abi::DEFAULT_USER_STACK_PAGES)
-        .ok_or(ENOMEM)?;
+    let stack_phys = pmm::alloc_pages_zeroed(atom_abi::DEFAULT_USER_STACK_PAGES).ok_or(ENOMEM)?;
 
     for i in 0..atom_abi::DEFAULT_USER_STACK_PAGES {
         let virt = user_stack_base + i * PAGE_SIZE;
@@ -4780,18 +4602,29 @@ fn spawn_process_internal(
             virt,
             phys,
             PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
-        ).map_err(|_| ENOMEM)?;
+        )
+        .map_err(|_| ENOMEM)?;
     }
 
     // Register the mapped stack range only. The guard page below it remains unmapped.
-    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-        start: user_stack_base,
-        end: user_stack_top,
-        perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Anonymous,
-        label: "stack",
-    }).map_err(|e| {
-        log_error!("spawn", "Failed to insert stack VMA for '{}': {:?}", name, e);
+    vma::insert_bootstrap_process_vma(
+        process_id,
+        new_pml4_phys,
+        Vma {
+            start: user_stack_base,
+            end: user_stack_top,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "stack",
+        },
+    )
+    .map_err(|e| {
+        log_error!(
+            "spawn",
+            "Failed to insert stack VMA for '{}': {:?}",
+            name,
+            e
+        );
         ENOMEM
     })?;
     vma::account_pre_mapped_range(
@@ -4800,28 +4633,38 @@ fn spawn_process_internal(
         user_stack_base,
         user_stack_top,
         PageSource::Anonymous,
-    ).map_err(|e| {
-        log_error!("spawn", "Failed to account stack pages for '{}': {:?}", name, e);
+    )
+    .map_err(|e| {
+        log_error!(
+            "spawn",
+            "Failed to account stack pages for '{}': {:?}",
+            name,
+            e
+        );
         ENOMEM
     })?;
 
     // Register a heap VMA (starts empty, grows via brk())
     let heap_start = atom_abi::USER_HEAP_START as usize;
-    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-        start: heap_start,
-        end: heap_start + PAGE_SIZE, // Minimal initial size
-        perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Anonymous,
-        label: "heap",
-    }).map_err(|e| {
+    vma::insert_bootstrap_process_vma(
+        process_id,
+        new_pml4_phys,
+        Vma {
+            start: heap_start,
+            end: heap_start + PAGE_SIZE, // Minimal initial size
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "heap",
+        },
+    )
+    .map_err(|e| {
         log_error!("spawn", "Failed to insert heap VMA for '{}': {:?}", name, e);
         ENOMEM
     })?;
 
     // Allocate kernel stack
     // CRITICAL: Use higher-half virtual address for kernel stack, not identity-mapped address.
-    let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
-        .ok_or(ENOMEM)?;
+    let kernel_stack_phys = pmm::alloc_pages(KERNEL_STACK_PAGES).ok_or(ENOMEM)?;
     let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
 
@@ -4861,7 +4704,10 @@ fn spawn_process_internal(
             log_error!(
                 "spawn",
                 "tid={} name={} Canary read-back mismatch! Got {:#X} expected {:#X}",
-                pid, static_name, readback, STACK_CANARY
+                pid,
+                static_name,
+                readback,
+                STACK_CANARY
             );
         }
     }
@@ -4899,7 +4745,12 @@ fn spawn_process_internal(
     // Thread is fully initialized — mark it schedulable
     crate::sched::mark_thread_ready(pid);
 
-    log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
+    log_info!(
+        "spawn",
+        "Process '{}' (pid={}) scheduled with VMA-backed memory",
+        name,
+        pid
+    );
 
     Ok(pid)
 }
@@ -4952,17 +4803,31 @@ fn apply_spawn_grants(
                     let perms = CapPermissions::READ.union(CapPermissions::WRITE);
                     if let Ok(c) = cap::create_root_capability(fb, pid, perms) {
                         let _ = crate::thread::add_thread_capability(pid, c);
-                        log_info!("spawn", "Granted FramebufferMap to '{}' (pid={})", name, pid);
+                        log_info!(
+                            "spawn",
+                            "Granted FramebufferMap to '{}' (pid={})",
+                            name,
+                            pid
+                        );
                     }
                 } else {
-                    log_warn!("spawn", "FramebufferMap requested by '{}' but no framebuffer present", name);
+                    log_warn!(
+                        "spawn",
+                        "FramebufferMap requested by '{}' but no framebuffer present",
+                        name
+                    );
                 }
             }
             EnvGrant::NetworkDevices => {
-                let net_devs: alloc::vec::Vec<_> =
-                    crate::drivers::pci::get_devices_by_class(0x02).into_iter().collect();
+                let net_devs: alloc::vec::Vec<_> = crate::drivers::pci::get_devices_by_class(0x02)
+                    .into_iter()
+                    .collect();
                 if net_devs.is_empty() {
-                    log_warn!("spawn", "NetworkDevices requested by '{}' but no PCI net device found", name);
+                    log_warn!(
+                        "spawn",
+                        "NetworkDevices requested by '{}' but no PCI net device found",
+                        name
+                    );
                 }
                 for dev in net_devs {
                     let res = ResourceType::Device { bdf: dev.bdf() };
@@ -4971,7 +4836,10 @@ fn apply_spawn_grants(
                         log_info!(
                             "spawn",
                             "Granted DeviceCap({:02x}:{:02x}.{}) to '{}'",
-                            dev.bus, dev.device, dev.function, name
+                            dev.bus,
+                            dev.device,
+                            dev.function,
+                            name
                         );
                     }
                 }
@@ -5124,7 +4992,11 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     let image = match crate::executable::parse_image(&image_data) {
         Ok(s) => s,
         Err(crate::executable::ExecError::InvalidMagic) => {
-            log_warn!(LOG_ORIGIN, "spawn_from_path: '{}' is not a valid ATXF file (bad magic)", path);
+            log_warn!(
+                LOG_ORIGIN,
+                "spawn_from_path: '{}' is not a valid ATXF file (bad magic)",
+                path
+            );
             return EINVAL;
         }
         Err(crate::executable::ExecError::UnsupportedVersion(v)) => {
@@ -5137,7 +5009,12 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
             return EINVAL;
         }
         Err(e) => {
-            log_warn!(LOG_ORIGIN, "spawn_from_path: parse error for '{}': {:?}", path, e);
+            log_warn!(
+                LOG_ORIGIN,
+                "spawn_from_path: parse error for '{}': {:?}",
+                path,
+                e
+            );
             return EINVAL;
         }
     };
@@ -5239,10 +5116,11 @@ fn sys_list_processes(buffer: u64, max_count: usize) -> u64 {
     let actual_count = max_count.min(32);
 
     // Validate the full user-space write range with checked arithmetic
-    let write_bytes = match actual_count.checked_mul(core::mem::size_of::<crate::thread::ProcessInfo>()) {
-        Some(v) => v,
-        None => return EINVAL,
-    };
+    let write_bytes =
+        match actual_count.checked_mul(core::mem::size_of::<crate::thread::ProcessInfo>()) {
+            Some(v) => v,
+            None => return EINVAL,
+        };
     if validate_user_range(buffer.as_u64(), write_bytes).is_err() {
         return EINVAL;
     }
@@ -5325,7 +5203,6 @@ fn sys_get_cpu_brand(buffer: u64, max_len: usize) -> u64 {
     copy_len as u64
 }
 
-
 fn resolve_target_thread_id(raw_tid: u64) -> Option<crate::thread::ThreadId> {
     let tid = if raw_tid == 0 {
         crate::sched::current_thread()?
@@ -5406,7 +5283,10 @@ fn process_context_error_kind(error: ProcessContextError) -> KernelOperationalEr
 fn contain_mm_operational_error(error: ProcessContextError) -> u64 {
     let (tid, pid) = match error {
         ProcessContextError::Pml4Drift { tid, pid, .. } => (Some(tid), Some(pid)),
-        _ => (crate::sched::current_thread(), best_effort_current_process()),
+        _ => (
+            crate::sched::current_thread(),
+            best_effort_current_process(),
+        ),
     };
 
     log_error!(
@@ -5428,9 +5308,12 @@ fn contain_mm_operational_error(error: ProcessContextError) -> u64 {
 
 fn current_process_vma_context() -> Result<ProcessVmaContext, ProcessContextError> {
     let tid = crate::sched::current_thread().ok_or(ProcessContextError::NoCurrentThread)?;
-    let pid = crate::thread::get_thread_process_id(tid).ok_or(ProcessContextError::NoCurrentProcess)?;
-    let process_pml4 = crate::process::get_process_pml4(pid).ok_or(ProcessContextError::MissingAddressSpace)?;
-    let thread_pml4 = crate::thread::get_thread_address_space(tid).ok_or(ProcessContextError::MissingAddressSpace)?;
+    let pid =
+        crate::thread::get_thread_process_id(tid).ok_or(ProcessContextError::NoCurrentProcess)?;
+    let process_pml4 =
+        crate::process::get_process_pml4(pid).ok_or(ProcessContextError::MissingAddressSpace)?;
+    let thread_pml4 = crate::thread::get_thread_address_space(tid)
+        .ok_or(ProcessContextError::MissingAddressSpace)?;
 
     if process_pml4 == 0 || thread_pml4 == 0 {
         return Err(ProcessContextError::MissingAddressSpace);
@@ -5467,8 +5350,8 @@ fn sys_mmap(
     prot: u64,
     flags: u64,
 ) -> atom_abi::UserVirtAddr {
-    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::mm::pmm::PAGE_SIZE;
+    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
 
     let length = length as usize;
     if length == 0 {
@@ -5562,13 +5445,15 @@ fn sys_mmap(
         atom_abi::USER_MMAP_START as usize
     };
 
-    let mapped_addr = match vma::with_address_space_ops_lock(pml4, || -> Result<atom_abi::UserVirtAddr, u64> {
-        let (virt_addr, virt_end, alloc_mode) = if let Some((addr, end)) = fixed_range {
-            // MAP_FIXED: replace anything overlapping this range and then insert.
-            let removed = match vma::remove_process_vma_range(process_id, addr, end) {
-                Ok(removed) => removed,
-                Err(_) => {
-                    log_error!(
+    let mapped_addr = match vma::with_address_space_ops_lock(
+        pml4,
+        || -> Result<atom_abi::UserVirtAddr, u64> {
+            let (virt_addr, virt_end, alloc_mode) = if let Some((addr, end)) = fixed_range {
+                // MAP_FIXED: replace anything overlapping this range and then insert.
+                let removed = match vma::remove_process_vma_range(process_id, addr, end) {
+                    Ok(removed) => removed,
+                    Err(_) => {
+                        log_error!(
                         "syscall",
                         "[MMAP_ERROR] reason=remove_range_failed addr={:#X} size={} hint={:#X} flags={:#X}",
                         addr_hint,
@@ -5576,23 +5461,23 @@ fn sys_mmap(
                         addr_hint,
                         flags
                     );
-                    return Err(EINVAL);
+                        return Err(EINVAL);
+                    }
+                };
+                for old_vma in &removed {
+                    unmap_vma_pages(process_id, pml4, old_vma);
                 }
-            };
-            for old_vma in &removed {
-                unmap_vma_pages(process_id, pml4, old_vma);
-            }
-            (addr, end, "fixed")
-        } else {
-            let addr = match vma::find_process_free_region(
-                process_id,
-                hint_start,
-                atom_abi::USER_MMAP_END as usize,
-                length,
-            ) {
-                Ok(Some(addr)) => addr,
-                Ok(None) => {
-                    log_error!(
+                (addr, end, "fixed")
+            } else {
+                let addr = match vma::find_process_free_region(
+                    process_id,
+                    hint_start,
+                    atom_abi::USER_MMAP_END as usize,
+                    length,
+                ) {
+                    Ok(Some(addr)) => addr,
+                    Ok(None) => {
+                        log_error!(
                         "syscall",
                         "[MMAP_ERROR] reason=no_free_region addr={:#X} size={} hint={:#X} flags={:#X}",
                         hint_start,
@@ -5600,10 +5485,10 @@ fn sys_mmap(
                         addr_hint,
                         flags
                     );
-                    return Err(ENOMEM);
-                }
-                Err(_) => {
-                    log_error!(
+                        return Err(ENOMEM);
+                    }
+                    Err(_) => {
+                        log_error!(
                         "syscall",
                         "[MMAP_ERROR] reason=find_free_region_failed addr={:#X} size={} hint={:#X} flags={:#X}",
                         hint_start,
@@ -5611,13 +5496,13 @@ fn sys_mmap(
                         addr_hint,
                         flags
                     );
-                    return Err(EPERM);
-                }
-            };
-            let end = match addr.checked_add(length) {
-                Some(end) => end,
-                None => {
-                    log_error!(
+                        return Err(EPERM);
+                    }
+                };
+                let end = match addr.checked_add(length) {
+                    Some(end) => end,
+                    None => {
+                        log_error!(
                         "syscall",
                         "[MMAP_ERROR] reason=overflow addr={:#X} size={} hint={:#X} flags={:#X}",
                         addr,
@@ -5625,14 +5510,14 @@ fn sys_mmap(
                         addr_hint,
                         flags
                     );
-                    return Err(EINVAL);
-                }
+                        return Err(EINVAL);
+                    }
+                };
+                (addr, end, "first_fit")
             };
-            (addr, end, "first_fit")
-        };
 
-        if virt_end > atom_abi::USER_MMAP_END as usize {
-            log_error!(
+            if virt_end > atom_abi::USER_MMAP_END as usize {
+                log_error!(
                 "syscall",
                 "[MMAP_CONTEXT_CORRUPTION] pid={} tid={} reason=allocation_window_escape start=0x{:X} end=0x{:X} limit=0x{:X}",
                 process_id,
@@ -5641,38 +5526,38 @@ fn sys_mmap(
                 virt_end,
                 atom_abi::USER_MMAP_END
             );
-            contain_operational_violation(
-                "sys_mmap_window",
-                KernelOperationalError::AddressSpaceCorruption,
-                Some(process_id),
-                Some(tid),
+                contain_operational_violation(
+                    "sys_mmap_window",
+                    KernelOperationalError::AddressSpaceCorruption,
+                    Some(process_id),
+                    Some(tid),
+                );
+                return Err(ESUCCESS);
+            }
+
+            log_info!(
+                "syscall",
+                "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode={}",
+                virt_addr,
+                length,
+                virt_end,
+                alloc_mode
             );
-            return Err(ESUCCESS);
-        }
 
-        log_info!(
-            "syscall",
-            "[MMAP_ALLOC] base={:#X} size={} next={:#X} mode={}",
-            virt_addr,
-            length,
-            virt_end,
-            alloc_mode
-        );
-
-        let overlap = match vma::process_range_overlaps(process_id, virt_addr, virt_end) {
-            Ok(found) => found,
-            Err(_) => return Err(EPERM),
-        };
-        log_debug!(
-            "syscall",
-            "[MMAP_ALLOC_VALIDATE] base=0x{:X} size={} end=0x{:X} overlap={}",
-            virt_addr,
-            length,
-            virt_end,
-            overlap
-        );
-        if overlap {
-            log_error!(
+            let overlap = match vma::process_range_overlaps(process_id, virt_addr, virt_end) {
+                Ok(found) => found,
+                Err(_) => return Err(EPERM),
+            };
+            log_debug!(
+                "syscall",
+                "[MMAP_ALLOC_VALIDATE] base=0x{:X} size={} end=0x{:X} overlap={}",
+                virt_addr,
+                length,
+                virt_end,
+                overlap
+            );
+            if overlap {
+                log_error!(
                 "syscall",
                 "[MMAP_ERROR] reason=allocator_overlap base=0x{:X} size={} end=0x{:X} flags=0x{:X}",
                 virt_addr,
@@ -5680,12 +5565,12 @@ fn sys_mmap(
                 virt_end,
                 flags
             );
-            return Err(ENOMEM);
-        }
+                return Err(ENOMEM);
+            }
 
-        let mapped_addr = virt_addr as atom_abi::UserVirtAddr;
-        if validate_mmap_return_range(mapped_addr, length).is_err() {
-            log_error!(
+            let mapped_addr = virt_addr as atom_abi::UserVirtAddr;
+            if validate_mmap_return_range(mapped_addr, length).is_err() {
+                log_error!(
                 "syscall",
                 "[MMAP_ERROR] reason=invalid_return_addr addr={:#X} size={} hint={:#X} flags={:#X}",
                 mapped_addr,
@@ -5693,7 +5578,7 @@ fn sys_mmap(
                 addr_hint,
                 flags
             );
-            log_error!(
+                log_error!(
                 "syscall",
                 "[ABI VIOLATION] [MMAP] pid={} invalid mmap VA selected: addr={:#X} size={} hint={:#X}",
                 process_id,
@@ -5701,18 +5586,18 @@ fn sys_mmap(
                 length,
                 addr_hint
             );
-            return Err(EINVAL);
-        }
+                return Err(EINVAL);
+            }
 
-        let new_vma = Vma {
-            start: virt_addr,
-            end: virt_end,
-            perms,
-            backing: VmaBacking::Anonymous,
-            label: "mmap",
-        };
+            let new_vma = Vma {
+                start: virt_addr,
+                end: virt_end,
+                perms,
+                backing: VmaBacking::Anonymous,
+                label: "mmap",
+            };
 
-        log_debug!(
+            log_debug!(
             "syscall",
             "[VMA_INSERT_ATTEMPT] pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} prot=0x{:X} flags=0x{:X} backing=Anonymous label=mmap",
             process_id,
@@ -5723,8 +5608,8 @@ fn sys_mmap(
             flags
         );
 
-        if let Err(err) = vma::insert_process_vma(process_id, new_vma) {
-            log_error!(
+            if let Err(err) = vma::insert_process_vma(process_id, new_vma) {
+                log_error!(
                 "syscall",
                 "[MMAP_BUG] insert failed after region selection: pid={} pml4=0x{:X} base=0x{:X} end=0x{:X} size={} err={:?}",
                 process_id,
@@ -5734,29 +5619,30 @@ fn sys_mmap(
                 length,
                 err
             );
-            log_error!(
+                log_error!(
+                    "syscall",
+                    "[VMA_INSERT] result=err pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} err={:?}",
+                    process_id,
+                    pml4,
+                    virt_addr,
+                    virt_end,
+                    err
+                );
+                return Err(ENOMEM);
+            }
+
+            log_debug!(
                 "syscall",
-                "[VMA_INSERT] result=err pid={} pml4=0x{:X} start=0x{:X} end=0x{:X} err={:?}",
+                "[VMA_INSERT] result=ok pid={} pml4=0x{:X} start=0x{:X} end=0x{:X}",
                 process_id,
                 pml4,
                 virt_addr,
-                virt_end,
-                err
+                virt_end
             );
-            return Err(ENOMEM);
-        }
 
-        log_debug!(
-            "syscall",
-            "[VMA_INSERT] result=ok pid={} pml4=0x{:X} start=0x{:X} end=0x{:X}",
-            process_id,
-            pml4,
-            virt_addr,
-            virt_end
-        );
-
-        Ok(mapped_addr)
-    }) {
+            Ok(mapped_addr)
+        },
+    ) {
         Ok(mapped_addr) => mapped_addr,
         Err(errno) => return errno,
     };
@@ -5784,8 +5670,8 @@ fn sys_mmap(
 /// Unmaps a previously mapped region, freeing both the VMA and any
 /// physical pages that were demand-paged into it.
 fn sys_munmap(addr: u64, length: u64) -> u64 {
-    use crate::mm::vma;
     use crate::mm::pmm::PAGE_SIZE;
+    use crate::mm::vma;
 
     let addr = addr as usize;
     let length = length as usize;
@@ -5836,9 +5722,9 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 ///
 /// Changes the protection on a virtual memory region.
 fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
-    use crate::mm::vma::{self, VmaPermissions};
-    use crate::mm::vm::{self, PageFlags};
     use crate::mm::pmm::PAGE_SIZE;
+    use crate::mm::vm::{self, PageFlags};
+    use crate::mm::vma::{self, VmaPermissions};
 
     let addr = addr as usize;
     let length = length as usize;
@@ -5934,8 +5820,8 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
 ///
 /// The heap VMA is identified by the "heap" label.
 fn sys_brk(new_brk: u64) -> u64 {
-    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
     use crate::mm::pmm::PAGE_SIZE;
+    use crate::mm::vma::{self, Vma, VmaBacking, VmaPermissions};
 
     let vma_ctx = match current_process_vma_context() {
         Ok(ctx) => ctx,
@@ -6034,11 +5920,7 @@ fn sys_brk(new_brk: u64) -> u64 {
 }
 
 /// Helper: unmap all physical pages for a VMA by walking the page table
-fn unmap_vma_pages(
-    process_id: crate::process::ProcessId,
-    pml4: usize,
-    vma: &crate::mm::vma::Vma,
-) {
+fn unmap_vma_pages(process_id: crate::process::ProcessId, pml4: usize, vma: &crate::mm::vma::Vma) {
     use crate::mm::pmm::PAGE_SIZE;
 
     for page in (vma.start..vma.end).step_by(PAGE_SIZE) {
@@ -6098,12 +5980,17 @@ fn validate_user_range(ptr: u64, size: usize) -> Result<atom_abi::UserRange, u64
 }
 
 #[inline]
-fn validate_user_byte_range(ptr: atom_abi::UserPtr<u8>, len: usize) -> Result<atom_abi::UserRange, u64> {
+fn validate_user_byte_range(
+    ptr: atom_abi::UserPtr<u8>,
+    len: usize,
+) -> Result<atom_abi::UserRange, u64> {
     ptr.byte_range(len).map_err(map_user_address_error)
 }
 
 #[inline]
-fn validate_user_return_addr(addr: atom_abi::UserVirtAddr) -> Result<atom_abi::UserVAddr, atom_abi::UserAddressError> {
+fn validate_user_return_addr(
+    addr: atom_abi::UserVirtAddr,
+) -> Result<atom_abi::UserVAddr, atom_abi::UserAddressError> {
     atom_abi::validate_user_return_addr(addr as usize)
 }
 
@@ -6123,7 +6010,9 @@ fn copy_string_from_user(src_range: atom_abi::UserRange) -> Result<alloc::string
     }
 
     // SAFETY: src_range is ABI-validated and guaranteed canonical.
-    match core::str::from_utf8(unsafe { core::slice::from_raw_parts(src_range.base().as_ptr::<u8>(), len) }) {
+    match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(src_range.base().as_ptr::<u8>(), len)
+    }) {
         Ok(s) => Ok(alloc::string::String::from(s)),
         Err(_) => Err(EINVAL),
     }
@@ -6153,9 +6042,12 @@ fn write_buffer_to_user(dst_range: atom_abi::UserRange, src: &[u8]) -> Result<()
     // certainly the result of a length calculation bug somewhere upstream.
     const MAX_SINGLE_COPY: usize = 64 * 1024 * 1024;
     if src.len() > MAX_SINGLE_COPY {
-        log_error!("write_buf",
+        log_error!(
+            "write_buf",
             "write_buffer_to_user: rejecting copy of {} bytes (max {})",
-            src.len(), MAX_SINGLE_COPY);
+            src.len(),
+            MAX_SINGLE_COPY
+        );
         return Err(EINVAL);
     }
 
@@ -6447,7 +6339,11 @@ fn sys_kern_fs_rmdir(path_ptr: u64, path_len: usize) -> u64 {
     match crate::drivers::fat32::stat_path(path) {
         Some(st) if !st.is_dir => ENOTDIR,
         Some(_) => {
-            if crate::drivers::fat32::rmdir(path) { ESUCCESS } else { ENOTEMPTY }
+            if crate::drivers::fat32::rmdir(path) {
+                ESUCCESS
+            } else {
+                ENOTEMPTY
+            }
         }
         None => ENOENT,
     }
@@ -6467,13 +6363,22 @@ fn sys_kern_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
     match crate::drivers::fat32::stat_path(path) {
         Some(st) if st.is_dir => EISDIR,
         Some(_) => {
-            if crate::drivers::fat32::unlink(path) { ESUCCESS } else { EIO }
+            if crate::drivers::fat32::unlink(path) {
+                ESUCCESS
+            } else {
+                EIO
+            }
         }
         None => ENOENT,
     }
 }
 
-fn sys_kern_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+fn sys_kern_fs_rename(
+    old_path_ptr: u64,
+    old_path_len: usize,
+    new_path_ptr: u64,
+    new_path_len: usize,
+) -> u64 {
     let old_range = match validate_user_path_range(old_path_ptr, old_path_len) {
         Ok(range) => range,
         Err(e) => return e,
@@ -6620,7 +6525,7 @@ fn sys_kern_block_flush() -> u64 {
 // FSD forwarding path (authoritative POSIX FS syscall path)
 // ============================================================================
 
-const FS_PORT_ID: u64 = atom_abi::PORT_FS_SERVICE as u64;
+const FS_PORT_ID: u64 = atom_abi::PORT_FS_SERVICE;
 const FS_REQ_TIMEOUT_MS: u64 = 5000;
 const FS_WIRE_HEADER_SIZE: usize = 16;
 const FS_WIRE_REPLY_PORT_SIZE: usize = 8;
@@ -6642,8 +6547,7 @@ const FS_MSG_READDIR: u32 = 1122;
 const FS_MSG_TRUNCATE: u32 = 1124;
 const FS_MSG_FSYNC: u32 = 1126;
 
-static FS_WIRE_SEQUENCE: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(1);
+static FS_WIRE_SEQUENCE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 #[inline]
 fn fs_max_write_chunk() -> usize {
@@ -7012,7 +6916,12 @@ fn fsd_sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
     }
 }
 
-fn fsd_sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+fn fsd_sys_fs_rename(
+    old_path_ptr: u64,
+    old_path_len: usize,
+    new_path_ptr: u64,
+    new_path_len: usize,
+) -> u64 {
     let old_range = match validate_user_path_range(old_path_ptr, old_path_len) {
         Ok(range) => range,
         Err(e) => return e,
@@ -7230,9 +7139,7 @@ impl KernelFd {
     fn free_cache(&mut self) {
         if self.cache_ptr != 0 && self.cache_len > 0 {
             unsafe {
-                let layout = core::alloc::Layout::from_size_align_unchecked(
-                    self.cache_len, 1,
-                );
+                let layout = core::alloc::Layout::from_size_align_unchecked(self.cache_len, 1);
                 alloc::alloc::dealloc(self.cache_ptr as *mut u8, layout);
             }
         }
@@ -7256,7 +7163,9 @@ fn validate_user_path_range(ptr: u64, len: usize) -> Result<atom_abi::UserRange,
 
 /// Copy a path string from userspace into a stack-allocated fixed buffer.
 /// Returns (buffer, length) on success.  No heap allocation.
-fn copy_path_from_user(path_range: atom_abi::UserRange) -> Result<([u8; MAX_PATH_BUF], usize), u64> {
+fn copy_path_from_user(
+    path_range: atom_abi::UserRange,
+) -> Result<([u8; MAX_PATH_BUF], usize), u64> {
     let len = path_range.len();
     if len == 0 || len > MAX_PATH_BUF {
         return Err(ENAMETOOLONG);
@@ -7279,8 +7188,10 @@ const _COPY_STRING_FROM_USER_TYPED: fn(atom_abi::UserRange) -> Result<alloc::str
     copy_string_from_user;
 const _COPY_BUFFER_FROM_USER_TYPED: fn(atom_abi::UserRange, usize) -> Result<Vec<u8>, u64> =
     copy_buffer_from_user;
-const _COPY_PATH_FROM_USER_TYPED: fn(atom_abi::UserRange) -> Result<([u8; MAX_PATH_BUF], usize), u64> =
-    copy_path_from_user;
+#[allow(clippy::type_complexity)]
+const _COPY_PATH_FROM_USER_TYPED: fn(
+    atom_abi::UserRange,
+) -> Result<([u8; MAX_PATH_BUF], usize), u64> = copy_path_from_user;
 const _WRITE_BUFFER_TO_USER_TYPED: fn(atom_abi::UserRange, &[u8]) -> Result<(), u64> =
     write_buffer_to_user;
 const _IPC_SEND_BATCH_CORE_TYPED: fn(
@@ -7303,7 +7214,10 @@ fn path_buf_as_str(buf: &[u8; MAX_PATH_BUF], len: usize) -> &str {
     unsafe { core::str::from_utf8_unchecked(&buf[..len]) }
 }
 
-fn validate_fd_ownership(idx: usize, table: &[KernelFd; MAX_KERNEL_FDS]) -> Result<(), FdPathError> {
+fn validate_fd_ownership(
+    idx: usize,
+    table: &[KernelFd; MAX_KERNEL_FDS],
+) -> Result<(), FdPathError> {
     policy::validate_fd_ownership(idx, table)
 }
 
@@ -7418,7 +7332,11 @@ fn ensure_fd_cache(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize) -> Result
     Ok(())
 }
 
-fn resize_fd_cache(table: &mut [KernelFd; MAX_KERNEL_FDS], idx: usize, new_len: usize) -> Result<(), u64> {
+fn resize_fd_cache(
+    table: &mut [KernelFd; MAX_KERNEL_FDS],
+    idx: usize,
+    new_len: usize,
+) -> Result<(), u64> {
     let old_ptr = table[idx].cache_ptr;
     let old_len = table[idx].cache_len;
 
@@ -7502,7 +7420,12 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
     };
     let path = path_buf_as_str(&path_buf, path_blen);
 
-    log_debug!(LOG_ORIGIN, "sys_fs_open(path=\"{}\", flags={:#x})", path, flags);
+    log_debug!(
+        LOG_ORIGIN,
+        "sys_fs_open(path=\"{}\", flags={:#x})",
+        path,
+        flags
+    );
 
     let o_directory: u32 = 0x10000;
     let o_creat: u32 = 0x0040;
@@ -7517,11 +7440,13 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
         } else {
             path.trim_start_matches('/')
         };
-        if path != "/" && !path.is_empty()
-            && crate::drivers::fat32::list_directory(list_path).is_none() {
-                log_debug!(LOG_ORIGIN, "directory not found: \"{}\"", path);
-                return ENOENT;
-            }
+        if path != "/"
+            && !path.is_empty()
+            && crate::drivers::fat32::list_directory(list_path).is_none()
+        {
+            log_debug!(LOG_ORIGIN, "directory not found: \"{}\"", path);
+            return ENOENT;
+        }
     } else if crate::drivers::fat32::stat_path(path).is_none() {
         if (flags & o_creat) == 0 {
             log_debug!(LOG_ORIGIN, "file not found: \"{}\"", path);
@@ -7572,8 +7497,19 @@ fn sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, _mode: u32) -> u64 {
     if path.contains("doom1") || path.contains("DOOM1") {
         let trimmed = path.trim_start_matches('/');
         match crate::drivers::fat32::stat_path(trimmed) {
-            Some(st) => log_info!(LOG_ORIGIN, "[WAD-DIAG] opened '{}' fd={} file_size={}", path, fd, st.size),
-            None => log_warn!(LOG_ORIGIN, "[WAD-DIAG] opened '{}' fd={} but stat_path FAILED", path, fd),
+            Some(st) => log_info!(
+                LOG_ORIGIN,
+                "[WAD-DIAG] opened '{}' fd={} file_size={}",
+                path,
+                fd,
+                st.size
+            ),
+            None => log_warn!(
+                LOG_ORIGIN,
+                "[WAD-DIAG] opened '{}' fd={} but stat_path FAILED",
+                path,
+                fd
+            ),
         }
     }
 
@@ -7610,7 +7546,13 @@ fn sys_fs_close(fd: u64) -> u64 {
 /// page allocations would fragment physical memory and eventually fail.
 fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
-    log_debug!(LOG_ORIGIN, "sys_fs_read(fd={}, buf_ptr={:#X}, count={})", fd, buf_ptr, count);
+    log_debug!(
+        LOG_ORIGIN,
+        "sys_fs_read(fd={}, buf_ptr={:#X}, count={})",
+        fd,
+        buf_ptr,
+        count
+    );
 
     // ── Argument validation ────────────────────────────────────────────────
     if count == 0 {
@@ -7688,14 +7630,15 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
                     table[idx].cache_len = 0;
                 } else {
                     // Allocate cache and copy file data
-                    let layout = unsafe {
-                        core::alloc::Layout::from_size_align_unchecked(flen, 1)
-                    };
+                    let layout = unsafe { core::alloc::Layout::from_size_align_unchecked(flen, 1) };
                     let ptr = unsafe { alloc::alloc::alloc(layout) };
                     if ptr.is_null() {
-                        log_warn!(LOG_ORIGIN,
+                        log_warn!(
+                            LOG_ORIGIN,
                             "sys_fs_read: failed to allocate {} bytes for fd {} cache",
-                            flen, fd);
+                            flen,
+                            fd
+                        );
                         return EIO;
                     }
                     unsafe {
@@ -7705,13 +7648,16 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
                     table[idx].cache_ptr = ptr as usize;
                     table[idx].cache_len = flen;
 
-                    log_debug!(LOG_ORIGIN,
-                        "sys_fs_read: cached {} bytes for fd {}", flen, fd);
+                    log_debug!(
+                        LOG_ORIGIN,
+                        "sys_fs_read: cached {} bytes for fd {}",
+                        flen,
+                        fd
+                    );
                 }
             }
             None => {
-                log_warn!(LOG_ORIGIN,
-                    "sys_fs_read: fat32::open failed for fd {}", fd);
+                log_warn!(LOG_ORIGIN, "sys_fs_read: fat32::open failed for fd {}", fd);
                 return EIO;
             }
         }
@@ -7725,9 +7671,7 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         return 0; // empty file
     }
 
-    let data: &[u8] = unsafe {
-        core::slice::from_raw_parts(data_ptr as *const u8, file_len)
-    };
+    let data: &[u8] = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, file_len) };
 
     let offset = table[idx].offset;
     if offset >= file_len {
@@ -7750,7 +7694,12 @@ fn sys_fs_read(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     // Update offset while still holding fd-table lock
     table[idx].offset += to_read;
 
-    log_debug!(LOG_ORIGIN, "sys_fs_read OK: fd={} returned {} bytes", fd, to_read);
+    log_debug!(
+        LOG_ORIGIN,
+        "sys_fs_read OK: fd={} returned {} bytes",
+        fd,
+        to_read
+    );
     to_read as u64
 }
 
@@ -7785,7 +7734,11 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
     }
 
     let append = (table[idx].flags & 0x0400) != 0;
-    let write_offset = if append { table[idx].cache_len } else { table[idx].offset };
+    let write_offset = if append {
+        table[idx].cache_len
+    } else {
+        table[idx].offset
+    };
     let new_len = write_offset.saturating_add(count);
     if let Err(e) = resize_fd_cache(&mut table, idx, new_len) {
         return e;
@@ -7795,10 +7748,7 @@ fn sys_fs_write(fd: u64, buf_ptr: u64, count: usize) -> u64 {
         // SAFETY: src_range is ABI-validated and guaranteed canonical.
         let src = unsafe { core::slice::from_raw_parts(src_range.base().as_ptr::<u8>(), count) };
         let dst = unsafe {
-            core::slice::from_raw_parts_mut(
-                (table[idx].cache_ptr + write_offset) as *mut u8,
-                count,
-            )
+            core::slice::from_raw_parts_mut((table[idx].cache_ptr + write_offset) as *mut u8, count)
         };
         dst.copy_from_slice(src);
     }
@@ -7817,7 +7767,12 @@ fn sys_fs_stat(path_ptr: u64, path_len: usize, stat_ptr: u64) -> u64 {
 /// Read directory entries
 fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
     const LOG_ORIGIN: &str = "fs_syscall";
-    log_debug!(LOG_ORIGIN, "sys_fs_readdir(dirfd={}, count={})", dirfd, count);
+    log_debug!(
+        LOG_ORIGIN,
+        "sys_fs_readdir(dirfd={}, count={})",
+        dirfd,
+        count
+    );
 
     if count == 0 {
         return EINVAL;
@@ -7914,7 +7869,12 @@ fn sys_fs_readdir(dirfd: u64, dirent_ptr: u64, count: usize) -> u64 {
                 ino_counter += 1;
             }
 
-            log_debug!(LOG_ORIGIN, "sys_fs_readdir OK: {} bytes, {} entries", pos, ino_counter - 1);
+            log_debug!(
+                LOG_ORIGIN,
+                "sys_fs_readdir OK: {} bytes, {} entries",
+                pos,
+                ino_counter - 1
+            );
             pos as u64
         }
         None => ENOENT,
@@ -7954,13 +7914,22 @@ fn sys_fs_unlink(path_ptr: u64, path_len: usize) -> u64 {
     match crate::drivers::fat32::stat_path(path) {
         Some(st) if st.is_dir => EISDIR,
         Some(_) => {
-            if crate::drivers::fat32::unlink(path) { ESUCCESS } else { EIO }
+            if crate::drivers::fat32::unlink(path) {
+                ESUCCESS
+            } else {
+                EIO
+            }
         }
         None => ENOENT,
     }
 }
 
-fn sys_fs_rename(old_path_ptr: u64, old_path_len: usize, new_path_ptr: u64, new_path_len: usize) -> u64 {
+fn sys_fs_rename(
+    old_path_ptr: u64,
+    old_path_len: usize,
+    new_path_ptr: u64,
+    new_path_len: usize,
+) -> u64 {
     let old_range = match validate_user_path_range(old_path_ptr, old_path_len) {
         Ok(range) => range,
         Err(e) => return e,
@@ -8022,12 +7991,14 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
     };
 
     let new_offset: i64 = match whence {
-        0 => offset,                 // SEEK_SET
-        1 => {                        // SEEK_CUR
+        0 => offset, // SEEK_SET
+        1 => {
+            // SEEK_CUR
             let cur = table[idx].offset as i64;
             cur + offset
         }
-        2 => {                        // SEEK_END
+        2 => {
+            // SEEK_END
             // Fast path: use the cached file length when already populated.
             let cached_len = table[idx].cache_len;
             if cached_len > 0 {
@@ -8050,8 +8021,11 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
             let file_data = match crate::drivers::fat32::open(path) {
                 Some(d) => d,
                 None => {
-                    log_warn!("fs_syscall",
-                        "sys_fs_seek SEEK_END: fat32::open('{}') failed", path);
+                    log_warn!(
+                        "fs_syscall",
+                        "sys_fs_seek SEEK_END: fat32::open('{}') failed",
+                        path
+                    );
                     return EIO;
                 }
             };
@@ -8059,16 +8033,19 @@ fn sys_fs_seek(fd: u64, offset: i64, whence: u32) -> u64 {
 
             // Allocate a kernel heap cache for the file data.
             let cache_ptr: usize = if file_len > 0 {
-                let layout = unsafe {
-                    core::alloc::Layout::from_size_align_unchecked(file_len, 1)
-                };
+                let layout = unsafe { core::alloc::Layout::from_size_align_unchecked(file_len, 1) };
                 let ptr = unsafe { alloc::alloc::alloc(layout) };
                 if ptr.is_null() {
-                    log_warn!("fs_syscall",
-                        "sys_fs_seek SEEK_END: alloc failed for {} bytes", file_len);
+                    log_warn!(
+                        "fs_syscall",
+                        "sys_fs_seek SEEK_END: alloc failed for {} bytes",
+                        file_len
+                    );
                     return EIO;
                 }
-                unsafe { core::ptr::copy_nonoverlapping(file_data.as_ptr(), ptr, file_len); }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(file_data.as_ptr(), ptr, file_len);
+                }
                 ptr as usize
             } else {
                 0
@@ -8179,7 +8156,11 @@ fn sys_fs_rmdir(path_ptr: u64, path_len: usize) -> u64 {
     match crate::drivers::fat32::stat_path(path) {
         Some(st) if !st.is_dir => ENOTDIR,
         Some(_) => {
-            if crate::drivers::fat32::rmdir(path) { ESUCCESS } else { ENOTEMPTY }
+            if crate::drivers::fat32::rmdir(path) {
+                ESUCCESS
+            } else {
+                ENOTEMPTY
+            }
         }
         None => ENOENT,
     }
@@ -8197,7 +8178,14 @@ fn sys_fs_truncate(fd: u64, _length: u64) -> u64 {
 }
 
 /// Mount filesystem
-fn sys_fs_mount(_source_ptr: u64, _source_len: usize, _target_ptr: u64, _target_len: usize, _fstype_ptr: u64, _fstype_len: usize) -> u64 {
+fn sys_fs_mount(
+    _source_ptr: u64,
+    _source_len: usize,
+    _target_ptr: u64,
+    _target_len: usize,
+    _fstype_ptr: u64,
+    _fstype_len: usize,
+) -> u64 {
     ENOTSUP
 }
 
@@ -8253,12 +8241,22 @@ fn sys_fs_dup2(oldfd: u64, newfd: u64) -> u64 {
 }
 
 /// Create hard link
-fn sys_fs_link(_oldpath_ptr: u64, _oldpath_len: usize, _newpath_ptr: u64, _newpath_len: usize) -> u64 {
+fn sys_fs_link(
+    _oldpath_ptr: u64,
+    _oldpath_len: usize,
+    _newpath_ptr: u64,
+    _newpath_len: usize,
+) -> u64 {
     ENOTSUP
 }
 
 /// Create symbolic link
-fn sys_fs_symlink(_target_ptr: u64, _target_len: usize, _linkpath_ptr: u64, _linkpath_len: usize) -> u64 {
+fn sys_fs_symlink(
+    _target_ptr: u64,
+    _target_len: usize,
+    _linkpath_ptr: u64,
+    _linkpath_len: usize,
+) -> u64 {
     ENOTSUP
 }
 
@@ -8301,11 +8299,17 @@ fn sys_fs_statvfs(_path_ptr: u64, _path_len: usize, _buf_ptr: u64) -> u64 {
 ///   ENOTSUP  – backend does not support mode changes (GOP only)
 ///   ENOMEM   – LFB too small for requested mode
 fn sys_set_video_mode(packed_res: u64, bpp_raw: u64) -> u64 {
-    let width  = (packed_res & 0xFFFF) as u16;
+    let width = (packed_res & 0xFFFF) as u16;
     let height = ((packed_res >> 16) & 0xFFFF) as u16;
-    let bpp    = bpp_raw as u8;
+    let bpp = bpp_raw as u8;
 
-    log_debug!("syscall", "SYS_SET_VIDEO_MODE: {}x{}x{}", width, height, bpp);
+    log_debug!(
+        "syscall",
+        "SYS_SET_VIDEO_MODE: {}x{}x{}",
+        width,
+        height,
+        bpp
+    );
 
     match crate::graphics::set_video_mode(width, height, bpp) {
         Ok(()) => {
@@ -8315,11 +8319,11 @@ fn sys_set_video_mode(packed_res: u64, bpp_raw: u64) -> u64 {
         Err(e) => {
             log_warn!("syscall", "SYS_SET_VIDEO_MODE failed: {:?}", e);
             match e {
-                crate::graphics::VideoModeError::InvalidResolution  => EINVAL,
-                crate::graphics::VideoModeError::UnsupportedBpp     => EINVAL,
-                crate::graphics::VideoModeError::ExceedsLfbSize     => ENOMEM,
+                crate::graphics::VideoModeError::InvalidResolution => EINVAL,
+                crate::graphics::VideoModeError::UnsupportedBpp => EINVAL,
+                crate::graphics::VideoModeError::ExceedsLfbSize => ENOMEM,
                 crate::graphics::VideoModeError::DeviceNotAvailable => ENODEV,
-                crate::graphics::VideoModeError::HardwareRejected   => EINVAL,
+                crate::graphics::VideoModeError::HardwareRejected => EINVAL,
                 crate::graphics::VideoModeError::BackendUnsupported => ENOTSUP,
             }
         }
@@ -8349,11 +8353,19 @@ fn sys_get_video_modes(buf_ptr: u64, max_modes: usize) -> u64 {
     };
 
     // Use a kernel-side buffer to avoid writing directly from the mode table
-    let mut kernel_modes = [crate::drivers::bga::VideoMode { width: 0, height: 0, bpp: 0, refresh_rate: 0 }; 32];
+    let mut kernel_modes = [crate::drivers::bga::VideoMode {
+        width: 0,
+        height: 0,
+        bpp: 0,
+        refresh_rate: 0,
+    }; 32];
     let count = crate::graphics::get_available_modes(&mut kernel_modes).min(max_modes);
 
     // Validate the full user-space write range with checked arithmetic
-    let write_bytes = match count.checked_mul(5).and_then(|v| v.checked_mul(core::mem::size_of::<u32>())) {
+    let write_bytes = match count
+        .checked_mul(5)
+        .and_then(|v| v.checked_mul(core::mem::size_of::<u32>()))
+    {
         Some(v) => v,
         None => return EINVAL,
     };
@@ -8365,9 +8377,9 @@ fn sys_get_video_modes(buf_ptr: u64, max_modes: usize) -> u64 {
     unsafe {
         for (i, m) in kernel_modes.iter().enumerate().take(count) {
             let base = buf_ptr.add(i * 5);
-            base.add(0).write_volatile(m.width  as u32);
+            base.add(0).write_volatile(m.width as u32);
             base.add(1).write_volatile(m.height as u32);
-            base.add(2).write_volatile(m.bpp    as u32);
+            base.add(2).write_volatile(m.bpp as u32);
             base.add(3).write_volatile(m.refresh_rate as u32);
             base.add(4).write_volatile(1u32); // LFB always available
         }
@@ -8436,7 +8448,11 @@ fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
     let handle = crate::cap::CapHandle::from_raw(dev_cap_handle);
 
     // Validate capability: must be Device type
-    let bdf = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+    let bdf = match crate::thread::validate_thread_capability(
+        caller,
+        handle,
+        crate::cap::CapPermissions::READ,
+    ) {
         Ok(()) => {
             let cap = crate::cap::lookup_capability(handle).unwrap();
             match cap.resource {
@@ -8471,7 +8487,12 @@ fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::PciBarInfo>()).is_err() {
+    if validate_user_range(
+        info_ptr.as_u64(),
+        core::mem::size_of::<atom_abi::PciBarInfo>(),
+    )
+    .is_err()
+    {
         return EINVAL;
     }
 
@@ -8482,13 +8503,12 @@ fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
             phys_addr: bar.base,
             size: bar.size as usize,
         };
-        match crate::cap::create_root_capability(mmio_res, caller, crate::cap::CapPermissions::ALL) {
-            Ok(cap) => {
-                match crate::thread::add_thread_capability(caller, cap) {
-                    Ok(h) => h.raw(),
-                    Err(_) => 0,
-                }
-            }
+        match crate::cap::create_root_capability(mmio_res, caller, crate::cap::CapPermissions::ALL)
+        {
+            Ok(cap) => match crate::thread::add_thread_capability(caller, cap) {
+                Ok(h) => h.raw(),
+                Err(_) => 0,
+            },
             Err(_) => 0,
         }
     } else {
@@ -8521,19 +8541,32 @@ fn sys_pci_query_device(dev_cap_handle: u64, info_ptr: u64) -> u64 {
     };
     let handle = crate::cap::CapHandle::from_raw(dev_cap_handle);
 
-    let bdf = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+    let bdf = match crate::thread::validate_thread_capability(
+        caller,
+        handle,
+        crate::cap::CapPermissions::READ,
+    ) {
         Ok(()) => {
             let cap = crate::cap::lookup_capability(handle).unwrap();
             match cap.resource {
                 crate::cap::ResourceType::Device { bdf } => bdf,
                 _ => {
-                    log_warn!("syscall", "pci_query_device: handle={} resource is not Device", dev_cap_handle);
+                    log_warn!(
+                        "syscall",
+                        "pci_query_device: handle={} resource is not Device",
+                        dev_cap_handle
+                    );
                     return EPERM;
                 }
             }
         }
         Err(e) => {
-            log_warn!("syscall", "pci_query_device: handle={} validate failed: {:?}", dev_cap_handle, e);
+            log_warn!(
+                "syscall",
+                "pci_query_device: handle={} validate failed: {:?}",
+                dev_cap_handle,
+                e
+            );
             return EPERM;
         }
     };
@@ -8541,7 +8574,11 @@ fn sys_pci_query_device(dev_cap_handle: u64, info_ptr: u64) -> u64 {
     let dev = match crate::drivers::pci::find_by_bdf(bdf) {
         Some(d) => d,
         None => {
-            log_warn!("syscall", "pci_query_device: bdf={:#x} not found in PCI registry", bdf);
+            log_warn!(
+                "syscall",
+                "pci_query_device: bdf={:#x} not found in PCI registry",
+                bdf
+            );
             return EINVAL;
         }
     };
@@ -8550,7 +8587,12 @@ fn sys_pci_query_device(dev_cap_handle: u64, info_ptr: u64) -> u64 {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::PciDeviceInfo>()).is_err() {
+    if validate_user_range(
+        info_ptr.as_u64(),
+        core::mem::size_of::<atom_abi::PciDeviceInfo>(),
+    )
+    .is_err()
+    {
         return EINVAL;
     }
 
@@ -8581,7 +8623,11 @@ fn sys_device_bind_irq(dev_cap_handle: u64, info_ptr: u64) -> u64 {
     };
     let handle = crate::cap::CapHandle::from_raw(dev_cap_handle);
 
-    let bdf = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+    let bdf = match crate::thread::validate_thread_capability(
+        caller,
+        handle,
+        crate::cap::CapPermissions::READ,
+    ) {
         Ok(()) => {
             let cap = crate::cap::lookup_capability(handle).unwrap();
             match cap.resource {
@@ -8606,14 +8652,18 @@ fn sys_device_bind_irq(dev_cap_handle: u64, info_ptr: u64) -> u64 {
     }
 
     // Create Irq capability
-    let irq_res = crate::cap::ResourceType::Irq { irq_num: pci_dev.irq_line };
-    let irq_cap = match crate::cap::create_root_capability(irq_res, caller, crate::cap::CapPermissions::ALL) {
-        Ok(cap) => {
-            match crate::thread::add_thread_capability(caller, cap) {
-                Ok(h) => h,
-                Err(_) => return ENOMEM,
-            }
-        }
+    let irq_res = crate::cap::ResourceType::Irq {
+        irq_num: pci_dev.irq_line,
+    };
+    let irq_cap = match crate::cap::create_root_capability(
+        irq_res,
+        caller,
+        crate::cap::CapPermissions::ALL,
+    ) {
+        Ok(cap) => match crate::thread::add_thread_capability(caller, cap) {
+            Ok(h) => h,
+            Err(_) => return ENOMEM,
+        },
         Err(_) => return ENOMEM,
     };
 
@@ -8621,7 +8671,12 @@ fn sys_device_bind_irq(dev_cap_handle: u64, info_ptr: u64) -> u64 {
         Ok(ptr) => ptr,
         Err(e) => return e,
     };
-    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::IrqBindInfo>()).is_err() {
+    if validate_user_range(
+        info_ptr.as_u64(),
+        core::mem::size_of::<atom_abi::IrqBindInfo>(),
+    )
+    .is_err()
+    {
         return EINVAL;
     }
 
@@ -8645,7 +8700,11 @@ fn sys_irq_listen(irq_cap_handle: u64, port_id: u64) -> u64 {
     };
     let handle = crate::cap::CapHandle::from_raw(irq_cap_handle);
 
-    let irq_num = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+    let irq_num = match crate::thread::validate_thread_capability(
+        caller,
+        handle,
+        crate::cap::CapPermissions::READ,
+    ) {
         Ok(()) => {
             let cap = crate::cap::lookup_capability(handle).unwrap();
             match cap.resource {
@@ -8661,12 +8720,15 @@ fn sys_irq_listen(irq_cap_handle: u64, port_id: u64) -> u64 {
         return EBUSY;
     }
 
-    bindings.insert(irq_num, IrqBinding {
-        owner: caller,
-        port: port_id,
-        pending: AtomicBool::new(false),
-        requires_ack: true, // new path: ACK required via SYS_IRQ_ACK to re-arm
-    });
+    bindings.insert(
+        irq_num,
+        IrqBinding {
+            owner: caller,
+            port: port_id,
+            pending: AtomicBool::new(false),
+            requires_ack: true, // new path: ACK required via SYS_IRQ_ACK to re-arm
+        },
+    );
     ESUCCESS
 }
 
@@ -8677,7 +8739,11 @@ fn sys_irq_ack(irq_cap_handle: u64) -> u64 {
     };
     let handle = crate::cap::CapHandle::from_raw(irq_cap_handle);
 
-    let irq_num = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::WRITE) {
+    let irq_num = match crate::thread::validate_thread_capability(
+        caller,
+        handle,
+        crate::cap::CapPermissions::WRITE,
+    ) {
         Ok(()) => {
             let cap = crate::cap::lookup_capability(handle).unwrap();
             match cap.resource {
@@ -8716,11 +8782,21 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
     let params_ptr = match validate_user_addr(params_ptr) {
         Ok(ptr) => ptr,
         Err(e) => {
-            log_warn!("syscall", "dma_alloc: invalid params_ptr={:#x} err={:#x}", params_ptr, e);
+            log_warn!(
+                "syscall",
+                "dma_alloc: invalid params_ptr={:#x} err={:#x}",
+                params_ptr,
+                e
+            );
             return e;
         }
     };
-    if validate_user_range(params_ptr.as_u64(), core::mem::size_of::<atom_abi::DmaAllocParams>()).is_err() {
+    if validate_user_range(
+        params_ptr.as_u64(),
+        core::mem::size_of::<atom_abi::DmaAllocParams>(),
+    )
+    .is_err()
+    {
         log_warn!("syscall", "dma_alloc: params range check failed");
         return EINVAL;
     }
@@ -8735,7 +8811,11 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
     let phys_addr = match crate::mm::pmm::alloc_pages_zeroed(pages) {
         Some(p) => p,
         None => {
-            log_warn!("syscall", "dma_alloc: alloc_pages_zeroed failed for {} pages", pages);
+            log_warn!(
+                "syscall",
+                "dma_alloc: alloc_pages_zeroed failed for {} pages",
+                pages
+            );
             return ENOMEM;
         }
     };
@@ -8745,19 +8825,29 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
         phys_addr: phys_addr as u64,
         size: params.size as usize,
     };
-    let dma_cap = match crate::cap::create_root_capability(dma_res, caller, crate::cap::CapPermissions::ALL) {
-        Ok(cap) => {
-            match crate::thread::add_thread_capability(caller, cap) {
-                Ok(h) => h,
-                Err(e) => {
-                    log_warn!("syscall", "dma_alloc: add_thread_capability failed: {:?}", e);
-                    let _ = crate::mm::pmm::free_pages(phys_addr, pages);
-                    return ENOMEM;
-                }
+    let dma_cap = match crate::cap::create_root_capability(
+        dma_res,
+        caller,
+        crate::cap::CapPermissions::ALL,
+    ) {
+        Ok(cap) => match crate::thread::add_thread_capability(caller, cap) {
+            Ok(h) => h,
+            Err(e) => {
+                log_warn!(
+                    "syscall",
+                    "dma_alloc: add_thread_capability failed: {:?}",
+                    e
+                );
+                let _ = crate::mm::pmm::free_pages(phys_addr, pages);
+                return ENOMEM;
             }
-        }
+        },
         Err(e) => {
-            log_warn!("syscall", "dma_alloc: create_root_capability failed: {:?}", e);
+            log_warn!(
+                "syscall",
+                "dma_alloc: create_root_capability failed: {:?}",
+                e
+            );
             let _ = crate::mm::pmm::free_pages(phys_addr, pages);
             return ENOMEM;
         }
@@ -8777,10 +8867,21 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
         }
     };
 
-    let user_va = match crate::mm::vma::find_process_free_region(caller_process, atom_abi::USER_MMAP_START as usize, atom_abi::USER_MMAP_END as usize, pages * crate::mm::pmm::PAGE_SIZE) {
+    let user_va = match crate::mm::vma::find_process_free_region(
+        caller_process,
+        atom_abi::USER_MMAP_START as usize,
+        atom_abi::USER_MMAP_END as usize,
+        pages * crate::mm::pmm::PAGE_SIZE,
+    ) {
         Ok(Some(addr)) => addr,
         other => {
-            log_warn!("syscall", "dma_alloc: find_free_region failed for process={} pages={}: {:?}", caller_process, pages, other);
+            log_warn!(
+                "syscall",
+                "dma_alloc: find_free_region failed for process={} pages={}: {:?}",
+                caller_process,
+                pages,
+                other
+            );
             let _ = crate::mm::pmm::free_pages(phys_addr, pages);
             return ENOMEM;
         }
@@ -8790,7 +8891,14 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
         let v = user_va + i * crate::mm::pmm::PAGE_SIZE;
         let p = phys_addr + i * crate::mm::pmm::PAGE_SIZE;
         if let Err(e) = crate::mm::vm::map_page_in_pml4(pml4 as usize, v, p, flags) {
-            log_warn!("syscall", "dma_alloc: map_page_in_pml4 failed page={} v={:#x} p={:#x}: {:?}", i, v, p, e);
+            log_warn!(
+                "syscall",
+                "dma_alloc: map_page_in_pml4 failed page={} v={:#x} p={:#x}: {:?}",
+                i,
+                v,
+                p,
+                e
+            );
             return ENOMEM;
         }
     }
@@ -8800,7 +8908,9 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
         start: user_va,
         end: user_va + pages * crate::mm::pmm::PAGE_SIZE,
         perms: crate::mm::vma::VmaPermissions::read_write(),
-        backing: crate::mm::vma::VmaBacking::Device { phys_base: phys_addr },
+        backing: crate::mm::vma::VmaBacking::Device {
+            phys_base: phys_addr,
+        },
         label: "dma",
     };
     if let Err(e) = crate::mm::vma::insert_process_vma(caller_process, vma) {
@@ -8811,11 +8921,21 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
     let info_ptr = match validate_user_addr(info_ptr) {
         Ok(ptr) => ptr,
         Err(e) => {
-            log_warn!("syscall", "dma_alloc: invalid info_ptr={:#x} err={:#x}", info_ptr, e);
+            log_warn!(
+                "syscall",
+                "dma_alloc: invalid info_ptr={:#x} err={:#x}",
+                info_ptr,
+                e
+            );
             return e;
         }
     };
-    if validate_user_range(info_ptr.as_u64(), core::mem::size_of::<atom_abi::DmaMappingInfo>()).is_err() {
+    if validate_user_range(
+        info_ptr.as_u64(),
+        core::mem::size_of::<atom_abi::DmaMappingInfo>(),
+    )
+    .is_err()
+    {
         log_warn!("syscall", "dma_alloc: info_ptr range check failed");
         return EINVAL;
     }
@@ -8862,28 +8982,53 @@ fn sys_map_mmio(mmio_cap_handle: u64, out_addr_ptr: u64) -> u64 {
     };
 
     let handle = crate::cap::CapHandle::from_raw(mmio_cap_handle);
-    let (phys_addr, size) = match crate::thread::validate_thread_capability(caller, handle, crate::cap::CapPermissions::READ) {
+    let (phys_addr, size) = match crate::thread::validate_thread_capability(
+        caller,
+        handle,
+        crate::cap::CapPermissions::READ,
+    ) {
         Ok(()) => {
             let cap = crate::cap::lookup_capability(handle).unwrap();
             match cap.resource {
-                crate::cap::ResourceType::MemoryRegion { phys_addr, size, .. } => (phys_addr, size),
+                crate::cap::ResourceType::MemoryRegion {
+                    phys_addr, size, ..
+                } => (phys_addr, size),
                 _ => {
-                    log_warn!("syscall", "map_mmio: handle={} not MemoryRegion", mmio_cap_handle);
+                    log_warn!(
+                        "syscall",
+                        "map_mmio: handle={} not MemoryRegion",
+                        mmio_cap_handle
+                    );
                     return EPERM;
                 }
             }
         }
         Err(e) => {
-            log_warn!("syscall", "map_mmio: handle={} validate failed: {:?}", mmio_cap_handle, e);
+            log_warn!(
+                "syscall",
+                "map_mmio: handle={} validate failed: {:?}",
+                mmio_cap_handle,
+                e
+            );
             return EPERM;
         }
     };
 
     let pages = size.div_ceil(crate::mm::pmm::PAGE_SIZE);
-    let user_va = match crate::mm::vma::find_process_free_region(caller_process, atom_abi::USER_MMAP_START as usize, atom_abi::USER_MMAP_END as usize, pages * crate::mm::pmm::PAGE_SIZE) {
+    let user_va = match crate::mm::vma::find_process_free_region(
+        caller_process,
+        atom_abi::USER_MMAP_START as usize,
+        atom_abi::USER_MMAP_END as usize,
+        pages * crate::mm::pmm::PAGE_SIZE,
+    ) {
         Ok(Some(addr)) => addr,
         other => {
-            log_warn!("syscall", "map_mmio: find_free_region failed for {} pages: {:?}", pages, other);
+            log_warn!(
+                "syscall",
+                "map_mmio: find_free_region failed for {} pages: {:?}",
+                pages,
+                other
+            );
             return ENOMEM;
         }
     };
@@ -8897,7 +9042,7 @@ fn sys_map_mmio(mmio_cap_handle: u64, out_addr_ptr: u64) -> u64 {
     for i in 0..pages {
         let v = user_va + i * crate::mm::pmm::PAGE_SIZE;
         let p = (phys_addr as usize) + i * crate::mm::pmm::PAGE_SIZE;
-        if let Err(_) = crate::mm::vm::map_page_in_pml4(pml4 as usize, v, p, flags) {
+        if crate::mm::vm::map_page_in_pml4(pml4 as usize, v, p, flags).is_err() {
             return ENOMEM;
         }
     }
@@ -8907,7 +9052,9 @@ fn sys_map_mmio(mmio_cap_handle: u64, out_addr_ptr: u64) -> u64 {
         start: user_va,
         end: user_va + pages * crate::mm::pmm::PAGE_SIZE,
         perms: crate::mm::vma::VmaPermissions::read_write(),
-        backing: crate::mm::vma::VmaBacking::Device { phys_base: phys_addr as usize },
+        backing: crate::mm::vma::VmaBacking::Device {
+            phys_base: phys_addr as usize,
+        },
         label: "mmio",
     };
     let _ = crate::mm::vma::insert_process_vma(caller_process, vma);

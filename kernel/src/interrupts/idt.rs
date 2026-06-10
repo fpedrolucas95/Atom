@@ -24,11 +24,8 @@
 use core::mem::size_of;
 
 use super::{
-    KEYBOARD_INTERRUPT_VECTOR,
-    MOUSE_INTERRUPT_VECTOR,
-    RESCHEDULE_INTERRUPT_VECTOR,
-    TIMER_INTERRUPT_VECTOR,
-    USER_TRAP_INTERRUPT_VECTOR,
+    KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, RESCHEDULE_INTERRUPT_VECTOR,
+    TIMER_INTERRUPT_VECTOR, USER_TRAP_INTERRUPT_VECTOR,
 };
 use crate::{log_debug, log_info};
 
@@ -108,7 +105,9 @@ struct Idt {
 
 impl Idt {
     const fn new() -> Self {
-        Idt { entries: [IdtEntry::new(); IDT_SIZE] }
+        Idt {
+            entries: [IdtEntry::new(); IDT_SIZE],
+        }
     }
 }
 
@@ -190,28 +189,133 @@ pub fn init() {
         let mut exc = |idx: usize, handler: usize, ist: u8, ty: u8| {
             entries[idx].set_handler(handler, KERNEL_CS, ist, ty);
         };
-        exc(0, exception_handler_0 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(1, exception_handler_1 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(2, exception_handler_2 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(3, exception_handler_3 as *const () as usize, 0, GATE_TYPE_TRAP);
-        exc(4, exception_handler_4 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(5, exception_handler_5 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(6, exception_handler_6 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(7, exception_handler_7 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
+        exc(
+            0,
+            exception_handler_0 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            1,
+            exception_handler_1 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            2,
+            exception_handler_2 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            3,
+            exception_handler_3 as *const () as usize,
+            0,
+            GATE_TYPE_TRAP,
+        );
+        exc(
+            4,
+            exception_handler_4 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            5,
+            exception_handler_5 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            6,
+            exception_handler_6 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            7,
+            exception_handler_7 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
         // #DF runs on a dedicated IST stack so a corrupted RSP cannot triple-fault.
-        exc(8, exception_handler_8 as *const () as usize, DOUBLE_FAULT_IST, GATE_TYPE_INTERRUPT);
-        exc(9, exception_handler_9 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(10, exception_handler_10 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(11, exception_handler_11 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(12, exception_handler_12 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(13, exception_handler_13 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(14, exception_handler_14 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(16, exception_handler_16 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(17, exception_handler_17 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(18, exception_handler_18 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(19, exception_handler_19 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(20, exception_handler_20 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
-        exc(21, exception_handler_21 as *const () as usize, 0, GATE_TYPE_INTERRUPT);
+        exc(
+            8,
+            exception_handler_8 as *const () as usize,
+            DOUBLE_FAULT_IST,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            9,
+            exception_handler_9 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            10,
+            exception_handler_10 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            11,
+            exception_handler_11 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            12,
+            exception_handler_12 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            13,
+            exception_handler_13 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            14,
+            exception_handler_14 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            16,
+            exception_handler_16 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            17,
+            exception_handler_17 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            18,
+            exception_handler_18 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            19,
+            exception_handler_19 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            20,
+            exception_handler_20 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
+        exc(
+            21,
+            exception_handler_21 as *const () as usize,
+            0,
+            GATE_TYPE_INTERRUPT,
+        );
 
         // 3. Hardware IRQ vectors (from the generated single source of truth).
         exc(

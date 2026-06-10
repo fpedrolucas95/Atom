@@ -50,19 +50,6 @@ Each entry: a stable id, the affected area, why it exists, the containment
 * **Exit criteria:** First green `qemu-smoke` job on CI; then this entry is
   closed.
 
-### SD-003 — Legacy tree not yet `cargo fmt` / `clippy -D warnings` clean
-* **Area:** workspace members (`kernel`, `shared/*`, `userspace/libs/*`).
-* **What:** The pre-existing code predates the fmt/clippy gates and is not
-  rustfmt-clean or warning-free under `-D warnings`. A one-time normalization
-  would touch ~90 files and was deliberately **not** bundled into this
-  security PR, to keep the security diff reviewable (reformatting `cap.rs`,
-  `shared_mem.rs`, etc. wholesale would bury the actual changes).
-* **Containment:** fmt/clippy run in their own CI job (`format-and-lint`),
-  separate from the security gates (`security-gates`), so a style nit can never
-  block or mask a security check. This PR's own changed files are fmt-clean.
-* **Exit criteria:** A dedicated normalization PR runs `cargo fmt --all` and
-  resolves the clippy warnings, after which `format-and-lint` goes green.
-
 ---
 
 ## Accepted, non-debt exceptions
@@ -72,6 +59,25 @@ are documentation comments that **reject** the removed privileged-process
 concept (PR1–PR3). They are not debt and require no exit criteria.
 
 ## Resolved
+
+### SD-R003 — Legacy tree not yet `cargo fmt` / `clippy -D warnings` clean
+Resolved by the documentation/CI normalization pass: `cargo fmt --all` was run
+across the workspace and the `cargo clippy -- -D warnings` findings were fixed
+(idiomatic rewrites where safe, narrowly-scoped `#[allow(...)]` with a rationale
+where a refactor would change a deliberate signature). The `format-and-lint`
+job now goes green. The clippy gate command was also corrected from
+`--all-targets` to `--lib --bins`: the default build target is the `no_std`
+`x86_64-unknown-uefi` target, for which the `--tests`/`--benches` targets cannot
+link the `test` crate (`E0463`), so `--all-targets` could never succeed.
+
+### SD-R002 — Unsafe baseline re-synced after the ATXF v3 / compositor merge
+The audited `unsafe` token counts for `kernel` (346 → 347) and
+`userspace/system_apps/ui_shell` (17 → 19) grew during the ATXF v3 Ed25519
+signing / multi-source entropy work and the compositor livelock fix, but
+`scripts/ci/unsafe_baseline.txt` was not updated in that change, leaving the
+`geiger-baseline` gate red. The baseline has been re-synced to the current
+audited values (the diff is the audit trail); no new unsafe was introduced by
+this normalization pass.
 
 ### SD-R001 — `SYS_IO_PORT_READ/WRITE` relied on the fail-closed wildcard
 Fixed in this PR: both are now classified `ExplicitlyUnrestricted` in

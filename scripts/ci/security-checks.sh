@@ -17,7 +17,7 @@
 #   5. cargo deny check               (licenses / bans / sources / advisories)
 #   6. semgrep --config .semgrep/     (syscall-without-gate static analysis)
 #   7. cargo fmt --check
-#   8. cargo clippy --workspace --all-targets -- -D warnings
+#   8. cargo clippy --workspace --lib --bins -- -D warnings
 #
 # In CI (CI=true) a missing external tool is a hard failure — the workflow is
 # responsible for installing it. Locally, a missing optional tool is a warning
@@ -74,7 +74,7 @@ cargo fmt --all --check
 ok "formatting clean"
 
 header "8/8 cargo clippy (-D warnings)"
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --lib --bins -- -D warnings
 ok "clippy clean"
 
 echo ""

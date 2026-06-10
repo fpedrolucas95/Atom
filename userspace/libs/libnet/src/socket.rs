@@ -141,13 +141,9 @@ pub fn net_send(netd_port: PortId, socket_id: u32, data: &[u8]) -> Result<usize,
 
         let _ = atom_syscall::ipc::close_port(reply_port);
 
-        match chunk_result {
-            Ok(sent) => {
-                total_sent += sent;
-                offset += chunk_len;
-            }
-            Err(e) => return Err(e),
-        }
+        let sent = chunk_result?;
+        total_sent += sent;
+        offset += chunk_len;
     }
 
     Ok(total_sent)
@@ -177,8 +173,7 @@ pub fn net_recv(
     }
 
     // Use a heap-allocated buffer for the large reply (NetRecvReplyMsg is 1036 bytes)
-    let mut recv_buf: Vec<u8> = Vec::with_capacity(1100);
-    recv_buf.resize(1100, 0u8);
+    let mut recv_buf: Vec<u8> = alloc::vec![0; 1100];
 
     let mut result = Err(NetError::Timeout);
 

@@ -1,7 +1,7 @@
 # Atom OS — Roadmap Técnico Atualizado
 
 > **Status do projeto**: microkernel funcional e experimental, com kernel, user space, runtime C/Rust, desktop, rede funcional em QEMU e suporte a aplicações nativas  
-> **Última revisão deste roadmap**: 06 de Abril de 2026  
+> **Última revisão deste roadmap**: 10 de Junho de 2026  
 > **Release de referência**: alpha_5  
 > **Arquitetura atual**: x86_64  
 > **Escopo atual validado**: QEMU/OVMF
@@ -73,7 +73,7 @@ O foco do roadmap deixa de ser “construir o básico” e passa a ser:
 
 ### 4. Syscall Layer
 
-- [x] ~80 syscalls cobrindo threads, IPC, capabilities, memória compartilhada, vídeo, processos, MM, PCI/MMIO/DMA/IRQ e filesystem
+- [x] ~116 syscalls cobrindo threads, IPC, capabilities, memória compartilhada, vídeo, processos, MM, PCI/MMIO/DMA/IRQ e filesystem
 - [x] Taxonomia de erros operacionais/contextuais em syscall path
 - [x] Containment local de corrupção operacional
 - [x] Validação ABI-typed para boa parte dos ponteiros de user space
@@ -84,7 +84,7 @@ O foco do roadmap deixa de ser “construir o básico” e passa a ser:
 - [x] `init` isolado em Ring 3
 - [x] `service_manager` com boot declarativo
 - [x] `namesvc`
-- [x] Loader ATXF
+- [x] Loader ATXF v3 com assinatura Ed25519, verificada contra raiz de confiança no kernel antes do mapeamento
 - [x] `SYS_SPAWN_PROCESS`
 - [x] `SYS_SPAWN_FROM_PATH`
 - [x] `app_launcher`
@@ -204,10 +204,10 @@ Objetivo: transformar a base atual em um sistema coerente, previsível e seguro 
 
 ### 7.7 Sincronização da documentação
 
-- [ ] Alinhar `README.md`, `README-PTBR.md` e `ROADMAP.md` ao estado real do código
-- [ ] Remover itens já implementados do backlog “futuro”
+- [x] Alinhar `README.md`, `README-PTBR.md` e `ROADMAP.md` ao estado real do código
+- [x] Remover itens já implementados do backlog “futuro” (rede e SMP saíram de “futuro”)
 - [ ] Publicar matriz simples “implementado / parcial / futuro” por subsistema
-- [ ] Documentar explicitamente limitações reais atuais: QEMU-only, single-core, enforcement parcial, hardware real pendente
+- [x] Documentar explicitamente limitações reais atuais: QEMU-only, SMP só em QEMU, enforcement parcial, hardware real pendente
 
 ---
 

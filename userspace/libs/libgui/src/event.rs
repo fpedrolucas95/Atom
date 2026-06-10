@@ -52,10 +52,18 @@ impl KeyModifiers {
 
     pub fn to_u8(&self) -> u8 {
         let mut flags = 0u8;
-        if self.shift { flags |= 0x01; }
-        if self.ctrl { flags |= 0x02; }
-        if self.alt { flags |= 0x04; }
-        if self.caps_lock { flags |= 0x08; }
+        if self.shift {
+            flags |= 0x01;
+        }
+        if self.ctrl {
+            flags |= 0x02;
+        }
+        if self.alt {
+            flags |= 0x04;
+        }
+        if self.caps_lock {
+            flags |= 0x08;
+        }
         flags
     }
 }
@@ -72,30 +80,13 @@ pub enum MouseButton {
 #[derive(Debug, Clone, Copy)]
 pub enum MouseEvent {
     /// Mouse moved to new position
-    Move {
-        x: i32,
-        y: i32,
-        dx: i16,
-        dy: i16,
-    },
+    Move { x: i32, y: i32, dx: i16, dy: i16 },
     /// Mouse button pressed
-    ButtonDown {
-        button: MouseButton,
-        x: i32,
-        y: i32,
-    },
+    ButtonDown { button: MouseButton, x: i32, y: i32 },
     /// Mouse button released
-    ButtonUp {
-        button: MouseButton,
-        x: i32,
-        y: i32,
-    },
+    ButtonUp { button: MouseButton, x: i32, y: i32 },
     /// Mouse wheel scrolled
-    Scroll {
-        delta: i16,
-        x: i32,
-        y: i32,
-    },
+    Scroll { delta: i16, x: i32, y: i32 },
 }
 
 impl MouseEvent {
@@ -124,7 +115,12 @@ pub enum WindowEvent {
     /// Window should be closed
     Close,
     /// Area needs redraw
-    Expose { x: i32, y: i32, width: u32, height: u32 },
+    Expose {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// All possible events an application can receive

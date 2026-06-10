@@ -24,14 +24,14 @@
 
 #![allow(dead_code)]
 
+use crate::arch::gdt;
+use crate::process::{self, ProcessId};
+use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
-use crate::arch::gdt;
-use crate::process::{self, ProcessId};
-use crate::{log_debug, log_error, log_info, log_panic, log_warn};
 
 use crate::cap::CapabilityTable;
 
@@ -63,7 +63,8 @@ impl ResourceCounters {
             self.threads_terminated.load(Ordering::Relaxed),
             self.kernel_stacks_allocated.load(Ordering::Relaxed),
             self.kernel_stacks_freed.load(Ordering::Relaxed),
-            self.physical_pages_freed_on_termination.load(Ordering::Relaxed)
+            self.physical_pages_freed_on_termination
+                .load(Ordering::Relaxed)
         );
     }
 }
@@ -86,13 +87,26 @@ pub enum TerminationReason {
     /// Normal exit via SYS_THREAD_EXIT or SYS_PROCESS_EXIT
     NormalExit { exit_code: u64 },
     /// Killed due to page fault
-    PageFault { address: u64, error_code: u64, rip: u64 },
+    PageFault {
+        address: u64,
+        error_code: u64,
+        rip: u64,
+    },
     /// Killed due to userspace stack overflow (guard-page hit)
-    StackOverflow { address: u64, error_code: u64, rip: u64, rsp: u64 },
+    StackOverflow {
+        address: u64,
+        error_code: u64,
+        rip: u64,
+        rsp: u64,
+    },
     /// Killed due to general protection fault
     GeneralProtectionFault { error_code: u64, rip: u64 },
     /// Killed due to other exception
-    Exception { vector: u64, error_code: u64, rip: u64 },
+    Exception {
+        vector: u64,
+        error_code: u64,
+        rip: u64,
+    },
     /// Killed by kernel (resource exhaustion, policy violation, etc.)
     KilledByKernel { reason_code: u64 },
     /// Killed by watchdog (unresponsive, timeout, etc.)
@@ -109,7 +123,9 @@ impl TerminationReason {
             TerminationReason::StackOverflow { .. } => 0xFFFF_FFFF_0000_00F0,
             TerminationReason::GeneralProtectionFault { .. } => 0xFFFF_FFFF_0000_000D,
             TerminationReason::Exception { vector, .. } => 0xFFFF_FFFF_0000_0000 | vector,
-            TerminationReason::KilledByKernel { reason_code } => 0xFFFF_FFFE_0000_0000 | reason_code,
+            TerminationReason::KilledByKernel { reason_code } => {
+                0xFFFF_FFFE_0000_0000 | reason_code
+            }
             TerminationReason::Watchdog { .. } => 0xFFFF_FFFD_0000_0000,
             TerminationReason::OutOfMemory => 0xFFFF_FFFC_0000_0000,
         }
@@ -138,8 +154,7 @@ pub enum ThreadState {
     Exited,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum ThreadPriority {
     Idle = 0,
     Low = 1,
@@ -147,7 +162,6 @@ pub enum ThreadPriority {
     Normal = 2,
     High = 3,
 }
-
 
 const LOG_ORIGIN: &str = "thread";
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -301,7 +315,7 @@ impl CpuContext {
             rdx: 0,
             rsi: 0,
             rdi: 0,
-            rbp: user_stack - 16,  // Initialize RBP to stack base for frame pointer compatibility
+            rbp: user_stack - 16, // Initialize RBP to stack base for frame pointer compatibility
             rsp: user_stack - 16,
             r8: 0,
             r9: 0,
@@ -367,25 +381,27 @@ impl Thread {
         let id = ThreadId::new();
         let context = Box::new(CpuContext::new(entry_point, kernel_stack, address_space));
         let capability_table = crate::cap::create_capability_table(id);
-        
+
         // Write canary and immediately verify it
         let _canary_addr = unsafe {
-            let bottom = kernel_stack
-                .wrapping_sub(kernel_stack_size as u64);
+            let bottom = kernel_stack.wrapping_sub(kernel_stack_size as u64);
             let canary_addr = bottom as *mut u64;
             core::ptr::write_volatile(canary_addr, STACK_CANARY);
-            
+
             // Read back to verify write succeeded
             let readback = core::ptr::read_volatile(canary_addr);
-            
+
             if readback != STACK_CANARY {
                 log_error!(
                     LOG_ORIGIN,
                     "tid={} name={} Canary read-back mismatch! Got {:#X} expected {:#X}",
-                    id, name, readback, STACK_CANARY
+                    id,
+                    name,
+                    readback,
+                    STACK_CANARY
                 );
             }
-            
+
             canary_addr as u64
         };
 
@@ -415,10 +431,11 @@ impl Thread {
             "idle",
         )
     }
-    
+
     pub fn validate_stack(&self) -> bool {
         unsafe {
-            let bottom = self.kernel_stack
+            let bottom = self
+                .kernel_stack
                 .wrapping_sub(self.kernel_stack_size as u64);
             let canary_addr = bottom as *const u64;
             core::ptr::read_volatile(canary_addr) == STACK_CANARY
@@ -498,7 +515,10 @@ impl ThreadList {
 
     pub fn remove(&self, id: ThreadId) -> Option<Thread> {
         let mut threads = self.threads.lock();
-        let removed = threads.iter().position(|t| t.id == id).map(|pos| threads.remove(pos));
+        let removed = threads
+            .iter()
+            .position(|t| t.id == id)
+            .map(|pos| threads.remove(pos));
         drop(threads);
 
         if let Some(thread) = &removed {
@@ -589,7 +609,7 @@ impl ThreadList {
             Some(f(&mut threads[from_idx].context, &ctx_copy))
         }
     }
-    
+
     fn snapshot_thread(&self, id: ThreadId) -> Option<Thread> {
         let threads = self.threads.lock();
         threads.iter().find(|t| t.id == id).map(|t| Thread {
@@ -643,10 +663,7 @@ impl ThreadList {
         thread.capability_table.get(cap_handle).cloned()
     }
 
-    pub fn local_capability_handles(
-        &self,
-        thread_id: ThreadId,
-    ) -> Vec<crate::cap::CapHandle> {
+    pub fn local_capability_handles(&self, thread_id: ThreadId) -> Vec<crate::cap::CapHandle> {
         let threads = self.threads.lock();
         let Some(thread) = threads.iter().find(|t| t.id == thread_id) else {
             return Vec::new();
@@ -662,7 +679,10 @@ impl ThreadList {
     ) -> Result<(), crate::cap::CapError> {
         let mut threads = self.threads.lock();
 
-        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+        for thread in threads
+            .iter_mut()
+            .filter(|t| t.process_id == Some(process_id))
+        {
             thread.capability_table.set_owner_process(Some(process_id));
 
             if let Some(existing) = thread.capability_table.get(capability.handle).cloned() {
@@ -689,7 +709,10 @@ impl ThreadList {
         let mut threads = self.threads.lock();
         let mut removed: Option<crate::cap::Capability> = None;
 
-        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+        for thread in threads
+            .iter_mut()
+            .filter(|t| t.process_id == Some(process_id))
+        {
             let thread_removed = thread.capability_table.remove(cap_handle);
 
             debug_assert!(
@@ -725,7 +748,10 @@ impl ThreadList {
     ) -> Result<(), crate::cap::CapError> {
         let mut threads = self.threads.lock();
 
-        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+        for thread in threads
+            .iter_mut()
+            .filter(|t| t.process_id == Some(process_id))
+        {
             let parent = thread
                 .capability_table
                 .get_mut(parent_handle)
@@ -746,7 +772,10 @@ impl ThreadList {
     ) -> Result<(), crate::cap::CapError> {
         let mut threads = self.threads.lock();
 
-        for thread in threads.iter_mut().filter(|t| t.process_id == Some(process_id)) {
+        for thread in threads
+            .iter_mut()
+            .filter(|t| t.process_id == Some(process_id))
+        {
             let parent = thread
                 .capability_table
                 .get_mut(parent_handle)
@@ -756,7 +785,6 @@ impl ThreadList {
 
         Ok(())
     }
-
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -777,10 +805,7 @@ static USERMODE_ENTRIES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new())
 pub static CURRENT_THREAD_KSTACK: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
-    log_info!(
-        LOG_ORIGIN,
-        "Threading subsystem initialized"
-    );
+    log_info!(LOG_ORIGIN, "Threading subsystem initialized");
 }
 
 fn track_thread_process(thread: &Thread) {
@@ -788,12 +813,10 @@ fn track_thread_process(thread: &Thread) {
         debug_assert!(
             thread.is_userspace,
             "Thread {} has process_id {} but is not marked as userspace",
-            thread.id,
-            process_id
+            thread.id, process_id
         );
         debug_assert_ne!(
-            thread.address_space,
-            0,
+            thread.address_space, 0,
             "Userspace thread {} must have a non-zero address space",
             thread.id
         );
@@ -813,11 +836,7 @@ fn track_thread_process(thread: &Thread) {
             thread.id
         );
 
-        process::debug_assert_thread_process_alignment(
-            process_id,
-            thread.id,
-            thread.address_space,
-        );
+        process::debug_assert_thread_process_alignment(process_id, thread.id, thread.address_space);
     } else {
         debug_assert!(
             !thread.is_userspace,
@@ -828,12 +847,9 @@ fn track_thread_process(thread: &Thread) {
         if thread.address_space != 0 {
             let mapped_process = process::process_id_for_pml4(thread.address_space);
             debug_assert_eq!(
-                mapped_process,
-                None,
+                mapped_process, None,
                 "Kernel thread {} unexpectedly resolves to process {:?} via PML4 0x{:X}",
-                thread.id,
-                mapped_process,
-                thread.address_space
+                thread.id, mapped_process, thread.address_space
             );
         }
     }
@@ -850,8 +866,7 @@ fn sync_thread_capability_mirror_from_process(thread: &mut Thread) {
         debug_assert!(
             false,
             "Thread {} missing process {} while syncing capability mirror",
-            thread.id,
-            process_id
+            thread.id, process_id
         );
         return;
     };
@@ -911,8 +926,7 @@ fn debug_assert_capability_mirror_process(thread_id: ThreadId, process_id: Proce
         debug_assert!(
             false,
             "Thread {} missing process {} while validating capability mirror",
-            thread_id,
-            process_id
+            thread_id, process_id
         );
         return;
     };
@@ -1017,12 +1031,18 @@ pub fn get_thread_stats() -> ThreadStats {
 /// Get the address_space (PML4) of a thread
 pub fn get_thread_address_space(thread_id: ThreadId) -> Option<u64> {
     let threads = THREAD_LIST.threads.lock();
-    threads.iter().find(|t| t.id == thread_id).map(|t| t.address_space)
+    threads
+        .iter()
+        .find(|t| t.id == thread_id)
+        .map(|t| t.address_space)
 }
 
 pub fn get_thread_process_id(thread_id: ThreadId) -> Option<ProcessId> {
     let threads = THREAD_LIST.threads.lock();
-    threads.iter().find(|t| t.id == thread_id).and_then(|t| t.process_id)
+    threads
+        .iter()
+        .find(|t| t.id == thread_id)
+        .and_then(|t| t.process_id)
 }
 
 pub fn get_thread_name(thread_id: ThreadId) -> Option<&'static str> {
@@ -1065,13 +1085,9 @@ pub fn get_thread_process_pml4(thread_id: ThreadId) -> Option<u64> {
 
     if is_userspace {
         assert_eq!(
-            cached_pml4,
-            process_pml4,
+            cached_pml4, process_pml4,
             "userspace thread {} must cache the same primary PML4 as process {}: 0x{:X} != 0x{:X}",
-            thread_id,
-            process_id,
-            cached_pml4,
-            process_pml4
+            thread_id, process_id, cached_pml4, process_pml4
         );
     }
 
@@ -1108,9 +1124,7 @@ pub(crate) fn remove_process_capability_child_mirror(
     THREAD_LIST.remove_process_capability_child_mirror(process_id, parent_handle, child_handle)
 }
 
-pub(crate) fn list_thread_local_capabilities(
-    thread_id: ThreadId,
-) -> Vec<crate::cap::CapHandle> {
+pub(crate) fn list_thread_local_capabilities(thread_id: ThreadId) -> Vec<crate::cap::CapHandle> {
     THREAD_LIST.local_capability_handles(thread_id)
 }
 
@@ -1139,13 +1153,9 @@ pub fn add_thread_capability(
 
     let process_id = get_thread_process_id(thread_id).ok_or(crate::cap::CapError::NotFound)?;
     debug_assert_eq!(
-        capability.owner,
-        process_id,
+        capability.owner, process_id,
         "Capability {} owner {} does not match thread {} process {}",
-        capability.handle,
-        capability.owner,
-        thread_id,
-        process_id
+        capability.handle, capability.owner, thread_id, process_id
     );
 
     let handle = process::add_process_capability(process_id, capability.clone())?;
@@ -1183,10 +1193,7 @@ pub fn remove_thread_capability(
     removed
 }
 
-pub fn thread_has_capability(
-    thread_id: ThreadId,
-    cap_handle: crate::cap::CapHandle,
-) -> bool {
+pub fn thread_has_capability(thread_id: ThreadId, cap_handle: crate::cap::CapHandle) -> bool {
     let Ok(process_id) = require_process_capability_authority(thread_id) else {
         return false;
     };
@@ -1214,11 +1221,7 @@ where
         process_id
     );
     debug_assert_capability_mirror_process(thread_id, process_id);
-    process::validate_process_capability_by_type(
-        process_id,
-        required_permission,
-        resource_filter,
-    )
+    process::validate_process_capability_by_type(process_id, required_permission, resource_filter)
 }
 
 extern "win64" {
@@ -1283,7 +1286,7 @@ pub unsafe fn switch_thread_context(current: &mut CpuContext, next: &CpuContext)
 
 pub unsafe fn jump_to_context(context: &CpuContext) -> ! {
     guard_context_or_halt(context, "initial");
-    
+
     // For first-time user entry, use dedicated enter_user to avoid complex switch logic
     let is_user_mode = (context.cs & 0x3) == 0x3;
     if is_user_mode {
@@ -1319,9 +1322,7 @@ pub fn jump_to_thread(thread_id: ThreadId) -> ! {
         log_user_entry_once(thread_id, &ctx_copy);
     }
 
-    unsafe {
-        jump_to_context(&ctx_copy)
-    }
+    unsafe { jump_to_context(&ctx_copy) }
 }
 
 pub fn kernel_stack_top(thread_id: ThreadId) -> Option<u64> {
@@ -1337,7 +1338,7 @@ pub fn kernel_stack_top(thread_id: ThreadId) -> Option<u64> {
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessInfo {
     pub pid: u64,
-    pub state: u8,  // 0=Running, 1=Ready, 2=Blocked, 3=Exited
+    pub state: u8, // 0=Running, 1=Ready, 2=Blocked, 3=Exited
     pub name: [u8; 32],
 }
 
@@ -1388,7 +1389,10 @@ pub fn list_processes(buffer: &mut [ProcessInfo]) -> usize {
 /// Get total number of active (non-exited) processes/threads
 pub fn process_count() -> usize {
     let threads = THREAD_LIST.threads.lock();
-    threads.iter().filter(|t| t.state != ThreadState::Exited).count()
+    threads
+        .iter()
+        .filter(|t| t.state != ThreadState::Exited)
+        .count()
 }
 
 /// Get information about all threads for OOM killer decisions.
@@ -1398,7 +1402,7 @@ pub fn get_all_thread_info() -> alloc::vec::Vec<(ThreadId, &'static str, Option<
     threads
         .iter()
         .filter(|t| t.state != ThreadState::Exited)
-    .map(|t| (t.id, t.name, t.process_id, t.is_userspace))
+        .map(|t| (t.id, t.name, t.process_id, t.is_userspace))
         .collect()
 }
 
@@ -1527,57 +1531,72 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
     crate::interrupts::disable();
 
     // Acquire lock, validate, update contexts, get pointers, then RELEASE lock before switch
-    let switch_info = {
-        let mut threads = THREAD_LIST.threads.lock();
+    let switch_info =
+        {
+            let mut threads = THREAD_LIST.threads.lock();
 
-        let from_idx = threads.iter().position(|t| t.id == from_id)
-            .expect("from thread not found in context switch");
-        let to_idx = threads.iter().position(|t| t.id == to_id)
-            .expect("to thread not found in context switch");
+            let from_idx = threads
+                .iter()
+                .position(|t| t.id == from_id)
+                .expect("from thread not found in context switch");
+            let to_idx = threads
+                .iter()
+                .position(|t| t.id == to_id)
+                .expect("to thread not found in context switch");
 
-        // Validate stack canary for outgoing thread
-        let from_thread = &threads[from_idx];
-        let bottom = from_thread.kernel_stack.wrapping_sub(from_thread.kernel_stack_size as u64);
-        unsafe {
-            let canary_addr = bottom as *const u64;
-            let actual = core::ptr::read_volatile(canary_addr);
-            if actual != STACK_CANARY {
-                log_error!(
+            // Validate stack canary for outgoing thread
+            let from_thread = &threads[from_idx];
+            let bottom = from_thread
+                .kernel_stack
+                .wrapping_sub(from_thread.kernel_stack_size as u64);
+            unsafe {
+                let canary_addr = bottom as *const u64;
+                let actual = core::ptr::read_volatile(canary_addr);
+                if actual != STACK_CANARY {
+                    log_error!(
                     LOG_ORIGIN,
                     "[CANARY_CORRUPT] tid={} name={} canary_addr={:#X} expected={:#X} actual={:#X}",
                     from_id, from_thread.name, canary_addr as u64, STACK_CANARY, actual
                 );
+                }
+            };
+
+            // Force CR3 to match address_space
+            let from_addr_space = threads[from_idx].address_space;
+            let to_addr_space = threads[to_idx].address_space;
+            let current_cr3 = unsafe {
+                let cr3: u64;
+                core::arch::asm!("mov {}, cr3", out(reg) cr3);
+                cr3
+            };
+            let from_cr3 = if from_addr_space == 0 {
+                current_cr3
+            } else {
+                from_addr_space
+            };
+            let to_cr3 = if to_addr_space == 0 {
+                current_cr3
+            } else {
+                to_addr_space
+            };
+            threads[from_idx].context.cr3 = from_cr3;
+            threads[to_idx].context.cr3 = to_cr3;
+
+            let to_is_userspace = threads[to_idx].is_userspace;
+            // Dereference the Box to get a raw pointer into the heap allocation.
+            // The Box's inner CpuContext lives at a stable heap address even when
+            // Vec<Thread> reallocates after we release the lock below — that is the
+            // point of storing context as Box<CpuContext> instead of inline.
+            let from_ptr = &mut *threads[from_idx].context as *mut CpuContext;
+            let to_ptr = &*threads[to_idx].context as *const CpuContext;
+            let to_kernel_stack = threads[to_idx].kernel_stack;
+
+            if to_is_userspace {
+                log_user_entry_once(to_id, &threads[to_idx].context);
             }
-        };
 
-        // Force CR3 to match address_space
-        let from_addr_space = threads[from_idx].address_space;
-        let to_addr_space = threads[to_idx].address_space;
-        let current_cr3 = unsafe {
-            let cr3: u64;
-            core::arch::asm!("mov {}, cr3", out(reg) cr3);
-            cr3
-        };
-        let from_cr3 = if from_addr_space == 0 { current_cr3 } else { from_addr_space };
-        let to_cr3 = if to_addr_space == 0 { current_cr3 } else { to_addr_space };
-        threads[from_idx].context.cr3 = from_cr3;
-        threads[to_idx].context.cr3 = to_cr3;
-
-        let to_is_userspace = threads[to_idx].is_userspace;
-        // Dereference the Box to get a raw pointer into the heap allocation.
-        // The Box's inner CpuContext lives at a stable heap address even when
-        // Vec<Thread> reallocates after we release the lock below — that is the
-        // point of storing context as Box<CpuContext> instead of inline.
-        let from_ptr = &mut *threads[from_idx].context as *mut CpuContext;
-        let to_ptr = &*threads[to_idx].context as *const CpuContext;
-        let to_kernel_stack = threads[to_idx].kernel_stack;
-
-        if to_is_userspace {
-            log_user_entry_once(to_id, &*threads[to_idx].context);
-        }
-
-        (from_ptr, to_ptr, to_kernel_stack, to_cr3)
-    }; // Lock released
+            (from_ptr, to_ptr, to_kernel_stack, to_cr3)
+        }; // Lock released
 
     let (from_ctx_ptr, to_ctx_ptr, to_kernel_stack, to_cr3) = switch_info;
 
@@ -1599,7 +1618,6 @@ pub fn perform_context_switch(from_id: ThreadId, to_id: ThreadId) {
         to_id,
         to_cr3
     );
-
 
     // Unified context switch: ALWAYS use switch_context to preserve kernel state.
     // This fixes the issue where kernel threads (like idle) would be restarted
@@ -1664,7 +1682,8 @@ fn free_user_space_pages(pml4_phys: usize) -> usize {
                                         // Identity-mapped kernel pages (like the heap) do not have the USER bit.
                                         // This prevents processes from freeing kernel memory during termination.
                                         if (page_entry & 0x4) != 0 {
-                                            let phys_frame = (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
+                                            let phys_frame =
+                                                (page_entry & 0x000F_FFFF_FFFF_F000) as usize;
 
                                             // Avoid freeing the framebuffer range even if mapped to userspace
                                             // as it's a shared hardware resource.
@@ -1979,10 +1998,7 @@ fn cleanup_reaped_address_space(ticket: &ReapTicket) {
         let mut tracked_pages_freed = 0usize;
 
         for account in tracked_pages {
-            let _ = crate::mm::vm::unmap_page_in_pml4(
-                pml4 as usize,
-                account.vaddr.as_usize(),
-            );
+            let _ = crate::mm::vm::unmap_page_in_pml4(pml4 as usize, account.vaddr.as_usize());
             if crate::mm::vma::free_page_account(account) {
                 tracked_pages_freed = tracked_pages_freed.saturating_add(1);
             }
@@ -2092,8 +2108,16 @@ fn detach_zombie_tcb(zombie: ZombieInfo) -> Option<ReapTicket> {
     Some(ReapTicket {
         id: thread.id,
         process_id: thread.process_id.or(zombie.process_id),
-        pml4: if thread.address_space != 0 { thread.address_space } else { zombie.pml4 },
-        stack: if thread.kernel_stack != 0 { thread.kernel_stack } else { zombie.stack },
+        pml4: if thread.address_space != 0 {
+            thread.address_space
+        } else {
+            zombie.pml4
+        },
+        stack: if thread.kernel_stack != 0 {
+            thread.kernel_stack
+        } else {
+            zombie.stack
+        },
         stack_size: if thread.kernel_stack_size != 0 {
             thread.kernel_stack_size
         } else {
@@ -2171,15 +2195,26 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         }
     };
 
-    let (kernel_stack, kernel_stack_size, address_space_cr3, thread_process_id, thread_name) = match thread_info {
-        Some((ks, kss, as_cr3, process_id, name)) => (ks, kss, as_cr3, process_id, name),
-        None => {
-            log_warn!(LOG_ORIGIN, "Thread {} not found in thread list during termination", thread_id);
-            return;
-        }
-    };
+    let (kernel_stack, kernel_stack_size, address_space_cr3, thread_process_id, thread_name) =
+        match thread_info {
+            Some((ks, kss, as_cr3, process_id, name)) => (ks, kss, as_cr3, process_id, name),
+            None => {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Thread {} not found in thread list during termination",
+                    thread_id
+                );
+                return;
+            }
+        };
 
-    log_info!(LOG_ORIGIN, "Terminating '{}' (TID={}, CR3=0x{:X})", thread_name, thread_id, address_space_cr3);
+    log_info!(
+        LOG_ORIGIN,
+        "Terminating '{}' (TID={}, CR3=0x{:X})",
+        thread_name,
+        thread_id,
+        address_space_cr3
+    );
     log_debug!(LOG_ORIGIN, "Step 1/10: Thread marked as Exited");
 
     // Step 2: Close all IPC ports and wake waiters
@@ -2198,7 +2233,10 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
         );
         claimed
     } else {
-        log_debug!(LOG_ORIGIN, "Step 3/10: Kernel thread - no process cleanup claim");
+        log_debug!(
+            LOG_ORIGIN,
+            "Step 3/10: Kernel thread - no process cleanup claim"
+        );
         false
     };
 
@@ -2206,13 +2244,25 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     // userspace thread exits. Kernel threads keep the original thread-local path.
     if let Some(process_id) = thread_process_id {
         if process_cleanup_claimed {
-            log_debug!(LOG_ORIGIN, "Step 4/10: Cleaning up process-owned shared memory for {}", process_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Step 4/10: Cleaning up process-owned shared memory for {}",
+                process_id
+            );
             crate::shared_mem::cleanup_process_shared_memory(process_id);
 
-            log_debug!(LOG_ORIGIN, "Step 4/10: Closing process-owned FDs for {}", process_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Step 4/10: Closing process-owned FDs for {}",
+                process_id
+            );
             crate::syscall::close_fds_for_process(process_id);
 
-            log_debug!(LOG_ORIGIN, "Step 4/10: Revoking process-owned capabilities for {}", process_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Step 4/10: Revoking process-owned capabilities for {}",
+                process_id
+            );
             crate::cap::revoke_all_process_capabilities(process_id);
         } else {
             log_debug!(
@@ -2227,11 +2277,17 @@ pub fn terminate_entity(thread_id: ThreadId, reason: TerminationReason) {
     }
 
     // Step 5: Clean up address spaces from manager
-    log_debug!(LOG_ORIGIN, "Step 5/10: Removing address spaces from manager");
+    log_debug!(
+        LOG_ORIGIN,
+        "Step 5/10: Removing address spaces from manager"
+    );
     crate::mm::addrspace::cleanup_thread_address_spaces(thread_id, address_space_cr3);
 
     // Step 8: Remove from scheduler (handled automatically when thread is removed or state is Exited)
-    log_debug!(LOG_ORIGIN, "Step 8/10: Scheduler will skip this thread from now on");
+    log_debug!(
+        LOG_ORIGIN,
+        "Step 8/10: Scheduler will skip this thread from now on"
+    );
 
     // Always defer final cleanup to the idle thread's reaper.
     //

@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use atom_syscall::ipc::{PortId, create_port};
+use atom_syscall::ipc::{create_port, PortId};
 use atom_syscall::SyscallResult;
 
 /// Well-known port identifiers

@@ -169,15 +169,21 @@ pub use port_io::*;
 // Fallback stubs for non-x86_64 targets (allow the kernel to compile on
 // other architectures even though port I/O is not meaningful there).
 #[cfg(not(target_arch = "x86_64"))]
-pub unsafe fn inb(_port: u16) -> u8  { 0 }
+pub unsafe fn inb(_port: u16) -> u8 {
+    0
+}
 #[cfg(not(target_arch = "x86_64"))]
 pub unsafe fn outb(_port: u16, _value: u8) {}
 #[cfg(not(target_arch = "x86_64"))]
-pub unsafe fn inw(_port: u16) -> u16 { 0 }
+pub unsafe fn inw(_port: u16) -> u16 {
+    0
+}
 #[cfg(not(target_arch = "x86_64"))]
 pub unsafe fn outw(_port: u16, _value: u16) {}
 #[cfg(not(target_arch = "x86_64"))]
-pub unsafe fn inl(_port: u16) -> u32 { 0 }
+pub unsafe fn inl(_port: u16) -> u32 {
+    0
+}
 #[cfg(not(target_arch = "x86_64"))]
 pub unsafe fn outl(_port: u16, _value: u32) {}
 

@@ -79,6 +79,10 @@ impl SystemInfo {
 
 #[allow(dead_code)]
 fn trim_nulls(bytes: &[u8]) -> &str {
-    let last = bytes.iter().rposition(|&b| b != 0).map(|idx| idx + 1).unwrap_or(0);
+    let last = bytes
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
     core::str::from_utf8(&bytes[..last]).unwrap_or("")
 }

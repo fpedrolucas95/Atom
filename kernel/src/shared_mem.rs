@@ -50,11 +50,11 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use atom_abi::{UserAddressError, UserRange, UserVAddr};
+use crate::log_debug;
+use crate::log_info;
 use crate::mm::{pmm, vm};
 use crate::process::{self, ProcessId};
-use crate::log_info;
-use crate::log_debug;
+use atom_abi::{UserAddressError, UserRange, UserVAddr};
 
 const LOG_ORIGIN: &str = "sharedmem";
 
@@ -299,8 +299,12 @@ impl SharedRegion {
         Ok(virt_addr)
     }
 
-    fn take_process_mapping(&mut self, process_id: ProcessId) -> Result<RegionMapping, SharedMemError> {
-        let mapping_idx = self.mappings
+    fn take_process_mapping(
+        &mut self,
+        process_id: ProcessId,
+    ) -> Result<RegionMapping, SharedMemError> {
+        let mapping_idx = self
+            .mappings
             .iter()
             .position(|m| m.process_id == process_id)
             .ok_or(SharedMemError::NotMapped)?;
@@ -357,7 +361,11 @@ impl SharedRegion {
         Ok(())
     }
 
-    fn unmap(&mut self, process_id: ProcessId, current_pml4_phys: usize) -> Result<(), SharedMemError> {
+    fn unmap(
+        &mut self,
+        process_id: ProcessId,
+        current_pml4_phys: usize,
+    ) -> Result<(), SharedMemError> {
         self.unmap_process_mapping(process_id, Some(current_pml4_phys))
     }
 
@@ -401,12 +409,9 @@ fn debug_assert_process_pml4_alignment(process_id: ProcessId, pml4_phys: usize) 
     let process = process::get_process(process_id)
         .expect("shared_mem process references must resolve to a registered process");
     debug_assert_eq!(
-        process.pml4_phys as usize,
-        pml4_phys,
+        process.pml4_phys as usize, pml4_phys,
         "shared_mem process {} must map through its registered PML4 0x{:X}, got 0x{:X}",
-        process_id,
-        process.pml4_phys,
-        pml4_phys
+        process_id, process.pml4_phys, pml4_phys
     );
 }
 
@@ -431,8 +436,7 @@ fn process_pml4(process_id: ProcessId) -> Result<usize, SharedMemError> {
     let process = process::get_process(process_id).ok_or(SharedMemError::PermissionDenied)?;
     let pml4_phys = process.pml4_phys as usize;
     debug_assert_ne!(
-        pml4_phys,
-        0,
+        pml4_phys, 0,
         "userspace shared_mem process {} must have a non-zero PML4",
         process_id
     );
@@ -446,7 +450,11 @@ impl SharedMemManager {
         }
     }
 
-    fn create_region(&self, owner_process: ProcessId, size: usize) -> Result<RegionId, SharedMemError> {
+    fn create_region(
+        &self,
+        owner_process: ProcessId,
+        size: usize,
+    ) -> Result<RegionId, SharedMemError> {
         debug_assert_process_exists(owner_process);
 
         let region_id = RegionId::new();
@@ -484,8 +492,7 @@ impl SharedMemManager {
             region_id
         );
         debug_assert_eq!(
-            region.ref_count,
-            0,
+            region.ref_count, 0,
             "shared_mem internal destruction requires region {} ref_count to be zero",
             region_id
         );
@@ -557,7 +564,8 @@ impl SharedMemManager {
             log_debug!(
                 LOG_ORIGIN,
                 "find_free_va: invalid window base=0x{:X} limit=0x{:X}",
-                va_base, va_limit
+                va_base,
+                va_limit
             );
             return Err(SharedMemError::NoFreeVirtualAddress);
         }
@@ -675,7 +683,8 @@ impl SharedMemManager {
         let effective_va = if let Some(base) = virt_addr {
             Self::validate_explicit_va(base, region_size)?
         } else {
-            let size = regions.get(&region_id)
+            let size = regions
+                .get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?
                 .size;
             Self::find_free_va(&regions, size, process_id, pml4_phys)?
@@ -683,7 +692,9 @@ impl SharedMemManager {
 
         let effective_range = atom_abi::validate_user_page_aligned_range(effective_va, region_size)
             .map_err(map_user_address_error)?;
-        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        let region = regions
+            .get_mut(&region_id)
+            .ok_or(SharedMemError::InvalidRegion)?;
         let mapped_va = region.map(process_id, effective_range, flags, pml4_phys)?;
         let shared_pages = region_size / pmm::PAGE_SIZE;
         drop(regions);
@@ -715,7 +726,8 @@ impl SharedMemManager {
         let effective_va = if let Some(base) = virt_addr {
             Self::validate_explicit_va(base, region_size)?
         } else {
-            let size = regions.get(&region_id)
+            let size = regions
+                .get(&region_id)
                 .ok_or(SharedMemError::InvalidRegion)?
                 .size;
             Self::find_free_va(&regions, size, process_id, pml4_phys)?
@@ -723,7 +735,9 @@ impl SharedMemManager {
 
         let effective_range = atom_abi::validate_user_page_aligned_range(effective_va, region_size)
             .map_err(map_user_address_error)?;
-        let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        let region = regions
+            .get_mut(&region_id)
+            .ok_or(SharedMemError::InvalidRegion)?;
         let mapped_va = region.map(process_id, effective_range, flags, pml4_phys)?;
         let shared_pages = region_size / pmm::PAGE_SIZE;
         drop(regions);
@@ -738,7 +752,10 @@ impl SharedMemManager {
     ///
     /// Note: callers pass `None` to `map_region_in_pml4` as the auto-assign
     /// sentinel; that case is intercepted *before* this function is called.
-    fn validate_explicit_va(virt_addr: UserVAddr, region_size: usize) -> Result<usize, SharedMemError> {
+    fn validate_explicit_va(
+        virt_addr: UserVAddr,
+        region_size: usize,
+    ) -> Result<usize, SharedMemError> {
         let base = virt_addr.as_usize();
         let _ = atom_abi::validate_user_page_aligned_range(base, region_size)
             .map_err(map_user_address_error)?;
@@ -746,14 +763,23 @@ impl SharedMemManager {
     }
 
     /// Unmap a region from the given process.
-    fn unmap_region(&self, region_id: RegionId, process_id: ProcessId, pml4_phys: usize) -> Result<(), SharedMemError> {
+    fn unmap_region(
+        &self,
+        region_id: RegionId,
+        process_id: ProcessId,
+        pml4_phys: usize,
+    ) -> Result<(), SharedMemError> {
         let mut regions = self.regions.lock();
         let shared_pages = {
-            let region = regions.get(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+            let region = regions
+                .get(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?;
             region.size / pmm::PAGE_SIZE
         };
         {
-            let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+            let region = regions
+                .get_mut(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?;
             region.unmap(process_id, pml4_phys)?;
         }
 
@@ -766,12 +792,18 @@ impl SharedMemManager {
         Ok(())
     }
 
-    fn destroy_region(&self, region_id: RegionId, caller_process: ProcessId) -> Result<(), SharedMemError> {
+    fn destroy_region(
+        &self,
+        region_id: RegionId,
+        caller_process: ProcessId,
+    ) -> Result<(), SharedMemError> {
         debug_assert_process_exists(caller_process);
         let mut regions = self.regions.lock();
 
         let should_destroy = {
-            let region = regions.get_mut(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+            let region = regions
+                .get_mut(&region_id)
+                .ok_or(SharedMemError::InvalidRegion)?;
 
             if region.owner_process != caller_process {
                 return Err(SharedMemError::PermissionDenied);
@@ -811,7 +843,9 @@ impl SharedMemManager {
 
     fn get_region_info(&self, region_id: RegionId) -> Result<RegionInfo, SharedMemError> {
         let regions = self.regions.lock();
-        let region = regions.get(&region_id).ok_or(SharedMemError::InvalidRegion)?;
+        let region = regions
+            .get(&region_id)
+            .ok_or(SharedMemError::InvalidRegion)?;
 
         Ok(RegionInfo {
             id: region.id,
@@ -901,7 +935,9 @@ impl core::fmt::Display for SharedMemError {
             SharedMemError::MappingFailed => write!(f, "Mapping failed"),
             SharedMemError::RegionInUse => write!(f, "Region in use"),
             SharedMemError::AddressInUse => write!(f, "Address in use by another mapping"),
-            SharedMemError::NoFreeVirtualAddress => write!(f, "No free virtual address in shared range"),
+            SharedMemError::NoFreeVirtualAddress => {
+                write!(f, "No free virtual address in shared range")
+            }
         }
     }
 }
@@ -981,14 +1017,27 @@ pub fn map_region_in_pml4(
     virt_addr: Option<UserVAddr>,
     flags: RegionFlags,
 ) -> Result<usize, SharedMemError> {
-    SHARED_MEM_MANAGER.map_region_in_pml4(region_id, process_id, pml4_phys as usize, virt_addr, flags)
+    SHARED_MEM_MANAGER.map_region_in_pml4(
+        region_id,
+        process_id,
+        pml4_phys as usize,
+        virt_addr,
+        flags,
+    )
 }
 
-pub fn unmap_region(region_id: RegionId, process_id: ProcessId, pml4_phys: u64) -> Result<(), SharedMemError> {
+pub fn unmap_region(
+    region_id: RegionId,
+    process_id: ProcessId,
+    pml4_phys: u64,
+) -> Result<(), SharedMemError> {
     SHARED_MEM_MANAGER.unmap_region(region_id, process_id, pml4_phys as usize)
 }
 
-pub fn destroy_region(region_id: RegionId, caller_process: ProcessId) -> Result<(), SharedMemError> {
+pub fn destroy_region(
+    region_id: RegionId,
+    caller_process: ProcessId,
+) -> Result<(), SharedMemError> {
     SHARED_MEM_MANAGER.destroy_region(region_id, caller_process)
 }
 
@@ -1099,11 +1148,9 @@ pub fn cleanup_process_shared_memory(process_id: ProcessId) {
     for region_id in &regions_to_destroy {
         if let Some(region) = regions.get_mut(region_id) {
             debug_assert_eq!(
-                region.owner_process,
-                process_id,
+                region.owner_process, process_id,
                 "shared_mem marked wrong owner for region {} during process {} cleanup",
-                region_id,
-                process_id
+                region_id, process_id
             );
             region.mark_destroying();
         }
@@ -1132,17 +1179,14 @@ pub fn cleanup_process_shared_memory(process_id: ProcessId) {
     for region_id in regions_to_destroy {
         let region_belongs_to_process = if let Some(region) = regions.get(&region_id) {
             debug_assert_eq!(
-                region.owner_process,
-                process_id,
+                region.owner_process, process_id,
                 "shared_mem cleanup observed wrong owner for region {} during process {} cleanup",
-                region_id,
-                process_id
+                region_id, process_id
             );
             debug_assert!(
                 region.is_destroying,
                 "shared_mem owned region {} must be marked destroying during process {} cleanup",
-                region_id,
-                process_id
+                region_id, process_id
             );
             true
         } else {
@@ -1157,9 +1201,10 @@ pub fn cleanup_process_shared_memory(process_id: ProcessId) {
     debug_assert_no_zombie_regions(&regions);
 
     debug_assert!(
-        !regions
-            .values()
-            .any(|region| region.mappings.iter().any(|mapping| mapping.process_id == process_id)),
+        !regions.values().any(|region| region
+            .mappings
+            .iter()
+            .any(|mapping| mapping.process_id == process_id)),
         "shared_mem cleanup left mappings behind for process {}",
         process_id
     );

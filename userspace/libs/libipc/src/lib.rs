@@ -28,15 +28,15 @@
 extern crate alloc;
 
 pub mod messages;
-pub mod protocol;
 pub mod ports;
+pub mod protocol;
 pub mod serialization;
 pub mod services;
 
 // Re-exports for convenience
 pub use messages::*;
-pub use protocol::*;
 pub use ports::*;
+pub use protocol::*;
 pub use services::*;
 
 /// Maximum message size in bytes

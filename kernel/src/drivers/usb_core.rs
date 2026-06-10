@@ -49,7 +49,12 @@ pub enum DeviceState {
 static mut DEVICES: [Option<UsbDevice>; 64] = [None; 64];
 
 pub fn handle_port_connection(port_id: u8, speed: u8) {
-    log_info!("usb_core", "New device connected on port {}, speed {}", port_id, speed);
+    log_info!(
+        "usb_core",
+        "New device connected on port {}, speed {}",
+        port_id,
+        speed
+    );
 
     let mut trb = Trb::new();
     trb.control = 9 << 10; // Enable Slot Command

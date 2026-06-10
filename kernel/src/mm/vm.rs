@@ -60,11 +60,11 @@ use core::arch::asm;
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
+use crate::boot::{EfiMemoryDescriptor, MemoryMap};
 use crate::mm::pmm;
 use crate::mm::ValidationError;
-use crate::boot::{EfiMemoryDescriptor, MemoryMap};
 
-use crate::{log_debug, log_info, log_warn, log_error};
+use crate::{log_debug, log_error, log_info, log_warn};
 
 const EFI_LOADER_CODE: u32 = 1;
 const EFI_LOADER_DATA: u32 = 2;
@@ -397,12 +397,7 @@ pub fn init(memory_map: &MemoryMap) {
 
             if phys < HIGHER_HALF_MIRROR_SIZE {
                 let higher_half = HIGHER_HALF_BASE + phys;
-                if let Err(err) = map_page_internal(
-                    pml4_phys,
-                    higher_half,
-                    phys,
-                    page_flags,
-                ) {
+                if let Err(err) = map_page_internal(pml4_phys, higher_half, phys, page_flags) {
                     if err != VmError::AlreadyMapped {
                         log_error!(
                             LOG_ORIGIN,
@@ -421,10 +416,10 @@ pub fn init(memory_map: &MemoryMap) {
 
     log_info!(LOG_ORIGIN, "Mapping VGA text buffer at 0xB8000...");
     let vga_flags = PageFlags(
-        PageFlags::PRESENT.bits() |
-        PageFlags::WRITABLE.bits() |
-        PageFlags::CACHE_DISABLE.bits() |
-        PageFlags::GLOBAL.bits()
+        PageFlags::PRESENT.bits()
+            | PageFlags::WRITABLE.bits()
+            | PageFlags::CACHE_DISABLE.bits()
+            | PageFlags::GLOBAL.bits(),
     );
 
     for offset in (0..8).map(|i| i * pmm::PAGE_SIZE) {
@@ -434,7 +429,12 @@ pub fn init(memory_map: &MemoryMap) {
                 log_debug!(LOG_ORIGIN, "Mapped VGA page 0x{:X}", vga_addr);
             }
             Err(err) => {
-                log_error!(LOG_ORIGIN, "Failed to map VGA buffer page 0x{:X} (err: {:?})", vga_addr, err);
+                log_error!(
+                    LOG_ORIGIN,
+                    "Failed to map VGA buffer page 0x{:X} (err: {:?})",
+                    vga_addr,
+                    err
+                );
             }
         }
     }
@@ -442,10 +442,10 @@ pub fn init(memory_map: &MemoryMap) {
     log_info!(LOG_ORIGIN, "Mapping Local APIC at 0xFEE00000...");
     let apic_addr = 0xFEE00000;
     let apic_flags = PageFlags(
-        PageFlags::PRESENT.bits() |
-        PageFlags::WRITABLE.bits() |
-        PageFlags::CACHE_DISABLE.bits() |
-        PageFlags::GLOBAL.bits()
+        PageFlags::PRESENT.bits()
+            | PageFlags::WRITABLE.bits()
+            | PageFlags::CACHE_DISABLE.bits()
+            | PageFlags::GLOBAL.bits(),
     );
 
     match map_page_internal(pml4_phys, apic_addr, apic_addr, apic_flags) {
@@ -453,17 +453,22 @@ pub fn init(memory_map: &MemoryMap) {
             log_info!(LOG_ORIGIN, "Mapped APIC at 0x{:X}", apic_addr);
         }
         Err(err) => {
-            log_error!(LOG_ORIGIN, "Failed to map APIC at 0x{:X} (err: {:?})", apic_addr, err);
+            log_error!(
+                LOG_ORIGIN,
+                "Failed to map APIC at 0x{:X} (err: {:?})",
+                apic_addr,
+                err
+            );
         }
     }
-    
+
     log_info!(LOG_ORIGIN, "Mapping I/O APIC at 0xFEC00000...");
     let ioapic_addr = 0xFEC00000;
     let ioapic_flags = PageFlags(
-        PageFlags::PRESENT.bits() |
-        PageFlags::WRITABLE.bits() |
-        PageFlags::CACHE_DISABLE.bits() |
-        PageFlags::GLOBAL.bits()
+        PageFlags::PRESENT.bits()
+            | PageFlags::WRITABLE.bits()
+            | PageFlags::CACHE_DISABLE.bits()
+            | PageFlags::GLOBAL.bits(),
     );
 
     match map_page_internal(pml4_phys, ioapic_addr, ioapic_addr, ioapic_flags) {
@@ -471,7 +476,12 @@ pub fn init(memory_map: &MemoryMap) {
             log_info!(LOG_ORIGIN, "Mapped I/O APIC at 0x{:X}", ioapic_addr);
         }
         Err(err) => {
-            log_error!(LOG_ORIGIN, "Failed to map I/O APIC at 0x{:X} (err: {:?})", ioapic_addr, err);
+            log_error!(
+                LOG_ORIGIN,
+                "Failed to map I/O APIC at 0x{:X} (err: {:?})",
+                ioapic_addr,
+                err
+            );
         }
     }
 
@@ -508,7 +518,12 @@ pub fn identity_map_ceiling() -> usize {
 }
 
 pub fn map_framebuffer(fb_addr: u64, fb_size: usize) -> bool {
-    log_info!(LOG_ORIGIN, "Mapping framebuffer at 0x{:X}, size {} bytes...", fb_addr, fb_size);
+    log_info!(
+        LOG_ORIGIN,
+        "Mapping framebuffer at 0x{:X}, size {} bytes...",
+        fb_addr,
+        fb_size
+    );
 
     // Include USER flag so userspace drivers can access the framebuffer
     let fb_flags = PageFlags(
@@ -517,7 +532,7 @@ pub fn map_framebuffer(fb_addr: u64, fb_size: usize) -> bool {
         PageFlags::USER.bits() |       // Allow userspace access
         PageFlags::CACHE_DISABLE.bits() |
         PageFlags::GLOBAL.bits() |
-        PageFlags::NO_EXECUTE.bits()
+        PageFlags::NO_EXECUTE.bits(),
     );
 
     let fb_start = pmm::align_down(fb_addr as usize);
@@ -534,7 +549,12 @@ pub fn map_framebuffer(fb_addr: u64, fb_size: usize) -> bool {
                 mapped_count += 1;
             }
             Err(err) => {
-                log_error!(LOG_ORIGIN, "Failed to map framebuffer page 0x{:X} (err: {:?})", phys, err);
+                log_error!(
+                    LOG_ORIGIN,
+                    "Failed to map framebuffer page 0x{:X} (err: {:?})",
+                    phys,
+                    err
+                );
                 error_count += 1;
             }
         }
@@ -589,8 +609,7 @@ pub fn ensure_current_stack_mapped(pages: usize) -> bool {
                 log_debug!(LOG_ORIGIN, "Mapped missing stack page 0x{:X}", page);
                 newly_mapped += 1;
             }
-            Err(VmError::AlreadyMapped) => {
-            }
+            Err(VmError::AlreadyMapped) => {}
             Err(err) => {
                 log_error!(
                     LOG_ORIGIN,
@@ -641,13 +660,13 @@ pub fn map_kernel_mmio(phys: usize, size: usize) -> Result<usize, VmError> {
         }));
     }
 
-    let last = phys
-        .checked_add(size - 1)
-        .ok_or(VmError::Validation(ValidationError::OutOfBounds {
-            addr: phys,
-            min: 0,
-            max: usize::MAX,
-        }))?;
+    let last =
+        phys.checked_add(size - 1)
+            .ok_or(VmError::Validation(ValidationError::OutOfBounds {
+                addr: phys,
+                min: 0,
+                max: usize::MAX,
+            }))?;
     let first_page = pmm::align_down(phys);
     let end_page = pmm::align_down(last);
     let flags = PageFlags::kernel_rw_nx() | PageFlags::CACHE_DISABLE;
@@ -664,10 +683,8 @@ pub fn map_kernel_mmio(phys: usize, size: usize) -> Result<usize, VmError> {
         match map_page(virt, page, flags) {
             Ok(()) => {}
             Err(VmError::AlreadyMapped) => {
-                let (mapped_phys, _) = query_mapping_in_pml4(
-                    ACTIVE_PML4.load(Ordering::Relaxed),
-                    virt,
-                )?;
+                let (mapped_phys, _) =
+                    query_mapping_in_pml4(ACTIVE_PML4.load(Ordering::Relaxed), virt)?;
                 if mapped_phys != page {
                     return Err(VmError::AlreadyMapped);
                 }
@@ -685,7 +702,12 @@ pub fn map_kernel_mmio(phys: usize, size: usize) -> Result<usize, VmError> {
         }))
 }
 
-pub fn map_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
+pub fn map_page_in_pml4(
+    pml4_phys: usize,
+    virt: usize,
+    phys: usize,
+    flags: PageFlags,
+) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(phys)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
@@ -723,7 +745,12 @@ pub fn is_page_present_in_pml4(pml4_phys: usize, virt: usize) -> bool {
 /// Map a page in a specific PML4, overwriting any existing mapping.
 /// This is used when creating new processes that may share page table structures
 /// with the kernel but need their own mappings in user space regions.
-pub fn remap_page_in_pml4(pml4_phys: usize, virt: usize, phys: usize, flags: PageFlags) -> Result<(), VmError> {
+pub fn remap_page_in_pml4(
+    pml4_phys: usize,
+    virt: usize,
+    phys: usize,
+    flags: PageFlags,
+) -> Result<(), VmError> {
     crate::mm::validate_page_alignment(virt)?;
     crate::mm::validate_page_alignment(phys)?;
     crate::mm::validate_initialized(pml4_phys != 0)?;
@@ -864,7 +891,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
                     let raw = src_pd.entries[pd_idx].0;
                     let flags = raw & !ADDR_MASK;
                     unsafe {
-                        let dst_pde = &mut (*(phys_to_virt_ptr(dst_pd_phys) as *mut PageTable)).entries[pd_idx];
+                        let dst_pde = &mut (*(phys_to_virt_ptr(dst_pd_phys) as *mut PageTable))
+                            .entries[pd_idx];
                         core::ptr::write_volatile(
                             &mut dst_pde.0 as *mut u64,
                             (dst_pt_phys as u64 & ADDR_MASK) | flags,
@@ -877,7 +905,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
             let raw = src_pdpt.entries[pdpt_idx].0;
             let flags = raw & !ADDR_MASK;
             unsafe {
-                let dst_pdpte = &mut (*(phys_to_virt_ptr(dst_pdpt_phys) as *mut PageTable)).entries[pdpt_idx];
+                let dst_pdpte =
+                    &mut (*(phys_to_virt_ptr(dst_pdpt_phys) as *mut PageTable)).entries[pdpt_idx];
                 core::ptr::write_volatile(
                     &mut dst_pdpte.0 as *mut u64,
                     (dst_pd_phys as u64 & ADDR_MASK) | flags,
@@ -889,7 +918,8 @@ pub fn clone_kernel_mappings(dst_pml4_phys: usize) -> Result<(), VmError> {
         let raw = src.entries[idx].0;
         let flags = raw & !ADDR_MASK;
         unsafe {
-            let dst_pml4e = &mut (*(phys_to_virt_ptr(dst_pml4_phys) as *mut PageTable)).entries[idx];
+            let dst_pml4e =
+                &mut (*(phys_to_virt_ptr(dst_pml4_phys) as *mut PageTable)).entries[idx];
             core::ptr::write_volatile(
                 &mut dst_pml4e.0 as *mut u64,
                 (dst_pdpt_phys as u64 & ADDR_MASK) | flags,
@@ -949,22 +979,32 @@ pub fn read_pte_in_pml4(pml4_phys: usize, virt: usize) -> Option<u64> {
 
     let pml4 = unsafe { &*(phys_to_virt_ptr(pml4_phys) as *const PageTable) };
     let e = &pml4.entries[pml4_idx];
-    if !e.is_present() { return None; }
+    if !e.is_present() {
+        return None;
+    }
 
     let pdpt = unsafe { &*(phys_to_virt_ptr(e.addr()) as *const PageTable) };
     let e = &pdpt.entries[pdpt_idx];
-    if !e.is_present() { return None; }
+    if !e.is_present() {
+        return None;
+    }
 
     let pd = unsafe { &*(phys_to_virt_ptr(e.addr()) as *const PageTable) };
     let e = &pd.entries[pd_idx];
-    if !e.is_present() { return None; }
+    if !e.is_present() {
+        return None;
+    }
 
     // 2 MiB huge page – treat as present
-    if e.0 & (1 << 7) != 0 { return Some(e.0); }
+    if e.0 & (1 << 7) != 0 {
+        return Some(e.0);
+    }
 
     let pt = unsafe { &*(phys_to_virt_ptr(e.addr()) as *const PageTable) };
     let e = &pt.entries[pt_idx];
-    if !e.is_present() { return None; }
+    if !e.is_present() {
+        return None;
+    }
 
     Some(e.0)
 }
@@ -992,7 +1032,9 @@ fn verify_and_repair_clone(src_pml4: usize, dst_pml4: usize) {
     // that must be identity-mapped in every process PML4, since the
     // kernel runs from identity-mapped code after syscall entry.
     let current_rip: usize;
-    unsafe { asm!("lea {}, [rip]", out(reg) current_rip, options(nomem, nostack)); }
+    unsafe {
+        asm!("lea {}, [rip]", out(reg) current_rip, options(nomem, nostack));
+    }
     let rip_page = current_rip & !(0xFFF);
 
     // Sample a range of pages around the kernel binary.  Identity
@@ -1056,14 +1098,22 @@ fn repair_leaf_pte(pml4_phys: usize, virt: usize, raw_pte: u64) {
     let (pml4_idx, pdpt_idx, pd_idx, pt_idx) = split_indices(virt);
 
     let pml4 = unsafe { &*(phys_to_virt_ptr(pml4_phys) as *const PageTable) };
-    if !pml4.entries[pml4_idx].is_present() { return; }
+    if !pml4.entries[pml4_idx].is_present() {
+        return;
+    }
 
     let pdpt = unsafe { &*(phys_to_virt_ptr(pml4.entries[pml4_idx].addr()) as *const PageTable) };
-    if !pdpt.entries[pdpt_idx].is_present() { return; }
+    if !pdpt.entries[pdpt_idx].is_present() {
+        return;
+    }
 
     let pd = unsafe { &*(phys_to_virt_ptr(pdpt.entries[pdpt_idx].addr()) as *const PageTable) };
-    if !pd.entries[pd_idx].is_present() { return; }
-    if pd.entries[pd_idx].0 & (1 << 7) != 0 { return; } // huge page
+    if !pd.entries[pd_idx].is_present() {
+        return;
+    }
+    if pd.entries[pd_idx].0 & (1 << 7) != 0 {
+        return;
+    } // huge page
 
     let pt = unsafe { &mut *(phys_to_virt_ptr(pd.entries[pd_idx].addr()) as *mut PageTable) };
     unsafe {
@@ -1227,7 +1277,10 @@ fn map_page_internal(
     Ok(())
 }
 
-fn walk_to_entry(virt: usize, create: bool) -> Result<(&'static mut PageTableEntry, bool), VmError> {
+fn walk_to_entry(
+    virt: usize,
+    create: bool,
+) -> Result<(&'static mut PageTableEntry, bool), VmError> {
     let pml4_phys = ACTIVE_PML4.load(Ordering::Relaxed);
     crate::mm::validate_initialized(pml4_phys != 0)?;
 
@@ -1274,7 +1327,7 @@ fn force_map_low_memory(pml4_phys: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{phys_to_virt_ptr_safe, HIGHER_HALF_READY, HIGHER_HALF_BASE};
+    use super::{phys_to_virt_ptr_safe, HIGHER_HALF_BASE, HIGHER_HALF_READY};
     use crate::mm::ValidationError;
     use core::sync::atomic::Ordering;
 
@@ -1290,10 +1343,7 @@ mod tests {
     #[test]
     fn phys_to_virt_ptr_safe_uses_higher_half_after_initialization() {
         HIGHER_HALF_READY.store(true, Ordering::Relaxed);
-        assert_eq!(
-            phys_to_virt_ptr_safe(0x2000),
-            Ok(HIGHER_HALF_BASE + 0x2000)
-        );
+        assert_eq!(phys_to_virt_ptr_safe(0x2000), Ok(HIGHER_HALF_BASE + 0x2000));
         HIGHER_HALF_READY.store(false, Ordering::Relaxed);
     }
 }
@@ -1325,8 +1375,18 @@ fn walk_to_entry_with_root_user(
     let mut created = false;
 
     let pml4 = unsafe { &mut *(phys_to_virt_ptr(pml4_phys) as *mut PageTable) };
-    let pdpt = ensure_table_user(&mut pml4.entries[pml4_idx], create, &mut created, user_access)?;
-    let pd = ensure_table_user(&mut pdpt.entries[pdpt_idx], create, &mut created, user_access)?;
+    let pdpt = ensure_table_user(
+        &mut pml4.entries[pml4_idx],
+        create,
+        &mut created,
+        user_access,
+    )?;
+    let pd = ensure_table_user(
+        &mut pdpt.entries[pdpt_idx],
+        create,
+        &mut created,
+        user_access,
+    )?;
     let pt = ensure_table_user(&mut pd.entries[pd_idx], create, &mut created, user_access)?;
 
     Ok((&mut pt.entries[pt_idx], created))
@@ -1419,7 +1479,10 @@ fn flags_for_descriptor(desc: &EfiMemoryDescriptor) -> PageFlags {
 }
 
 fn is_code_descriptor(typ: u32) -> bool {
-    matches!(typ, EFI_LOADER_CODE | EFI_BOOT_SERVICES_CODE | EFI_RUNTIME_SERVICES_CODE)
+    matches!(
+        typ,
+        EFI_LOADER_CODE | EFI_BOOT_SERVICES_CODE | EFI_RUNTIME_SERVICES_CODE
+    )
 }
 
 fn apply_cacheability_flags(mut flags: PageFlags, attribute: u64) -> PageFlags {

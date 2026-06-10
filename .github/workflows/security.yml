@@ -5,8 +5,11 @@ name: Security
 # regression must break the build.
 
 on:
+  # Run on pushes to main and on every pull request. Feature branches are
+  # covered by their PR run, so we don't also run on push to "**" (that double-ran
+  # the security gates for every PR'd branch — once for push, once for pull_request).
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
     branches: ["**"]
 
@@ -61,7 +64,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # --lib --bins (not --all-targets): the default target is the no_std
+        # x86_64-unknown-uefi target, whose --tests/--benches targets cannot
+        # link the `test` crate (E0463), so --all-targets can never succeed.
+        run: cargo clippy --workspace --lib --bins -- -D warnings
 
   supply-chain:
     name: cargo audit / cargo deny

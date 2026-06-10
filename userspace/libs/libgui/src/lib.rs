@@ -44,14 +44,14 @@
 
 extern crate alloc;
 
-pub mod surface;
-pub mod event;
-pub mod color;
-pub mod font;
 pub mod application;
+pub mod color;
+pub mod event;
+pub mod font;
+pub mod surface;
 
 // Re-exports
-pub use surface::Surface;
-pub use event::{Event, KeyEvent, MouseEvent};
-pub use color::Color;
 pub use application::Application;
+pub use color::Color;
+pub use event::{Event, KeyEvent, MouseEvent};
+pub use surface::Surface;

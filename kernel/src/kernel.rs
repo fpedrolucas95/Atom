@@ -49,32 +49,32 @@
 extern crate alloc;
 
 mod arch;
+mod architectural_invariants_selftests;
 mod boot;
-mod vga;
-mod mm;
-mod serial;
 mod build_info;
-mod interrupts;
-mod input;  // Minimal input buffer for userspace drivers
-mod log;
-mod graphics;
-mod process;
-mod thread;
-mod sched;
-mod smp;
-mod syscall;
-mod ipc;
 mod cap;
-mod shared_mem;
-mod system;
-mod executable;
-mod random;
-mod init_process;
-mod system_manifest;
 mod driver_registry;
 mod drivers;
-mod architectural_invariants_selftests;
+mod executable;
+mod graphics;
+mod init_process;
+mod input; // Minimal input buffer for userspace drivers
+mod interrupts;
+mod ipc;
+mod log;
+mod mm;
+mod process;
+mod random;
+mod sched;
 mod security_selftests;
+mod serial;
+mod shared_mem;
+mod smp;
+mod syscall;
+mod system;
+mod system_manifest;
+mod thread;
+mod vga;
 // NOTE: service_manager and namesvc run as userspace processes.
 // They are spawned by the init process (PID 1), not by the kernel.
 // See userspace/services/ for their implementations.
@@ -87,8 +87,8 @@ mod util;
 #[path = "../../arch/x86_64/uefi.rs"]
 mod uefi;
 
-use crate::arch::{current_rsp, halt, read_cr3};
 use crate::arch::gdt;
+use crate::arch::{current_rsp, halt, read_cr3};
 use crate::boot::{BootInfo, MemoryMap};
 use core::panic::PanicInfo;
 
@@ -166,8 +166,8 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     // consuming command ACK bytes prematurely.
     input::init();
     input::init_ps2_mouse_full(); // Use full initialization with 1:1 scaling
-    drivers::pci::init();         // Enumerate PCI bus
-    drivers::xhci::init();        // Initialize USB xHCI controller
+    drivers::pci::init(); // Enumerate PCI bus
+    drivers::xhci::init(); // Initialize USB xHCI controller
 
     log_info!(LOG_APIC, "Enabling interrupts...");
     interrupts::enable();
@@ -187,12 +187,21 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
     // Initialize disk and filesystem for dynamic executable loading
     if drivers::ahci::init() {
         if drivers::fat32::init() {
-            log_info!(LOG_KERNEL_INIT, "Filesystem initialized for dynamic loading");
+            log_info!(
+                LOG_KERNEL_INIT,
+                "Filesystem initialized for dynamic loading"
+            );
         } else {
-            log_warn!(LOG_KERNEL_INIT, "FAT32 init failed - dynamic loading disabled");
+            log_warn!(
+                LOG_KERNEL_INIT,
+                "FAT32 init failed - dynamic loading disabled"
+            );
         }
     } else {
-        log_warn!(LOG_KERNEL_INIT, "AHCI init failed - dynamic loading disabled");
+        log_warn!(
+            LOG_KERNEL_INIT,
+            "AHCI init failed - dynamic loading disabled"
+        );
     }
 
     // =======================================================================
@@ -220,30 +229,56 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
             );
         }
         Err(e) => {
-            log_panic!(LOG_INIT_PROC, "================================================");
+            log_panic!(
+                LOG_INIT_PROC,
+                "================================================"
+            );
             log_panic!(LOG_INIT_PROC, "FATAL: Failed to load init process: {:?}", e);
-            log_panic!(LOG_INIT_PROC, "================================================");
-            log_panic!(LOG_INIT_PROC, "The kernel requires a valid init.atxf payload");
+            log_panic!(
+                LOG_INIT_PROC,
+                "================================================"
+            );
+            log_panic!(
+                LOG_INIT_PROC,
+                "The kernel requires a valid init.atxf payload"
+            );
             log_panic!(LOG_INIT_PROC, "to be provided by the bootloader.");
-            log_panic!(LOG_INIT_PROC, "================================================");
+            log_panic!(
+                LOG_INIT_PROC,
+                "================================================"
+            );
             log_panic!(LOG_INIT_PROC, "SYSTEM HALTED");
-            log_panic!(LOG_INIT_PROC, "================================================");
+            log_panic!(
+                LOG_INIT_PROC,
+                "================================================"
+            );
             loop {
                 halt();
             }
         }
     }
 
-    log_info!(LOG_KERNEL_INIT, "===========================================");
+    log_info!(
+        LOG_KERNEL_INIT,
+        "==========================================="
+    );
     log_info!(LOG_KERNEL_INIT, "MICROKERNEL READY");
-    log_info!(LOG_KERNEL_INIT, "===========================================");
-    log_info!(LOG_KERNEL_INIT, "Kernel provides: syscalls, IPC, capabilities");
+    log_info!(
+        LOG_KERNEL_INIT,
+        "==========================================="
+    );
+    log_info!(
+        LOG_KERNEL_INIT,
+        "Kernel provides: syscalls, IPC, capabilities"
+    );
     log_info!(LOG_KERNEL_INIT, "Init orchestrates: services, drivers, UI");
-    log_info!(LOG_KERNEL_INIT, "===========================================");
+    log_info!(
+        LOG_KERNEL_INIT,
+        "==========================================="
+    );
 
     log_info!(LOG_KERNEL_INIT, "Handing over to scheduler.");
     start_scheduling();
-
 }
 
 pub extern "C" fn idle_thread_entry() -> ! {
@@ -291,7 +326,11 @@ fn launch_smp_smoke_threads() {
     let cr3 = read_cr3();
     for cpu in 0..online {
         let Some(stack_phys) = mm::pmm::alloc_pages(4) else {
-            log_warn!(LOG_SMP, "failed to allocate stack for SMP smoke cpu={}", cpu);
+            log_warn!(
+                LOG_SMP,
+                "failed to allocate stack for SMP smoke cpu={}",
+                cpu
+            );
             break;
         };
 
@@ -317,7 +356,6 @@ fn launch_smp_smoke_threads() {
         );
     }
 }
-
 
 fn init_scheduler() {
     let idle_stack_phys = mm::pmm::alloc_pages(4).expect("Failed to allocate idle stack");
@@ -362,7 +400,6 @@ fn start_scheduling() -> ! {
     }
 }
 
-
 fn display_uefi_memory_map(memory_map: &MemoryMap) {
     let mut usable_ram = 0u64;
     for descriptor in memory_map.descriptors() {
@@ -372,14 +409,25 @@ fn display_uefi_memory_map(memory_map: &MemoryMap) {
             usable_ram += descriptor.number_of_pages * 4096;
         }
     }
-    log_info!(LOG_KERNEL_INIT, "Usable RAM: {} MB", usable_ram / (1024 * 1024));
+    log_info!(
+        LOG_KERNEL_INIT,
+        "Usable RAM: {} MB",
+        usable_ram / (1024 * 1024)
+    );
 }
 
 fn display_memory_stats() {
     let (total, free) = mm::pmm::get_stats();
     let total_mb = (total * mm::pmm::PAGE_SIZE) / (1024 * 1024);
     let free_mb = (free * mm::pmm::PAGE_SIZE) / (1024 * 1024);
-    log_info!(LOG_MM, "PMM: {}/{} pages free ({}/{} MiB)", free, total, free_mb, total_mb);
+    log_info!(
+        LOG_MM,
+        "PMM: {}/{} pages free ({}/{} MiB)",
+        free,
+        total,
+        free_mb,
+        total_mb
+    );
 }
 
 #[panic_handler]

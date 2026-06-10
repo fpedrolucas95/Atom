@@ -5,7 +5,7 @@
 //! passes them to the kernel via BootInfo. This registry stores
 //! references to those drivers so they can be spawned by userspace.
 
-use crate::boot::{DriverList, DriverImage, ExecutableImage};
+use crate::boot::{DriverImage, DriverList, ExecutableImage};
 use spin::Once;
 
 /// Global driver registry, initialized from boot info
@@ -34,7 +34,9 @@ pub fn init(drivers: &'static DriverList) {
 
 /// Find a driver by name
 pub fn find_driver(name: &str) -> Option<&'static DriverImage> {
-    DRIVER_REGISTRY.get().and_then(|registry| registry.find(name))
+    DRIVER_REGISTRY
+        .get()
+        .and_then(|registry| registry.find(name))
 }
 
 /// Get the executable image for a driver by name
@@ -51,7 +53,8 @@ pub fn driver_count() -> usize {
 /// List all driver names
 #[allow(dead_code)]
 pub fn list_drivers() -> impl Iterator<Item = &'static str> {
-    DRIVER_REGISTRY.get()
+    DRIVER_REGISTRY
+        .get()
         .map(|r| r.iter())
         .into_iter()
         .flatten()

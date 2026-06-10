@@ -49,7 +49,7 @@ use spin::Mutex;
 use crate::mm::pmm;
 use crate::mm::vm::{self, PageFlags, VmError};
 use crate::thread::ThreadId;
-use crate::{log_info, log_warn, log_error};
+use crate::{log_error, log_info, log_warn};
 use atom_abi::UserRange;
 
 static CLEANED_THREAD_ADDRESS_SPACES: Mutex<BTreeSet<ThreadId>> = Mutex::new(BTreeSet::new());
@@ -94,7 +94,9 @@ impl core::fmt::Display for AddressSpaceId {
 // These are pub so that other kernel modules (shared_mem, executable, etc.)
 // can import them from addrspace if needed.
 #[allow(unused_imports)]
-pub use atom_abi::{USER_CANONICAL_MAX as USER_CANONICAL_MAX_U64, USER_VA_LIMIT, SYSCALL_ERROR_THRESHOLD};
+pub use atom_abi::{
+    SYSCALL_ERROR_THRESHOLD, USER_CANONICAL_MAX as USER_CANONICAL_MAX_U64, USER_VA_LIMIT,
+};
 
 /// `USER_CANONICAL_MAX` as a `usize`, for kernel-internal address comparisons.
 #[allow(dead_code)]
@@ -121,7 +123,7 @@ pub struct AddressSpace {
 impl AddressSpace {
     pub fn new(owner: ThreadId) -> Result<Self, AddressSpaceError> {
         let pml4_phys = pmm::alloc_page_zeroed().ok_or(AddressSpaceError::OutOfMemory)?;
-        
+
         if let Err(err) = vm::clone_kernel_mappings(pml4_phys).map_err(|err| {
             log_error!(
                 LOG_ORIGIN,
@@ -207,7 +209,7 @@ impl Drop for AddressSpace {
             self.id,
             self.pml4_phys
         );
-        
+
         // Unregister the PML4 before freeing (Req 2.5)
         let _ = pmm::unregister_active_pml4(self.pml4_phys);
         let _ = pmm::free_page(self.pml4_phys);
@@ -249,7 +251,7 @@ impl AddressSpaceManager {
             spaces: Mutex::new(BTreeMap::new()),
         }
     }
-    
+
     pub fn create(&self, owner: ThreadId) -> Result<AddressSpaceId, AddressSpaceError> {
         let addrspace = AddressSpace::new(owner)?;
         let id = addrspace.id();
@@ -261,12 +263,8 @@ impl AddressSpaceManager {
         log_info!(LOG_ORIGIN, "Registered address space {}", id);
         Ok(id)
     }
-    
-    pub fn destroy(
-        &self,
-        id: AddressSpaceId,
-        caller: ThreadId,
-    ) -> Result<(), AddressSpaceError> {
+
+    pub fn destroy(&self, id: AddressSpaceId, caller: ThreadId) -> Result<(), AddressSpaceError> {
         let mut spaces = self.spaces.lock();
         let addrspace = spaces.get(&id).ok_or(AddressSpaceError::NotFound)?;
 
@@ -295,7 +293,7 @@ impl AddressSpaceManager {
         log_info!(LOG_ORIGIN, "Destroyed address space {}", id);
         Ok(())
     }
-    
+
     pub fn map_region(
         &self,
         id: AddressSpaceId,
@@ -342,7 +340,7 @@ impl AddressSpaceManager {
         for i in 0..num_pages {
             let virt = virt_addr + (i * pmm::PAGE_SIZE);
             let phys = phys_addr + (i * pmm::PAGE_SIZE);
-            
+
             if let Err(e) = self.map_page_in_pml4(pml4_phys, virt, phys, flags) {
                 log_error!(
                     LOG_ORIGIN,
@@ -393,7 +391,7 @@ impl AddressSpaceManager {
 
         Ok(())
     }
-    
+
     pub fn unmap_region(
         &self,
         id: AddressSpaceId,
@@ -456,7 +454,7 @@ impl AddressSpaceManager {
 
         Ok(())
     }
-    
+
     pub fn remap_region(
         &self,
         id: AddressSpaceId,
@@ -495,7 +493,7 @@ impl AddressSpaceManager {
             new_virt,
             num_pages
         );
-        
+
         let mut mappings = alloc::vec::Vec::with_capacity(num_pages);
         for i in 0..num_pages {
             let old_virt_page = old_virt + (i * pmm::PAGE_SIZE);
@@ -519,25 +517,15 @@ impl AddressSpaceManager {
         for i in 0..num_pages {
             let old_virt_page = old_virt + (i * pmm::PAGE_SIZE);
             if let Err(e) = self.unmap_page_in_pml4(pml4_phys, old_virt_page) {
-                log_error!(
-                    LOG_ORIGIN,
-                    "Remap: failed to unmap old page {}: {:?}",
-                    i,
-                    e
-                );
+                log_error!(LOG_ORIGIN, "Remap: failed to unmap old page {}: {:?}", i, e);
             }
         }
-        
+
         for (i, &(phys, flags)) in mappings.iter().enumerate().take(num_pages) {
             let new_virt_page = new_virt + (i * pmm::PAGE_SIZE);
 
             if let Err(e) = self.map_page_in_pml4(pml4_phys, new_virt_page, phys, flags) {
-                log_error!(
-                    LOG_ORIGIN,
-                    "Remap: failed to map new page {}: {:?}",
-                    i,
-                    e
-                );
+                log_error!(LOG_ORIGIN, "Remap: failed to map new page {}: {:?}", i, e);
                 return Err(AddressSpaceError::AlreadyMapped);
             }
         }
@@ -546,7 +534,7 @@ impl AddressSpaceManager {
 
         Ok(())
     }
-    
+
     fn map_page_in_pml4(
         &self,
         pml4_phys: usize,
@@ -566,20 +554,26 @@ impl AddressSpaceManager {
         let spaces = self.spaces.lock();
         spaces.get(&id).map(|space| space.pml4_phys())
     }
-
 }
 
 static ADDRESS_SPACE_MANAGER: AddressSpaceManager = AddressSpaceManager::new();
 
 pub fn init() {
-    log_info!(LOG_ORIGIN, "Address space management initialized (Phase 5.1)");
+    log_info!(
+        LOG_ORIGIN,
+        "Address space management initialized (Phase 5.1)"
+    );
     log_info!(
         LOG_ORIGIN,
         "User VA window (ABI): 0x{:X}..0x{:X}",
         atom_abi::USER_SPACE_MIN,
         atom_abi::USER_SPACE_MAX
     );
-    log_info!(LOG_ORIGIN, "Max region size: {} MB", MAX_REGION_SIZE / (1024 * 1024));
+    log_info!(
+        LOG_ORIGIN,
+        "Max region size: {} MB",
+        MAX_REGION_SIZE / (1024 * 1024)
+    );
 }
 
 pub fn create_address_space(owner: ThreadId) -> Result<AddressSpaceId, AddressSpaceError> {

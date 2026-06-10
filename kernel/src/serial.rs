@@ -74,7 +74,7 @@ impl SerialPort {
             if inb(self.base) != 0xAE {
                 return;
             }
-            
+
             outb(self.base + 4, 0x0F);
         }
     }

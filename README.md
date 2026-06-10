@@ -25,7 +25,7 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 
 ## Current Status
 
-**Latest release: alpha_4** (March 2026)
+**Latest reference build: alpha_5**
 
 ### Kernel
 
@@ -37,26 +37,31 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 - SMP boot via ACPI MADT (BSP/AP discovery, AP startup trampoline, per-CPU online tracking)
 - Context switching in x86-64 assembly with higher-half trampoline, stack canary validation, canonical address checks, and per-CPU syscall stack state (swapgs)
 - Per-CPU scheduler (idle thread/current thread/run queue per CPU) with work stealing, remote wakeups, and affinity masks
-- ~80 syscalls covering threads, IPC, capabilities, shared memory, filesystem, video modes, and process spawning
+- ~116 syscalls covering threads, IPC, capabilities, shared memory, filesystem, video modes, process spawning, and PCI/MMIO/DMA/IRQ device infrastructure
 - IPC subsystem with ports, messages, deadlock cycle detection, priority inheritance, wait queues, and batch send/receive
 - Capability system with handle-based access, permission bitflags, derivation, transitive revocation, and audit logging
 - Shared memory manager with dynamic VA window allocation and owner-exit cleanup
-- Bochs Graphics Adapter driver for runtime display resolution switching
-- FAT32 filesystem stack with read/write support through fsd-routed POSIX syscalls, with active on-disk data path owned by fsd userspace FAT32 over raw block I/O
-- Process spawning from filesystem via `SYS_SPAWN_FROM_PATH` loading ATXF executables into isolated address spaces
+- In-kernel drivers: AHCI (SATA), FAT32, Bochs Graphics Adapter (runtime resolution switching), PCI enumeration, and xHCI/USB-HID input
+- FAT32 filesystem stack with read/write support through fsd-routed POSIX syscalls, with the active on-disk data path owned by the fsd userspace FAT32 driver over raw block I/O
+- Process spawning from filesystem via `SYS_SPAWN_FROM_PATH`, loading **signed ATXF v3 executables** (Ed25519, verified against a kernel-side trust root before mapping) into isolated address spaces
+- PCI/MMIO/DMA/IRQ syscall surface so user-space drivers (e.g. the e1000 NIC) can claim BARs, map device memory, allocate DMA buffers, and receive interrupts
 
 ### User Space
 
 - **Services:** init (PID 1), namesvc (service discovery), service_manager (declarative boot), fsd (filesystem daemon), app_launcher (privileged process creation), nic_driver (e1000 NIC), netd (TCP/IP stack: ARP, IPv4, ICMP, UDP, TCP, DNS)
-- **System applications:** display driver, keyboard driver, mouse driver, ui_shell (compositor + window manager), terminal emulator
-- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), filesystem test suite, display settings, timesync (HTTP GET to worldtimeapi.org, demonstrates full networking stack)
+- **System applications:** display driver, keyboard driver, mouse driver, ui_shell (compositor + window manager), terminal emulator, display settings
+- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), hello_atxf, filesystem test suite, browser, timesync (HTTP GET, demonstrates the full networking stack), and security_smoke (adversarial CI self-test harness)
 
 ### Runtime and Libraries
 
 - **libc** — freestanding C standard library (string, stdlib, stdio, ctype, errno, assert, math via x87 FPU, unistd, time) with crt0.S runtime initialization, malloc/free via SYS_MMAP/SYS_MUNMAP, and full vsnprintf formatting
 - **TinyGL** — software OpenGL 1.1 rendering (port of TinyGL 0.4.1) as a freestanding static library with a custom blit bridge converting RGB565 to compositor ARGB32 surfaces
 - **libgui** — Rust library for window creation, drawing primitives (rounded rectangles, alpha blending, soft shadows), and event handling via IPC
+- **atom_ui / atom_theme** — higher-level Rust widget and theming layers built on top of libgui
+- **libimage** — Rust image decoders (PNG/GIF/JPEG) for application and desktop assets
+- **libnet** — Rust networking client library (sockets, HTTP, ICMP, DNS helpers) for apps talking to `netd`
 - **libipc** — Rust IPC wrapper for user-space services
+- **libring** — lock-free ring buffer primitive shared across services
 - **atom_abi** — shared crate defining syscall numbers, constants, and types as a single source of truth between kernel and user space
 
 ### Desktop Environment
@@ -73,26 +78,30 @@ For SMP internals (bootstrap, per-CPU structures, scheduler model, locking rules
 ### Kernel vs User Space
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    User Space (Ring 3)                   │
-│                                                         │
-│  Services          System Apps         Applications     │
-│  ├ init            ├ display driver    ├ file manager   │
-│  ├ namesvc         ├ keyboard driver   ├ terminal       │
-│  ├ service_manager ├ mouse driver      ├ tinygl_demo    │
-│  ├ fsd             └ ui_shell          └ hello_c        │
-│  └ app_launcher      (compositor)                       │
-│                                                         │
-│  Libraries: libc, libtinygl, libgui, libipc, atom_abi   │
-├─────────────────────────────────────────────────────────┤
-│                 Syscall Interface (~80 calls)            │
-├─────────────────────────────────────────────────────────┤
-│                     Kernel (Ring 0)                      │
-│                                                         │
-│  PMM/VMM    Scheduler    IPC + SharedMem    Capabilities │
-│  Heap       Threads      Syscall dispatch   FAT32 driver │
-│  Paging     Interrupts   Context switch     Video modes  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      User Space (Ring 3)                       │
+│                                                                │
+│  Services          System Apps          Applications          │
+│  ├ init            ├ display driver     ├ file manager        │
+│  ├ namesvc         ├ keyboard driver    ├ terminal*           │
+│  ├ service_manager ├ mouse driver       ├ tinygl_demo         │
+│  ├ fsd             ├ ui_shell           ├ browser             │
+│  ├ app_launcher    │   (compositor)     ├ timesync            │
+│  ├ nic_driver      └ display_settings   └ hello_c / hello_atxf│
+│  └ netd                                                       │
+│                          (* terminal runs as a system app)    │
+│                                                                │
+│  Libraries: libc, tinygl, libgui, atom_ui, atom_theme,        │
+│             libimage, libnet, libipc, libring, atom_abi       │
+├──────────────────────────────────────────────────────────────┤
+│                 Syscall Interface (~116 calls)                 │
+├──────────────────────────────────────────────────────────────┤
+│                       Kernel (Ring 0)                          │
+│                                                                │
+│  PMM/VMM    Scheduler    IPC + SharedMem    Capabilities       │
+│  Heap       Threads      Syscall dispatch   FAT32 / AHCI       │
+│  Paging     Interrupts   Context switch     PCI / xHCI / BGA   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Boot Flow
@@ -146,23 +155,37 @@ atom/
 ├── kernel/
 │   └── src/
 │       ├── kernel.rs              # Kernel entry point and module wiring
-│       ├── mm/                    # PMM, VMM, heap, address spaces, shared memory
+│       ├── arch/                  # GDT and arch-specific glue
+│       ├── mm/                    # PMM, VMM, heap, address spaces, OOM, VMA
 │       ├── interrupts/            # IDT, APIC, handlers, context switch assembly
-│       ├── drivers/               # In-kernel drivers (AHCI, FAT32, BGA video)
+│       ├── drivers/              # In-kernel drivers (AHCI, FAT32, BGA, PCI, xHCI/USB-HID)
+│       ├── syscall/              # Syscall dispatch (mod.rs) + capability policy table
+│       ├── cap/ , cap.rs          # Capability system
 │       ├── ipc.rs                 # IPC ports, messages, deadlock detection
-│       ├── cap.rs                 # Capability system
-│       ├── sched.rs               # Preemptive priority scheduler
-│       ├── thread.rs              # Thread and process primitives
+│       ├── sched.rs , smp.rs      # Preemptive priority scheduler + SMP bringup
+│       ├── thread.rs , process.rs # Thread and process primitives
+│       ├── shared_mem.rs          # Shared memory regions
+│       ├── executable.rs          # ATXF loading / image mapping
+│       ├── system_manifest.rs     # Per-service capability manifest (trust root)
+│       ├── *_selftests.rs         # Architectural & security boot self-tests
 │       └── init_process.rs        # Launches init (PID 1) in isolated address space
-├── shared/                        # atom_abi: shared types and constants (kernel ↔ userspace)
+├── shared/
+│   ├── abi/                       # atom_abi: shared types/constants (kernel ↔ userspace)
+│   └── atxf/                      # atom_atxf: ATXF v3 executable format + signed loader
 ├── userspace/
-│   ├── libs/                      # libipc, libgui, syscall wrappers, libc, libtinygl
-│   ├── system_apps/               # display, keyboard, mouse drivers; ui_shell; terminal
-│   ├── services/                  # init, namesvc, service_manager, fsd, app_launcher
-│   └── apps/                      # fileman, doom, tinygl_demo, hello_c, fs_test, display_settings
+│   ├── libs/                      # libc, tinygl, libgui, atom_ui, atom_theme, libimage,
+│   │                              #   libnet, libipc, libring, syscall wrappers
+│   ├── system_apps/               # display, keyboard, mouse drivers; ui_shell; terminal;
+│   │                              #   display_settings; demo_rects / demo_text
+│   ├── services/                  # init, namesvc, service_manager, fsd, app_launcher,
+│   │                              #   nic_driver, netd
+│   └── apps/                      # fileman, tinygl_demo, hello_c, hello_atxf, fs_test,
+│                                  #   browser, timesync, security_smoke
 ├── tools/
-│   └── elf2atxf/                  # ELF → ATXF binary converter for user-space executables
-├── linker/                        # Linker scripts for UEFI target
+│   └── elf2atxf/                  # ELF → signed ATXF converter for user-space executables
+├── keys/                          # ATXF signing keys / trust-root material
+├── scripts/ci/                    # Security & build gates (see docs/security_pipeline.md)
+├── linker/                        # Linker scripts for the UEFI target
 ├── build.sh / build.ps1           # Build, package, and run scripts
 └── clean.sh / clean.ps1           # Cleanup scripts
 ```

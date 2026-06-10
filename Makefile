@@ -35,8 +35,11 @@ fmt-check:
 	cargo fmt --all --check
 
 ## clippy: lint with warnings denied
+# --lib --bins (not --all-targets): the default target is the no_std
+# x86_64-unknown-uefi target, whose --tests/--benches targets cannot link the
+# `test` crate (E0463), so --all-targets can never succeed here.
 clippy:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --lib --bins -- -D warnings
 
 ## audit: advisory database scan
 audit:

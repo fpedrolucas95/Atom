@@ -56,13 +56,13 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+use crate::log_debug;
+use crate::log_info;
+use crate::log_warn;
 use crate::process::ProcessId;
 use crate::shared_mem;
 use crate::shared_mem::RegionId;
 use crate::thread::{ThreadId, ThreadPriority};
-use crate::log_debug;
-use crate::log_info;
-use crate::log_warn;
 
 pub const MAX_MESSAGE_SIZE: usize = 4096;
 pub const ZERO_COPY_THRESHOLD: usize = 4096;
@@ -158,7 +158,7 @@ pub enum IpcCapability {
         cap_handle: crate::cap::CapHandle,
         permissions: crate::cap::CapPermissions,
     },
-    
+
     Move {
         cap_handle: crate::cap::CapHandle,
     },
@@ -176,7 +176,11 @@ impl Message {
         }
     }
 
-    pub fn new_with_shared_region(sender: ThreadId, message_type: u32, region_id: RegionId) -> Self {
+    pub fn new_with_shared_region(
+        sender: ThreadId,
+        message_type: u32,
+        region_id: RegionId,
+    ) -> Self {
         Self {
             sender,
             message_type,
@@ -186,7 +190,7 @@ impl Message {
             timestamp_ms: current_time_ms(),
         }
     }
-    
+
     pub fn new_with_grant(
         sender: ThreadId,
         message_type: u32,
@@ -206,7 +210,7 @@ impl Message {
             timestamp_ms: current_time_ms(),
         }
     }
-    
+
     pub fn new_with_move(
         sender: ThreadId,
         message_type: u32,
@@ -319,8 +323,7 @@ impl IpcTraceBuffer {
     }
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct IpcPortMetrics {
     messages_sent: u64,
     messages_received: u64,
@@ -332,7 +335,6 @@ struct IpcPortMetrics {
     first_message_timestamp_ms: Option<u64>,
     last_message_timestamp_ms: Option<u64>,
 }
-
 
 impl IpcPortMetrics {
     fn record_send(&mut self, size: usize, timestamp_ms: u64) {
@@ -466,16 +468,15 @@ fn debug_assert_port_authority_metadata(port: &PortState) {
 
         if let Some(routing_process) = crate::thread::get_thread_process_id(port.routing_thread) {
             debug_assert_eq!(
-                routing_process,
-                owner_process,
+                routing_process, owner_process,
                 "routing_thread must stay within the port authority process for userspace ports"
             );
         }
 
-        if let Some(lifecycle_process) = crate::thread::get_thread_process_id(port.lifecycle_thread) {
+        if let Some(lifecycle_process) = crate::thread::get_thread_process_id(port.lifecycle_thread)
+        {
             debug_assert_eq!(
-                lifecycle_process,
-                owner_process,
+                lifecycle_process, owner_process,
                 "lifecycle_thread must stay within the port authority process for userspace ports"
             );
         }
@@ -613,32 +614,48 @@ impl IpcManager {
         drop(ports);
 
         if let Some(receiver_id) = receiver {
-            log_debug!(LOG_ORIGIN, "Waking blocked receiver {} on closed port {}", receiver_id, port_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Waking blocked receiver {} on closed port {}",
+                receiver_id,
+                port_id
+            );
             self.waiting_threads.lock().remove(&receiver_id);
             crate::sched::mark_thread_ready(receiver_id);
             self.restore_priority(receiver_id);
         }
 
         for waiter_id in wait_queue {
-            log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on closed port {}", waiter_id, port_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Waking wait_queue waiter {} on closed port {}",
+                waiter_id,
+                port_id
+            );
             crate::sched::mark_thread_ready(waiter_id);
         }
 
         for waiter_id in wait_any_waiters {
-            log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on closed port {}", waiter_id, port_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Waking wait_any waiter {} on closed port {}",
+                waiter_id,
+                port_id
+            );
             crate::sched::mark_thread_ready(waiter_id);
         }
 
         Ok(())
     }
-    
+
     fn validate_payload_and_size(&self, message: &Message) -> Result<usize, IpcError> {
         if let Some(region) = message.shared_region {
             if !message.payload.is_empty() {
                 return Err(IpcError::SharedMemoryPayloadConflict);
             }
 
-            let info = shared_mem::get_region_info(region).map_err(|_| IpcError::InvalidSharedRegion)?;
+            let info =
+                shared_mem::get_region_info(region).map_err(|_| IpcError::InvalidSharedRegion)?;
 
             Ok(info.size)
         } else {
@@ -698,7 +715,12 @@ impl IpcManager {
         } else if let Some(waiter_id) = port.wait_queue.pop_front() {
             // Wake up first thread in wait queue
             drop(ports);
-            log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on port {}", waiter_id, port_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Waking wait_queue waiter {} on port {}",
+                waiter_id,
+                port_id
+            );
             crate::sched::mark_thread_ready(waiter_id);
         } else if !port.wait_any_waiters.is_empty() {
             // Wake up wait_any waiters
@@ -706,7 +728,12 @@ impl IpcManager {
             drop(ports);
 
             for waiter_id in waiters {
-                log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on port {}", waiter_id, port_id);
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Waking wait_any waiter {} on port {}",
+                    waiter_id,
+                    port_id
+                );
                 crate::sched::mark_thread_ready(waiter_id);
             }
         }
@@ -769,7 +796,12 @@ impl IpcManager {
         } else if let Some(waiter_id) = port.wait_queue.pop_front() {
             // Wake up first thread in wait queue
             drop(ports);
-            log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on port {} (batch)", waiter_id, port_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Waking wait_queue waiter {} on port {} (batch)",
+                waiter_id,
+                port_id
+            );
             crate::sched::mark_thread_ready(waiter_id);
         } else if !port.wait_any_waiters.is_empty() {
             // Wake up wait_any waiters
@@ -777,7 +809,12 @@ impl IpcManager {
             drop(ports);
 
             for waiter_id in waiters {
-                log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on port {} (batch)", waiter_id, port_id);
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Waking wait_any waiter {} on port {} (batch)",
+                    waiter_id,
+                    port_id
+                );
                 crate::sched::mark_thread_ready(waiter_id);
             }
         }
@@ -785,9 +822,12 @@ impl IpcManager {
         Ok(count)
     }
 
-    fn recv_batch(&self, port_id: PortId, caller: ThreadId, max_count: usize)
-        -> Result<Vec<Message>, IpcError>
-    {
+    fn recv_batch(
+        &self,
+        port_id: PortId,
+        caller: ThreadId,
+        max_count: usize,
+    ) -> Result<Vec<Message>, IpcError> {
         let max_count = core::cmp::min(max_count, MAX_BATCH_SIZE);
         let mut ports = self.ports.lock();
         let port = ports.get_mut(&port_id).ok_or(IpcError::InvalidPort)?;
@@ -798,8 +838,7 @@ impl IpcManager {
             if let Some(msg) = port.messages.pop_front() {
                 let receive_timestamp_ms = current_time_ms();
                 let size = self.resolve_message_size(&msg)?;
-                port
-                    .metrics
+                port.metrics
                     .record_receive(size, msg.timestamp_ms, receive_timestamp_ms);
 
                 self.record_trace_event(IpcTraceEvent {
@@ -828,8 +867,7 @@ impl IpcManager {
             let receive_timestamp_ms = current_time_ms();
             let size = self.resolve_message_size(&msg)?;
 
-            port
-                .metrics
+            port.metrics
                 .record_receive(size, msg.timestamp_ms, receive_timestamp_ms);
 
             self.record_trace_event(IpcTraceEvent {
@@ -891,17 +929,21 @@ impl IpcManager {
         port.max_waiter_priority = Some(
             port.max_waiter_priority
                 .map(|p| p.max(caller_priority))
-                .unwrap_or(caller_priority)
+                .unwrap_or(caller_priority),
         );
 
         drop(ports);
-        self.waiting_threads
-            .lock()
-            .insert(caller, WaiterInfo { port: port_id, deadline });
+        self.waiting_threads.lock().insert(
+            caller,
+            WaiterInfo {
+                port: port_id,
+                deadline,
+            },
+        );
 
         Ok(())
     }
-    
+
     fn get_max_waiter_priority(&self, port_id: PortId) -> Option<ThreadPriority> {
         self.ports
             .lock()
@@ -912,11 +954,11 @@ impl IpcManager {
     fn register_waiter(&self, port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
         let mut ports = self.ports.lock();
         let port = ports.get_mut(&port_id).ok_or(IpcError::InvalidPort)?;
-        
+
         if !port.wait_queue.iter().any(|&id| id == caller) {
             port.wait_queue.push_back(caller);
         }
-        
+
         Ok(())
     }
 
@@ -1002,7 +1044,12 @@ impl IpcManager {
         }
 
         for (tid, port_id) in expired {
-            log_debug!(LOG_ORIGIN, "Timeout waking blocked thread {} on {}", tid, port_id);
+            log_debug!(
+                LOG_ORIGIN,
+                "Timeout waking blocked thread {} on {}",
+                tid,
+                port_id
+            );
             crate::sched::mark_thread_ready(tid);
             self.restore_priority(tid);
         }
@@ -1028,7 +1075,12 @@ impl IpcManager {
             if let Some(port) = ports.get_mut(port_id) {
                 if !port.wait_any_waiters.contains(&caller) {
                     port.wait_any_waiters.push(caller);
-                    log_debug!(LOG_ORIGIN, "Thread {} registered as wait_any waiter on {}", caller, port_id);
+                    log_debug!(
+                        LOG_ORIGIN,
+                        "Thread {} registered as wait_any waiter on {}",
+                        caller,
+                        port_id
+                    );
                 }
             }
         }
@@ -1203,10 +1255,7 @@ pub fn get_port_owner(port_id: PortId) -> Option<ThreadId> {
     get_port_authority_thread(port_id)
 }
 
-pub fn validate_port_authority_exercise(
-    port_id: PortId,
-    caller: ThreadId,
-) -> Result<(), IpcError> {
+pub fn validate_port_authority_exercise(port_id: PortId, caller: ThreadId) -> Result<(), IpcError> {
     IPC_MANAGER.validate_port_authority_exercise(port_id, caller)
 }
 
@@ -1259,7 +1308,11 @@ pub fn send_batch(port_id: PortId, messages: Vec<Message>) -> Result<usize, IpcE
     IPC_MANAGER.send_batch(port_id, messages)
 }
 
-pub fn receive_batch(port_id: PortId, caller: ThreadId, max_count: usize) -> Result<Vec<Message>, IpcError> {
+pub fn receive_batch(
+    port_id: PortId,
+    caller: ThreadId,
+    max_count: usize,
+) -> Result<Vec<Message>, IpcError> {
     IPC_MANAGER.recv_batch(port_id, caller, max_count)
 }
 
@@ -1337,7 +1390,12 @@ pub fn close_ports_for_thread_lifecycle(thread_id: ThreadId) {
             // They will receive an error when they wake up and try to receive
             if let Some(receiver_id) = port.receiver_blocked {
                 drop(ports);
-                log_debug!(LOG_ORIGIN, "Waking blocked receiver {} on closed port {}", receiver_id, port_id);
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Waking blocked receiver {} on closed port {}",
+                    receiver_id,
+                    port_id
+                );
                 IPC_MANAGER.waiting_threads.lock().remove(&receiver_id);
                 crate::sched::mark_thread_ready(receiver_id);
                 ports = IPC_MANAGER.ports.lock();
@@ -1345,13 +1403,23 @@ pub fn close_ports_for_thread_lifecycle(thread_id: ThreadId) {
 
             // Wake up threads in wait queue
             for waiter_id in port.wait_queue {
-                log_debug!(LOG_ORIGIN, "Waking wait_queue waiter {} on closed port {}", waiter_id, port_id);
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Waking wait_queue waiter {} on closed port {}",
+                    waiter_id,
+                    port_id
+                );
                 crate::sched::mark_thread_ready(waiter_id);
             }
 
             // Wake up wait_any waiters
             for waiter_id in port.wait_any_waiters {
-                log_debug!(LOG_ORIGIN, "Waking wait_any waiter {} on closed port {}", waiter_id, port_id);
+                log_debug!(
+                    LOG_ORIGIN,
+                    "Waking wait_any waiter {} on closed port {}",
+                    waiter_id,
+                    port_id
+                );
                 crate::sched::mark_thread_ready(waiter_id);
             }
 

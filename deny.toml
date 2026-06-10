@@ -41,7 +41,11 @@ unused-allowed-license = "allow"
 # Duplicate versions of the same crate are a supply-chain and binary-size risk
 # in a TCB; warn so they are visible and can be deduplicated.
 multiple-versions = "warn"
-wildcard-dependencies = "deny"
+# Deny `*` version requirements on crates.io deps, but allow in-tree `path`
+# dependencies between our own workspace crates (which carry no version and
+# would otherwise be reported as wildcards).
+wildcards = "deny"
+allow-wildcard-paths = true
 # Crates that must never appear in the dependency graph.
 deny = []
 # Crates allowed to appear more than once (documented exceptions only).

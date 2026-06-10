@@ -299,6 +299,7 @@ impl ChaCha20 {
             quarter_round(&mut working, 2, 7, 8, 13);
             quarter_round(&mut working, 3, 4, 9, 14);
         }
+        #[allow(clippy::needless_range_loop)]
         for index in 0..16 {
             let word = working[index].wrapping_add(self.state[index]);
             self.block[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());

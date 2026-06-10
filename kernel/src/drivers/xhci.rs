@@ -5,9 +5,9 @@
 
 use crate::mm::pmm;
 use crate::mm::vm::{self, PageFlags};
+use crate::{log_debug, log_error, log_info, log_warn};
 use core::ptr;
 use spin::Mutex;
-use crate::{log_info, log_debug, log_warn, log_error};
 
 // xHCI PCI constants
 pub const XHCI_CLASS: u8 = 0x0C;
@@ -78,7 +78,11 @@ pub struct Trb {
 
 impl Trb {
     pub fn new() -> Self {
-        Self { data: 0, status: 0, control: 0 }
+        Self {
+            data: 0,
+            status: 0,
+            control: 0,
+        }
     }
 
     pub fn get_type(&self) -> u32 {
@@ -129,10 +133,10 @@ pub struct SlotContext {
 
 #[repr(C)]
 pub struct EndpointContext {
-    pub field1: u32, // EP State, Mult, MaxPStreams, LSA, Interval
-    pub field2: u32, // Max Packet Size, Max Burst Size, EP Type
+    pub field1: u32,  // EP State, Mult, MaxPStreams, LSA, Interval
+    pub field2: u32,  // Max Packet Size, Max Burst Size, EP Type
     pub tr_base: u64, // Dequeue Cycle State, TR Dequeue Pointer
-    pub field4: u32, // Average TRB Length, Max ESIT Payload
+    pub field4: u32,  // Average TRB Length, Max ESIT Payload
     pub reserved: [u32; 3],
 }
 
@@ -182,7 +186,14 @@ pub fn init() -> bool {
     log_info!("xhci", "Initializing production xHCI driver...");
 
     if let Some((phys_base, bus, dev, func)) = find_xhci_controller() {
-        log_info!("xhci", "Found xHCI controller at Phys 0x{:X} ({:02x}:{:02x}.{})", phys_base, bus, dev, func);
+        log_info!(
+            "xhci",
+            "Found xHCI controller at Phys 0x{:X} ({:02x}:{:02x}.{})",
+            phys_base,
+            bus,
+            dev,
+            func
+        );
 
         unsafe {
             // Enable PCI Bus Mastering and Memory Space
@@ -192,7 +203,8 @@ pub fn init() -> bool {
 
             // Production mapping: use a safe MMIO virtual address
             let xhci_virt = 0xFFFF_FFFF_A000_0000;
-            if !map_mmio(phys_base, xhci_virt, 32) { // Map 32 pages to be safe
+            if !map_mmio(phys_base, xhci_virt, 32) {
+                // Map 32 pages to be safe
                 log_error!("xhci", "Failed to map xHCI MMIO");
                 return false;
             }
@@ -213,8 +225,13 @@ pub fn init() -> bool {
             let max_slots = (hcsparams1 & 0xFF) as u8;
             let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
 
-            log_info!("xhci", "xHCI Version: 0x{:04X}, Max Slots: {}, Max Ports: {}",
-                ptr::read_volatile(&(*cap_regs).hciversion), max_slots, max_ports);
+            log_info!(
+                "xhci",
+                "xHCI Version: 0x{:04X}, Max Slots: {}, Max Ports: {}",
+                ptr::read_volatile(&(*cap_regs).hciversion),
+                max_slots,
+                max_ports
+            );
 
             let mut controller = XhciController {
                 cap_regs,
@@ -264,13 +281,18 @@ impl XhciController {
         ptr::write_volatile(&mut (*self.op_regs).dcbaap, dcbaap_phys as u64);
 
         // 2. Setup Command Ring
-        if !self.cmd_ring.init(1) { // 1 page
+        if !self.cmd_ring.init(1) {
+            // 1 page
             return false;
         }
-        ptr::write_volatile(&mut (*self.op_regs).crcr, self.cmd_ring.phys_base as u64 | 1);
+        ptr::write_volatile(
+            &mut (*self.op_regs).crcr,
+            self.cmd_ring.phys_base as u64 | 1,
+        );
 
         // 3. Setup Event Ring
-        if !self.event_ring.init(1) { // 1 page
+        if !self.event_ring.init(1) {
+            // 1 page
             return false;
         }
 
@@ -299,7 +321,8 @@ impl XhciController {
         let usbcmd = ptr::read_volatile(&(*self.op_regs).usbcmd);
         ptr::write_volatile(&mut (*self.op_regs).usbcmd, usbcmd | 1); // Set RS
 
-        if !self.wait_for_status(1, false) { // USBSTS_HCH should be clear
+        if !self.wait_for_status(1, false) {
+            // USBSTS_HCH should be clear
             log_error!("xhci", "Controller failed to start");
             return false;
         }
@@ -311,8 +334,10 @@ impl XhciController {
     pub unsafe fn poll_ports(&mut self) {
         for i in 0..self.max_ports {
             let mut portsc = ptr::read_volatile(&(*self.ports.add(i as usize)).portsc);
-            if portsc & 0x01 != 0 { // Current Connect Status
-                if (portsc & (1 << 1)) == 0 { // Not enabled, needs reset
+            if portsc & 0x01 != 0 {
+                // Current Connect Status
+                if (portsc & (1 << 1)) == 0 {
+                    // Not enabled, needs reset
                     log_info!("xhci", "Port {} needs reset", i + 1);
                     self.reset_port(i + 1);
                     portsc = ptr::read_volatile(&(*self.ports.add(i as usize)).portsc);
@@ -334,9 +359,13 @@ impl XhciController {
         // Wait for reset to complete (PRC bit)
         for _ in 0..100_000 {
             let val = ptr::read_volatile(&(*self.ports.add(port_idx)).portsc);
-            if val & (1 << 21) != 0 { // Port Reset Change
+            if val & (1 << 21) != 0 {
+                // Port Reset Change
                 // Clear PRC
-                ptr::write_volatile(&mut (*self.ports.add(port_idx)).portsc, (val & 0x0E00_C3E0) | (1 << 21));
+                ptr::write_volatile(
+                    &mut (*self.ports.add(port_idx)).portsc,
+                    (val & 0x0E00_C3E0) | (1 << 21),
+                );
                 break;
             }
             core::hint::spin_loop();
@@ -353,15 +382,23 @@ impl XhciController {
 
             let trb_type = trb.get_type();
             match trb_type {
-                33 => { // Command Completion Event
+                33 => {
+                    // Command Completion Event
                     let completion_code = (trb.status >> 24) as u8;
                     let slot_id = (trb.control >> 24) as u8;
-                    log_debug!("xhci", "Command Completion: Code {}, Slot {}", completion_code, slot_id);
-                    if completion_code == 1 { // Success
+                    log_debug!(
+                        "xhci",
+                        "Command Completion: Code {}, Slot {}",
+                        completion_code,
+                        slot_id
+                    );
+                    if completion_code == 1 {
+                        // Success
                         crate::drivers::usb_core::on_slot_enabled(slot_id);
                     }
                 }
-                34 => { // Port Status Change Event
+                34 => {
+                    // Port Status Change Event
                     let port_id = (trb.data >> 24) as u8;
                     log_debug!("xhci", "Port Status Change: Port {}", port_id);
                 }
@@ -412,7 +449,8 @@ impl XhciController {
         ptr::write_volatile(&mut (*self.op_regs).usbcmd, usbcmd & !1); // Clear RS
 
         // 2. Wait for HCHalted
-        if !self.wait_for_status(1, true) { // USBSTS_HCH
+        if !self.wait_for_status(1, true) {
+            // USBSTS_HCH
             log_error!("xhci", "Controller failed to halt");
             return false;
         }
@@ -554,7 +592,13 @@ fn map_mmio(phys_base: usize, virt_base: usize, page_count: usize) -> bool {
             paddr,
             PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::CACHE_DISABLE,
         ) {
-            log_error!("xhci", "Failed to map MMIO page Phys:0x{:X} to Virt:0x{:X}: {:?}", paddr, vaddr, e);
+            log_error!(
+                "xhci",
+                "Failed to map MMIO page Phys:0x{:X} to Virt:0x{:X}: {:?}",
+                paddr,
+                vaddr,
+                e
+            );
             return false;
         }
     }
@@ -562,11 +606,11 @@ fn map_mmio(phys_base: usize, virt_base: usize, page_count: usize) -> bool {
 }
 
 fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    ((bus as u32) << 16) |
-    ((device as u32) << 11) |
-    ((function as u32) << 8) |
-    ((offset as u32) & 0xFC) |
-    0x80000000
+    ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xFC)
+        | 0x80000000
 }
 
 fn pci_read_config(address: u32) -> u32 {

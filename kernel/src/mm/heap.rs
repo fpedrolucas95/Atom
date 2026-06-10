@@ -19,10 +19,10 @@
 
 use super::pmm;
 use crate::mm::vm;
+use crate::{log_info, log_warn};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 use spin::Mutex;
-use crate::{log_info, log_warn};
 
 /// Slab size classes — powers of two from 32 to 2048
 const SIZE_CLASSES: [usize; 7] = [32, 64, 128, 256, 512, 1024, 2048];
@@ -71,10 +71,9 @@ impl SlabCache {
 
     /// Allocate a block from this cache. If empty, request a new page.
     fn alloc(&mut self) -> *mut u8 {
-        if self.free_list.is_null()
-            && !self.grow() {
-                return null_mut();
-            }
+        if self.free_list.is_null() && !self.grow() {
+            return null_mut();
+        }
 
         let block = self.free_list;
         unsafe {
@@ -225,9 +224,9 @@ impl SlabAllocator {
         //   [ pages | header_offset | magic ]
         unsafe {
             let header = (base + header_offset - LARGE_HEADER_SIZE) as *mut usize;
-            *header          = pages;
-            *header.add(1)   = header_offset;
-            *header.add(2)   = LARGE_MAGIC;
+            *header = pages;
+            *header.add(1) = header_offset;
+            *header.add(2) = LARGE_MAGIC;
         }
 
         self.large_alloc_count += 1;
@@ -242,9 +241,9 @@ impl SlabAllocator {
         let header_ptr = (ptr as usize - LARGE_HEADER_SIZE) as *const usize;
 
         unsafe {
-            let pages         = *header_ptr;
+            let pages = *header_ptr;
             let header_offset = *header_ptr.add(1);
-            let magic         = *header_ptr.add(2);
+            let magic = *header_ptr.add(2);
 
             if magic != LARGE_MAGIC {
                 // Corruption detected — don't free to avoid damage
@@ -275,11 +274,19 @@ pub fn init() {
 
     for cache in state.caches.iter_mut() {
         if !cache.grow() {
-            log_warn!("heap", "Failed to pre-populate slab cache for size {}", cache.block_size);
+            log_warn!(
+                "heap",
+                "Failed to pre-populate slab cache for size {}",
+                cache.block_size
+            );
         }
     }
 
-    log_info!("heap", "Slab allocator initialized — {} size classes (32-2048), large allocs via PMM", NUM_CLASSES);
+    log_info!(
+        "heap",
+        "Slab allocator initialized — {} size classes (32-2048), large allocs via PMM",
+        NUM_CLASSES
+    );
 }
 
 unsafe impl GlobalAlloc for KernelAllocator {
@@ -316,7 +323,12 @@ pub fn get_stats() -> (usize, usize) {
 #[allow(dead_code)]
 pub fn get_detailed_stats() -> SlabStats {
     let state = ALLOCATOR_STATE.lock();
-    let mut classes = [SlabClassStats { block_size: 0, alloc_count: 0, dealloc_count: 0, active: 0 }; NUM_CLASSES];
+    let mut classes = [SlabClassStats {
+        block_size: 0,
+        alloc_count: 0,
+        dealloc_count: 0,
+        active: 0,
+    }; NUM_CLASSES];
 
     for (i, cache) in state.caches.iter().enumerate() {
         classes[i] = SlabClassStats {

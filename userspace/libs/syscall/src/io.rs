@@ -4,17 +4,15 @@
 // Access is controlled by the kernel's capability system - only authorized
 // ports can be accessed.
 
-use crate::error::{ESUCCESS, EPERM, EINVAL, SyscallError, SyscallResult};
-use crate::raw::{syscall2, numbers::*};
+use crate::error::{SyscallError, SyscallResult, EINVAL, EPERM, ESUCCESS};
+use crate::raw::{numbers::*, syscall2};
 
 /// Read a byte from an I/O port
 ///
 /// Returns the byte read, or an error if access is denied.
 /// Only ports authorized by the kernel can be accessed.
 pub fn port_read_u8(port: u16) -> SyscallResult<u8> {
-    let result = unsafe {
-        syscall2(SYS_IO_PORT_READ, port as u64, 1)
-    };
+    let result = unsafe { syscall2(SYS_IO_PORT_READ, port as u64, 1) };
 
     if result == EPERM {
         Err(SyscallError::PermissionDenied)
@@ -30,16 +28,12 @@ pub fn port_read_u8(port: u16) -> SyscallResult<u8> {
 /// Returns Ok(()) on success, or an error if access is denied.
 /// Only ports authorized by the kernel can be accessed.
 pub fn port_write_u8(port: u16, value: u8) -> SyscallResult<()> {
-    let result = unsafe {
-        syscall2(SYS_IO_PORT_WRITE, port as u64, value as u64)
-    };
+    let result = unsafe { syscall2(SYS_IO_PORT_WRITE, port as u64, value as u64) };
 
     if result == ESUCCESS {
         Ok(())
     } else if result == EPERM {
         Err(SyscallError::PermissionDenied)
-    } else if result == EINVAL {
-        Err(SyscallError::InvalidArgument)
     } else {
         Err(SyscallError::InvalidArgument)
     }

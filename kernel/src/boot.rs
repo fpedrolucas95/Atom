@@ -173,7 +173,11 @@ impl DriverImage {
     }
 
     pub fn name_str(&self) -> &str {
-        let len = self.name.iter().position(|&c| c == 0).unwrap_or(MAX_DRIVER_NAME_LEN);
+        let len = self
+            .name
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(MAX_DRIVER_NAME_LEN);
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
     }
 }

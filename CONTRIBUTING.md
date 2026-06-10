@@ -48,6 +48,6 @@ checks. None of them may use `continue-on-error`.
 
 ## Style
 
-* `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings`
+* `cargo fmt --all` and `cargo clippy --workspace --lib --bins -- -D warnings`
   must be clean.
 * Match the surrounding code's conventions and comment density.

@@ -7,19 +7,19 @@
 //! - Optional drop-shadow (DS `shadows::SOFT`).
 //! - Anti-aliased rounded corners (DS `radius::MD` = 12 px).
 
-use libgui::color::Color;
-use libgui::surface::Surface;
 use atom_theme::colors::{
-    ATOM_COLOR_SURFACE, ATOM_COLOR_SURFACE_ALT, ATOM_COLOR_BORDER, ATOM_COLOR_SHADOW,
+    ATOM_COLOR_BORDER, ATOM_COLOR_SHADOW, ATOM_COLOR_SURFACE, ATOM_COLOR_SURFACE_ALT,
 };
 use atom_theme::radius;
 use atom_theme::shadows;
+use libgui::color::Color;
+use libgui::surface::Surface;
 
 /// A rectangular background panel.
 pub struct Panel {
-    pub x:      u32,
-    pub y:      u32,
-    pub width:  u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
     pub height: u32,
     /// When `true`, use `ATOM_COLOR_SURFACE_ALT` and draw a drop-shadow.
     pub elevated: bool,
@@ -35,7 +35,10 @@ impl Panel {
     /// Create a standard surface panel.
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
-            x, y, width, height,
+            x,
+            y,
+            width,
+            height,
             elevated: false,
             corner_radius: radius::MD,
             show_border: true,
@@ -46,7 +49,10 @@ impl Panel {
     /// Create an elevated panel (SURFACE_ALT background + shadow).
     pub fn elevated(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
-            x, y, width, height,
+            x,
+            y,
+            width,
+            height,
             elevated: true,
             corner_radius: radius::MD,
             show_border: true,
@@ -55,11 +61,20 @@ impl Panel {
     }
 
     /// Override the corner radius.
-    pub fn with_radius(mut self, r: u32) -> Self { self.corner_radius = r; self }
+    pub fn with_radius(mut self, r: u32) -> Self {
+        self.corner_radius = r;
+        self
+    }
     /// Enable / disable the 1-px border.
-    pub fn with_border(mut self, v: bool) -> Self { self.show_border = v; self }
+    pub fn with_border(mut self, v: bool) -> Self {
+        self.show_border = v;
+        self
+    }
     /// Enable / disable the drop-shadow.
-    pub fn with_shadow(mut self, v: bool) -> Self { self.show_shadow = v; self }
+    pub fn with_shadow(mut self, v: bool) -> Self {
+        self.show_shadow = v;
+        self
+    }
 
     /// Draw the panel into `surface`.
     pub fn draw(&self, surface: &mut Surface) {
@@ -69,8 +84,10 @@ impl Panel {
         if self.show_shadow {
             let sc: Color = ATOM_COLOR_SHADOW.into();
             surface.draw_shadow_layers(
-                self.x as i32, self.y as i32,
-                self.width, self.height,
+                self.x as i32,
+                self.y as i32,
+                self.width,
+                self.height,
                 self.corner_radius,
                 sc,
                 spec.offset_y,
@@ -86,7 +103,10 @@ impl Panel {
             ATOM_COLOR_SURFACE.into()
         };
         surface.fill_rect_rounded_aa(
-            self.x, self.y, self.width, self.height,
+            self.x,
+            self.y,
+            self.width,
+            self.height,
             self.corner_radius,
             bg,
         );
@@ -95,7 +115,10 @@ impl Panel {
         if self.show_border {
             let bc: Color = ATOM_COLOR_BORDER.into();
             surface.draw_rect_rounded_aa(
-                self.x, self.y, self.width, self.height,
+                self.x,
+                self.y,
+                self.width,
+                self.height,
                 self.corner_radius,
                 bc,
             );
@@ -106,7 +129,7 @@ impl Panel {
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x as i32
             && y >= self.y as i32
-            && x < (self.x + self.width)  as i32
+            && x < (self.x + self.width) as i32
             && y < (self.y + self.height) as i32
     }
 }

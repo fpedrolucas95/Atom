@@ -8,18 +8,15 @@
 // Error handling mirrors the kernel ABI: every non-zero return is one of
 // the POSIX-like codes defined in `atom_abi`.
 
-use crate::raw::numbers::*;
 use crate::error::is_syscall_error;
+use crate::raw::numbers::*;
 use crate::raw::{syscall1, syscall2, syscall3, syscall4, syscall6};
 use atom_abi::{
-    ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY, EBADF,
-    EFBIG, ENOSPC, EROFS, ENAMETOOLONG, EIO, EACCES,
-    EMFILE, EOVERFLOW, ECORRUPTED, EMLINK, EXDEV, EPIPE,
-    ENOTSUP, EAGAIN, EINTR, E2BIG,
-    SEEK_SET, SEEK_CUR, SEEK_END,
-    O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC,
-    O_APPEND, O_NONBLOCK, O_SYNC, O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC,
-    S_IFMT, S_IFREG, S_IFDIR, S_IFLNK, S_IFBLK, S_IFCHR, S_IFIFO, S_IFSOCK,
+    E2BIG, EACCES, EAGAIN, EBADF, ECORRUPTED, EEXIST, EFBIG, EINTR, EIO, EISDIR, EMFILE, EMLINK,
+    ENAMETOOLONG, ENOENT, ENOSPC, ENOTDIR, ENOTEMPTY, ENOTSUP, EOVERFLOW, EPIPE, EROFS, EXDEV,
+    O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR,
+    O_SYNC, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
+    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
 };
 
 extern crate alloc;
@@ -31,88 +28,88 @@ use alloc::vec::Vec;
 /// Filesystem-specific error codes, mapped from ABI u64 codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
-    NotFound,       // ENOENT
-    Exists,         // EEXIST
-    IsDir,          // EISDIR
-    NotDir,         // ENOTDIR
-    NotEmpty,       // ENOTEMPTY
-    BadFd,          // EBADF
-    FileTooLarge,   // EFBIG
-    NoSpace,        // ENOSPC
-    ReadOnly,       // EROFS
-    NameTooLong,    // ENAMETOOLONG
-    Io,             // EIO
+    NotFound,         // ENOENT
+    Exists,           // EEXIST
+    IsDir,            // EISDIR
+    NotDir,           // ENOTDIR
+    NotEmpty,         // ENOTEMPTY
+    BadFd,            // EBADF
+    FileTooLarge,     // EFBIG
+    NoSpace,          // ENOSPC
+    ReadOnly,         // EROFS
+    NameTooLong,      // ENAMETOOLONG
+    Io,               // EIO
     PermissionDenied, // EACCES
-    TooManyFiles,   // EMFILE
-    Overflow,       // EOVERFLOW
-    Corrupted,      // ECORRUPTED
-    TooManyLinks,   // EMLINK
-    CrossDevice,    // EXDEV
-    BrokenPipe,     // EPIPE
-    NotSupported,   // ENOTSUP
-    WouldBlock,     // EAGAIN
-    Interrupted,    // EINTR
-    ArgListTooLong, // E2BIG
-    InvalidArg,     // EINVAL
+    TooManyFiles,     // EMFILE
+    Overflow,         // EOVERFLOW
+    Corrupted,        // ECORRUPTED
+    TooManyLinks,     // EMLINK
+    CrossDevice,      // EXDEV
+    BrokenPipe,       // EPIPE
+    NotSupported,     // ENOTSUP
+    WouldBlock,       // EAGAIN
+    Interrupted,      // EINTR
+    ArgListTooLong,   // E2BIG
+    InvalidArg,       // EINVAL
     Other(u64),
 }
 
 impl FsError {
     pub fn from_raw(code: u64) -> Self {
         match code {
-            x if x == ENOENT       => FsError::NotFound,
-            x if x == EEXIST       => FsError::Exists,
-            x if x == EISDIR       => FsError::IsDir,
-            x if x == ENOTDIR      => FsError::NotDir,
-            x if x == ENOTEMPTY    => FsError::NotEmpty,
-            x if x == EBADF        => FsError::BadFd,
-            x if x == EFBIG        => FsError::FileTooLarge,
-            x if x == ENOSPC       => FsError::NoSpace,
-            x if x == EROFS        => FsError::ReadOnly,
+            x if x == ENOENT => FsError::NotFound,
+            x if x == EEXIST => FsError::Exists,
+            x if x == EISDIR => FsError::IsDir,
+            x if x == ENOTDIR => FsError::NotDir,
+            x if x == ENOTEMPTY => FsError::NotEmpty,
+            x if x == EBADF => FsError::BadFd,
+            x if x == EFBIG => FsError::FileTooLarge,
+            x if x == ENOSPC => FsError::NoSpace,
+            x if x == EROFS => FsError::ReadOnly,
             x if x == ENAMETOOLONG => FsError::NameTooLong,
-            x if x == EIO          => FsError::Io,
-            x if x == EACCES       => FsError::PermissionDenied,
-            x if x == EMFILE       => FsError::TooManyFiles,
-            x if x == EOVERFLOW    => FsError::Overflow,
-            x if x == ECORRUPTED   => FsError::Corrupted,
-            x if x == EMLINK       => FsError::TooManyLinks,
-            x if x == EXDEV        => FsError::CrossDevice,
-            x if x == EPIPE        => FsError::BrokenPipe,
-            x if x == ENOTSUP      => FsError::NotSupported,
-            x if x == EAGAIN       => FsError::WouldBlock,
-            x if x == EINTR        => FsError::Interrupted,
-            x if x == E2BIG        => FsError::ArgListTooLong,
+            x if x == EIO => FsError::Io,
+            x if x == EACCES => FsError::PermissionDenied,
+            x if x == EMFILE => FsError::TooManyFiles,
+            x if x == EOVERFLOW => FsError::Overflow,
+            x if x == ECORRUPTED => FsError::Corrupted,
+            x if x == EMLINK => FsError::TooManyLinks,
+            x if x == EXDEV => FsError::CrossDevice,
+            x if x == EPIPE => FsError::BrokenPipe,
+            x if x == ENOTSUP => FsError::NotSupported,
+            x if x == EAGAIN => FsError::WouldBlock,
+            x if x == EINTR => FsError::Interrupted,
+            x if x == E2BIG => FsError::ArgListTooLong,
             x if x == atom_abi::EINVAL => FsError::InvalidArg,
-            other                  => FsError::Other(other),
+            other => FsError::Other(other),
         }
     }
 
     pub fn to_raw(&self) -> u64 {
         match self {
-            FsError::NotFound         => ENOENT,
-            FsError::Exists           => EEXIST,
-            FsError::IsDir            => EISDIR,
-            FsError::NotDir           => ENOTDIR,
-            FsError::NotEmpty         => ENOTEMPTY,
-            FsError::BadFd            => EBADF,
-            FsError::FileTooLarge     => EFBIG,
-            FsError::NoSpace          => ENOSPC,
-            FsError::ReadOnly         => EROFS,
-            FsError::NameTooLong      => ENAMETOOLONG,
-            FsError::Io               => EIO,
+            FsError::NotFound => ENOENT,
+            FsError::Exists => EEXIST,
+            FsError::IsDir => EISDIR,
+            FsError::NotDir => ENOTDIR,
+            FsError::NotEmpty => ENOTEMPTY,
+            FsError::BadFd => EBADF,
+            FsError::FileTooLarge => EFBIG,
+            FsError::NoSpace => ENOSPC,
+            FsError::ReadOnly => EROFS,
+            FsError::NameTooLong => ENAMETOOLONG,
+            FsError::Io => EIO,
             FsError::PermissionDenied => EACCES,
-            FsError::TooManyFiles     => EMFILE,
-            FsError::Overflow         => EOVERFLOW,
-            FsError::Corrupted        => ECORRUPTED,
-            FsError::TooManyLinks     => EMLINK,
-            FsError::CrossDevice      => EXDEV,
-            FsError::BrokenPipe       => EPIPE,
-            FsError::NotSupported     => ENOTSUP,
-            FsError::WouldBlock       => EAGAIN,
-            FsError::Interrupted      => EINTR,
-            FsError::ArgListTooLong   => E2BIG,
-            FsError::InvalidArg       => atom_abi::EINVAL,
-            FsError::Other(c)         => *c,
+            FsError::TooManyFiles => EMFILE,
+            FsError::Overflow => EOVERFLOW,
+            FsError::Corrupted => ECORRUPTED,
+            FsError::TooManyLinks => EMLINK,
+            FsError::CrossDevice => EXDEV,
+            FsError::BrokenPipe => EPIPE,
+            FsError::NotSupported => ENOTSUP,
+            FsError::WouldBlock => EAGAIN,
+            FsError::Interrupted => EINTR,
+            FsError::ArgListTooLong => E2BIG,
+            FsError::InvalidArg => atom_abi::EINVAL,
+            FsError::Other(c) => *c,
         }
     }
 }
@@ -137,18 +134,18 @@ fn check(raw: u64) -> FsResult<u64> {
 
 pub struct OpenFlags;
 impl OpenFlags {
-    pub const RDONLY:    u32 = O_RDONLY;
-    pub const WRONLY:    u32 = O_WRONLY;
-    pub const RDWR:      u32 = O_RDWR;
-    pub const CREAT:     u32 = O_CREAT;
-    pub const EXCL:      u32 = O_EXCL;
-    pub const TRUNC:     u32 = O_TRUNC;
-    pub const APPEND:    u32 = O_APPEND;
-    pub const NONBLOCK:  u32 = O_NONBLOCK;
-    pub const SYNC:      u32 = O_SYNC;
+    pub const RDONLY: u32 = O_RDONLY;
+    pub const WRONLY: u32 = O_WRONLY;
+    pub const RDWR: u32 = O_RDWR;
+    pub const CREAT: u32 = O_CREAT;
+    pub const EXCL: u32 = O_EXCL;
+    pub const TRUNC: u32 = O_TRUNC;
+    pub const APPEND: u32 = O_APPEND;
+    pub const NONBLOCK: u32 = O_NONBLOCK;
+    pub const SYNC: u32 = O_SYNC;
     pub const DIRECTORY: u32 = O_DIRECTORY;
-    pub const NOFOLLOW:  u32 = O_NOFOLLOW;
-    pub const CLOEXEC:   u32 = O_CLOEXEC;
+    pub const NOFOLLOW: u32 = O_NOFOLLOW;
+    pub const CLOEXEC: u32 = O_CLOEXEC;
 }
 
 pub struct SeekWhence;
@@ -163,38 +160,40 @@ impl SeekWhence {
 /// File status — mirrors the 80-byte on-wire stat struct.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FsStat {
-    pub size:     u64,
-    pub inode:    u64,
+    pub size: u64,
+    pub inode: u64,
     pub mtime_ns: u64,
     pub atime_ns: u64,
     pub ctime_ns: u64,
-    pub mode:     u32,
-    pub uid:      u16,
-    pub gid:      u16,
-    pub nlinks:   u32,
-    pub nblocks:  u32,
-    pub blksize:  u32,
-    pub dev:      u32,
+    pub mode: u32,
+    pub uid: u16,
+    pub gid: u16,
+    pub nlinks: u32,
+    pub nblocks: u32,
+    pub blksize: u32,
+    pub dev: u32,
 }
 
 impl FsStat {
     pub const WIRE_SIZE: usize = 80;
 
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::WIRE_SIZE { return None; }
+        if b.len() < Self::WIRE_SIZE {
+            return None;
+        }
         Some(Self {
-            size:     u64::from_le_bytes(b[0..8].try_into().ok()?),
-            inode:    u64::from_le_bytes(b[8..16].try_into().ok()?),
+            size: u64::from_le_bytes(b[0..8].try_into().ok()?),
+            inode: u64::from_le_bytes(b[8..16].try_into().ok()?),
             mtime_ns: u64::from_le_bytes(b[16..24].try_into().ok()?),
             atime_ns: u64::from_le_bytes(b[24..32].try_into().ok()?),
             ctime_ns: u64::from_le_bytes(b[32..40].try_into().ok()?),
-            mode:     u32::from_le_bytes(b[40..44].try_into().ok()?),
-            uid:      u16::from_le_bytes(b[44..46].try_into().ok()?),
-            gid:      u16::from_le_bytes(b[46..48].try_into().ok()?),
-            nlinks:   u32::from_le_bytes(b[48..52].try_into().ok()?),
-            nblocks:  u32::from_le_bytes(b[52..56].try_into().ok()?),
-            blksize:  u32::from_le_bytes(b[56..60].try_into().ok()?),
-            dev:      u32::from_le_bytes(b[60..64].try_into().ok()?),
+            mode: u32::from_le_bytes(b[40..44].try_into().ok()?),
+            uid: u16::from_le_bytes(b[44..46].try_into().ok()?),
+            gid: u16::from_le_bytes(b[46..48].try_into().ok()?),
+            nlinks: u32::from_le_bytes(b[48..52].try_into().ok()?),
+            nblocks: u32::from_le_bytes(b[52..56].try_into().ok()?),
+            blksize: u32::from_le_bytes(b[56..60].try_into().ok()?),
+            dev: u32::from_le_bytes(b[60..64].try_into().ok()?),
         })
     }
 
@@ -219,12 +218,24 @@ impl FsStat {
         FileType::from_mode(self.mode as u16)
     }
 
-    pub fn is_dir(&self) -> bool { self.file_type() == FileType::Directory }
-    pub fn is_file(&self) -> bool { self.file_type() == FileType::Regular }
-    pub fn is_symlink(&self) -> bool { self.file_type() == FileType::Symlink }
-    pub fn is_readable(&self, uid: u16, gid: u16) -> bool { self.mode_check(uid, gid, 4) }
-    pub fn is_writable(&self, uid: u16, gid: u16) -> bool { self.mode_check(uid, gid, 2) }
-    pub fn is_executable(&self, uid: u16, gid: u16) -> bool { self.mode_check(uid, gid, 1) }
+    pub fn is_dir(&self) -> bool {
+        self.file_type() == FileType::Directory
+    }
+    pub fn is_file(&self) -> bool {
+        self.file_type() == FileType::Regular
+    }
+    pub fn is_symlink(&self) -> bool {
+        self.file_type() == FileType::Symlink
+    }
+    pub fn is_readable(&self, uid: u16, gid: u16) -> bool {
+        self.mode_check(uid, gid, 4)
+    }
+    pub fn is_writable(&self, uid: u16, gid: u16) -> bool {
+        self.mode_check(uid, gid, 2)
+    }
+    pub fn is_executable(&self, uid: u16, gid: u16) -> bool {
+        self.mode_check(uid, gid, 1)
+    }
 
     fn mode_check(&self, uid: u16, gid: u16, want: u32) -> bool {
         let perm = self.mode & 0o777;
@@ -255,27 +266,27 @@ impl FileType {
     pub fn from_mode(mode: u16) -> Self {
         let mode = mode as u32;
         match mode & S_IFMT {
-            x if x == S_IFREG  => FileType::Regular,
-            x if x == S_IFDIR  => FileType::Directory,
-            x if x == S_IFLNK  => FileType::Symlink,
-            x if x == S_IFBLK  => FileType::BlockDevice,
-            x if x == S_IFCHR  => FileType::CharDevice,
-            x if x == S_IFIFO  => FileType::Fifo,
+            x if x == S_IFREG => FileType::Regular,
+            x if x == S_IFDIR => FileType::Directory,
+            x if x == S_IFLNK => FileType::Symlink,
+            x if x == S_IFBLK => FileType::BlockDevice,
+            x if x == S_IFCHR => FileType::CharDevice,
+            x if x == S_IFIFO => FileType::Fifo,
             x if x == S_IFSOCK => FileType::Socket,
-            _                  => FileType::Unknown,
+            _ => FileType::Unknown,
         }
     }
 
     pub fn as_dirent_type(self) -> u8 {
         match self {
-            FileType::Regular      => 1,
-            FileType::Directory    => 2,
-            FileType::Symlink      => 3,
-            FileType::BlockDevice  => 4,
-            FileType::CharDevice   => 5,
-            FileType::Fifo         => 6,
-            FileType::Socket       => 7,
-            FileType::Unknown      => 0,
+            FileType::Regular => 1,
+            FileType::Directory => 2,
+            FileType::Symlink => 3,
+            FileType::BlockDevice => 4,
+            FileType::CharDevice => 5,
+            FileType::Fifo => 6,
+            FileType::Socket => 7,
+            FileType::Unknown => 0,
         }
     }
 }
@@ -283,34 +294,36 @@ impl FileType {
 /// Filesystem statistics.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FsStatvfs {
-    pub bsize:   u64,
-    pub frsize:  u64,
-    pub blocks:  u64,
-    pub bfree:   u64,
-    pub bavail:  u64,
-    pub files:   u64,
-    pub ffree:   u64,
-    pub favail:  u64,
+    pub bsize: u64,
+    pub frsize: u64,
+    pub blocks: u64,
+    pub bfree: u64,
+    pub bavail: u64,
+    pub files: u64,
+    pub ffree: u64,
+    pub favail: u64,
     pub namemax: u32,
-    pub flags:   u32,
+    pub flags: u32,
 }
 
 impl FsStatvfs {
     pub const WIRE_SIZE: usize = 72;
 
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::WIRE_SIZE { return None; }
+        if b.len() < Self::WIRE_SIZE {
+            return None;
+        }
         Some(Self {
-            bsize:   u64::from_le_bytes(b[0..8].try_into().ok()?),
-            frsize:  u64::from_le_bytes(b[8..16].try_into().ok()?),
-            blocks:  u64::from_le_bytes(b[16..24].try_into().ok()?),
-            bfree:   u64::from_le_bytes(b[24..32].try_into().ok()?),
-            bavail:  u64::from_le_bytes(b[32..40].try_into().ok()?),
-            files:   u64::from_le_bytes(b[40..48].try_into().ok()?),
-            ffree:   u64::from_le_bytes(b[48..56].try_into().ok()?),
-            favail:  u64::from_le_bytes(b[56..64].try_into().ok()?),
+            bsize: u64::from_le_bytes(b[0..8].try_into().ok()?),
+            frsize: u64::from_le_bytes(b[8..16].try_into().ok()?),
+            blocks: u64::from_le_bytes(b[16..24].try_into().ok()?),
+            bfree: u64::from_le_bytes(b[24..32].try_into().ok()?),
+            bavail: u64::from_le_bytes(b[32..40].try_into().ok()?),
+            files: u64::from_le_bytes(b[40..48].try_into().ok()?),
+            ffree: u64::from_le_bytes(b[48..56].try_into().ok()?),
+            favail: u64::from_le_bytes(b[56..64].try_into().ok()?),
             namemax: u32::from_le_bytes(b[64..68].try_into().ok()?),
-            flags:   u32::from_le_bytes(b[68..72].try_into().ok()?),
+            flags: u32::from_le_bytes(b[68..72].try_into().ok()?),
         })
     }
 }
@@ -318,9 +331,9 @@ impl FsStatvfs {
 /// Directory entry returned by readdir.
 #[derive(Debug, Clone)]
 pub struct FsDirent {
-    pub ino:       u64,
+    pub ino: u64,
     pub file_type: FileType,
-    pub name:      String,
+    pub name: String,
 }
 
 // ── Syscall wrappers ─────────────────────────────────────────────────────────
@@ -336,7 +349,13 @@ pub struct FsDirent {
 pub fn open(path: &str, flags: u32, mode: u32) -> FsResult<u64> {
     let p = path.as_bytes();
     let raw = unsafe {
-        syscall4(SYS_FS_OPEN, p.as_ptr() as u64, p.len() as u64, flags as u64, mode as u64)
+        syscall4(
+            SYS_FS_OPEN,
+            p.as_ptr() as u64,
+            p.len() as u64,
+            flags as u64,
+            mode as u64,
+        )
     };
     check(raw)
 }
@@ -351,10 +370,10 @@ pub fn close(fd: u64) -> FsResult<()> {
 ///
 /// Returns the number of bytes actually read (0 = EOF).
 pub fn read(fd: u64, buf: &mut [u8]) -> FsResult<usize> {
-    if buf.is_empty() { return Ok(0); }
-    let raw = unsafe {
-        syscall3(SYS_FS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64)
-    };
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let raw = unsafe { syscall3(SYS_FS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) };
     check(raw).map(|n| n as usize)
 }
 
@@ -362,10 +381,10 @@ pub fn read(fd: u64, buf: &mut [u8]) -> FsResult<usize> {
 ///
 /// Returns the number of bytes written.
 pub fn write(fd: u64, buf: &[u8]) -> FsResult<usize> {
-    if buf.is_empty() { return Ok(0); }
-    let raw = unsafe {
-        syscall3(SYS_FS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64)
-    };
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let raw = unsafe { syscall3(SYS_FS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) };
     check(raw).map(|n| n as usize)
 }
 
@@ -375,7 +394,9 @@ pub fn read_all(fd: u64) -> FsResult<Vec<u8>> {
     let mut buf = [0u8; 4096];
     loop {
         let n = read(fd, &mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         out.extend_from_slice(&buf[..n]);
     }
     Ok(out)
@@ -386,7 +407,9 @@ pub fn write_all(fd: u64, data: &[u8]) -> FsResult<()> {
     let mut written = 0;
     while written < data.len() {
         let n = write(fd, &data[written..])?;
-        if n == 0 { return Err(FsError::Io); }
+        if n == 0 {
+            return Err(FsError::Io);
+        }
         written += n;
     }
     Ok(())
@@ -394,9 +417,7 @@ pub fn write_all(fd: u64, data: &[u8]) -> FsResult<()> {
 
 /// Reposition the file offset.
 pub fn lseek(fd: u64, offset: i64, whence: u32) -> FsResult<u64> {
-    let raw = unsafe {
-        syscall3(SYS_FS_SEEK, fd, offset as u64, whence as u64)
-    };
+    let raw = unsafe { syscall3(SYS_FS_SEEK, fd, offset as u64, whence as u64) };
     check(raw)
 }
 
@@ -405,7 +426,12 @@ pub fn stat(path: &str) -> FsResult<FsStat> {
     let mut buf = [0u8; FsStat::WIRE_SIZE];
     let p = path.as_bytes();
     let raw = unsafe {
-        syscall3(SYS_FS_STAT, p.as_ptr() as u64, p.len() as u64, buf.as_mut_ptr() as u64)
+        syscall3(
+            SYS_FS_STAT,
+            p.as_ptr() as u64,
+            p.len() as u64,
+            buf.as_mut_ptr() as u64,
+        )
     };
     check(raw)?;
     FsStat::from_bytes(&buf).ok_or(FsError::Io)
@@ -414,9 +440,7 @@ pub fn stat(path: &str) -> FsResult<FsStat> {
 /// Get file status by file descriptor.
 pub fn fstat(fd: u64) -> FsResult<FsStat> {
     let mut buf = [0u8; FsStat::WIRE_SIZE];
-    let raw = unsafe {
-        syscall2(SYS_FS_FSTAT, fd, buf.as_mut_ptr() as u64)
-    };
+    let raw = unsafe { syscall2(SYS_FS_FSTAT, fd, buf.as_mut_ptr() as u64) };
     check(raw)?;
     FsStat::from_bytes(&buf).ok_or(FsError::Io)
 }
@@ -424,27 +448,21 @@ pub fn fstat(fd: u64) -> FsResult<FsStat> {
 /// Create a directory.
 pub fn mkdir(path: &str, mode: u32) -> FsResult<()> {
     let p = path.as_bytes();
-    let raw = unsafe {
-        syscall3(SYS_FS_MKDIR, p.as_ptr() as u64, p.len() as u64, mode as u64)
-    };
+    let raw = unsafe { syscall3(SYS_FS_MKDIR, p.as_ptr() as u64, p.len() as u64, mode as u64) };
     check(raw).map(|_| ())
 }
 
 /// Remove an empty directory.
 pub fn rmdir(path: &str) -> FsResult<()> {
     let p = path.as_bytes();
-    let raw = unsafe {
-        syscall2(SYS_FS_RMDIR, p.as_ptr() as u64, p.len() as u64)
-    };
+    let raw = unsafe { syscall2(SYS_FS_RMDIR, p.as_ptr() as u64, p.len() as u64) };
     check(raw).map(|_| ())
 }
 
 /// Remove a file (unlink).
 pub fn unlink(path: &str) -> FsResult<()> {
     let p = path.as_bytes();
-    let raw = unsafe {
-        syscall2(SYS_FS_UNLINK, p.as_ptr() as u64, p.len() as u64)
-    };
+    let raw = unsafe { syscall2(SYS_FS_UNLINK, p.as_ptr() as u64, p.len() as u64) };
     check(raw).map(|_| ())
 }
 
@@ -472,7 +490,12 @@ pub fn readdir(fd: u64) -> FsResult<Vec<FsDirent>> {
     // Allocate a reasonably large buffer for directory entries.
     let mut buf = alloc::vec![0u8; 65536];
     let raw = unsafe {
-        syscall3(SYS_FS_READDIR, fd, buf.as_mut_ptr() as u64, buf.len() as u64)
+        syscall3(
+            SYS_FS_READDIR,
+            fd,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
     };
     let total = check(raw)? as usize;
 
@@ -485,13 +508,17 @@ pub fn readdir(fd: u64) -> FsResult<Vec<FsDirent>> {
         let name_len = b[6] as usize;
         let ftype_raw = b[7];
 
-        if rec_len < 8 || rec_len % 4 != 0 || pos + rec_len > total { break; }
-        if 8 + name_len > rec_len { break; }
+        if rec_len < 8 || !rec_len.is_multiple_of(4) || pos + rec_len > total {
+            break;
+        }
+        if 8 + name_len > rec_len {
+            break;
+        }
         if ino != 0 {
             let name_bytes = &b[8..8 + name_len];
             let name = core::str::from_utf8(name_bytes)
                 .map_err(|_| FsError::Io)
-                .map(|s| String::from(s))?;
+                .map(String::from)?;
             let file_type = match ftype_raw {
                 1 => FileType::Regular,
                 2 => FileType::Directory,
@@ -502,7 +529,11 @@ pub fn readdir(fd: u64) -> FsResult<Vec<FsDirent>> {
                 7 => FileType::Socket,
                 _ => FileType::Unknown,
             };
-            entries.push(FsDirent { ino: ino as u64, file_type, name });
+            entries.push(FsDirent {
+                ino: ino as u64,
+                file_type,
+                name,
+            });
         }
         pos += rec_len;
     }
@@ -534,9 +565,12 @@ pub fn mount(device: &str, mountpoint: &str, fstype: &str, _flags: u32) -> FsRes
     let raw = unsafe {
         syscall6(
             SYS_FS_MOUNT,
-            dp.as_ptr() as u64, dp.len() as u64,
-            mp.as_ptr() as u64, mp.len() as u64,
-            ft.as_ptr() as u64, ft.len() as u64,
+            dp.as_ptr() as u64,
+            dp.len() as u64,
+            mp.as_ptr() as u64,
+            mp.len() as u64,
+            ft.as_ptr() as u64,
+            ft.len() as u64,
         )
     };
     check(raw).map(|_| ())
@@ -552,9 +586,7 @@ pub fn umount(path: &str) -> FsResult<()> {
 /// Change file permissions.
 pub fn chmod(path: &str, mode: u32) -> FsResult<()> {
     let p = path.as_bytes();
-    let raw = unsafe {
-        syscall3(SYS_FS_CHMOD, p.as_ptr() as u64, p.len() as u64, mode as u64)
-    };
+    let raw = unsafe { syscall3(SYS_FS_CHMOD, p.as_ptr() as u64, p.len() as u64, mode as u64) };
     check(raw).map(|_| ())
 }
 
@@ -575,8 +607,13 @@ pub fn link(old: &str, new: &str) -> FsResult<()> {
     let op = old.as_bytes();
     let np = new.as_bytes();
     let raw = unsafe {
-        crate::raw::syscall4(SYS_FS_LINK, op.as_ptr() as u64, op.len() as u64,
-                             np.as_ptr() as u64, np.len() as u64)
+        crate::raw::syscall4(
+            SYS_FS_LINK,
+            op.as_ptr() as u64,
+            op.len() as u64,
+            np.as_ptr() as u64,
+            np.len() as u64,
+        )
     };
     check(raw).map(|_| ())
 }
@@ -586,8 +623,13 @@ pub fn symlink(target: &str, link_path: &str) -> FsResult<()> {
     let tp = target.as_bytes();
     let lp = link_path.as_bytes();
     let raw = unsafe {
-        crate::raw::syscall4(SYS_FS_SYMLINK, tp.as_ptr() as u64, tp.len() as u64,
-                             lp.as_ptr() as u64, lp.len() as u64)
+        crate::raw::syscall4(
+            SYS_FS_SYMLINK,
+            tp.as_ptr() as u64,
+            tp.len() as u64,
+            lp.as_ptr() as u64,
+            lp.len() as u64,
+        )
     };
     check(raw).map(|_| ())
 }
@@ -597,11 +639,18 @@ pub fn readlink(path: &str) -> FsResult<String> {
     let p = path.as_bytes();
     let mut buf = alloc::vec![0u8; 4096];
     let raw = unsafe {
-        crate::raw::syscall4(SYS_FS_READLINK, p.as_ptr() as u64, p.len() as u64,
-                             buf.as_mut_ptr() as u64, buf.len() as u64)
+        crate::raw::syscall4(
+            SYS_FS_READLINK,
+            p.as_ptr() as u64,
+            p.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
     };
     let n = check(raw)? as usize;
-    core::str::from_utf8(&buf[..n]).map(|s| String::from(s)).map_err(|_| FsError::Io)
+    core::str::from_utf8(&buf[..n])
+        .map(String::from)
+        .map_err(|_| FsError::Io)
 }
 
 /// Update access and modification timestamps on `path`.
@@ -611,8 +660,13 @@ pub fn readlink(path: &str) -> FsResult<String> {
 pub fn utimes(path: &str, atime_ns: i64, mtime_ns: i64) -> FsResult<()> {
     let p = path.as_bytes();
     let raw = unsafe {
-        crate::raw::syscall4(SYS_FS_UTIMES, p.as_ptr() as u64, p.len() as u64,
-                             atime_ns as u64, mtime_ns as u64)
+        crate::raw::syscall4(
+            SYS_FS_UTIMES,
+            p.as_ptr() as u64,
+            p.len() as u64,
+            atime_ns as u64,
+            mtime_ns as u64,
+        )
     };
     check(raw).map(|_| ())
 }
@@ -622,7 +676,12 @@ pub fn statvfs(path: &str) -> FsResult<FsStatvfs> {
     let mut buf = [0u8; FsStatvfs::WIRE_SIZE];
     let p = path.as_bytes();
     let raw = unsafe {
-        syscall3(SYS_FS_STATVFS, p.as_ptr() as u64, p.len() as u64, buf.as_mut_ptr() as u64)
+        syscall3(
+            SYS_FS_STATVFS,
+            p.as_ptr() as u64,
+            p.len() as u64,
+            buf.as_mut_ptr() as u64,
+        )
     };
     check(raw)?;
     FsStatvfs::from_bytes(&buf).ok_or(FsError::Io)
@@ -661,7 +720,9 @@ pub fn append_file(path: &str, data: &[u8]) -> FsResult<()> {
 
 /// Recursively create directory and all parents (like `mkdir -p`).
 pub fn mkdir_all(path: &str, mode: u32) -> FsResult<()> {
-    if path.is_empty() || path == "/" { return Ok(()); }
+    if path.is_empty() || path == "/" {
+        return Ok(());
+    }
     match mkdir(path, mode) {
         Ok(()) => Ok(()),
         Err(FsError::Exists) => Ok(()),
@@ -685,12 +746,21 @@ where
     F: FnMut(u64, u64),
 {
     let src_fd = open(src, OpenFlags::RDONLY, 0)?;
-    let src_stat = fstat(src_fd).map_err(|e| { let _ = close(src_fd); e })?;
+    let src_stat = fstat(src_fd).inspect_err(|_e| {
+        let _ = close(src_fd);
+    })?;
     let total = src_stat.size;
 
-    let dst_fd = match open(dst, OpenFlags::WRONLY | OpenFlags::CREAT | OpenFlags::TRUNC, 0o644) {
+    let dst_fd = match open(
+        dst,
+        OpenFlags::WRONLY | OpenFlags::CREAT | OpenFlags::TRUNC,
+        0o644,
+    ) {
         Ok(f) => f,
-        Err(e) => { let _ = close(src_fd); return Err(e); }
+        Err(e) => {
+            let _ = close(src_fd);
+            return Err(e);
+        }
     };
 
     let mut buf = alloc::vec![0u8; 65536];
@@ -793,13 +863,7 @@ pub fn kern_fs_write_file(path: &str, data: &[u8]) -> FsResult<()> {
 
 /// Create a directory directly via the kernel FAT32 backend.
 pub fn kern_fs_mkdir(path: &str) -> FsResult<()> {
-    let r = unsafe {
-        syscall2(
-            SYS_KERN_FS_MKDIR,
-            path.as_ptr() as u64,
-            path.len() as u64,
-        )
-    };
+    let r = unsafe { syscall2(SYS_KERN_FS_MKDIR, path.as_ptr() as u64, path.len() as u64) };
     if is_syscall_error(r) {
         Err(FsError::from_raw(r))
     } else {
@@ -809,13 +873,7 @@ pub fn kern_fs_mkdir(path: &str) -> FsResult<()> {
 
 /// Remove an empty directory directly via the kernel FAT32 backend.
 pub fn kern_fs_rmdir(path: &str) -> FsResult<()> {
-    let r = unsafe {
-        syscall2(
-            SYS_KERN_FS_RMDIR,
-            path.as_ptr() as u64,
-            path.len() as u64,
-        )
-    };
+    let r = unsafe { syscall2(SYS_KERN_FS_RMDIR, path.as_ptr() as u64, path.len() as u64) };
     if is_syscall_error(r) {
         Err(FsError::from_raw(r))
     } else {
@@ -825,13 +883,7 @@ pub fn kern_fs_rmdir(path: &str) -> FsResult<()> {
 
 /// Remove a file directly via the kernel FAT32 backend.
 pub fn kern_fs_unlink(path: &str) -> FsResult<()> {
-    let r = unsafe {
-        syscall2(
-            SYS_KERN_FS_UNLINK,
-            path.as_ptr() as u64,
-            path.len() as u64,
-        )
-    };
+    let r = unsafe { syscall2(SYS_KERN_FS_UNLINK, path.as_ptr() as u64, path.len() as u64) };
     if is_syscall_error(r) {
         Err(FsError::from_raw(r))
     } else {

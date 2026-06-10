@@ -44,12 +44,12 @@
 // - Structured log sinks (e.g. ring buffers or user-space log servers)
 // - Runtime-configurable backends via user-space logging services
 
-use core::fmt;
-use core::fmt::Write;
 use crate::serial;
 use crate::vga::{self, Color};
-use spin::Mutex;
+use core::fmt;
+use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
 
 /// Ring buffer for kernel log storage (accessible by userspace)
 const LOG_BUFFER_SIZE: usize = 8192;
@@ -221,22 +221,12 @@ pub fn _log(level: LogLevel, origin: &str, args: fmt::Arguments, file: &str, lin
     if is_debug {
         serial::_print(format_args!(
             "[t={}.{:03}s] [{}] [{}] {} ({}:{})\n",
-            seconds,
-            milliseconds,
-            level_str,
-            origin,
-            args,
-            file,
-            line
+            seconds, milliseconds, level_str, origin, args, file, line
         ));
     } else {
         serial::_print(format_args!(
             "[t={}.{:03}s] [{}] [{}] {}\n",
-            seconds,
-            milliseconds,
-            level_str,
-            origin,
-            args
+            seconds, milliseconds, level_str, origin, args
         ));
     }
 
@@ -294,7 +284,6 @@ unsafe fn write_vga_log(
 
     writer.write_byte(b'\n');
 }
-
 
 #[macro_export]
 macro_rules! log_debug {

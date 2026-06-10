@@ -106,11 +106,11 @@ impl From<bga::BgaError> for VideoModeError {
     fn from(e: bga::BgaError) -> Self {
         match e {
             bga::BgaError::InvalidResolution => VideoModeError::InvalidResolution,
-            bga::BgaError::WidthMisaligned   => VideoModeError::InvalidResolution,
-            bga::BgaError::UnsupportedBpp    => VideoModeError::UnsupportedBpp,
-            bga::BgaError::ExceedsLfbSize    => VideoModeError::ExceedsLfbSize,
-            bga::BgaError::NotAvailable      => VideoModeError::DeviceNotAvailable,
-            bga::BgaError::HardwareRejected  => VideoModeError::HardwareRejected,
+            bga::BgaError::WidthMisaligned => VideoModeError::InvalidResolution,
+            bga::BgaError::UnsupportedBpp => VideoModeError::UnsupportedBpp,
+            bga::BgaError::ExceedsLfbSize => VideoModeError::ExceedsLfbSize,
+            bga::BgaError::NotAvailable => VideoModeError::DeviceNotAvailable,
+            bga::BgaError::HardwareRejected => VideoModeError::HardwareRejected,
         }
     }
 }
@@ -147,8 +147,12 @@ pub struct Color {
 
 impl Color {
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0 };
-    pub const WHITE: Color = Color { r: 255, g: 255, b: 255 };
-    pub const RED:   Color = Color { r: 255, g: 0,   b: 0   };
+    pub const WHITE: Color = Color {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    pub const RED: Color = Color { r: 255, g: 0, b: 0 };
 
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
@@ -177,19 +181,29 @@ impl Framebuffer {
 
         Self {
             address: info.address as *mut u8,
-            width:   info.width,
-            height:  info.height,
-            stride:  info.pixels_per_scan_line,
+            width: info.width,
+            height: info.height,
+            stride: info.pixels_per_scan_line,
             pixel_format: info.pixel_format,
             bytes_per_pixel,
         }
     }
 
-    pub fn width(&self)           -> u32   { self.width }
-    pub fn height(&self)          -> u32   { self.height }
-    pub fn address(&self)         -> *mut u8 { self.address }
-    pub fn stride(&self)          -> u32   { self.stride }
-    pub fn bytes_per_pixel(&self) -> usize { self.bytes_per_pixel }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    pub fn address(&self) -> *mut u8 {
+        self.address
+    }
+    pub fn stride(&self) -> u32 {
+        self.stride
+    }
+    pub fn bytes_per_pixel(&self) -> usize {
+        self.bytes_per_pixel
+    }
 
     /// Calculate framebuffer size in bytes
     pub fn size(&self) -> usize {
@@ -204,40 +218,46 @@ impl Framebuffer {
 /// Published video mode state (updated on every mode change).
 /// Fields use atomic types to allow lock-free reads in performance-sensitive paths.
 struct VideoModeState {
-    backend:        Mutex<VideoBackend>,
-    lfb_phys:       AtomicU32,    // Physical address (lower 32 bits; BGA is always < 4 GiB in QEMU)
-    lfb_phys_hi:    AtomicU32,    // High 32 bits (for future 64-bit BAR support)
-    width:          AtomicU32,
-    height:         AtomicU32,
-    pitch:          AtomicU32,    // Bytes per scanline
+    backend: Mutex<VideoBackend>,
+    lfb_phys: AtomicU32, // Physical address (lower 32 bits; BGA is always < 4 GiB in QEMU)
+    lfb_phys_hi: AtomicU32, // High 32 bits (for future 64-bit BAR support)
+    width: AtomicU32,
+    height: AtomicU32,
+    pitch: AtomicU32, // Bytes per scanline
     bytes_per_pixel: AtomicU32,
 }
 
 static VIDEO_MODE_STATE: VideoModeState = VideoModeState {
-    backend:         Mutex::new(VideoBackend::None),
-    lfb_phys:        AtomicU32::new(0),
-    lfb_phys_hi:     AtomicU32::new(0),
-    width:           AtomicU32::new(0),
-    height:          AtomicU32::new(0),
-    pitch:           AtomicU32::new(0),
+    backend: Mutex::new(VideoBackend::None),
+    lfb_phys: AtomicU32::new(0),
+    lfb_phys_hi: AtomicU32::new(0),
+    width: AtomicU32::new(0),
+    height: AtomicU32::new(0),
+    pitch: AtomicU32::new(0),
     bytes_per_pixel: AtomicU32::new(0),
 };
 
 impl VideoModeState {
     fn set_from_framebuffer(&self, fb: &Framebuffer) {
         let phys = fb.address() as usize;
-        self.lfb_phys.store((phys & 0xFFFF_FFFF) as u32, Ordering::Release);
-        self.lfb_phys_hi.store((phys >> 32) as u32, Ordering::Release);
+        self.lfb_phys
+            .store((phys & 0xFFFF_FFFF) as u32, Ordering::Release);
+        self.lfb_phys_hi
+            .store((phys >> 32) as u32, Ordering::Release);
         self.width.store(fb.width(), Ordering::Release);
         self.height.store(fb.height(), Ordering::Release);
-        self.pitch.store(fb.stride() * fb.bytes_per_pixel() as u32, Ordering::Release);
-        self.bytes_per_pixel.store(fb.bytes_per_pixel() as u32, Ordering::Release);
+        self.pitch
+            .store(fb.stride() * fb.bytes_per_pixel() as u32, Ordering::Release);
+        self.bytes_per_pixel
+            .store(fb.bytes_per_pixel() as u32, Ordering::Release);
         *self.backend.lock() = VideoBackend::UefiGop;
     }
 
     fn set_from_bga(&self, lfb_phys: usize, width: u16, height: u16, pitch: u32, bpp: u32) {
-        self.lfb_phys.store((lfb_phys & 0xFFFF_FFFF) as u32, Ordering::Release);
-        self.lfb_phys_hi.store((lfb_phys >> 32) as u32, Ordering::Release);
+        self.lfb_phys
+            .store((lfb_phys & 0xFFFF_FFFF) as u32, Ordering::Release);
+        self.lfb_phys_hi
+            .store((lfb_phys >> 32) as u32, Ordering::Release);
         self.width.store(width as u32, Ordering::Release);
         self.height.store(height as u32, Ordering::Release);
         self.pitch.store(pitch, Ordering::Release);
@@ -265,8 +285,13 @@ pub fn init(fb_info: &FramebufferInfo) {
     VIDEO_MODE_STATE.set_from_framebuffer(&fb);
     *FRAMEBUFFER.lock() = Some(fb);
     FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
-    crate::log_info!("graphics", "GOP framebuffer: {}x{} at 0x{:X}",
-        fb_info.width, fb_info.height, fb_info.address);
+    crate::log_info!(
+        "graphics",
+        "GOP framebuffer: {}x{} at 0x{:X}",
+        fb_info.width,
+        fb_info.height,
+        fb_info.address
+    );
 }
 
 /// Initialize the BGA driver.
@@ -296,7 +321,13 @@ pub fn init_bga() {
         Ok(()) => {
             if let Some((lfb_phys, w, h, pitch, bpp)) = bga::get_current_mode_info() {
                 VIDEO_MODE_STATE.set_from_bga(lfb_phys, w, h, pitch, bpp);
-                crate::log_info!("graphics", "BGA active: {}x{}x32 at LFB 0x{:X}", w, h, lfb_phys);
+                crate::log_info!(
+                    "graphics",
+                    "BGA active: {}x{}x32 at LFB 0x{:X}",
+                    w,
+                    h,
+                    lfb_phys
+                );
             }
         }
         Err(e) => {
@@ -323,17 +354,14 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8) -> Result<(), VideoModeE
 
     match backend {
         VideoBackend::Bga => {
-            bga::set_video_mode(width, height, bpp, true)
-                .map_err(VideoModeError::from)?;
+            bga::set_video_mode(width, height, bpp, true).map_err(VideoModeError::from)?;
 
             if let Some((lfb_phys, w, h, pitch, bpp_bytes)) = bga::get_current_mode_info() {
                 VIDEO_MODE_STATE.set_from_bga(lfb_phys, w, h, pitch, bpp_bytes);
             }
             Ok(())
         }
-        VideoBackend::UefiGop | VideoBackend::None => {
-            Err(VideoModeError::BackendUnsupported)
-        }
+        VideoBackend::UefiGop | VideoBackend::None => Err(VideoModeError::BackendUnsupported),
     }
 }
 
@@ -364,10 +392,14 @@ pub fn get_backend() -> VideoBackend {
 
 /// Get current framebuffer dimensions.
 pub fn get_dimensions() -> Option<(u32, u32)> {
-    if !is_initialized() { return None; }
+    if !is_initialized() {
+        return None;
+    }
     let w = VIDEO_MODE_STATE.width.load(Ordering::Relaxed);
     let h = VIDEO_MODE_STATE.height.load(Ordering::Relaxed);
-    if w == 0 || h == 0 { return None; }
+    if w == 0 || h == 0 {
+        return None;
+    }
     Some((w, h))
 }
 
@@ -377,7 +409,9 @@ pub fn get_dimensions() -> Option<(u32, u32)> {
 /// mapped and user-accessible). When only GOP is available, this returns the
 /// GOP framebuffer address provided by UEFI.
 pub fn get_framebuffer_address() -> Option<usize> {
-    if !is_initialized() { return None; }
+    if !is_initialized() {
+        return None;
+    }
     let phys = VIDEO_MODE_STATE.get_lfb_phys();
     if phys == 0 {
         // Fallback: read from GOP framebuffer struct
@@ -389,33 +423,42 @@ pub fn get_framebuffer_address() -> Option<usize> {
 
 /// Get full framebuffer info tuple: (address, width, height, stride, bytes_per_pixel).
 pub fn get_framebuffer_info() -> Option<(usize, u32, u32, u32, usize)> {
-    if !is_initialized() { return None; }
+    if !is_initialized() {
+        return None;
+    }
 
     let backend = *VIDEO_MODE_STATE.backend.lock();
 
     match backend {
         VideoBackend::Bga => {
-            let addr  = VIDEO_MODE_STATE.get_lfb_phys();
-            let w     = VIDEO_MODE_STATE.width.load(Ordering::Relaxed);
-            let h     = VIDEO_MODE_STATE.height.load(Ordering::Relaxed);
+            let addr = VIDEO_MODE_STATE.get_lfb_phys();
+            let w = VIDEO_MODE_STATE.width.load(Ordering::Relaxed);
+            let h = VIDEO_MODE_STATE.height.load(Ordering::Relaxed);
             let pitch = VIDEO_MODE_STATE.pitch.load(Ordering::Relaxed);
-            let bpp   = VIDEO_MODE_STATE.bytes_per_pixel.load(Ordering::Relaxed) as usize;
+            let bpp = VIDEO_MODE_STATE.bytes_per_pixel.load(Ordering::Relaxed) as usize;
             // stride (pixels per scanline) = pitch / bpp
             let stride = if bpp > 0 { pitch / bpp as u32 } else { w };
             Some((addr, w, h, stride, bpp))
         }
-        VideoBackend::UefiGop | VideoBackend::None => {
-            with_framebuffer(|fb| {
-                (fb.address() as usize, fb.width(), fb.height(), fb.stride(), fb.bytes_per_pixel())
-            })
-        }
+        VideoBackend::UefiGop | VideoBackend::None => with_framebuffer(|fb| {
+            (
+                fb.address() as usize,
+                fb.width(),
+                fb.height(),
+                fb.stride(),
+                fb.bytes_per_pixel(),
+            )
+        }),
     }
 }
 
 /// Get the framebuffer stride (pixels per scanline)
 pub fn get_stride() -> u32 {
     VIDEO_MODE_STATE.pitch.load(Ordering::Relaxed)
-        / VIDEO_MODE_STATE.bytes_per_pixel.load(Ordering::Relaxed).max(1)
+        / VIDEO_MODE_STATE
+            .bytes_per_pixel
+            .load(Ordering::Relaxed)
+            .max(1)
 }
 
 /// Get bytes per pixel
@@ -436,7 +479,9 @@ pub fn with_framebuffer<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut Framebuffer) -> R,
 {
-    if !is_initialized() { return None; }
+    if !is_initialized() {
+        return None;
+    }
     let mut fb_lock = FRAMEBUFFER.lock();
     (*fb_lock).as_mut().map(f)
 }
@@ -452,24 +497,24 @@ where
 // Safety: Uses raw pointer writes. Intentionally does not acquire any locks.
 
 const FONT_HEIGHT: u32 = 8;
-const FONT_WIDTH:  u32 = 8;
+const FONT_WIDTH: u32 = 8;
 
 /// Minimal 8x8 bitmap font for emergency output (panic screen, early diagnostics).
 fn get_minimal_glyph(ch: u8) -> [u8; 8] {
     match ch {
-        b' '      => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        b'!'      => [0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00],
-        b':'      => [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00],
-        b'0'      => [0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00],
-        b'1'      => [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00],
-        b'2'      => [0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00],
-        b'3'      => [0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E, 0x00],
-        b'4'      => [0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00],
-        b'5'      => [0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E, 0x00],
-        b'6'      => [0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00],
-        b'7'      => [0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x00],
-        b'8'      => [0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00],
-        b'9'      => [0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E, 0x00],
+        b' ' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        b'!' => [0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00],
+        b':' => [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00],
+        b'0' => [0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00],
+        b'1' => [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00],
+        b'2' => [0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00],
+        b'3' => [0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E, 0x00],
+        b'4' => [0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00],
+        b'5' => [0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E, 0x00],
+        b'6' => [0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00],
+        b'7' => [0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x00],
+        b'8' => [0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00],
+        b'9' => [0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E, 0x00],
         b'A'..=b'Z' => get_uppercase_glyph(ch),
         b'a'..=b'z' => get_lowercase_glyph(ch),
         _ => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
@@ -504,7 +549,7 @@ fn get_uppercase_glyph(ch: u8) -> [u8; 8] {
         b'X' => [0x63, 0x36, 0x1C, 0x1C, 0x1C, 0x36, 0x63, 0x00],
         b'Y' => [0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00],
         b'Z' => [0x7F, 0x63, 0x30, 0x18, 0x0C, 0x63, 0x7F, 0x00],
-        _    => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        _ => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     }
 }
 
@@ -536,7 +581,7 @@ fn get_lowercase_glyph(ch: u8) -> [u8; 8] {
         b'x' => [0x00, 0x00, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x00],
         b'y' => [0x00, 0x00, 0x66, 0x66, 0x66, 0x3E, 0x06, 0x3C],
         b'z' => [0x00, 0x00, 0x7E, 0x18, 0x0C, 0x06, 0x7E, 0x00],
-        _    => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        _ => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     }
 }
 
@@ -548,14 +593,14 @@ pub fn panic_write(x: u32, y: u32, text: &str, color: Color) {
             PixelFormat::Rgb => {
                 ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)
             }
-            _ => {
-                ((color.b as u32) << 16) | ((color.g as u32) << 8) | (color.r as u32)
-            }
+            _ => ((color.b as u32) << 16) | ((color.g as u32) << 8) | (color.r as u32),
         };
 
         let mut cx = x;
         for ch in text.bytes() {
-            if cx + FONT_WIDTH > fb.width { break; }
+            if cx + FONT_WIDTH > fb.width {
+                break;
+            }
             let glyph = get_minimal_glyph(ch);
             for row in 0..FONT_HEIGHT {
                 for col in 0..FONT_WIDTH {
@@ -581,7 +626,9 @@ pub fn panic_write(x: u32, y: u32, text: &str, color: Color) {
 // Compatibility Stubs
 // ============================================================================
 
-pub fn init_terminal() -> bool { true }
+pub fn init_terminal() -> bool {
+    true
+}
 pub fn terminal_write_str(_s: &str) {}
 pub fn terminal_put_char(_ch: u8) {}
 pub fn terminal_clear() {}
