@@ -721,7 +721,7 @@ fn window_title_for(executable: &str) -> &str {
     match executable {
         "fileman" => "File Manager",
         "terminal" => "Terminal",
-        "display_settings" => "Display Settings",
+        "system_settings" => "System Settings",
         "tinygl_demo" => "TinyGL Gears",
         other => other,
     }
@@ -1498,7 +1498,7 @@ impl Compositor {
     fn build_dock_apps() -> Vec<DockApp> {
         let candidates: [(&str, &str, Color); 4] = [
             ("fileman", "Files", atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),
-            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
+            ("system_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
             ("tinygl_demo", "TinyGL", atom_theme::colors::ATOM_COLOR_SUCCESS),
             ("terminal", "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),
         ];
@@ -2685,13 +2685,13 @@ impl Compositor {
     }
 
     fn open_display_settings_wallpaper_tab(&mut self) {
-        let port = match libipc::protocol::lookup_service("display_settings") {
+        let port = match libipc::protocol::lookup_service("system_settings") {
             Ok(port) => port,
             Err(_) => {
                 self.spawn_display_settings();
                 let mut found = None;
                 for _ in 0..80 {
-                    if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+                    if let Ok(port) = libipc::protocol::lookup_service("system_settings") {
                         found = Some(port);
                         break;
                     }
@@ -2708,7 +2708,7 @@ impl Compositor {
             .wm
             .windows
             .iter()
-            .find(|w| w.title == "Display Settings")
+            .find(|w| w.title == "System Settings")
             .map(|w| w.id)
         {
             self.wm.focus_window(id);
@@ -2716,8 +2716,8 @@ impl Compositor {
         }
 
         let msg = OpenInTabMsg {
-            target_app: String::from("display_settings"),
-            tab_name: String::from("Wallpaper"),
+            target_app: String::from("system_settings"),
+            tab_name: String::from("Desktop Background"),
         };
         let payload = msg.to_bytes();
         let header = MessageHeader::new(MessageType::OpenInTab, payload.len() as u32);
@@ -2729,7 +2729,7 @@ impl Compositor {
     }
 
     fn send_wallpaper_applied(&mut self) {
-        if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+        if let Ok(port) = libipc::protocol::lookup_service("system_settings") {
             let msg = WallpaperAppliedMsg {};
             let header =
                 MessageHeader::new(MessageType::WallpaperApplied, WallpaperAppliedMsg::SIZE as u32);
@@ -2741,7 +2741,7 @@ impl Compositor {
     }
 
     fn send_wallpaper_failed(&mut self, error: &str) {
-        if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+        if let Ok(port) = libipc::protocol::lookup_service("system_settings") {
             let msg = WallpaperFailedMsg { error_message: String::from(error) };
             let payload = msg.to_bytes();
             let header = MessageHeader::new(MessageType::WallpaperFailed, payload.len() as u32);
@@ -3258,7 +3258,7 @@ impl Compositor {
         match name {
             "terminal" => return self.spawn_terminal(),
             "fileman" => return self.spawn_fileman(),
-            "display_settings" => return self.spawn_display_settings(),
+            "system_settings" => return self.spawn_display_settings(),
             _ => {}
         }
 
@@ -3315,10 +3315,10 @@ impl Compositor {
     }
 
     fn spawn_display_settings(&mut self) {
-        if !self.request_app_launch("/apps/system/display_settings.atxf") {
+        if !self.request_app_launch("/apps/system/system_settings.atxf") {
             return;
         }
-        self.spawn_hosted_window("Display Settings", 200, 100, 20, 480, 420);
+        self.spawn_hosted_window("System Settings", 160, 80, 20, 700, 520);
     }
 
     fn draw_all(&mut self) {

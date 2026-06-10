@@ -1,0 +1,17 @@
+[package]
+name = "system_settings"
+version = "0.1.0"
+edition = "2021"
+description = "Atom OS System Settings – unified settings panel with sidebar navigation"
+
+[workspace]
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc       = { path = "../../libs/libipc" }
+libimage     = { path = "../../libs/libimage" }
+libnet       = { path = "../../libs/libnet" }
+
+[[bin]]
+name = "system_settings"
+path = "src/main.rs"
