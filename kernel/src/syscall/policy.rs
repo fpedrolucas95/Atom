@@ -185,16 +185,15 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
             => ExplicitlyUnrestricted,
 
         // ── Input devices ─────────────────────────────────────────────────
-        // Gated by InputDevice capability type.
-        // Note: all processes currently receive these caps at spawn time
-        // (over-provisioning — see P1-A TODO in spawn_process_internal).
-        // Fixing over-provisioning will automatically tighten access here
-        // without further changes to this table.
+        // Gated by InputDevice capability type. These caps are granted only to
+        // the compositor (ui_shell) through the SystemServiceManifest; ordinary
+        // apps hold none and are denied EPERM here. There are no ambient grants.
         SYS_MOUSE_POLL | SYS_MOUSE_GET_ID   => Requires(InputMouse),
         SYS_KEYBOARD_POLL                    => Requires(InputKeyboard),
 
         // ── Framebuffer / display ──────────────────────────────────────────
-        // Gated by Framebuffer cap.  Same over-provisioning caveat applies.
+        // Gated by Framebuffer cap, granted only to the compositor (ui_shell)
+        // via the manifest's FramebufferMap environment grant.
         SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER
             => Requires(FramebufferMap),
         SYS_SET_VIDEO_MODE
@@ -417,27 +416,34 @@ pub(super) fn validate_ipc_send_with_cap_permissions(
         return Err(EPERM);
     }
 
-    if !crate::thread::thread_has_capability(sender, cap_handle) {
-        log_warn!(
-            "syscall",
-            "ipc_send_with_cap: denied (sender does not own capability cap={:#x})",
-            cap_handle_raw
-        );
-        return Err(EPERM);
-    }
-
-    let has_grant_permission = crate::thread::validate_thread_capability_by_type(
+    // The capability being delegated must itself be owned by the sender AND
+    // carry GRANT. Holding GRANT on some *other* capability must never authorise
+    // delegating this one — that would defeat per-capability least privilege and
+    // let a sender escalate a non-delegable handle. `validate_thread_capability`
+    // checks both ownership (handle present in the caller's table) and the
+    // GRANT permission on that exact handle in one step.
+    match crate::thread::validate_thread_capability(
         sender,
+        cap_handle,
         crate::cap::CapPermissions::GRANT,
-        |_resource| true,
-    );
-
-    if !has_grant_permission {
-        log_warn!(
-            "syscall",
-            "ipc_send_with_cap: denied (missing GRANT permission)"
-        );
-        return Err(EPERM);
+    ) {
+        Ok(()) => {}
+        Err(crate::cap::CapError::PermissionDenied) => {
+            log_warn!(
+                "syscall",
+                "ipc_send_with_cap: denied (capability cap={:#x} lacks GRANT permission)",
+                cap_handle_raw
+            );
+            return Err(EPERM);
+        }
+        Err(_) => {
+            log_warn!(
+                "syscall",
+                "ipc_send_with_cap: denied (sender does not own capability cap={:#x})",
+                cap_handle_raw
+            );
+            return Err(EPERM);
+        }
     }
 
     Ok(())
