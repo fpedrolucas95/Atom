@@ -103,7 +103,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
         payload_size
     );
 
-    // Authenticate and validate the complete ATXF v2 image before mapping.
+    // Authenticate and validate the complete ATXF v3 image before mapping.
     let payload_bytes =
         unsafe { core::slice::from_raw_parts(payload_ptr, payload_size) };
 
@@ -121,7 +121,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
 
     log_info!(
         LOG_ORIGIN,
-        "ATXF v2 authenticated: segments={}, relocations={}, entry_offset=0x{:X}",
+        "ATXF v3 authenticated: segments={}, relocations={}, entry_offset=0x{:X}",
         image.segments.len(),
         image.relocations.len(),
         image.entry_offset

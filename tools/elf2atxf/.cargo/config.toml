@@ -1,5 +1,12 @@
-# This is a host tool, not a UEFI application
-# The target is now dynamically determined by the build scripts (build.sh / build.ps1)
-# to support cross-platform builds (Linux, macOS, Windows).
+# Host tool — not a UEFI application.
+#
+# Override root .cargo/config.toml which sets target=x86_64-unknown-uefi and
+# enables build-std for the kernel workspace. Both must not leak here:
+#   - build target must be the host (or explicitly overridden by build scripts)
+#   - build-std must be cleared so the prebuilt host std is used as-is
+
 [build]
-# target = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-linux-gnu"
+
+[unstable]
+build-std = []

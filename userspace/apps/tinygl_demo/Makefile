@@ -64,6 +64,7 @@ LIBTINYGL    = $(TINYGL_DIR)/build/libtinygl.a
 LDSCRIPT     = ../../userspace.ld
 
 ELF2ATXF     = ../../../tools/elf2atxf/target/$(shell rustc -vV 2>/dev/null | sed -n 's/host: //p')/release/elf2atxf
+ELF2ATXF_KEY = ../../../keys/dev/atxf_signing.seed
 
 # ---------------------------------------------------------------------------
 # Compiler flags
@@ -116,7 +117,7 @@ $(TARGET).elf: $(CRT0) $(OBJS) $(LIBTINYGL) $(LIBC)
 
 $(TARGET).atxf: $(TARGET).elf
 	@if [ -x "$(ELF2ATXF)" ]; then \
-	    $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
+	    ATXF_SIGNING_KEY_FILE="$(ELF2ATXF_KEY)" $(ELF2ATXF) $(TARGET).elf $(TARGET).atxf && echo "Built: $(TARGET).atxf"; \
 	else \
 	    echo "WARNING: elf2atxf not found at $(ELF2ATXF); skipping ATXF conversion"; \
 	fi

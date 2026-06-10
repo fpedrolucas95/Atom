@@ -29,3 +29,4 @@ spin = "0.9"
 x86_64 = "0.14"
 atom_abi = { path = "../shared/abi" }
 atom_atxf = { path = "../shared/atxf" }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }

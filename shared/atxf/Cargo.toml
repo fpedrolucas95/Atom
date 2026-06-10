@@ -1,8 +1,18 @@
 [package]
 name = "atom_atxf"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
+[features]
+default = []
+# Enables sign_image (Ed25519 private-seed signing). Host tooling only — the
+# kernel must never enable this feature.
+signing = []
+
 [dependencies]
-hmac = { version = "0.12", default-features = false }
-sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+# ed25519-compact uses the ref10 (serial) Ed25519 implementation with no
+# SIMD dependencies. ed25519-dalek / curve25519-dalek select a SIMD backend
+# when the build host supports AVX2, which then fails to compile for
+# x86_64-unknown-uefi ("LLVM ERROR: Do not know how to split the result of
+# this operator!"). ed25519-compact avoids this entirely.
+ed25519-compact = { version = "2", default-features = false }

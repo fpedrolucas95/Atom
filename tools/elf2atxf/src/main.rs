@@ -1,85 +1,42 @@
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use atom_atxf::{
+    sign_image, ATXF_FLAG_PIE, ATXF_MAGIC, ATXF_PAGE_SIZE, ATXF_SIGNATURE_SIZE, ATXF_VERSION,
+    KNOWN_PERMISSIONS, PERM_EXECUTE, PERM_READ, PERM_WRITE, RELOCATION_RELATIVE64, SEGMENT_BSS,
+    SEGMENT_DATA, SEGMENT_RODATA, SEGMENT_TEXT,
+};
 use std::env;
 use std::fs;
 use std::io;
 
-const ATXF_MAGIC: u32 = 0x4154_5846;
-const ATXF_VERSION: u16 = 2;
-const ATXF_FLAG_PIE: u32 = 1;
-const ATXF_SIGNATURE_SIZE: usize = 32;
-const ATXF_PAGE_SIZE: u64 = 4096;
-const PRODUCT_HMAC_KEY: &[u8; 32] = b"AtomOS-ATXF-v2-product-key-0001!";
-const SEGMENT_TEXT: u32 = 1;
-const SEGMENT_RODATA: u32 = 2;
-const SEGMENT_DATA: u32 = 3;
-const SEGMENT_BSS: u32 = 4;
-const PERM_READ: u32 = 1;
-const PERM_WRITE: u32 = 2;
-const PERM_EXECUTE: u32 = 4;
-const KNOWN_PERMISSIONS: u32 = PERM_READ | PERM_WRITE | PERM_EXECUTE;
-const RELOCATION_RELATIVE64: u32 = 1;
+/// Default development signing seed; production release tooling must point
+/// this at a protected key via the environment variable.
+const SIGNING_KEY_ENV: &str = "ATXF_SIGNING_KEY_FILE";
+const DEV_SIGNING_KEY_PATH: &str = "keys/dev/atxf_signing.seed";
 
-#[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default)]
-struct AtxfV2Header {
-    magic: u32,
-    version: u16,
-    header_size: u16,
-    flags: u32,
-    entry_offset: u64,
-    segment_count: u32,
-    relocation_count: u32,
-    segment_table_offset: u64,
-    relocation_table_offset: u64,
-    signature_offset: u64,
-    signature_size: u32,
-    reserved: u32,
-    image_size: u64,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default)]
-struct AtxfV2Segment {
-    kind: u32,
-    permissions: u32,
-    file_offset: u64,
-    file_size: u64,
-    mem_size: u64,
-    virtual_offset: u64,
-    align: u64,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default)]
-struct AtxfV2Relocation {
-    offset: u64,
-    kind: u32,
-    reserved: u32,
-    addend: i64,
-}
+use atom_atxf::{AtxfV2Header, AtxfV2Relocation, AtxfV2Segment};
 
 const HEADER_SIZE: usize = std::mem::size_of::<AtxfV2Header>();
 const SEGMENT_SIZE: usize = std::mem::size_of::<AtxfV2Segment>();
 const RELOCATION_SIZE: usize = std::mem::size_of::<AtxfV2Relocation>();
 
-fn compute_image_mac(
-    image: &[u8],
-    signature_offset: usize,
-    signature_size: usize,
-) -> Option<[u8; ATXF_SIGNATURE_SIZE]> {
-    let signature_end = signature_offset.checked_add(signature_size)?;
-    if signature_size != ATXF_SIGNATURE_SIZE || signature_end > image.len() {
-        return None;
+/// Load the Ed25519 signing seed: `$ATXF_SIGNING_KEY_FILE` if set, otherwise
+/// the committed development seed. The file holds 64 hex characters.
+fn load_signing_seed() -> [u8; 32] {
+    let path = env::var(SIGNING_KEY_ENV).unwrap_or_else(|_| DEV_SIGNING_KEY_PATH.to_string());
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| fail(format!("cannot read signing key {}: {}", path, e)));
+    let text = text.trim();
+    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        fail(format!(
+            "signing key {} must contain exactly 64 hex characters",
+            path
+        ));
     }
-    let mut mac = Hmac::<Sha256>::new_from_slice(PRODUCT_HMAC_KEY).ok()?;
-    mac.update(&image[..signature_offset]);
-    mac.update(&[0u8; ATXF_SIGNATURE_SIZE]);
-    mac.update(&image[signature_end..]);
-    let bytes = mac.finalize().into_bytes();
-    let mut result = [0u8; ATXF_SIGNATURE_SIZE];
-    result.copy_from_slice(&bytes);
-    Some(result)
+    let mut seed = [0u8; 32];
+    for (index, byte) in seed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .unwrap_or_else(|_| fail("invalid hex in signing key"));
+    }
+    seed
 }
 
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -459,13 +416,14 @@ fn main() -> io::Result<()> {
     }
     output.resize(signature_offset, 0);
     output.extend_from_slice(&[0u8; ATXF_SIGNATURE_SIZE]);
-    let mac = compute_image_mac(&output, signature_offset, ATXF_SIGNATURE_SIZE)
-        .unwrap_or_else(|| fail("failed to authenticate output image"));
-    output[signature_offset..signature_offset + ATXF_SIGNATURE_SIZE].copy_from_slice(&mac);
+    let seed = load_signing_seed();
+    let signature = sign_image(&output, signature_offset, ATXF_SIGNATURE_SIZE, &seed)
+        .unwrap_or_else(|| fail("failed to sign output image"));
+    output[signature_offset..signature_offset + ATXF_SIGNATURE_SIZE].copy_from_slice(&signature);
 
     fs::write(&args[2], &output)?;
     println!(
-        "elf2atxf: ATXF v2 PIE: {} segments, {} relocations, entry=0x{:x}, {} bytes",
+        "elf2atxf: ATXF v3 PIE (Ed25519): {} segments, {} relocations, entry=0x{:x}, {} bytes",
         segments.len(),
         relocations.len(),
         entry,

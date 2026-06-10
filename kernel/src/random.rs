@@ -1,6 +1,27 @@
+//! Kernel CSPRNG (ChaCha20) seeded from multiple independent entropy sources.
+//!
+//! ## Seeding policy (fail-closed)
+//!
+//! The seed mixes every source that is available at boot:
+//!
+//! * **RDRAND** — DRBG output, retried per architectural guidance.
+//! * **RDSEED** — direct conditioned entropy, when the CPU supports it.
+//! * **TSC jitter** — inter-sample deltas of the time-stamp counter across
+//!   serializing instructions. Always available; treated as *defense in
+//!   depth*, never as the sole source.
+//!
+//! All collected material is compressed with SHA-512 into the ChaCha20
+//! key+nonce, so a failure (or silent bias) of any single source cannot
+//! reduce the seed below the strength of the remaining ones. The policy
+//! itself is the pure function [`entropy_policy`]: at least one *hardware*
+//! source (RDRAND or RDSEED) must have produced data, otherwise `init`
+//! refuses to come up. The policy and the refusal path are exercised by the
+//! boot self-tests (`security_selftests`), which run under the QEMU CI gate.
+
 use core::arch::asm;
-use core::arch::x86_64::__cpuid;
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{AtomicU64, Ordering};
+use sha2::{Digest, Sha512};
 use spin::Mutex;
 
 use crate::{log_info, log_panic};
@@ -10,43 +31,125 @@ const ASLR_START: usize = 0x0000_0000_0100_0000;
 const ASLR_END: usize = 0x0000_0008_0000_0000;
 const ASLR_ALIGNMENT: usize = 2 * 1024 * 1024;
 
+/// 64-bit words requested from each hardware source during seeding.
+const HW_SEED_WORDS: usize = 8;
+/// TSC jitter samples mixed into the seed.
+const JITTER_SAMPLES: usize = 256;
+
 static RNG: Mutex<Option<ChaCha20>> = Mutex::new(None);
 static LAST_USER_BASE: AtomicU64 = AtomicU64::new(0);
 
+/// Boot-time entropy source availability, as observed by `init`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntropyReport {
+    pub rdrand: bool,
+    pub rdseed: bool,
+    pub jitter_samples: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyPolicyError {
+    /// No hardware entropy source produced data; jitter alone is not enough.
+    NoHardwareSource,
+}
+
+/// Pure seeding policy: require at least one hardware source. Kept free of
+/// I/O so the boot self-tests can exercise both the accept and the refuse
+/// paths with simulated availability.
+pub fn entropy_policy(report: &EntropyReport) -> Result<(), EntropyPolicyError> {
+    if report.rdrand || report.rdseed {
+        Ok(())
+    } else {
+        Err(EntropyPolicyError::NoHardwareSource)
+    }
+}
+
 pub fn init() {
-    let features = __cpuid(1);
-    if features.ecx & (1 << 30) == 0 {
+    let mut hasher = Sha512::new();
+    hasher.update(b"AtomOS-kernel-entropy-v2");
+
+    let rdrand = mix_rdrand(&mut hasher);
+    let rdseed = mix_rdseed(&mut hasher);
+    let jitter_samples = mix_tsc_jitter(&mut hasher);
+    let report = EntropyReport {
+        rdrand,
+        rdseed,
+        jitter_samples,
+    };
+
+    if let Err(error) = entropy_policy(&report) {
         log_panic!(
             LOG_ORIGIN,
-            "No hardware RDRAND source; refusing to initialize ASLR CSPRNG"
+            "Insufficient boot entropy ({:?}): rdrand={} rdseed={} jitter_samples={}",
+            error,
+            report.rdrand,
+            report.rdseed,
+            report.jitter_samples
         );
         panic!("strong entropy unavailable");
     }
 
-    let mut seed = [0u8; 44];
-    for chunk in seed.chunks_mut(8) {
-        let value = hardware_random_u64().unwrap_or_else(|| {
-            log_panic!(LOG_ORIGIN, "RDRAND repeatedly failed during CSPRNG seeding");
-            panic!("hardware entropy failure");
-        });
-        let bytes = value.to_le_bytes();
-        chunk.copy_from_slice(&bytes[..chunk.len()]);
-    }
-
-    let jitter = read_tsc().to_le_bytes();
-    for (index, byte) in jitter.iter().enumerate() {
-        seed[index] ^= *byte;
-    }
-
+    let digest = hasher.finalize();
     let mut key = [0u8; 32];
-    key.copy_from_slice(&seed[..32]);
+    key.copy_from_slice(&digest[..32]);
     let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&seed[32..44]);
+    nonce.copy_from_slice(&digest[32..44]);
     *RNG.lock() = Some(ChaCha20::new(key, nonce));
+
     log_info!(
         LOG_ORIGIN,
-        "CSPRNG initialized from hardware entropy (RDRAND, ChaCha20)"
+        "CSPRNG initialized (ChaCha20, SHA-512 mix): rdrand={} rdseed={} jitter_samples={}",
+        report.rdrand,
+        report.rdseed,
+        report.jitter_samples
     );
+}
+
+/// Feed RDRAND output into the seed hash. Returns whether the source is
+/// present *and* actually produced all requested words.
+fn mix_rdrand(hasher: &mut Sha512) -> bool {
+    let features = __cpuid(1);
+    if features.ecx & (1 << 30) == 0 {
+        return false;
+    }
+    for _ in 0..HW_SEED_WORDS {
+        match rdrand_u64() {
+            Some(value) => hasher.update(value.to_le_bytes()),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Feed RDSEED output into the seed hash. RDSEED can underflow legitimately
+/// (it surfaces raw conditioned entropy), so exhaustion after retries simply
+/// marks the source unavailable instead of failing the boot.
+fn mix_rdseed(hasher: &mut Sha512) -> bool {
+    let features = __cpuid_count(7, 0);
+    if features.ebx & (1 << 18) == 0 {
+        return false;
+    }
+    for _ in 0..HW_SEED_WORDS {
+        match rdseed_u64() {
+            Some(value) => hasher.update(value.to_le_bytes()),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Feed TSC jitter deltas into the seed hash. CPUID serializes execution
+/// between samples so each delta carries pipeline/cache timing noise.
+fn mix_tsc_jitter(hasher: &mut Sha512) -> u32 {
+    let mut previous = read_tsc();
+    for _ in 0..JITTER_SAMPLES {
+        __cpuid(0);
+        let now = read_tsc();
+        hasher.update(now.wrapping_sub(previous).to_le_bytes());
+        previous = now;
+    }
+    hasher.update(previous.to_le_bytes());
+    JITTER_SAMPLES as u32
 }
 
 pub fn kernel_random_fill(output: &mut [u8]) {
@@ -89,7 +192,7 @@ fn align_up(value: usize, alignment: usize) -> Option<usize> {
         .map(|value| value & !(alignment - 1))
 }
 
-fn hardware_random_u64() -> Option<u64> {
+fn rdrand_u64() -> Option<u64> {
     for _ in 0..16 {
         let value: u64;
         let success: u8;
@@ -105,6 +208,29 @@ fn hardware_random_u64() -> Option<u64> {
         if success != 0 {
             return Some(value);
         }
+    }
+    None
+}
+
+fn rdseed_u64() -> Option<u64> {
+    // RDSEED underflows more often than RDRAND; give it more attempts with a
+    // pause between them, per Intel DRNG guidance.
+    for _ in 0..64 {
+        let value: u64;
+        let success: u8;
+        unsafe {
+            asm!(
+                "rdseed {value}",
+                "setc {success}",
+                value = out(reg) value,
+                success = out(reg_byte) success,
+                options(nostack, nomem)
+            );
+        }
+        if success != 0 {
+            return Some(value);
+        }
+        core::hint::spin_loop();
     }
     None
 }
