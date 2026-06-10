@@ -68,7 +68,9 @@ mod cap;
 mod shared_mem;
 mod system;
 mod executable;
+mod random;
 mod init_process;
+mod system_manifest;
 mod driver_registry;
 mod drivers;
 mod architectural_invariants_selftests;
@@ -146,6 +148,7 @@ pub unsafe extern "C" fn kmain(boot_info: &'static BootInfo) -> ! {
 
     display_uefi_memory_map(&boot_info.memory_map);
     display_memory_stats();
+    random::init();
 
     thread::init();
     cap::init();

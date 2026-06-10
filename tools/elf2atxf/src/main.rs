@@ -1,362 +1,475 @@
-// elf2atxf - Convert ELF binaries to Atom ATXF executable format
-//
-// ATXF (Atom Executable Format) is a simple executable format for Atom OS:
-// - Magic: 0x41545846 ("ATXF" in little-endian)
-// - Version: 1
-// - Fixed header with section offsets and sizes
-// - .text section (code, read-only)
-// - .data section (initialized data, writable)
-// - .bss size (zero-initialized data, writable)
-//
-// Usage: elf2atxf <input.elf> <output.atxf>
-
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::env;
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 
-const ATXF_MAGIC: u32 = 0x4154_5846; // "ATXF" in ASCII, little-endian
-const ATXF_VERSION: u16 = 1;
-const PAGE_SIZE: usize = 4096;
-const USER_BASE: u64 = 0x800000; // Expected userspace load address (must be above kernel heap)
+const ATXF_MAGIC: u32 = 0x4154_5846;
+const ATXF_VERSION: u16 = 2;
+const ATXF_FLAG_PIE: u32 = 1;
+const ATXF_SIGNATURE_SIZE: usize = 32;
+const ATXF_PAGE_SIZE: u64 = 4096;
+const PRODUCT_HMAC_KEY: &[u8; 32] = b"AtomOS-ATXF-v2-product-key-0001!";
+const SEGMENT_TEXT: u32 = 1;
+const SEGMENT_RODATA: u32 = 2;
+const SEGMENT_DATA: u32 = 3;
+const SEGMENT_BSS: u32 = 4;
+const PERM_READ: u32 = 1;
+const PERM_WRITE: u32 = 2;
+const PERM_EXECUTE: u32 = 4;
+const KNOWN_PERMISSIONS: u32 = PERM_READ | PERM_WRITE | PERM_EXECUTE;
+const RELOCATION_RELATIVE64: u32 = 1;
 
-// ELF constants
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+struct AtxfV2Header {
+    magic: u32,
+    version: u16,
+    header_size: u16,
+    flags: u32,
+    entry_offset: u64,
+    segment_count: u32,
+    relocation_count: u32,
+    segment_table_offset: u64,
+    relocation_table_offset: u64,
+    signature_offset: u64,
+    signature_size: u32,
+    reserved: u32,
+    image_size: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+struct AtxfV2Segment {
+    kind: u32,
+    permissions: u32,
+    file_offset: u64,
+    file_size: u64,
+    mem_size: u64,
+    virtual_offset: u64,
+    align: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+struct AtxfV2Relocation {
+    offset: u64,
+    kind: u32,
+    reserved: u32,
+    addend: i64,
+}
+
+const HEADER_SIZE: usize = std::mem::size_of::<AtxfV2Header>();
+const SEGMENT_SIZE: usize = std::mem::size_of::<AtxfV2Segment>();
+const RELOCATION_SIZE: usize = std::mem::size_of::<AtxfV2Relocation>();
+
+fn compute_image_mac(
+    image: &[u8],
+    signature_offset: usize,
+    signature_size: usize,
+) -> Option<[u8; ATXF_SIGNATURE_SIZE]> {
+    let signature_end = signature_offset.checked_add(signature_size)?;
+    if signature_size != ATXF_SIGNATURE_SIZE || signature_end > image.len() {
+        return None;
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(PRODUCT_HMAC_KEY).ok()?;
+    mac.update(&image[..signature_offset]);
+    mac.update(&[0u8; ATXF_SIGNATURE_SIZE]);
+    mac.update(&image[signature_end..]);
+    let bytes = mac.finalize().into_bytes();
+    let mut result = [0u8; ATXF_SIGNATURE_SIZE];
+    result.copy_from_slice(&bytes);
+    Some(result)
+}
+
+const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
-const PF_X: u32 = 0x1;
-const PF_W: u32 = 0x2;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+const PF_R: u32 = 4;
+const SHT_RELA: u32 = 4;
+const R_X86_64_RELATIVE: u32 = 8;
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct AtxfHeader {
-    magic: u32,           // 0x41545846 = "ATXF"
-    version: u16,         // 1
-    header_size: u16,     // Size of this header
-    entry_offset: u32,    // Entry point relative to text base
-    text_offset: u32,     // Offset of .text in file (page-aligned)
-    text_size: u32,       // Size of .text section
-    data_offset: u32,     // Offset of .data in file (page-aligned)
-    data_size: u32,       // Size of .data section
-    bss_size: u32,        // Size of .bss (zeroed, not in file)
+#[derive(Clone)]
+struct OutputSegment {
+    descriptor: AtxfV2Segment,
+    bytes: Vec<u8>,
 }
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct Elf64Header {
-    e_ident: [u8; 16],
-    e_type: u16,
-    e_machine: u16,
-    e_version: u32,
-    e_entry: u64,
-    e_phoff: u64,
-    e_shoff: u64,
-    e_flags: u32,
-    e_ehsize: u16,
-    e_phentsize: u16,
-    e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
+fn fail(message: impl AsRef<str>) -> ! {
+    eprintln!("elf2atxf: error: {}", message.as_ref());
+    std::process::exit(1);
 }
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct Elf64Phdr {
-    p_type: u32,
-    p_flags: u32,
-    p_offset: u64,
-    p_vaddr: u64,
-    p_paddr: u64,
-    p_filesz: u64,
-    p_memsz: u64,
-    p_align: u64,
+fn checked_slice(data: &[u8], offset: u64, size: u64) -> Option<&[u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let len = usize::try_from(size).ok()?;
+    let end = start.checked_add(len)?;
+    data.get(start..end)
+}
+
+fn u16_at(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn u64_at(data: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        data.get(offset..offset + 8)?.try_into().ok()?,
+    ))
+}
+
+fn i64_at(data: &[u8], offset: usize) -> Option<i64> {
+    Some(i64::from_le_bytes(
+        data.get(offset..offset + 8)?.try_into().ok()?,
+    ))
 }
 
 fn align_up(value: usize, alignment: usize) -> usize {
-    (value + alignment - 1) & !(alignment - 1)
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .unwrap_or_else(|| fail("layout overflow"))
 }
 
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([data[offset], data[offset + 1]])
+fn append_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
+fn append_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ])
+fn append_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_i64(out: &mut Vec<u8>, value: i64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_header(out: &mut Vec<u8>, header: AtxfV2Header) {
+    append_u32(out, header.magic);
+    append_u16(out, header.version);
+    append_u16(out, header.header_size);
+    append_u32(out, header.flags);
+    append_u64(out, header.entry_offset);
+    append_u32(out, header.segment_count);
+    append_u32(out, header.relocation_count);
+    append_u64(out, header.segment_table_offset);
+    append_u64(out, header.relocation_table_offset);
+    append_u64(out, header.signature_offset);
+    append_u32(out, header.signature_size);
+    append_u32(out, header.reserved);
+    append_u64(out, header.image_size);
+}
+
+fn append_segment(out: &mut Vec<u8>, segment: AtxfV2Segment) {
+    append_u32(out, segment.kind);
+    append_u32(out, segment.permissions);
+    append_u64(out, segment.file_offset);
+    append_u64(out, segment.file_size);
+    append_u64(out, segment.mem_size);
+    append_u64(out, segment.virtual_offset);
+    append_u64(out, segment.align);
+}
+
+fn append_relocation(out: &mut Vec<u8>, relocation: AtxfV2Relocation) {
+    append_u64(out, relocation.offset);
+    append_u32(out, relocation.kind);
+    append_u32(out, relocation.reserved);
+    append_i64(out, relocation.addend);
+}
+
+fn writable_target(segments: &[OutputSegment], offset: u64) -> bool {
+    segments.iter().any(|segment| {
+        let permissions = segment.descriptor.permissions;
+        let start = segment.descriptor.virtual_offset;
+        let end = start.saturating_add(segment.descriptor.mem_size);
+        permissions & PERM_WRITE != 0
+            && offset >= start
+            && offset
+                .checked_add(8)
+                .is_some_and(|target_end| target_end <= end)
+    })
 }
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-
-    let positional: Vec<String> = args[1..].to_vec();
-
-    if positional.len() != 2 {
-        eprintln!("Usage: {} <input.elf> <output.atxf>", args[0]);
-        eprintln!();
-        eprintln!("Convert ELF binary to Atom ATXF executable format.");
-        eprintln!();
-        eprintln!("The input ELF should be a statically linked executable");
-        eprintln!("compiled with:");
-        eprintln!("  cargo build --target x86_64-unknown-none --release");
-        std::process::exit(1);
+    if args.len() != 3 {
+        eprintln!("Usage: {} <input-pie.elf> <output.atxf>", args[0]);
+        std::process::exit(2);
     }
 
-    let input_path = &positional[0];
-    let output_path = &positional[1];
-
-    println!("elf2atxf: Converting {} -> {}", input_path, output_path);
-
-    // Read the ELF file
-    let elf_data = fs::read(input_path)?;
-
-    // Verify ELF magic
-    if elf_data.len() < 64 {
-        eprintln!("Error: File too small to be a valid ELF");
-        std::process::exit(1);
+    let elf = fs::read(&args[1])?;
+    if elf.len() < 64 || elf[..4] != ELF_MAGIC {
+        fail("input is not an ELF image");
+    }
+    if elf[4] != ELFCLASS64 || elf[5] != ELFDATA2LSB {
+        fail("only little-endian ELF64 images are supported");
+    }
+    if u16_at(&elf, 16) != Some(ET_DYN) {
+        fail("ELF is not PIE (expected ET_DYN)");
+    }
+    if u16_at(&elf, 18) != Some(EM_X86_64) {
+        fail("ELF architecture is not x86_64");
     }
 
-    if elf_data[0..4] != ELF_MAGIC {
-        eprintln!("Error: Not a valid ELF file (bad magic)");
-        std::process::exit(1);
+    let entry = u64_at(&elf, 24).unwrap_or_else(|| fail("truncated ELF header"));
+    let phoff = u64_at(&elf, 32).unwrap_or_else(|| fail("truncated ELF header"));
+    let shoff = u64_at(&elf, 40).unwrap_or_else(|| fail("truncated ELF header"));
+    let phentsize = u16_at(&elf, 54).unwrap_or(0) as usize;
+    let phnum = u16_at(&elf, 56).unwrap_or(0) as usize;
+    let shentsize = u16_at(&elf, 58).unwrap_or(0) as usize;
+    let shnum = u16_at(&elf, 60).unwrap_or(0) as usize;
+    if phentsize < 56 || phnum == 0 {
+        fail("ELF has no usable program header table");
     }
 
-    // Verify 64-bit ELF
-    if elf_data[4] != ELFCLASS64 {
-        eprintln!("Error: Not a 64-bit ELF");
-        std::process::exit(1);
-    }
-
-    // Parse ELF header manually
-    let e_machine = read_u16_le(&elf_data, 18);
-    if e_machine != EM_X86_64 {
-        eprintln!("Error: ELF is not x86_64 (machine type: {})", e_machine);
-        std::process::exit(1);
-    }
-
-    let e_entry = read_u64_le(&elf_data, 24);
-    let e_phoff = read_u64_le(&elf_data, 32);
-    let e_phentsize = read_u16_le(&elf_data, 54);
-    let e_phnum = read_u16_le(&elf_data, 56);
-
-    println!("  Entry point: 0x{:X}", e_entry);
-    println!("  Program headers: {} at offset 0x{:X}", e_phnum, e_phoff);
-
-    // Extract sections from program headers
-    let mut text_data: Vec<u8> = Vec::new();
-    let mut data_data: Vec<u8> = Vec::new();
-    let mut bss_size: usize = 0;
-    let mut text_vaddr: u64 = 0;
-    let mut base_addr: u64 = u64::MAX;
-    // Track the virtual base of the data region and the high-water mark of
-    // memory coverage across all non-executable PT_LOAD segments.  These are
-    // needed to correctly fill virtual gaps between segments with zeros and to
-    // compute the BSS size after all file content has been placed.
-    let mut data_vaddr: u64 = 0;
-    let mut max_data_mem_end: u64 = 0;
-
-    // First pass: find base address (only considering segments at/above USER_BASE)
-    for i in 0..e_phnum as usize {
-        let phdr_offset = e_phoff as usize + i * e_phentsize as usize;
-        if phdr_offset + 56 > elf_data.len() {
-            break;
+    let mut segments = Vec::new();
+    for index in 0..phnum {
+        let offset = usize::try_from(phoff)
+            .ok()
+            .and_then(|base| base.checked_add(index.checked_mul(phentsize)?))
+            .unwrap_or_else(|| fail("program header table overflow"));
+        if offset.checked_add(56).is_none_or(|end| end > elf.len()) {
+            fail("truncated program header table");
         }
-
-        let p_type = read_u32_le(&elf_data, phdr_offset);
-        let p_vaddr = read_u64_le(&elf_data, phdr_offset + 16);
-
-        // Only consider segments at or above USER_BASE (skip dynamic linking junk at low addresses)
-        if p_type == PT_LOAD && p_vaddr >= USER_BASE && p_vaddr < base_addr {
-            base_addr = p_vaddr;
-        }
-    }
-
-    if base_addr == u64::MAX {
-        base_addr = USER_BASE;
-    }
-    println!("  Base address: 0x{:X}", base_addr);
-
-    // Second pass: extract segments
-    for i in 0..e_phnum as usize {
-        let phdr_offset = e_phoff as usize + i * e_phentsize as usize;
-        if phdr_offset + 56 > elf_data.len() {
-            break;
-        }
-
-        let p_type = read_u32_le(&elf_data, phdr_offset);
-        let p_flags = read_u32_le(&elf_data, phdr_offset + 4);
-        let p_offset = read_u64_le(&elf_data, phdr_offset + 8);
-        let p_vaddr = read_u64_le(&elf_data, phdr_offset + 16);
-        let p_filesz = read_u64_le(&elf_data, phdr_offset + 32);
-        let p_memsz = read_u64_le(&elf_data, phdr_offset + 40);
-
-        if p_type != PT_LOAD {
+        if u32_at(&elf, offset) != Some(PT_LOAD) {
             continue;
         }
 
-        // Skip segments below USER_BASE (dynamic linking junk at low addresses)
-        if p_vaddr < USER_BASE {
-            println!("  Skipping segment at 0x{:X} (below USER_BASE)", p_vaddr);
+        let flags = u32_at(&elf, offset + 4).unwrap();
+        let file_offset = u64_at(&elf, offset + 8).unwrap();
+        let virtual_offset = u64_at(&elf, offset + 16).unwrap();
+        let file_size = u64_at(&elf, offset + 32).unwrap();
+        let mem_size = u64_at(&elf, offset + 40).unwrap();
+        let align = u64_at(&elf, offset + 48).unwrap();
+
+        if mem_size == 0 {
             continue;
         }
+        if flags & PF_R == 0 {
+            fail("PT_LOAD segment is not readable");
+        }
+        if flags & PF_W != 0 && flags & PF_X != 0 {
+            fail("ELF contains a writable and executable PT_LOAD segment");
+        }
+        if virtual_offset % ATXF_PAGE_SIZE != 0 || align < ATXF_PAGE_SIZE {
+            fail("PT_LOAD virtual address/alignment is not page aligned");
+        }
+        if mem_size < file_size {
+            fail("PT_LOAD mem size is smaller than file size");
+        }
 
-        let start = p_offset as usize;
-        let file_size = p_filesz as usize;
-        let mem_size = p_memsz as usize;
-        let end = start + file_size;
+        let permissions = PERM_READ
+            | if flags & PF_W != 0 { PERM_WRITE } else { 0 }
+            | if flags & PF_X != 0 { PERM_EXECUTE } else { 0 };
+        if permissions & !KNOWN_PERMISSIONS != 0 {
+            fail("unsupported segment permissions");
+        }
+        let kind = if flags & PF_X != 0 {
+            SEGMENT_TEXT
+        } else if flags & PF_W != 0 {
+            SEGMENT_DATA
+        } else {
+            SEGMENT_RODATA
+        };
+        let bytes = checked_slice(&elf, file_offset, file_size)
+            .unwrap_or_else(|| fail("PT_LOAD file range is outside ELF"))
+            .to_vec();
 
-        // Check if executable (text) or writable (data)
-        let is_executable = p_flags & PF_X != 0;
-        let is_writable = p_flags & PF_W != 0;
+        if mem_size > file_size && flags & PF_W == 0 {
+            fail("non-writable PT_LOAD contains an unsupported zero-fill tail");
+        }
 
-        if is_executable {
-            // Text segment
-            if end <= elf_data.len() {
-                text_data.extend_from_slice(&elf_data[start..end]);
-                text_vaddr = p_vaddr;
-                println!("  Text segment: {} bytes at 0x{:X}", file_size, p_vaddr);
+        let data_mem_size = if file_size == 0 {
+            0
+        } else {
+            mem_size.min(align_up(file_size as usize, ATXF_PAGE_SIZE as usize) as u64)
+        };
+        if data_mem_size != 0 {
+            segments.push(OutputSegment {
+                descriptor: AtxfV2Segment {
+                    kind,
+                    permissions,
+                    file_offset: 0,
+                    file_size,
+                    mem_size: data_mem_size,
+                    virtual_offset,
+                    align: ATXF_PAGE_SIZE,
+                },
+                bytes,
+            });
+        }
+
+        if mem_size > data_mem_size {
+            let bss_offset = virtual_offset
+                .checked_add(data_mem_size)
+                .unwrap_or_else(|| fail("BSS virtual range overflow"));
+            if bss_offset % ATXF_PAGE_SIZE != 0 {
+                fail("BSS split is not page aligned");
             }
-        } else if is_writable || file_size > 0 || mem_size > 0 {
-            // Data / BSS segment.
-            //
-            // Multiple non-executable PT_LOAD segments must be placed at their
-            // correct virtual offsets relative to the first one.  Gaps between
-            // segments are filled with zeros so that all subsequent segments
-            // land at the right position inside the data image.
-            if data_vaddr == 0 {
-                data_vaddr = p_vaddr;
-            }
+            segments.push(OutputSegment {
+                descriptor: AtxfV2Segment {
+                    kind: SEGMENT_BSS,
+                    permissions: PERM_READ | PERM_WRITE,
+                    file_offset: 0,
+                    file_size: 0,
+                    mem_size: mem_size - data_mem_size,
+                    virtual_offset: bss_offset,
+                    align: ATXF_PAGE_SIZE,
+                },
+                bytes: Vec::new(),
+            });
+        }
+    }
 
-            if file_size > 0 && end <= elf_data.len() {
-                let expected_offset = (p_vaddr - data_vaddr) as usize;
-                if expected_offset > data_data.len() {
-                    // Fill the virtual gap (and any BSS tail of the previous
-                    // segment that falls before the start of this one) with zeros.
-                    data_data.resize(expected_offset, 0u8);
+    if segments.is_empty() {
+        fail("ELF has no loadable segments");
+    }
+    segments.sort_by_key(|segment| segment.descriptor.virtual_offset);
+    for pair in segments.windows(2) {
+        let left_end = pair[0]
+            .descriptor
+            .virtual_offset
+            .checked_add(pair[0].descriptor.mem_size)
+            .unwrap_or_else(|| fail("segment virtual range overflow"));
+        if left_end > pair[1].descriptor.virtual_offset {
+            fail("ELF PT_LOAD segments overlap");
+        }
+    }
+    if !segments.iter().any(|segment| {
+        segment.descriptor.permissions & PERM_EXECUTE != 0
+            && entry >= segment.descriptor.virtual_offset
+            && entry
+                < segment
+                    .descriptor
+                    .virtual_offset
+                    .saturating_add(segment.descriptor.mem_size)
+    }) {
+        fail("entry point is outside executable memory");
+    }
+
+    let mut relocations = Vec::new();
+    if shoff != 0 && shnum != 0 {
+        if shentsize < 64 {
+            fail("invalid ELF section header size");
+        }
+        for index in 0..shnum {
+            let offset = usize::try_from(shoff)
+                .ok()
+                .and_then(|base| base.checked_add(index.checked_mul(shentsize)?))
+                .unwrap_or_else(|| fail("section header table overflow"));
+            if offset.checked_add(64).is_none_or(|end| end > elf.len()) {
+                fail("truncated section header table");
+            }
+            if u32_at(&elf, offset + 4) != Some(SHT_RELA) {
+                continue;
+            }
+            let section_offset = u64_at(&elf, offset + 24).unwrap();
+            let section_size = u64_at(&elf, offset + 32).unwrap();
+            let entry_size = u64_at(&elf, offset + 56).unwrap();
+            if entry_size != 24 || section_size % entry_size != 0 {
+                fail("unsupported ELF RELA table layout");
+            }
+            let rela = checked_slice(&elf, section_offset, section_size)
+                .unwrap_or_else(|| fail("RELA section is outside ELF"));
+            for record in rela.chunks_exact(24) {
+                let target = u64_at(record, 0).unwrap();
+                let info = u64_at(record, 8).unwrap();
+                let addend = i64_at(record, 16).unwrap();
+                let kind = info as u32;
+                let symbol = info >> 32;
+                if kind != R_X86_64_RELATIVE || symbol != 0 {
+                    fail(format!(
+                        "unsupported relocation type {} (symbol {})",
+                        kind, symbol
+                    ));
                 }
-                data_data.extend_from_slice(&elf_data[start..end]);
-                println!("  Data segment: {} bytes at 0x{:X}", file_size, p_vaddr);
-            } else if mem_size > 0 {
-                println!("  BSS-only segment: {} bytes at 0x{:X}", mem_size, p_vaddr);
-            }
-
-            // Update the high-water mark for total memory coverage.
-            let seg_mem_end = p_vaddr + p_memsz;
-            if seg_mem_end > max_data_mem_end {
-                max_data_mem_end = seg_mem_end;
+                if !writable_target(&segments, target) {
+                    fail("relocation target is not inside a writable segment");
+                }
+                relocations.push(AtxfV2Relocation {
+                    offset: target,
+                    kind: RELOCATION_RELATIVE64,
+                    reserved: 0,
+                    addend,
+                });
             }
         }
     }
 
-    // Compute BSS: the zero-initialized memory that follows all file-backed data.
-    // This is the difference between the highest virtual memory address covered
-    // by any data segment and the end of the file-backed data image.
-    if data_vaddr > 0 && max_data_mem_end > data_vaddr {
-        let total_mem = (max_data_mem_end - data_vaddr) as usize;
-        bss_size = total_mem.saturating_sub(data_data.len());
+    let segment_table_offset = HEADER_SIZE;
+    let relocation_table_offset = segment_table_offset + segments.len() * SEGMENT_SIZE;
+    let metadata_end = relocation_table_offset + relocations.len() * RELOCATION_SIZE;
+    let mut cursor = align_up(metadata_end, ATXF_PAGE_SIZE as usize);
+    for segment in &mut segments {
+        if !segment.bytes.is_empty() {
+            segment.descriptor.file_offset = cursor as u64;
+            cursor = align_up(cursor + segment.bytes.len(), ATXF_PAGE_SIZE as usize);
+        }
     }
-    if bss_size > 0 {
-        println!("  BSS: {} bytes", bss_size);
-    }
+    let signature_offset = cursor;
+    let image_size = signature_offset + ATXF_SIGNATURE_SIZE;
 
-    // If text is empty, we have a problem
-    if text_data.is_empty() {
-        eprintln!("Error: No text/code section found in ELF");
-        std::process::exit(1);
-    }
-
-    // Calculate entry offset relative to text base
-    let entry_offset = if text_vaddr > 0 && e_entry >= text_vaddr {
-        (e_entry - text_vaddr) as u32
-    } else if e_entry >= base_addr {
-        (e_entry - base_addr) as u32
-    } else {
-        e_entry as u32
-    };
-
-    println!("  Entry offset: 0x{:X}", entry_offset);
-
-    // Build ATXF file
-    let header_size = std::mem::size_of::<AtxfHeader>();
-    let text_offset = align_up(header_size, PAGE_SIZE);
-    let text_size = text_data.len();
-    let data_offset = align_up(text_offset + text_size, PAGE_SIZE);
-    let data_size = data_data.len();
-
-    let header = AtxfHeader {
+    let header = AtxfV2Header {
         magic: ATXF_MAGIC,
         version: ATXF_VERSION,
-        header_size: header_size as u16,
-        entry_offset,
-        text_offset: text_offset as u32,
-        text_size: text_size as u32,
-        data_offset: data_offset as u32,
-        data_size: data_size as u32,
-        bss_size: bss_size as u32,
+        header_size: HEADER_SIZE as u16,
+        flags: ATXF_FLAG_PIE,
+        entry_offset: entry,
+        segment_count: segments.len() as u32,
+        relocation_count: relocations.len() as u32,
+        segment_table_offset: segment_table_offset as u64,
+        relocation_table_offset: relocation_table_offset as u64,
+        signature_offset: signature_offset as u64,
+        signature_size: ATXF_SIGNATURE_SIZE as u32,
+        reserved: 0,
+        image_size: image_size as u64,
     };
 
-    // Write ATXF file
-    let mut output = File::create(output_path)?;
-
-    // Write header as bytes
-    unsafe {
-        let header_bytes = std::slice::from_raw_parts(
-            &header as *const AtxfHeader as *const u8,
-            header_size,
-        );
-        output.write_all(header_bytes)?;
+    let mut output = Vec::with_capacity(image_size);
+    append_header(&mut output, header);
+    for segment in &segments {
+        append_segment(&mut output, segment.descriptor);
     }
-
-    // Pad to text offset
-    let padding_to_text = text_offset - header_size;
-    output.write_all(&vec![0u8; padding_to_text])?;
-
-    // Write text section
-    output.write_all(&text_data)?;
-
-    // Pad to data offset
-    let current_pos = text_offset + text_size;
-    if data_size > 0 {
-        let padding_to_data = data_offset - current_pos;
-        output.write_all(&vec![0u8; padding_to_data])?;
-
-        // Write data section
-        output.write_all(&data_data)?;
+    for relocation in relocations.iter().copied() {
+        append_relocation(&mut output, relocation);
     }
+    output.resize(align_up(output.len(), ATXF_PAGE_SIZE as usize), 0);
+    for segment in &segments {
+        if segment.bytes.is_empty() {
+            continue;
+        }
+        output.resize(segment.descriptor.file_offset as usize, 0);
+        output.extend_from_slice(&segment.bytes);
+        output.resize(align_up(output.len(), ATXF_PAGE_SIZE as usize), 0);
+    }
+    output.resize(signature_offset, 0);
+    output.extend_from_slice(&[0u8; ATXF_SIGNATURE_SIZE]);
+    let mac = compute_image_mac(&output, signature_offset, ATXF_SIGNATURE_SIZE)
+        .unwrap_or_else(|| fail("failed to authenticate output image"));
+    output[signature_offset..signature_offset + ATXF_SIGNATURE_SIZE].copy_from_slice(&mac);
 
-    let total_size = if data_size > 0 {
-        data_offset + data_size
-    } else {
-        text_offset + text_size
-    };
-
-    println!();
-    println!("ATXF created successfully:");
-    println!("  Magic:        0x{:08X} (\"ATXF\")", ATXF_MAGIC);
-    println!("  Version:      {}", ATXF_VERSION);
-    println!("  Header size:  {} bytes", header_size);
-    println!("  Entry offset: 0x{:X}", entry_offset);
-    println!("  Text:         offset=0x{:X}, size={} bytes", text_offset, text_size);
-    println!("  Data:         offset=0x{:X}, size={} bytes", data_offset, data_size);
-    println!("  BSS:          {} bytes", bss_size);
-    println!("  Total size:   {} bytes", total_size);
-
+    fs::write(&args[2], &output)?;
+    println!(
+        "elf2atxf: ATXF v2 PIE: {} segments, {} relocations, entry=0x{:x}, {} bytes",
+        segments.len(),
+        relocations.len(),
+        entry,
+        output.len()
+    );
     Ok(())
 }

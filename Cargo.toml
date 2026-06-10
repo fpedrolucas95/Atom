@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "shared/abi",
+    "shared/atxf",
     "kernel",
     "userspace/libs/syscall",
     "userspace/libs/libipc",
@@ -34,6 +35,7 @@ exclude = [
     "userspace/services/netd",
     "userspace/apps/timesync",
     "userspace/apps/browser",
+    "userspace/apps/security_smoke",
 ]
 resolver = "2"
 

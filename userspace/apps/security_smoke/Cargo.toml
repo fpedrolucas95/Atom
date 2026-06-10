@@ -1,0 +1,18 @@
+[package]
+name = "security_smoke"
+version = "0.1.0"
+edition = "2021"
+authors = ["Atom OS Contributors"]
+description = "Adversarial least-privilege smoke test: an ordinary app must be denied all sensitive syscalls"
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+
+[[bin]]
+name = "security_smoke"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

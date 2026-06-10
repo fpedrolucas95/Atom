@@ -159,6 +159,13 @@ impl MountsManager {
         fstype: &str,
         flags: u32,
     ) -> Result<u32, VfsError> {
+        // Enforce a hard cap on the number of active mount points so a caller
+        // cannot exhaust memory by mounting unboundedly (PR5 resource limit).
+        let active = self.mounts.iter().filter(|m| m.active).count();
+        if active >= crate::limits::MAX_MOUNT_POINTS {
+            return Err(VfsError::InvalidArg);
+        }
+
         // Validate mount point doesn't already exist
         if self.mounts.iter().any(|m| m.mount_point == mount_point) {
             return Err(VfsError::Exists);

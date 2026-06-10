@@ -310,6 +310,7 @@ impl AddressSpaceManager {
         crate::mm::validate_page_alignment(virt_addr).map_err(map_validation_error)?;
         crate::mm::validate_page_alignment(phys_addr).map_err(map_validation_error)?;
         crate::mm::validate_size(size, MAX_REGION_SIZE).map_err(map_validation_error)?;
+        vm::validate_user_page_flags(flags).map_err(|_| AddressSpaceError::PermissionDenied)?;
 
         let mut spaces = self.spaces.lock();
         let addrspace = spaces.get_mut(&id).ok_or(AddressSpaceError::NotFound)?;

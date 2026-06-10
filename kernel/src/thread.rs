@@ -1851,6 +1851,7 @@ struct ReapTicket {
 
 static ZOMBIE_THREADS: Mutex<Vec<ZombieInfo>> = Mutex::new(Vec::new());
 static CLEANED_ADDRESS_SPACES: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+static REAPER_LOCK: Mutex<()> = Mutex::new(());
 
 #[inline]
 fn userspace_address_space_is_teardown_claimed(process_id: Option<ProcessId>) -> bool {
@@ -2103,6 +2104,11 @@ fn detach_zombie_tcb(zombie: ZombieInfo) -> Option<ReapTicket> {
 }
 
 pub fn reap_zombies() {
+    // Idle threads run on every CPU. Only one of them may detach TCBs and
+    // reclaim page-table frames at a time; acquiring this lock also acts as a
+    // completion barrier for callers waiting on an in-flight reap pass.
+    let _reaper_guard = REAPER_LOCK.lock();
+
     loop {
         let zombies = take_zombie_batch();
         if zombies.is_empty() {

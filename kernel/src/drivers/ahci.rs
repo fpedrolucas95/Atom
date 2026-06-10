@@ -125,26 +125,28 @@ pub fn init() -> bool {
     // Find AHCI controller via PCI
     if let Some(base) = find_ahci_controller() {
         unsafe {
-            AHCI_BASE = base;
             crate::log_info!("ahci", "Found AHCI controller at 0x{:X}", base);
 
-            // Map AHCI MMIO region into kernel address space
-            // AHCI uses ~4KB of MMIO, map 2 pages to be safe
-            use crate::mm::vm::{self, PageFlags};
-            let page_base = base & !0xFFF; // Align to page
-            for i in 0..2 {
-                let addr = page_base + i * 0x1000;
-                let _ = vm::unmap_page(addr); // Remove any existing mapping
-                if let Err(e) = vm::map_page(
-                    addr,
-                    addr, // Identity map for MMIO
-                    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::CACHE_DISABLE,
-                ) {
-                    crate::log_error!("ahci", "Failed to map MMIO page 0x{:X}: {:?}", addr, e);
+            // ABAR is CPU-accessed through the shared kernel higher half.
+            // The controller still receives physical addresses for DMA below.
+            AHCI_BASE = match crate::mm::vm::map_kernel_mmio(base, 0x2000) {
+                Ok(virt) => virt,
+                Err(err) => {
+                    crate::log_error!(
+                        "ahci",
+                        "Failed to map MMIO BAR 0x{:X}: {:?}",
+                        base,
+                        err
+                    );
                     return false;
                 }
-            }
-            crate::log_debug!("ahci", "MMIO mapped at 0x{:X}", page_base);
+            };
+            crate::log_debug!(
+                "ahci",
+                "MMIO mapped: phys=0x{:X} virt=0x{:X}",
+                base,
+                AHCI_BASE
+            );
 
             // Enable AHCI mode
             let ghc = read_reg(AHCI_GHC);
@@ -304,7 +306,7 @@ unsafe fn init_port(port: u32) -> bool {
     write_port_reg(port, PORT_IS, 0xFFFFFFFF);
 
     // Set up command header 0
-    let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
+    let cmd_header = crate::mm::vm::phys_to_virt_ptr(CMD_LIST_BASE) as *mut CommandHeader;
     (*cmd_header).ctba = CMD_TABLE_BASE as u32;
     (*cmd_header).ctbau = 0;
 
@@ -352,13 +354,13 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<Vec<u8>> {
         }
 
         // Set up command header
-        let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
+        let cmd_header = crate::mm::vm::phys_to_virt_ptr(CMD_LIST_BASE) as *mut CommandHeader;
         (*cmd_header).flags = 5 | (1 << 6); // 5 DWORDs in FIS, clear busy on ok
         (*cmd_header).prdtl = 1;
         (*cmd_header).prdbc = 0;
 
         // Set up command table
-        let cmd_table = CMD_TABLE_BASE as *mut CommandTable;
+        let cmd_table = crate::mm::vm::phys_to_virt_ptr(CMD_TABLE_BASE) as *mut CommandTable;
         ptr::write_bytes(cmd_table, 0, 1);
 
         // Set up PRDT entry
@@ -400,7 +402,10 @@ pub fn read_sectors(lba: u64, count: u16) -> Option<Vec<u8>> {
                 write_port_reg(port, PORT_IS, is);
 
                 let size = (count as usize) * 512;
-                let src = core::slice::from_raw_parts(DATA_BUFFER as *const u8, size);
+                let src = core::slice::from_raw_parts(
+                    crate::mm::vm::phys_to_virt_ptr(DATA_BUFFER) as *const u8,
+                    size,
+                );
                 return Some(src.to_vec());
             }
         }
@@ -437,14 +442,18 @@ pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
             byte_count
         );
 
-        core::ptr::copy_nonoverlapping(data.as_ptr(), DATA_BUFFER as *mut u8, byte_count);
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            crate::mm::vm::phys_to_virt_ptr(DATA_BUFFER) as *mut u8,
+            byte_count,
+        );
 
-        let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
+        let cmd_header = crate::mm::vm::phys_to_virt_ptr(CMD_LIST_BASE) as *mut CommandHeader;
         (*cmd_header).flags = 5 | (1 << 6);
         (*cmd_header).prdtl = 1;
         (*cmd_header).prdbc = 0;
 
-        let cmd_table = CMD_TABLE_BASE as *mut CommandTable;
+        let cmd_table = crate::mm::vm::phys_to_virt_ptr(CMD_TABLE_BASE) as *mut CommandTable;
         ptr::write_bytes(cmd_table, 0, 1);
 
         (*cmd_table).prdt[0].dba = DATA_BUFFER as u32;
@@ -499,12 +508,12 @@ pub fn flush_cache() -> bool {
         };
         crate::log_info!("ahci", "AHCI FLUSH: begin");
 
-        let cmd_header = CMD_LIST_BASE as *mut CommandHeader;
+        let cmd_header = crate::mm::vm::phys_to_virt_ptr(CMD_LIST_BASE) as *mut CommandHeader;
         (*cmd_header).flags = 5; // 5 DWORDs in FIS, no data transfer
         (*cmd_header).prdtl = 0;
         (*cmd_header).prdbc = 0;
 
-        let cmd_table = CMD_TABLE_BASE as *mut CommandTable;
+        let cmd_table = crate::mm::vm::phys_to_virt_ptr(CMD_TABLE_BASE) as *mut CommandTable;
         ptr::write_bytes(cmd_table, 0, 1);
 
         let fis = &mut (*cmd_table).cfis as *mut [u8; 64] as *mut FisRegH2D;

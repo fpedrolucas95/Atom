@@ -1,0 +1,8 @@
+[package]
+name = "atom_atxf"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }

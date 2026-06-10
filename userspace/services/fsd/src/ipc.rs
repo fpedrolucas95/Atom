@@ -35,6 +35,10 @@ const ENOTDIR: u64  = u64::MAX - 19;
 const EEXIST: u64   = u64::MAX - 16;
 const ENOTEMPTY: u64 = u64::MAX - 38;
 const ENOTSUP: u64  = u64::MAX - 34;
+const ENOMEM: u64   = u64::MAX - 3;  // matches atom_abi::ENOMEM
+const EMSGSIZE: u64 = u64::MAX - 6;  // matches atom_abi::EMSGSIZE
+
+use crate::limits;
 
 // ── Simple file descriptor table ──────────────────────────────────────────
 
@@ -103,6 +107,14 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
     /// Dispatch incoming request to handler based on message type.
     /// Returns a byte vector that will be sent verbatim to the reply port.
     pub fn handle_request(&mut self, msg_type: MessageType, payload: &[u8]) -> Vec<u8> {
+        // Defensive bound: never parse a request payload larger than a single
+        // IPC envelope. The transport already caps this, but enforcing it here
+        // keeps the handlers independent of the transport and rejects abuse
+        // with a clear error instead of trusting client-supplied sizes.
+        if payload.len() > limits::MAX_REQUEST_PAYLOAD {
+            Self::log("fsd: request payload exceeds limit, rejecting EMSGSIZE");
+            return Self::make_reply(EMSGSIZE, 0);
+        }
         match msg_type {
             MessageType::FsOpen    => self.handle_fs_open(payload),
             MessageType::FsClose   => self.handle_fs_close(payload),
@@ -242,6 +254,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
         }
 
         let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if let Err(e) = limits::check_path_len(path_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 4 + path_len + 8 {
             return Self::make_reply(EINVAL, 0);
         }
@@ -389,7 +404,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
 
             let fd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
             let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
-            let count = count.min(FS_MAX_READ_CHUNK);
+            // Never trust the client's count: clamp to a safe per-request bound
+            // so a huge value cannot drive an oversized copy/allocation.
+            let count = limits::clamp_read_count(count).min(FS_MAX_READ_CHUNK);
 
             if fd >= MAX_FDS || self.fds[fd].is_none() {
                 Self::encode_reply_header(reply, EBADF, 0);
@@ -521,6 +538,11 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
 
         let fd = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
         let count = u64::from_le_bytes(payload[8..16].try_into().unwrap()) as usize;
+        // Reject oversized writes before touching the heap: a client must not be
+        // able to request an unbounded allocation by inflating `count`.
+        if let Err(e) = limits::check_write_count(count) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 16 + count {
             return Self::make_reply(EINVAL, 0);
         }
@@ -551,7 +573,18 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
         // Build the new file image: read existing content, splice in new data.
         let existing_size = self.fds[fd].as_ref().unwrap().size as usize;
         let image_len = new_len.max(existing_size);
-        let mut new_image = alloc::vec![0u8; image_len];
+        // Bound the largest single allocation fsd performs, then allocate
+        // fallibly so a transient OOM becomes a recoverable ENOMEM reply rather
+        // than an abort. The daemon keeps serving other requests.
+        if let Err(e) = limits::check_file_image(image_len) {
+            return Self::make_reply(e, 0);
+        }
+        let mut new_image: Vec<u8> = Vec::new();
+        if new_image.try_reserve_exact(image_len).is_err() {
+            Self::log("fsd: WRITE ENOMEM — could not allocate file image");
+            return Self::make_reply(ENOMEM, 0);
+        }
+        new_image.resize(image_len, 0);
 
         // Read existing content into image (only if there's something to preserve).
         if existing_size > 0 {
@@ -604,6 +637,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
         }
 
         let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if let Err(e) = limits::check_path_len(path_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 4 + path_len {
             return Self::make_reply(EINVAL, 0);
         }
@@ -666,6 +702,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
             return Self::make_reply(EINVAL, 0);
         }
         let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if let Err(e) = limits::check_path_len(path_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 4 + path_len + 4 {
             return Self::make_reply(EINVAL, 0);
         }
@@ -694,6 +733,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
             return Self::make_reply(EINVAL, 0);
         }
         let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if let Err(e) = limits::check_path_len(path_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 4 + path_len {
             return Self::make_reply(EINVAL, 0);
         }
@@ -724,6 +766,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
             return Self::make_reply(EINVAL, 0);
         }
         let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if let Err(e) = limits::check_path_len(path_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 4 + path_len {
             return Self::make_reply(EINVAL, 0);
         }
@@ -754,6 +799,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
             return Self::make_reply(EINVAL, 0);
         }
         let old_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if let Err(e) = limits::check_path_len(old_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < 4 + old_len + 4 {
             return Self::make_reply(EINVAL, 0);
         }
@@ -768,6 +816,9 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
             payload[new_len_off + 2],
             payload[new_len_off + 3],
         ]) as usize;
+        if let Err(e) = limits::check_path_len(new_len) {
+            return Self::make_reply(e, 0);
+        }
         if payload.len() < new_len_off + 4 + new_len {
             return Self::make_reply(EINVAL, 0);
         }
@@ -818,8 +869,11 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
 
         Self::log(&alloc::format!("fsd: readdir fd={} path=\"{}\"", dirfd, dir.path));
 
-        // Ask kernel backend for directory listing (packed dirent format)
-        let buf_size = count.min(64 * 1024);
+        // Ask kernel backend for directory listing (packed dirent format).
+        // Bound the listing buffer to a single IPC reply: a client cannot make
+        // fsd allocate an arbitrary buffer by claiming a huge count, and the
+        // result is guaranteed to fit the reply envelope.
+        let buf_size = limits::clamp_read_count(count).min(FS_MAX_READ_CHUNK);
         if buf_size == 0 {
             return Self::make_reply(EINVAL, 0);
         }

@@ -1,0 +1,117 @@
+name: Security
+
+# Mandatory security gate for Atom OS. Every check here is a HARD failure:
+# there is intentionally no continue-on-error anywhere in this file. A security
+# regression must break the build.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: "true"
+
+jobs:
+  # Security-specific gates. These are deterministic and dependency-light, and
+  # are kept independent of the repo-wide style normalization (fmt/clippy) so a
+  # legacy style nit can never block a security gate.
+  security-gates:
+    name: syscall-policy / TODO / unsafe baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syscall policy gate (fail on unclassified syscall)
+        run: ./scripts/ci/check-syscall-policy.sh
+
+      - name: Security-debt / TODO gate
+        run: ./scripts/ci/check-security-todos.sh
+
+      - name: Unsafe baseline gate (cargo geiger)
+        run: ./scripts/ci/geiger-baseline.sh
+
+  format-and-lint:
+    name: fmt / clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly + components
+        run: |
+          rustup show
+          rustup component add rust-src clippy rustfmt
+          rustup target add x86_64-unknown-uefi x86_64-unknown-none || true
+
+      - name: System build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm mtools dosfstools lld
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  supply-chain:
+    name: cargo audit / cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        run: rustup show
+
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: cargo audit (fail on relevant advisory)
+        run: cargo audit
+
+      - name: cargo deny check (licenses / bans / sources / advisories)
+        run: cargo deny check
+
+  geiger-report:
+    name: cargo geiger report (artifact)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust nightly + rust-src
+        run: |
+          rustup show
+          rustup component add rust-src
+      - name: Install cargo-geiger
+        run: cargo install cargo-geiger --locked
+      - name: Generate geiger report
+        run: cargo geiger --workspace --output-format Ascii | tee geiger-report.txt
+      - name: Enforce deterministic unsafe baseline
+        run: ./scripts/ci/geiger-baseline.sh
+      - name: Upload geiger report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geiger-report
+          path: geiger-report.txt
+          if-no-files-found: warn
+
+  semgrep:
+    name: Semgrep (syscall-without-gate)
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep rules (.semgrep/)
+        run: semgrep --config .semgrep/ --error --metrics off

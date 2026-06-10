@@ -1,0 +1,27 @@
+# unsafe baseline for Atom OS critical crates (cargo-geiger style gate).
+#
+# Format: <max_unsafe_count> <crate_path>
+#
+# scripts/ci/geiger-baseline.sh counts `unsafe` tokens under each crate's src/
+# and FAILS if the live count EXCEEDS the baseline. Decreases are always fine.
+# Raising a number here is a deliberate, reviewed act (the diff is the audit
+# trail) and must be justified in SECURITY_DEBT.md. Silent growth of `unsafe`
+# in the TCB is therefore impossible.
+0    shared/abi
+0    shared/atxf
+346  kernel
+128  userspace/libs/syscall
+0    userspace/libs/libipc
+4    userspace/services/init
+10   userspace/services/namesvc
+16   userspace/services/service_manager
+37   userspace/services/fsd
+4    userspace/services/app_launcher
+9    userspace/services/netd
+24   userspace/services/nic_driver
+17   userspace/system_apps/ui_shell
+4    userspace/system_apps/display
+4    userspace/system_apps/display_settings
+36   userspace/system_apps/terminal
+31   userspace/apps/security_smoke
+0    tools/elf2atxf

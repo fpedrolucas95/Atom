@@ -1,0 +1,56 @@
+# cargo-deny configuration for Atom OS.
+#
+# Run with: cargo deny check
+# Covered by: scripts/ci/security-checks.sh and .github/workflows/security.yml
+#
+# A security check, not a style check: a failure here fails CI (never
+# continue-on-error).
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any vulnerability or unmaintained advisory. `cargo audit` is run
+# separately as a second, advisory-focused gate.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# `version = 2` semantics: unspecified advisory outcomes default to "deny".
+ignore = []
+
+[licenses]
+# Permissive licenses acceptable for a from-scratch OS. Anything outside this
+# set must be reviewed and added deliberately.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+]
+confidence-threshold = 0.9
+# No copyleft / unknown licenses sneak in via a transitive dep.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions of the same crate are a supply-chain and binary-size risk
+# in a TCB; warn so they are visible and can be deduplicated.
+multiple-versions = "warn"
+wildcard-dependencies = "deny"
+# Crates that must never appear in the dependency graph.
+deny = []
+# Crates allowed to appear more than once (documented exceptions only).
+skip = []
+
+[sources]
+# Only crates.io and in-tree path/git deps are allowed. An unknown registry or
+# git source is a supply-chain red flag and fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

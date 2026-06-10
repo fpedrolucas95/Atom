@@ -591,7 +591,7 @@ if ($Run) {
 
     qemu-system-x86_64 `
         -machine q35 `
-        -cpu qemu64 `
+        -cpu qemu64,+rdrand `
         -smp $Smp `
         -m 512M `
         -bios "$OVMF_PATH" `

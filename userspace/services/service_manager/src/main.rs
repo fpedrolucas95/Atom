@@ -630,27 +630,21 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     atom_syscall::debug::log("svcmgr: Service Manager starting");
 
-    // Create our IPC port with the reserved well-known ID (Port 2)
+    // Bind the reserved well-known port (Port 2). This requires the
+    // ReservedPort(2) capability granted by the kernel manifest. There is NO
+    // dynamic fallback: a service_manager that cannot own Port(2) would leave
+    // the system inconsistent (clients reach the wrong port), so we fail the
+    // boot loudly instead of degrading silently.
     let port = match atom_syscall::ipc::create_port_with_id(SERVICE_MANAGER_PORT) {
         Ok(p) => {
-            atom_syscall::debug::log("svcmgr: created port with reserved ID 2");
+            atom_syscall::debug::log("svcmgr: bound reserved Port(2)");
             p
         }
         Err(_) => {
-            atom_syscall::debug::log("svcmgr: WARN - reserved Port(2) busy, using dynamic port allocation");
-            match atom_syscall::ipc::create_port() {
-                Ok(p) => {
-                    let msg = alloc::format!("svcmgr: allocated dynamic port {}", p);
-                    atom_syscall::debug::log(&msg);
-                    p
-                }
-                Err(_) => {
-                    atom_syscall::debug::log("svcmgr: FATAL - failed to create any port, exiting");
-                    loop {
-                        atom_syscall::thread::sleep_ms(1000);
-                    }
-                }
-            }
+            atom_syscall::debug::log(
+                "svcmgr: FATAL - could not bind reserved Port(2); refusing dynamic fallback",
+            );
+            panic!("service_manager cannot bind Port(2)");
         }
     };
 

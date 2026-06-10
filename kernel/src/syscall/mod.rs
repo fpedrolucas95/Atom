@@ -202,6 +202,26 @@ pub const SYS_BRK: u64 = 103;
 pub const SYS_FORK: u64 = 104;
 
 // ---------------------------------------------------------------------------
+// Authenticated IPC (PR2) — kernel-generated sender identity + reserved-port
+// and service-identity queries used by namesvc to authorise registration.
+// ---------------------------------------------------------------------------
+
+/// recv_envelope(port, env_ptr, buf_ptr, buf_len) -> payload_len | errno.
+/// Non-blocking. Writes a kernel-generated `IpcEnvelope` (sender process/thread,
+/// sender service id, transferred capability) before the payload. Userspace
+/// cannot forge any envelope field.
+pub const SYS_IPC_RECV_ENVELOPE: u64 = 105;
+/// service_name_allowed(service_id, name_ptr, name_len) -> 1 | 0.
+/// Kernel checks the SystemServiceManifest: is `name` the canonical name or a
+/// declared alias for `service_id`?
+pub const SYS_SERVICE_NAME_ALLOWED: u64 = 106;
+/// ipc_port_owner(port_id) -> owner_process_raw | 0.
+/// Returns the process that owns `port_id`, or 0 if the port has no owner.
+pub const SYS_IPC_PORT_OWNER: u64 = 107;
+/// process_alive(pid) -> 1 | 0. True if the process exists and is not terminated.
+pub const SYS_PROCESS_ALIVE: u64 = 108;
+
+// ---------------------------------------------------------------------------
 // Kernel FS backend syscalls — used exclusively by fsd to access the
 // kernel's FAT32 driver.  These are *not* general-purpose filesystem
 // syscalls; applications use SYS_FS_OPEN etc. which route through fsd.
@@ -828,6 +848,10 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_READ_KLOG => sys_read_klog(arg0, arg1 as usize),
         SYS_MOUSE_GET_ID => sys_mouse_get_id(),
         SYS_IPC_CREATE_PORT_WITH_ID => sys_ipc_create_port_with_id(arg0),
+        SYS_IPC_RECV_ENVELOPE => sys_ipc_recv_envelope(arg0, arg1, arg2, arg3 as usize),
+        SYS_SERVICE_NAME_ALLOWED => sys_service_name_allowed(arg0, arg1, arg2 as usize),
+        SYS_IPC_PORT_OWNER => sys_ipc_port_owner(arg0),
+        SYS_PROCESS_ALIVE => sys_process_alive(arg0),
         SYS_GET_CPU_BRAND => sys_get_cpu_brand(arg0, arg1 as usize),
         SYS_GET_CPU_ID => sys_get_cpu_id(),
         SYS_GET_CPU_COUNT => sys_get_cpu_count(),
@@ -1628,6 +1652,20 @@ fn sys_fork(frame: &SyscallSavedFrame) -> u64 {
             let Some(mut cloned_cap) = parent_process.capability_table.get(cap_handle).cloned() else {
                 continue;
             };
+            // Spawn / klog / reserved-port / service-identity authority is never
+            // inherited implicitly. fork() is a process-creation path too, and
+            // copying these would let a service hand its authority to an
+            // unprivileged fork — a bypass of the SystemServiceManifest. Such
+            // authority must always be granted explicitly by the kernel.
+            if crate::cap::is_non_inheritable(&cloned_cap.resource) {
+                log_warn!(
+                    LOG_ORIGIN,
+                    "fork: not propagating non-inheritable capability {:?} to child pid={}",
+                    cloned_cap.resource,
+                    child_pid
+                );
+                continue;
+            }
             cloned_cap.owner = child_pid;
             if crate::process::add_process_capability(child_pid, cloned_cap.clone()).is_ok() {
                 let _ = crate::thread::mirror_process_capability_to_threads(child_pid, cloned_cap);
@@ -1740,8 +1778,37 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
         }
     };
 
+    // Reserved ports (1..=255) are not first-come-first-served. Binding one
+    // requires a specific `ReservedPort { port_id }` capability granted by the
+    // SystemServiceManifest. Without it, a common process — or even a service
+    // holding a *different* reserved-port cap — is denied with EPERM.
+    if (1..=crate::ipc::MAX_RESERVED_PORT).contains(&requested_id) {
+        let has_reserved_cap = crate::thread::validate_thread_capability_by_type(
+            owner,
+            crate::cap::CapPermissions::WRITE,
+            |r| matches!(r, crate::cap::ResourceType::ReservedPort { port_id } if *port_id == requested_id),
+        );
+        if !has_reserved_cap {
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id denied: caller={} lacks ReservedPort({}) capability",
+                owner,
+                requested_id
+            );
+            return EPERM;
+        }
+    }
+
     let port_id = match crate::ipc::create_port_with_id(owner, requested_id) {
         Ok(id) => id,
+        Err(crate::ipc::IpcError::PortBusy) => {
+            log_warn!(
+                LOG_ORIGIN,
+                "ipc_create_port_with_id failed: port id={} already in use",
+                requested_id
+            );
+            return EEXIST;
+        }
         Err(e) => {
             log_warn!(
                 LOG_ORIGIN,
@@ -1785,6 +1852,143 @@ fn sys_ipc_create_port_with_id(requested_id: u64) -> u64 {
     }
 
     port_id.raw()
+}
+
+/// Non-blocking receive that also delivers a kernel-generated `IpcEnvelope`.
+///
+/// Layout: `(port, env_ptr, buf_ptr, buf_size)`. On success the envelope is
+/// written to `env_ptr` (sender process/thread, sender service id, transferred
+/// capability, payload_len) and up to `buf_size` payload bytes to `buf_ptr`;
+/// the return value is the payload length. Returns `EWOULDBLOCK` when the port
+/// is empty. Every envelope field comes from kernel state and cannot be forged.
+fn sys_ipc_recv_envelope(
+    port_id_raw: u64,
+    env_ptr: u64,
+    buf_ptr: u64,
+    buf_size: usize,
+) -> u64 {
+    const LOG_ORIGIN: &str = "syscall";
+
+    let caller = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    // Validate the envelope output pointer up front.
+    let env_user = match validate_user_addr(env_ptr) {
+        Ok(ptr) => ptr,
+        Err(e) => return e,
+    };
+    if validate_user_range(env_user.as_u64(), core::mem::size_of::<atom_abi::IpcEnvelope>()).is_err() {
+        return EINVAL;
+    }
+
+    let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+
+    let msg = match crate::ipc::try_receive_message(port_id, caller) {
+        Ok(Some(msg)) => msg,
+        Ok(None) => return EWOULDBLOCK,
+        Err(crate::ipc::IpcError::InvalidPort) => return EINVAL,
+        Err(e) => {
+            log_warn!(LOG_ORIGIN, "ipc_recv_envelope error {:?} (port={})", e, port_id);
+            return EINVAL;
+        }
+    };
+
+    // Derive non-forgeable sender identity from kernel state.
+    let sender_thread = msg.sender;
+    let sender_process = crate::thread::get_thread_process_id(sender_thread);
+    let sender_service_id = sender_process
+        .and_then(crate::system_manifest::service_identity_of)
+        .map(|sid| sid.0 as u64)
+        .unwrap_or(0);
+    let transferred_capability = match &msg.capability {
+        Some(crate::ipc::IpcCapability::Grant { cap_handle, .. }) => cap_handle.raw(),
+        Some(crate::ipc::IpcCapability::Move { cap_handle }) => cap_handle.raw(),
+        None => 0,
+    };
+
+    let bytes_to_copy = core::cmp::min(msg.payload.len(), buf_size);
+    if bytes_to_copy > 0 && buf_ptr != 0 {
+        let buf_user = match validate_user_ptr::<u8>(buf_ptr) {
+            Ok(ptr) => ptr,
+            Err(e) => return e,
+        };
+        let buf_range = match validate_user_byte_range(buf_user, bytes_to_copy) {
+            Ok(range) => range,
+            Err(e) => return e,
+        };
+        if let Err(e) = write_buffer_to_user(buf_range, &msg.payload[..bytes_to_copy]) {
+            return e;
+        }
+    }
+
+    let envelope = atom_abi::IpcEnvelope {
+        sender_process: sender_process.map(|p| p.raw()).unwrap_or(0),
+        sender_thread: sender_thread.raw(),
+        sender_service_id,
+        transferred_capability,
+        payload_len: bytes_to_copy as u64,
+    };
+
+    // SAFETY: env_user was validated as a writable user range of the struct size.
+    unsafe {
+        core::ptr::write(env_user.as_mut_ptr::<atom_abi::IpcEnvelope>(), envelope);
+    }
+
+    bytes_to_copy as u64
+}
+
+/// `(service_id, name_ptr, name_len) -> 1 | 0`. Kernel-authoritative check of
+/// whether `name` is the canonical name or a declared alias for `service_id`,
+/// per the SystemServiceManifest. Used by namesvc to authorise registration.
+fn sys_service_name_allowed(service_id_raw: u64, name_ptr: u64, name_len: usize) -> u64 {
+    if name_len == 0 || name_len > 64 {
+        return 0;
+    }
+    let name_ptr = match validate_user_ptr::<u8>(name_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return 0,
+    };
+    let name_range = match validate_user_byte_range(name_ptr, name_len) {
+        Ok(range) => range,
+        Err(_) => return 0,
+    };
+    // SAFETY: name_range is ABI-validated and canonical.
+    let name_bytes = unsafe {
+        core::slice::from_raw_parts(name_range.base().as_ptr::<u8>(), name_range.len())
+    };
+    let name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s.trim_end_matches('\0'),
+        Err(_) => return 0,
+    };
+
+    let service_id = crate::system_manifest::ServiceId(service_id_raw as u32);
+    if crate::system_manifest::service_name_allowed(service_id, name) {
+        1
+    } else {
+        0
+    }
+}
+
+/// `(port_id) -> owner_process_raw | 0`. Reports which process owns `port_id`.
+fn sys_ipc_port_owner(port_id_raw: u64) -> u64 {
+    let port_id = crate::ipc::PortId::from_raw(port_id_raw);
+    crate::ipc::get_port_authority_process(port_id)
+        .map(|p| p.raw())
+        .unwrap_or(0)
+}
+
+/// `(pid) -> 1 | 0`. True if the process exists and has not terminated. Used by
+/// namesvc to confirm a previous registration owner is really gone before
+/// allowing a replacement (no timeout-based takeover).
+fn sys_process_alive(pid_raw: u64) -> u64 {
+    let pid = crate::process::ProcessId::from_raw(pid_raw);
+    if crate::process::get_process(pid).is_some() && !crate::process::is_process_terminated(pid) {
+        1
+    } else {
+        0
+    }
 }
 
 fn sys_ipc_close_port(port_id_raw: u64) -> u64 {
@@ -3335,6 +3539,15 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
     );
 
     let region_id = crate::shared_mem::RegionId::from_raw(region_id_raw);
+    if flags_raw & !0x7 != 0 {
+        log_warn!(
+            "syscall",
+            "shared_region_map rejected unknown permission bits: {:#x}",
+            flags_raw
+        );
+        return EINVAL;
+    }
+
     let flags = crate::shared_mem::RegionFlags::from_raw(flags_raw);
     let requested_addr = if virt_addr == 0 {
         None
@@ -3400,6 +3613,7 @@ fn sys_shared_region_map(region_id_raw: u64, virt_addr: u64, flags_raw: u64) -> 
                 crate::shared_mem::SharedMemError::AddressInUse => EBUSY,
                 crate::shared_mem::SharedMemError::OutOfMemory => ENOMEM,
                 crate::shared_mem::SharedMemError::NoFreeVirtualAddress => ENOMEM,
+                crate::shared_mem::SharedMemError::PermissionDenied => EPERM,
                 _ => EINVAL,
             }
         }
@@ -3641,6 +3855,13 @@ fn sys_map_region(
 
     let mut flags = crate::mm::vm::PageFlags::from_bits(flags_raw);
     flags |= crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::USER;
+    if !flags.contains(crate::mm::vm::PageFlags::NO_EXECUTE) {
+        log_warn!(
+            "syscall",
+            "map_region denied: executable cross-address-space mappings are loader-only"
+        );
+        return EPERM;
+    }
 
     match crate::mm::addrspace::map_region(
         as_id,
@@ -4290,6 +4511,57 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
         }
     };
 
+    // ── Kernel-side authorization (SystemServiceManifest) ──────────────────
+    //
+    // The SpawnSystemService capability gate (syscall policy) is already
+    // satisfied at this point, but the capability is NOT sufficient on its
+    // own: the kernel must confirm that `name` is a declared system service
+    // and that the caller's kernel-assigned identity is allowed to start it.
+    // This is what stops a holder of SpawnSystemService from spawning an
+    // arbitrary path, and stops a service from starting a child it was not
+    // declared to manage.
+    let caller_tid = match crate::sched::current_thread() {
+        Some(tid) => tid,
+        None => {
+            log_warn!(LOG_ORIGIN, "spawn_process: no current thread");
+            return EPERM;
+        }
+    };
+    let caller_pid = match crate::thread::get_thread_process_id(caller_tid) {
+        Some(pid) => pid,
+        None => {
+            log_warn!(LOG_ORIGIN, "spawn_process: caller has no process id");
+            return EPERM;
+        }
+    };
+    let manifest_entry =
+        match crate::system_manifest::authorize_system_service_spawn(caller_pid, name) {
+            Ok(entry) => entry,
+            Err(err) => {
+                use crate::system_manifest::SpawnAuthError;
+                match err {
+                    SpawnAuthError::NotDeclared => log_warn!(
+                        LOG_ORIGIN,
+                        "spawn denied: service '{}' not declared in manifest (caller pid={})",
+                        name,
+                        caller_pid
+                    ),
+                    SpawnAuthError::CallerNotService => log_warn!(
+                        LOG_ORIGIN,
+                        "spawn denied: caller pid={} has no system-service identity",
+                        caller_pid
+                    ),
+                    SpawnAuthError::NotAllowedChild => log_warn!(
+                        LOG_ORIGIN,
+                        "spawn denied: service '{}' not allowed child of caller pid={}",
+                        name,
+                        caller_pid
+                    ),
+                }
+                return EPERM;
+            }
+        };
+
     log_info!(LOG_ORIGIN, "Looking up driver: '{}'", name);
 
     // First try to load from filesystem (dynamic loading)
@@ -4301,7 +4573,11 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 
         if let Some(data) = crate::drivers::fat32::open(&path) {
             log_info!(LOG_ORIGIN, "Loaded {} bytes from filesystem", data.len());
-            return spawn_from_image(&data, name);
+            return spawn_from_image(
+                &data,
+                name,
+                crate::system_manifest::grants_for_entry(manifest_entry),
+            );
         }
         // Fall back to registry if not found in filesystem
         log_debug!(LOG_ORIGIN, "Not found in filesystem, trying registry");
@@ -4309,16 +4585,19 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 
     // Load from boot-loaded driver registry
     match load_from_registry(name) {
-        Ok(sections) => {
+        Ok(image) => {
             log_info!(
                 LOG_ORIGIN,
-                "Executable parsed: text={} bytes, data={} bytes, bss={} bytes, entry=0x{:X}",
-                sections.text.len(),
-                sections.data.len(),
-                sections.bss_size,
-                sections.entry_offset
+                "ATXF v2 authenticated: segments={} relocations={} entry=0x{:X}",
+                image.segments.len(),
+                image.relocations.len(),
+                image.entry_offset
             );
-            match spawn_process_internal(name, &sections) {
+            match spawn_process_internal(
+                name,
+                &image,
+                crate::system_manifest::grants_for_entry(manifest_entry),
+            ) {
                 Ok(pid) => {
                     log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
                     pid.raw()
@@ -4334,10 +4613,14 @@ fn sys_spawn_process(name_ptr: u64, name_len: usize) -> u64 {
 }
 
 /// Spawn a process from raw image data
-fn spawn_from_image(data: &[u8], name: &str) -> u64 {
+fn spawn_from_image(
+    data: &[u8],
+    name: &str,
+    grants: crate::system_manifest::SpawnGrants,
+) -> u64 {
     const LOG_ORIGIN: &str = "syscall:spawn";
 
-    let sections = match crate::executable::parse_image(data) {
+    let image = match crate::executable::parse_image(data) {
         Ok(s) => s,
         Err(e) => {
             log_error!(LOG_ORIGIN, "spawn_process: failed to parse executable: {:?}", e);
@@ -4347,14 +4630,13 @@ fn spawn_from_image(data: &[u8], name: &str) -> u64 {
 
     log_info!(
         LOG_ORIGIN,
-        "Executable parsed: text={} bytes, data={} bytes, bss={} bytes, entry=0x{:X}",
-        sections.text.len(),
-        sections.data.len(),
-        sections.bss_size,
-        sections.entry_offset
+        "ATXF v2 authenticated: segments={} relocations={} entry=0x{:X}",
+        image.segments.len(),
+        image.relocations.len(),
+        image.entry_offset
     );
 
-    match spawn_process_internal(name, &sections) {
+    match spawn_process_internal(name, &image, grants) {
         Ok(pid) => {
             log_info!(LOG_ORIGIN, "Process '{}' spawned successfully with PID {}", name, pid);
             pid.raw()
@@ -4366,8 +4648,16 @@ fn spawn_from_image(data: &[u8], name: &str) -> u64 {
     }
 }
 
+/// Returns true if `path` points into a directory reserved for system-service
+/// images. Such images may only be started via `SYS_SPAWN_PROCESS` under the
+/// SystemServiceManifest, never via `SYS_SPAWN_FROM_PATH` (applications).
+fn is_system_service_path(path: &str) -> bool {
+    const SYSTEM_DIRS: [&str; 3] = ["/drivers/", "/bin/", "/sbin/"];
+    SYSTEM_DIRS.iter().any(|dir| path.starts_with(dir))
+}
+
 /// Load driver from boot-loaded registry
-fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableSections<'_>, u64> {
+fn load_from_registry(name: &str) -> Result<crate::executable::ExecutableImageV2<'_>, u64> {
     let driver_image = crate::driver_registry::get_driver_image(name)
         .ok_or(ENOTFOUND)?;
 
@@ -4419,13 +4709,12 @@ fn get_static_driver_name(name: &str) -> &'static str {
 /// - A heap VMA is pre-registered for brk() support
 fn spawn_process_internal(
     name: &str,
-    sections: &crate::executable::ExecutableSections,
+    image: &crate::executable::ExecutableImageV2<'_>,
+    grants: crate::system_manifest::SpawnGrants,
 ) -> Result<crate::thread::ThreadId, u64> {
     // Get static name for the thread
     let static_name = get_static_driver_name(name);
-    use crate::cap::{self, CapPermissions, InputDeviceType, ResourceType};
-    use crate::executable::USER_EXEC_LOAD_BASE;
-    use crate::mm::pmm::{self, align_up, PAGE_SIZE};
+    use crate::mm::pmm::{self, PAGE_SIZE};
     use crate::mm::vm::{self, PageFlags};
     use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
     use crate::thread::{CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
@@ -4436,19 +4725,15 @@ fn spawn_process_internal(
     let pid = ThreadId::new();
     let process_id = crate::process::ProcessId::from(pid);
 
-    // Each process gets its own address space - load at the standard base address
-    // since each process has isolated virtual memory
-    let text_base = USER_EXEC_LOAD_BASE;
     let user_stack_top = USER_STACK_TOP;
     let stack_layout = crate::thread::UserStackMetadata::default_for_top(user_stack_top);
     let user_stack_base = stack_layout.usable_base as usize;
 
     log_info!(
         "spawn",
-        "Creating process '{}' (pid={}) at text=0x{:X}, stack=0x{:X}",
+        "Creating process '{}' (pid={}) with ASLR, stack=0x{:X}",
         name,
         pid,
-        text_base,
         user_stack_top
     );
 
@@ -4471,143 +4756,11 @@ fn spawn_process_internal(
         new_pml4_phys
     );
 
-    // Allocate and map text section in the NEW address space
-    let text_size = align_up(sections.text.len().max(1));
-    let text_pages = text_size / PAGE_SIZE;
-
-    let text_phys = pmm::alloc_pages_zeroed(text_pages)
-        .ok_or(ENOMEM)?;
-
-    // Copy text section content (use higher-half address to avoid broken identity mapping)
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            sections.text.as_ptr(),
-            vm::phys_to_virt_ptr(text_phys) as *mut u8,
-            sections.text.len(),
-        );
-    }
-
-    for i in 0..text_pages {
-        let virt = text_base + i * PAGE_SIZE;
-        let phys = text_phys + i * PAGE_SIZE;
-        vm::remap_page_in_pml4(new_pml4_phys, virt, phys, PageFlags::PRESENT | PageFlags::USER)
-            .map_err(|_| ENOMEM)?;
-    }
-
-    // Register text VMA
-    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-        start: text_base,
-        end: text_base + text_size,
-        perms: VmaPermissions::read_exec(),
-        backing: VmaBacking::Anonymous,
-        label: "text",
-    }).map_err(|e| {
-        log_error!("spawn", "Failed to insert text VMA for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
-    vma::account_pre_mapped_range(
-        process_id,
-        new_pml4_phys,
-        text_base,
-        text_base + text_size,
-        PageSource::Anonymous,
-    ).map_err(|e| {
-        log_error!("spawn", "Failed to account text pages for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
-
-    // Allocate and map data section
-    let data_base = align_up(text_base + text_size);
-    let data_size = align_up(sections.data.len().max(1));
-    let data_pages = data_size / PAGE_SIZE;
-
-    if !sections.data.is_empty() {
-        let data_phys = pmm::alloc_pages_zeroed(data_pages)
-            .ok_or(ENOMEM)?;
-
-        // Copy data section content
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                sections.data.as_ptr(),
-                vm::phys_to_virt_ptr(data_phys) as *mut u8,
-                sections.data.len(),
-            );
-        }
-
-        for i in 0..data_pages {
-            let virt = data_base + i * PAGE_SIZE;
-            let phys = data_phys + i * PAGE_SIZE;
-            vm::remap_page_in_pml4(
-                new_pml4_phys,
-                virt,
-                phys,
-                PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
-            ).map_err(|_| ENOMEM)?;
-        }
-
-        // Register data VMA
-        vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-            start: data_base,
-            end: data_base + data_size,
-            perms: VmaPermissions::read_write(),
-            backing: VmaBacking::Anonymous,
-            label: "data",
-        }).map_err(|e| {
-            log_error!("spawn", "Failed to insert data VMA for '{}': {:?}", name, e);
-            ENOMEM
+    let loaded = crate::executable::load_into_process(image, new_pml4_phys, process_id)
+        .map_err(|error| {
+            log_error!("spawn", "ATXF v2 load failed for '{}': {:?}", name, error);
+            EINVAL
         })?;
-        vma::account_pre_mapped_range(
-            process_id,
-            new_pml4_phys,
-            data_base,
-            data_base + data_size,
-            PageSource::Anonymous,
-        ).map_err(|e| {
-            log_error!("spawn", "Failed to account data pages for '{}': {:?}", name, e);
-            ENOMEM
-        })?;
-    }
-
-    // Allocate and map BSS section
-    let bss_base = align_up(data_base + data_size);
-    let bss_size = sections.bss_size.max(1);
-    let bss_pages = align_up(bss_size) / PAGE_SIZE;
-
-    let bss_phys = pmm::alloc_pages_zeroed(bss_pages)
-        .ok_or(ENOMEM)?;
-
-    for i in 0..bss_pages {
-        let virt = bss_base + i * PAGE_SIZE;
-        let phys = bss_phys + i * PAGE_SIZE;
-        vm::remap_page_in_pml4(
-            new_pml4_phys,
-            virt,
-            phys,
-            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
-        ).map_err(|_| ENOMEM)?;
-    }
-
-    // Register BSS VMA
-    vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
-        start: bss_base,
-        end: bss_base + align_up(bss_size),
-        perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Anonymous,
-        label: "bss",
-    }).map_err(|e| {
-        log_error!("spawn", "Failed to insert bss VMA for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
-    vma::account_pre_mapped_range(
-        process_id,
-        new_pml4_phys,
-        bss_base,
-        bss_base + align_up(bss_size),
-        PageSource::Anonymous,
-    ).map_err(|e| {
-        log_error!("spawn", "Failed to account bss pages for '{}': {:?}", name, e);
-        ENOMEM
-    })?;
 
     // Allocate the full userspace stack while leaving the guard page unmapped.
     let stack_phys = pmm::alloc_pages_zeroed(atom_abi::DEFAULT_USER_STACK_PAGES)
@@ -4620,7 +4773,7 @@ fn spawn_process_internal(
             new_pml4_phys,
             virt,
             phys,
-            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE,
+            PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
         ).map_err(|_| ENOMEM)?;
     }
 
@@ -4648,17 +4801,6 @@ fn spawn_process_internal(
 
     // Register a heap VMA (starts empty, grows via brk())
     let heap_start = atom_abi::USER_HEAP_START as usize;
-    let bss_end = bss_base + align_up(bss_size);
-    if bss_end > heap_start {
-        log_error!(
-            "spawn",
-            "Executable '{}' too large: BSS end 0x{:X} exceeds USER_HEAP_START 0x{:X}",
-            name,
-            bss_end,
-            heap_start
-        );
-        return Err(ENOMEM);
-    }
     vma::insert_bootstrap_process_vma(process_id, new_pml4_phys, Vma {
         start: heap_start,
         end: heap_start + PAGE_SIZE, // Minimal initial size
@@ -4677,16 +4819,13 @@ fn spawn_process_internal(
     let kernel_stack_virt = vm::HIGHER_HALF_BASE + kernel_stack_phys;
     let kernel_stack_top = (kernel_stack_virt + KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
 
-    // Calculate entry point
-    let entry_point = text_base + sections.entry_offset;
+    let entry_point = loaded.entry_point;
 
     log_info!(
         "spawn",
-        "Process memory: text=0x{:X}-0x{:X}, data=0x{:X}, bss=0x{:X}, stack_guard=0x{:X}-0x{:X}, stack=0x{:X}-0x{:X} ({}KB), entry=0x{:X}",
-        text_base,
-        text_base + text_size,
-        data_base,
-        bss_base,
+        "Process memory: image=0x{:X}-0x{:X}, stack_guard=0x{:X}-0x{:X}, stack=0x{:X}-0x{:X} ({}KB), entry=0x{:X}",
+        loaded.image_base,
+        loaded.image_end,
         stack_layout.guard_base,
         stack_layout.usable_base,
         user_stack_base,
@@ -4732,7 +4871,7 @@ fn spawn_process_internal(
         address_space: new_pml4_phys as u64,
         priority: ThreadPriority::Normal,
         name: static_name,
-        capability_table: cap::create_capability_table(pid),
+        capability_table: crate::cap::create_capability_table(pid),
         is_userspace: true,
         user_stack: Some(stack_layout),
     };
@@ -4742,98 +4881,14 @@ fn spawn_process_internal(
     // are complete so the thread cannot be scheduled before it has its caps.
     crate::thread::add_thread(thread);
 
-    // Register the very first spawned process as privileged (init).
-    // PRIVILEGED_PID is guarded by compare_exchange so subsequent spawns are no-ops.
-    policy::register_privileged_process(pid);
-
-    // Grant capabilities
+    // ── Manifest-driven grants (least privilege; PR3) ───────────
     //
-    // Over-provisioning note (P1-A TODO):
-    //   Framebuffer, InputDevice, and IoPort caps are currently granted to ALL
-    //   processes so that the existing user-space stack continues to work while
-    //   the dispatcher policy gates (P2-A) are put in place.  Once the system is
-    //   stable with gates enforced, tighten the grants below to:
-    //     Framebuffer  → "ui_shell", "display" only
-    //     Keyboard     → "keyboard" only
-    //     Mouse        → "mouse" only
-    //     IoPort PS/2  → "keyboard", "mouse" only
-    //
-    // FsNamespace cap is already scoped: only "fsd" receives it.  All other
-    // processes must go through fsd via IPC to access the filesystem.
-
-    // FsNamespace capability — granted only to the filesystem daemon (fsd).
-    // This cap is the gate for SYS_KERN_FS_{READ_FILE,LIST_DIR,STAT_PATH}
-    // which fsd uses to communicate directly with the kernel FAT32 driver.
-    if name == "fsd" {
-        let fs_resource = ResourceType::FsNamespace { namespace_id: 0 };
-        let fs_perms = CapPermissions::READ.union(CapPermissions::WRITE).union(CapPermissions::GRANT);
-        if let Ok(cap) = cap::create_root_capability(fs_resource, pid, fs_perms) {
-            let _ = crate::thread::add_thread_capability(pid, cap);
-            log_info!("spawn", "Granted FsNamespace cap to fsd (pid={})", pid);
-        }
-    }
-
-    // PCI Device capabilities — grant all network devices (class 0x02) to nic_driver.
-    // The kernel does not know or care which specific NIC the driver supports;
-    // nic_driver uses SYS_PCI_QUERY_DEVICE to inspect each capability and decides
-    // which device to drive based on vendor/device ID.
-    if name == "nic_driver" {
-        let net_devs: alloc::vec::Vec<_> = crate::drivers::pci::get_devices_by_class(0x02)
-            .into_iter()
-            .collect();
-        if net_devs.is_empty() {
-            log_warn!("spawn", "No PCI network devices found for nic_driver");
-        }
-        for dev in net_devs {
-            let res = ResourceType::Device { bdf: dev.bdf() };
-            if let Ok(cap) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
-                let _ = crate::thread::add_thread_capability(pid, cap);
-                log_info!("spawn", "Granted DeviceCap({:02x}:{:02x}.{}) to nic_driver",
-                    dev.bus, dev.device, dev.function);
-            }
-        }
-    }
-
-    // Framebuffer capability
-    if let Some((address, width, height, stride, bpp)) = crate::graphics::get_framebuffer_info() {
-        let fb_resource = ResourceType::Framebuffer {
-            address: address as u64,
-            width,
-            height,
-            stride,
-            bytes_per_pixel: bpp as u8,
-        };
-        let fb_perms = CapPermissions::READ.union(CapPermissions::WRITE);
-        if let Ok(cap) = cap::create_root_capability(fb_resource, pid, fb_perms) {
-            let _ = crate::thread::add_thread_capability(pid, cap);
-        }
-    }
-
-    // Keyboard capability
-    let kbd_resource = ResourceType::InputDevice {
-        device_type: InputDeviceType::Keyboard,
-    };
-    if let Ok(cap) = cap::create_root_capability(kbd_resource, pid, CapPermissions::READ) {
-        let _ = crate::thread::add_thread_capability(pid, cap);
-    }
-
-    // Mouse capability
-    let mouse_resource = ResourceType::InputDevice {
-        device_type: InputDeviceType::Mouse,
-    };
-    if let Ok(cap) = cap::create_root_capability(mouse_resource, pid, CapPermissions::READ) {
-        let _ = crate::thread::add_thread_capability(pid, cap);
-    }
-
-    // I/O port capabilities for PS/2 hardware access
-    // TODO: restrict IoPort caps to PS/2 driver only (least privilege)
-    let io_perms = CapPermissions::READ.union(CapPermissions::WRITE);
-    for &port in &[0x60u16, 0x64u16] {
-        let io_resource = ResourceType::IoPort { port };
-        if let Ok(cap) = cap::create_root_capability(io_resource, pid, io_perms) {
-            let _ = crate::thread::add_thread_capability(pid, cap);
-        }
-    }
+    // There are NO ambient/default grants. The process receives EXACTLY the
+    // identity + capabilities declared for it:
+    //   * system services  -> SystemServiceManifest profile (caps + env grants);
+    //   * trusted apps      -> declared TrustedAppProfile;
+    //   * ordinary apps     -> nothing sensitive (SpawnGrants::NONE).
+    apply_spawn_grants(pid, process_id, name, grants);
 
     // Thread is fully initialized — mark it schedulable
     crate::sched::mark_thread_ready(pid);
@@ -4841,6 +4896,82 @@ fn spawn_process_internal(
     log_info!("spawn", "Process '{}' (pid={}) scheduled with VMA-backed memory", name, pid);
 
     Ok(pid)
+}
+
+/// Apply the declared [`SpawnGrants`] to a freshly created process. This is the
+/// single, centralised grant path: identity, static capabilities, and
+/// environment-derived capabilities (framebuffer geometry, network device BDFs)
+/// all flow through here and nowhere else.
+fn apply_spawn_grants(
+    pid: crate::thread::ThreadId,
+    process_id: crate::process::ProcessId,
+    name: &str,
+    grants: crate::system_manifest::SpawnGrants,
+) {
+    use crate::cap::{self, CapPermissions, ResourceType};
+    use crate::system_manifest::EnvGrant;
+
+    if let Some(service_id) = grants.service_id {
+        crate::system_manifest::assign_service_identity(process_id, service_id);
+    }
+
+    for init_cap in grants.capabilities {
+        match cap::create_root_capability(init_cap.resource, pid, init_cap.permissions) {
+            Ok(granted) => {
+                let _ = crate::thread::add_thread_capability(pid, granted);
+            }
+            Err(e) => log_error!(
+                "spawn",
+                "Failed to grant capability {:?} to '{}': {:?}",
+                init_cap.resource,
+                name,
+                e
+            ),
+        }
+    }
+
+    for env in grants.environment_grants {
+        match env {
+            EnvGrant::FramebufferMap => {
+                if let Some((address, width, height, stride, bpp)) =
+                    crate::graphics::get_framebuffer_info()
+                {
+                    let fb = ResourceType::Framebuffer {
+                        address: address as u64,
+                        width,
+                        height,
+                        stride,
+                        bytes_per_pixel: bpp as u8,
+                    };
+                    let perms = CapPermissions::READ.union(CapPermissions::WRITE);
+                    if let Ok(c) = cap::create_root_capability(fb, pid, perms) {
+                        let _ = crate::thread::add_thread_capability(pid, c);
+                        log_info!("spawn", "Granted FramebufferMap to '{}' (pid={})", name, pid);
+                    }
+                } else {
+                    log_warn!("spawn", "FramebufferMap requested by '{}' but no framebuffer present", name);
+                }
+            }
+            EnvGrant::NetworkDevices => {
+                let net_devs: alloc::vec::Vec<_> =
+                    crate::drivers::pci::get_devices_by_class(0x02).into_iter().collect();
+                if net_devs.is_empty() {
+                    log_warn!("spawn", "NetworkDevices requested by '{}' but no PCI net device found", name);
+                }
+                for dev in net_devs {
+                    let res = ResourceType::Device { bdf: dev.bdf() };
+                    if let Ok(c) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
+                        let _ = crate::thread::add_thread_capability(pid, c);
+                        log_info!(
+                            "spawn",
+                            "Granted DeviceCap({:02x}:{:02x}.{}) to '{}'",
+                            dev.bus, dev.device, dev.function, name
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4856,11 +4987,13 @@ fn spawn_process_internal(
 //   binary that is present on the filesystem at runtime.
 //
 // Security model:
-//   This syscall does NOT perform caller-identity checks itself.  Privilege
-//   restriction is enforced at the IPC layer: only app_launcher (a trusted
-//   system service) is expected to call this syscall.  In a future hardening
-//   pass a capability check (ResourceType::Spawn or similar) can be added
-//   here to prevent rogue processes from abusing it.
+//   Gated by the SpawnFromPath capability in the syscall policy table
+//   (syscall_policy -> Requires(SpawnFromPath)). That capability is granted only
+//   to app_launcher via the SystemServiceManifest, so any other caller is
+//   denied EPERM before this handler runs. The handler additionally rejects
+//   path traversal and system-service image paths (is_system_service_path), so
+//   SpawnFromPath can never be used as a back door to start a privileged
+//   service image.
 //
 // Error returns:
 //   EINVAL   — path is NULL, empty, too long, or not valid UTF-8
@@ -4932,6 +5065,32 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
         return ENOTSUP;
     }
 
+    // ── 3a. Reject path-traversal and absolute-path violations ─────────────
+    // SpawnFromPath authorizes *applications*, never system services. The
+    // kernel enforces this independently of app_launcher's userspace checks so
+    // a SpawnFromPath holder can never reach a system-service image.
+    if !path.starts_with('/') || path.split('/').any(|c| c == "..") {
+        log_warn!(
+            LOG_ORIGIN,
+            "spawn_from_path: '{}' is not a valid absolute application path",
+            path
+        );
+        return EPERM;
+    }
+
+    // ── 3b. Reject system-service directories ──────────────────────────────
+    // System service images live under /drivers. SYS_SPAWN_FROM_PATH must not
+    // be a back door into spawning declared system services — those go through
+    // SYS_SPAWN_PROCESS + the SystemServiceManifest.
+    if is_system_service_path(path) {
+        log_warn!(
+            LOG_ORIGIN,
+            "spawn denied: '{}' is a system-service path, not an application",
+            path
+        );
+        return EPERM;
+    }
+
     log_info!(LOG_ORIGIN, "spawn_from_path: loading '{}'", path);
 
     // ── 4. Read file from FAT32 ────────────────────────────────────────────
@@ -4956,7 +5115,7 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     );
 
     // ── 5. Parse the ATXF image ────────────────────────────────────────────
-    let sections = match crate::executable::parse_image(&image_data) {
+    let image = match crate::executable::parse_image(&image_data) {
         Ok(s) => s,
         Err(crate::executable::ExecError::InvalidMagic) => {
             log_warn!(LOG_ORIGIN, "spawn_from_path: '{}' is not a valid ATXF file (bad magic)", path);
@@ -4979,11 +5138,10 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
 
     log_info!(
         LOG_ORIGIN,
-        "spawn_from_path: ATXF validated — text={} data={} bss={} entry=0x{:X}",
-        sections.text.len(),
-        sections.data.len(),
-        sections.bss_size,
-        sections.entry_offset
+        "spawn_from_path: ATXF v2 authenticated — segments={} relocations={} entry=0x{:X}",
+        image.segments.len(),
+        image.relocations.len(),
+        image.entry_offset
     );
 
     // ── 6. Derive a display name from the filename ─────────────────────────
@@ -4992,8 +5150,12 @@ fn sys_spawn_from_path(path_ptr: u64, path_len: usize) -> u64 {
     let app_name = basename.strip_suffix(".atxf").unwrap_or(basename);
 
     // Spawn with generic name — Thread::name is &'static str so we use "app".
-    // The actual path is logged above for diagnostics.
-    match spawn_process_internal("app", &sections) {
+    // The actual path is logged above for diagnostics. Applications launched by
+    // path receive NO ambient authority; only a declared TrustedAppProfile
+    // (exact canonical path) grants a minimal cap set (e.g. display_settings ->
+    // DisplayModeSet). Everything else gets nothing.
+    let app_grants = crate::system_manifest::app_grants_for_path(path);
+    match spawn_process_internal("app", &image, app_grants) {
         Ok(pid) => {
             log_info!(
                 LOG_ORIGIN,
@@ -5304,6 +5466,12 @@ fn sys_mmap(
 
     let length = length as usize;
     if length == 0 {
+        return EINVAL;
+    }
+    if prot & atom_abi::PROT_WRITE != 0 && prot & atom_abi::PROT_EXEC != 0 {
+        return EPERM;
+    }
+    if prot & !(atom_abi::PROT_READ | atom_abi::PROT_WRITE | atom_abi::PROT_EXEC) != 0 {
         return EINVAL;
     }
 
@@ -5672,6 +5840,12 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     if length == 0 {
         return EINVAL;
     }
+    if prot & atom_abi::PROT_WRITE != 0 && prot & atom_abi::PROT_EXEC != 0 {
+        return EPERM;
+    }
+    if prot & !(atom_abi::PROT_READ | atom_abi::PROT_WRITE | atom_abi::PROT_EXEC) != 0 {
+        return EINVAL;
+    }
 
     let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let user_range = match atom_abi::validate_user_range(addr, length) {
@@ -5702,6 +5876,22 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
     }
     if prot & atom_abi::PROT_EXEC != 0 {
         perms = perms.union(VmaPermissions::EXEC);
+    }
+
+    // There is no JIT policy: mprotect may remove execute permission, but
+    // cannot add it to a region that was not executable at creation time.
+    if perms.contains(VmaPermissions::EXEC) {
+        let mut cursor = addr;
+        while cursor < end {
+            let existing = match vma::find_process_vma(process_id, cursor) {
+                Some(existing) => existing,
+                None => return EINVAL,
+            };
+            if !existing.perms.contains(VmaPermissions::EXEC) {
+                return EPERM;
+            }
+            cursor = existing.end.min(end);
+        }
     }
 
     match vma::with_address_space_ops_lock(pml4, || -> Result<(), u64> {
@@ -8568,7 +8758,10 @@ fn sys_dma_alloc(params_ptr: u64, info_ptr: u64) -> u64 {
     };
 
     // Map into userspace
-    let flags = crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::WRITABLE | crate::mm::vm::PageFlags::USER;
+    let flags = crate::mm::vm::PageFlags::PRESENT
+        | crate::mm::vm::PageFlags::WRITABLE
+        | crate::mm::vm::PageFlags::USER
+        | crate::mm::vm::PageFlags::NO_EXECUTE;
 
     let pml4 = match crate::thread::get_thread_address_space(caller) {
         Some(p) => p,
@@ -8689,7 +8882,11 @@ fn sys_map_mmio(mmio_cap_handle: u64, out_addr_ptr: u64) -> u64 {
         }
     };
 
-    let flags = crate::mm::vm::PageFlags::PRESENT | crate::mm::vm::PageFlags::WRITABLE | crate::mm::vm::PageFlags::USER | crate::mm::vm::PageFlags::CACHE_DISABLE;
+    let flags = crate::mm::vm::PageFlags::PRESENT
+        | crate::mm::vm::PageFlags::WRITABLE
+        | crate::mm::vm::PageFlags::USER
+        | crate::mm::vm::PageFlags::CACHE_DISABLE
+        | crate::mm::vm::PageFlags::NO_EXECUTE;
 
     for i in 0..pages {
         let v = user_va + i * crate::mm::pmm::PAGE_SIZE;
