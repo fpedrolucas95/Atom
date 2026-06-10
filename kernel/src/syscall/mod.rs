@@ -6692,6 +6692,8 @@ const FS_MSG_RENAME: u32 = 1120;
 const FS_MSG_READDIR: u32 = 1122;
 const FS_MSG_TRUNCATE: u32 = 1124;
 const FS_MSG_FSYNC: u32 = 1126;
+const FS_MSG_STATVFS: u32 = 1142;
+const FS_STATVFS_WIRE_SIZE: usize = 72;
 
 static FS_WIRE_SEQUENCE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
@@ -6815,6 +6817,17 @@ fn fsd_parse_reply_stat(reply: &[u8]) -> Result<&[u8], u64> {
         return Err(error);
     }
     Ok(&reply[8..8 + FS_STAT_WIRE_SIZE])
+}
+
+fn fsd_parse_reply_statvfs(reply: &[u8]) -> Result<&[u8], u64> {
+    if reply.len() < 8 + FS_STATVFS_WIRE_SIZE {
+        return Err(EIO);
+    }
+    let error = u64::from_le_bytes(reply[0..8].try_into().unwrap());
+    if error != ESUCCESS {
+        return Err(error);
+    }
+    Ok(&reply[8..8 + FS_STATVFS_WIRE_SIZE])
 }
 
 fn fsd_sys_fs_open(path_ptr: u64, path_len: usize, flags: u32, mode: u32) -> u64 {
@@ -8416,9 +8429,40 @@ fn sys_fs_utimes(_path_ptr: u64, _path_len: usize, _atime: i64, _mtime: i64) -> 
     ENOTSUP
 }
 
-/// Get filesystem statistics
-fn sys_fs_statvfs(_path_ptr: u64, _path_len: usize, _buf_ptr: u64) -> u64 {
-    ENOTSUP
+/// Get filesystem statistics — forwarded to FSD via IPC.
+fn sys_fs_statvfs(path_ptr: u64, path_len: usize, buf_ptr: u64) -> u64 {
+    let buf_ptr = match validate_user_ptr::<u8>(buf_ptr) {
+        Ok(ptr) => ptr,
+        Err(_) => return EINVAL,
+    };
+    let buf_range = match validate_user_byte_range(buf_ptr, FS_STATVFS_WIRE_SIZE) {
+        Ok(range) => range,
+        Err(_) => return EINVAL,
+    };
+    let path_range = match validate_user_path_range(path_ptr, path_len) {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+    let (path_buf, path_blen) = match copy_path_from_user(path_range) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = path_buf_as_str(&path_buf, path_blen);
+    let mut req = Vec::with_capacity(4 + path.len());
+    req.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    req.extend_from_slice(path.as_bytes());
+    let reply = match fsd_rpc(FS_MSG_STATVFS, &req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let svfs = match fsd_parse_reply_statvfs(&reply) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = write_buffer_to_user(buf_range, svfs) {
+        return e;
+    }
+    ESUCCESS
 }
 // ============================================================================
 // Video Mode Management Syscall Handlers
