@@ -140,20 +140,22 @@ const ROW_H:      u32 = 22;
 const VIS_ROWS:   usize = 12;
 const SBW:        u32 = 8;    // scrollbar width
 
-// Wallpaper page — fixed absolute y-positions from content top (y=0)
-// Page title + divider take  CH+6+4+2 = 20px baseline → section starts at 32
 const PTITLE_H:  u32 = CH + 14;  // 22 — page title block height
+const SEC_LBL_H: u32 = CH + 8;   // 16 — section label row height
 
-const SEC_LBL_H: u32 = CH + 8;  // 16 — section label row height
+// Desktop Background mode toggle
+const MTOG_H:  u32 = 26;   // toggle pill height
+const MTOG_W:  u32 = 118;  // each option width
+const MTOG_G:  u32 = 2;    // gap between options
 
-// Color swatches
-const CSZ:   u32 = 44;   // swatch size
-const CGAP:  u32 = 8;    // gap between swatches (4 per row × 2 rows)
+// Color swatches — 4 columns × 4 rows = 16 swatches
+const CSZ:   u32 = 40;   // swatch size
+const CGAP:  u32 = 8;    // gap
 
-// Scaling buttons
-const SBTN_W:  u32 = 56;
+// Scaling buttons — single row of 5
+const SBTN_W:  u32 = 58;
 const SBTN_H:  u32 = 22;
-const SBTN_G:  u32 = 8;
+const SBTN_G:  u32 = 6;
 
 // Wallpaper image tiles
 const TW:     u32 = 84;
@@ -174,6 +176,9 @@ const DEF_H: u16 = 768;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page { DesktopBg, DisplayRes, AboutSys }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WpMode { Color, Image }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatusKind { None, Ok, Warn }
@@ -208,7 +213,8 @@ enum ThumbSt { Pending, Loaded { w: u16, h: u16 }, Fail }
 struct WpImage { name: String, path: String, thumb: ThumbSt }
 
 struct WpState {
-    swatches: [Color; 8],
+    mode:     WpMode,
+    swatches: [Color; 16],
     images:   Vec<WpImage>,
     selected: Option<WpSrc>,
     scaling:  ScalingMode,
@@ -217,11 +223,20 @@ struct WpState {
 impl WpState {
     fn new() -> Self {
         Self {
+            mode: WpMode::Color,
             swatches: [
-                Color::new(18,20,28), Color::new(12,14,22),
-                Color::new(24,28,42), Color::new(16,24,40),
-                Color::new(22,36,52), Color::new(28,18,36),
-                Color::new(20,30,24), Color::new(34,20,20),
+                // Row 1: deep darks
+                Color::new(0x0B,0x0E,0x13), Color::new(0x11,0x11,0x11),
+                Color::new(0x1A,0x1A,0x2E), Color::new(0x16,0x21,0x3E),
+                // Row 2: mid-dark tones
+                Color::new(0x1F,0x2D,0x4E), Color::new(0x2C,0x1A,0x3E),
+                Color::new(0x0F,0x2F,0x27), Color::new(0x3D,0x1A,0x1A),
+                // Row 3: medium / warm
+                Color::new(0x4A,0x4A,0x5A), Color::new(0x5A,0x46,0x3A),
+                Color::new(0x3A,0x4E,0x3A), Color::new(0x6A,0x55,0x44),
+                // Row 4: light
+                Color::new(0xC8,0xCC,0xD8), Color::new(0xE8,0xE4,0xD8),
+                Color::new(0xC4,0xDC,0xF4), Color::new(0xF4,0xF4,0xF4),
             ],
             images: Vec::new(),
             selected: None,
@@ -229,16 +244,17 @@ impl WpState {
             loading: false,
         }
     }
-    fn is_image_sel(&self) -> bool { matches!(self.selected, Some(WpSrc::Image { .. })) }
     fn pick_color(&mut self, i: usize) {
-        if i >= 8 { return; }
+        if i >= 16 { return; }
         let c = self.swatches[i];
         let rgb = ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32;
         self.selected = Some(WpSrc::Color { rgb });
+        self.mode = WpMode::Color;
     }
     fn pick_image(&mut self, i: usize) {
         if let Some(img) = self.images.get(i) {
             self.selected = Some(WpSrc::Image { path: img.path.clone() });
+            self.mode = WpMode::Image;
         }
     }
     fn discover(&mut self) {
@@ -409,48 +425,42 @@ impl App {
     }
 
     // ── Wallpaper page element positions (absolute) ───────────────────────────
+    //
+    // y layout:
+    //   0              : page title
+    //   PTITLE_H+8     : mode toggle  [Solid Color | Wallpaper Image]
+    //   +MTOG_H+12     : body start — colour swatches (Color mode)
+    //                                 OR scale picker + image tiles (Image mode)
+    //   sh-STAT_H-BTN_H-10 : Apply button
 
-    // Content y layout (from y=0 at the top of the surface):
-    //   0  .. PTITLE_H        : page title block
-    //   PTITLE_H .. PTITLE_H+2: thin divider
-    //   — section "Background Color"
-    //   — 4×2 color swatches
-    //   — section "Image Scaling"
-    //   — scaling buttons
-    //   — section "Wallpaper Images"
-    //   — image tiles
-    //   sh-STAT_H-BTN_H-12   : Apply button
+    fn wp_toggle_y(&self) -> u32 { PTITLE_H + 8 }
+    fn wp_body_y(&self)   -> u32 { self.wp_toggle_y() + MTOG_H + 12 }
 
-    fn wp_section1_y(&self) -> u32 { PTITLE_H + 4 }
+    // Color mode: 4×4 swatch grid (label at wp_body_y, swatches below it)
     fn wp_swatch_row_y(&self, row: u32) -> u32 {
-        self.wp_section1_y() + SEC_LBL_H + row * (CSZ + CGAP)
+        self.wp_body_y() + SEC_LBL_H + row * (CSZ + CGAP)
     }
-    fn wp_section2_y(&self) -> u32 { self.wp_swatch_row_y(2) + 4 }
-    fn wp_sbtn_row_y(&self, row: u32) -> u32 {
-        self.wp_section2_y() + SEC_LBL_H + row * (SBTN_H + SBTN_G)
-    }
-    fn wp_section3_y(&self) -> u32 { self.wp_sbtn_row_y(2) + 6 }
-    fn wp_tile_row_y(&self, row: u32) -> u32 {
-        self.wp_section3_y() + SEC_LBL_H + row * (TH + TG)
-    }
-
     fn swatch_rect(&self, i: usize) -> (u32, u32) {
-        let cx = self.cx();
         let col = (i % 4) as u32;
         let row = (i / 4) as u32;
-        (cx + PAD + col * (CSZ + CGAP), self.wp_swatch_row_y(row))
+        (self.cx() + PAD + col * (CSZ + CGAP), self.wp_swatch_row_y(row))
+    }
+
+    // Image mode: scale row then tiles
+    fn wp_scale_y(&self)    -> u32 { self.wp_body_y() }
+    fn wp_sbtn_y(&self)     -> u32 { self.wp_scale_y() + SEC_LBL_H }
+    fn wp_tiles_label_y(&self) -> u32 { self.wp_sbtn_y() + SBTN_H + 12 }
+    fn wp_tile_row_y(&self, row: u32) -> u32 {
+        self.wp_tiles_label_y() + SEC_LBL_H + row * (TH + TG)
     }
     fn sbtn_rect(&self, i: usize) -> (u32, u32) {
-        let cx = self.cx();
-        let col = (i % 3) as u32;
-        let row = (i / 3) as u32;
-        (cx + PAD + col * (SBTN_W + SBTN_G), self.wp_sbtn_row_y(row))
+        // All 5 scaling options in a single row
+        (self.cx() + PAD + i as u32 * (SBTN_W + SBTN_G), self.wp_sbtn_y())
     }
     fn tile_rect(&self, vis: usize) -> (u32, u32) {
-        let cx = self.cx();
         let col = (vis % TCOLS) as u32;
         let row = (vis / TCOLS) as u32;
-        (cx + PAD + col * (TW + TG), self.wp_tile_row_y(row))
+        (self.cx() + PAD + col * (TW + TG), self.wp_tile_row_y(row))
     }
 
     fn apply_btn(&self) -> (u32, u32) {
@@ -669,44 +679,89 @@ impl App {
 
     // ── Desktop Background page ───────────────────────────────────────────────
 
+    fn draw_wp_toggle(&self, s: &SharedSurface) {
+        let cx  = self.cx();
+        let y   = self.wp_toggle_y();
+        let x0  = cx + PAD;
+        let tw  = MTOG_W * 2 + MTOG_G + 4;
+        // Outer track
+        s.fill_rect_rounded_aa(x0, y, tw, MTOG_H, MTOG_H / 2, theme::SURFACE);
+        s.draw_rect_rounded_aa(x0, y, tw, MTOG_H, MTOG_H / 2, theme::BORDER);
+        // Active pill
+        let pill_x = if self.wp.mode == WpMode::Color { x0 + 2 }
+                     else { x0 + 2 + MTOG_W + MTOG_G };
+        s.fill_rect_rounded_aa(pill_x, y + 2, MTOG_W, MTOG_H - 4, (MTOG_H - 4) / 2, theme::ACCENT);
+        // Labels
+        let labels = ["Solid Color", "Wallpaper Image"];
+        for (i, lbl) in labels.iter().enumerate() {
+            let lx = x0 + 2 + i as u32 * (MTOG_W + MTOG_G);
+            let active = (i == 0 && self.wp.mode == WpMode::Color)
+                      || (i == 1 && self.wp.mode == WpMode::Image);
+            let fg = if active { theme::BTN_TEXT } else { theme::TEXT_SEC };
+            let bg = if active { theme::ACCENT } else { theme::SURFACE };
+            let tx = lx + (MTOG_W.saturating_sub(lbl.len() as u32 * CW)) / 2;
+            s.draw_string(tx, y + (MTOG_H - CH) / 2, lbl, fg, bg);
+        }
+    }
+
     fn draw_desktop_bg(&self, s: &SharedSurface) {
-        let cx = self.cx();
-        let cw = self.cw();
-
         self.draw_page_title(s, "Desktop Background");
+        self.draw_wp_toggle(s);
 
-        // Section: Background Color
-        self.draw_sec_label(s, self.wp_section1_y(), "Background Color");
+        match self.wp.mode {
+            WpMode::Color => self.draw_wp_color_section(s),
+            WpMode::Image => self.draw_wp_image_section(s),
+        }
 
-        // 4×2 colour swatches
-        for i in 0..8 {
+        // Apply button (bottom-right)
+        let (ax, ay) = self.apply_btn();
+        s.fill_rect_rounded_aa(ax, ay, BTN_W, BTN_H, 7, theme::BTN_PRIMARY);
+        let lbl = "Apply";
+        let lx = ax + (BTN_W.saturating_sub(lbl.len() as u32 * CW)) / 2;
+        s.draw_string(lx, ay + (BTN_H - CH) / 2, lbl, theme::BTN_TEXT, theme::BTN_PRIMARY);
+    }
+
+    fn draw_wp_color_section(&self, s: &SharedSurface) {
+        let cx = self.cx();
+        self.draw_sec_label(s, self.wp_body_y(), "Background Color");
+        // 4×4 swatch grid (16 colours: 4 dark, 4 mid-dark, 4 medium/warm, 4 light)
+        for i in 0..16 {
             let (sx, sy) = self.swatch_rect(i);
             let c = self.wp.swatches[i];
             let rgb = ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32;
             let active = matches!(&self.wp.selected, Some(WpSrc::Color { rgb: r }) if *r == rgb);
-            s.fill_rect_rounded_aa(sx, sy, CSZ, CSZ, 8, c);
+            s.fill_rect_rounded_aa(sx, sy, CSZ, CSZ, 7, c);
             if active {
-                // Double ring highlight
-                s.draw_rect_rounded_aa(sx.saturating_sub(2), sy.saturating_sub(2), CSZ+4, CSZ+4, 9, theme::ACCENT);
-                s.draw_rect_rounded_aa(sx.saturating_sub(3), sy.saturating_sub(3), CSZ+6, CSZ+6, 10, theme::ACCENT_DIM);
+                s.draw_rect_rounded_aa(sx.saturating_sub(2), sy.saturating_sub(2), CSZ+4, CSZ+4, 8, theme::ACCENT);
+                s.draw_rect_rounded_aa(sx.saturating_sub(3), sy.saturating_sub(3), CSZ+6, CSZ+6, 9, theme::ACCENT_DIM);
             } else {
-                s.draw_rect_rounded_aa(sx, sy, CSZ, CSZ, 8, theme::BORDER);
+                // Subtle border — brighter for light swatches so they don't vanish on light bg
+                let border = if c.r > 0xB0 { theme::TEXT_MUTED } else { theme::BORDER };
+                s.draw_rect_rounded_aa(sx, sy, CSZ, CSZ, 7, border);
             }
         }
+        // Row labels on the left
+        let row_labels = ["Dark", "Deep", "Mid", "Light"];
+        for (r, lbl) in row_labels.iter().enumerate() {
+            let ry = self.wp_swatch_row_y(r as u32) + (CSZ - CH) / 2;
+            let lx = cx + PAD + 4 * (CSZ + CGAP) + 10;
+            s.draw_string(lx, ry, lbl, theme::TEXT_MUTED, theme::BG);
+        }
+    }
 
-        // Section: Image Scaling
-        self.draw_sec_label(s, self.wp_section2_y(), "Image Scaling");
+    fn draw_wp_image_section(&self, s: &SharedSurface) {
+        let cx = self.cx();
+
+        // Scaling picker
+        self.draw_sec_label(s, self.wp_scale_y(), "Image Scaling");
         let modes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch,
                      ScalingMode::Center, ScalingMode::Tile];
         for (i, mode) in modes.iter().enumerate() {
             let (bx, by) = self.sbtn_rect(i);
-            let enabled = self.wp.is_image_sel();
-            let is_sel  = self.wp.scaling == *mode;
-            let bg = if is_sel && enabled { theme::SEL_BG }
-                     else if enabled      { theme::SURFACE }
-                     else                 { theme::SURFACE_ALT };
-            let fg = if enabled { theme::TEXT } else { theme::TEXT_MUTED };
-            let border = if is_sel && enabled { theme::ACCENT } else { theme::BORDER };
+            let is_sel = self.wp.scaling == *mode;
+            let bg     = if is_sel { theme::SEL_BG } else { theme::SURFACE };
+            let fg     = theme::TEXT;
+            let border = if is_sel { theme::ACCENT } else { theme::BORDER };
             s.fill_rect_rounded_aa(bx, by, SBTN_W, SBTN_H, 5, bg);
             s.draw_rect_rounded_aa(bx, by, SBTN_W, SBTN_H, 5, border);
             let lbl = mode.to_str();
@@ -714,8 +769,8 @@ impl App {
             s.draw_string(lx, by + (SBTN_H - CH) / 2, lbl, fg, bg);
         }
 
-        // Section: Wallpaper Images
-        self.draw_sec_label(s, self.wp_section3_y(), "Wallpaper Images");
+        // Wallpaper image tiles
+        self.draw_sec_label(s, self.wp_tiles_label_y(), "Wallpaper Images");
         let start = self.wpscr;
         let vis   = 2 * TCOLS;
         let end   = (start + vis).min(self.wp.images.len());
@@ -725,55 +780,45 @@ impl App {
             if ty + TH > self.sh { continue; }
             let img = &self.wp.images[idx];
             let sel = matches!(&self.wp.selected, Some(WpSrc::Image { path: p }) if p == &img.path);
-            let bg = if sel { theme::SEL_BG } else { theme::SURFACE };
-            let brd= if sel { theme::ACCENT } else { theme::BORDER };
+            let bg  = if sel { theme::SEL_BG } else { theme::SURFACE };
+            let brd = if sel { theme::ACCENT  } else { theme::BORDER };
             s.fill_rect_rounded_aa(tx, ty, TW, TH, 6, bg);
             s.draw_rect_rounded_aa(tx, ty, TW, TH, 6, brd);
-            // Thumbnail placeholder
             let ph = TH.saturating_sub(CH + 8);
             let pw = TW.saturating_sub(12);
             let px = tx + 6; let py = ty + 4;
-            s.fill_rect_rounded_aa(px, py, pw, ph, 4, Color::new(28,34,50));
+            s.fill_rect_rounded_aa(px, py, pw, ph, 4, Color::new(28, 34, 50));
             match img.thumb {
                 ThumbSt::Loaded { w, h } => {
-                    let (dw, dh) = fit_in(w as u32, h as u32, pw-4, ph-4);
-                    let dx=px+(pw-dw)/2; let dy=py+(ph-dh)/2;
-                    s.fill_rect_rounded_aa(dx,dy,dw,dh,3,theme::ACCENT_DIM);
+                    let (dw, dh) = fit_in(w as u32, h as u32, pw - 4, ph - 4);
+                    let dx = px + (pw - dw) / 2; let dy = py + (ph - dh) / 2;
+                    s.fill_rect_rounded_aa(dx, dy, dw, dh, 3, theme::ACCENT_DIM);
                 }
                 ThumbSt::Fail => {
-                    s.draw_rect_rounded_aa(px+6,py+4,pw-12,ph-8,3,theme::WARNING);
+                    s.draw_rect_rounded_aa(px + 6, py + 4, pw - 12, ph - 8, 3, theme::WARNING);
                 }
                 ThumbSt::Pending => {
-                    let dw=pw/3; let dh=ph/3;
-                    s.fill_rect_rounded_aa(px+dw,py+dh,dw,dh,3,theme::SB_THUMB);
+                    let dw = pw / 3; let dh = ph / 3;
+                    s.fill_rect_rounded_aa(px + dw, py + dh, dw, dh, 3, theme::SB_THUMB);
                 }
             }
-            // Filename (truncated to tile width)
             let max_c = (TW / CW) as usize;
-            let lbl = if img.name.len()>max_c { &img.name[..max_c] } else { &img.name };
-            s.draw_string(tx+4, ty+TH-CH-2, lbl, theme::TEXT_SEC, bg);
+            let lbl = if img.name.len() > max_c { &img.name[..max_c] } else { &img.name };
+            s.draw_string(tx + 4, ty + TH - CH - 2, lbl, theme::TEXT_SEC, bg);
         }
         if self.wp.loading {
-            let y = self.wp_section3_y() + SEC_LBL_H + 4;
-            s.draw_string(cx + PAD, y, "Loading...", theme::TEXT_MUTED, theme::BG);
+            s.draw_string(cx + PAD, self.wp_tiles_label_y() + SEC_LBL_H + 4,
+                          "Loading...", theme::TEXT_MUTED, theme::BG);
         } else if self.wp.images.is_empty() {
-            let y = self.wp_section3_y() + SEC_LBL_H + 4;
-            s.draw_string(cx + PAD, y, "No images in /system/wallpapers/", theme::TEXT_MUTED, theme::BG);
+            s.draw_string(cx + PAD, self.wp_tiles_label_y() + SEC_LBL_H + 4,
+                          "No images in /system/wallpapers/", theme::TEXT_MUTED, theme::BG);
         }
-
-        // Apply button (bottom-right of content)
-        let (ax, ay) = self.apply_btn();
-        s.fill_rect_rounded_aa(ax, ay, BTN_W, BTN_H, 7, theme::BTN_PRIMARY);
-        let lbl = "Apply";
-        let lx = ax + (BTN_W.saturating_sub(lbl.len() as u32 * CW)) / 2;
-        s.draw_string(lx, ay+(BTN_H-CH)/2, lbl, theme::BTN_TEXT, theme::BTN_PRIMARY);
     }
 
     // ── Display Resolution page ───────────────────────────────────────────────
 
     fn draw_display_res(&self, s: &SharedSurface) {
         let cx = self.cx();
-        let cw = self.cw();
 
         self.draw_page_title(s, "Display Resolution");
 
@@ -961,35 +1006,50 @@ impl App {
     }
 
     fn on_wp_click(&mut self, mx: i32, my: i32) {
-        // Colour swatches
-        for i in 0..8 {
-            let (sx, sy) = self.swatch_rect(i);
-            if in_rect(mx, my, sx, sy, CSZ, CSZ) {
-                self.wp.pick_color(i); self.dirty = true; return;
-            }
-        }
-        // Scaling buttons
-        let modes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch,
-                     ScalingMode::Center, ScalingMode::Tile];
-        for (i, mode) in modes.iter().enumerate() {
-            let (bx, by) = self.sbtn_rect(i);
-            if in_rect(mx, my, bx, by, SBTN_W, SBTN_H) {
-                if self.wp.is_image_sel() { self.wp.scaling = *mode; self.dirty = true; }
-                return;
-            }
-        }
-        // Image tiles
-        let start = self.wpscr;
-        let end = (start + 2*TCOLS).min(self.wp.images.len());
-        for idx in start..end {
-            let (tx, ty) = self.tile_rect(idx - start);
-            if in_rect(mx, my, tx, ty, TW, TH) {
-                self.wp.pick_image(idx); self.dirty = true; return;
-            }
-        }
         // Apply button
         let (ax, ay) = self.apply_btn();
-        if in_rect(mx, my, ax, ay, BTN_W, BTN_H) { self.apply_wallpaper(); }
+        if in_rect(mx, my, ax, ay, BTN_W, BTN_H) { self.apply_wallpaper(); return; }
+
+        // Mode toggle
+        let ty = self.wp_toggle_y();
+        let x0 = self.cx() + PAD;
+        if in_rect(mx, my, x0 + 2, ty, MTOG_W, MTOG_H) {
+            self.wp.mode = WpMode::Color; self.dirty = true; return;
+        }
+        if in_rect(mx, my, x0 + 2 + MTOG_W + MTOG_G, ty, MTOG_W, MTOG_H) {
+            self.wp.mode = WpMode::Image; self.dirty = true; return;
+        }
+
+        match self.wp.mode {
+            WpMode::Color => {
+                for i in 0..16 {
+                    let (sx, sy) = self.swatch_rect(i);
+                    if in_rect(mx, my, sx, sy, CSZ, CSZ) {
+                        self.wp.pick_color(i); self.dirty = true; return;
+                    }
+                }
+            }
+            WpMode::Image => {
+                // Scaling buttons
+                let smodes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch,
+                              ScalingMode::Center, ScalingMode::Tile];
+                for (i, mode) in smodes.iter().enumerate() {
+                    let (bx, by) = self.sbtn_rect(i);
+                    if in_rect(mx, my, bx, by, SBTN_W, SBTN_H) {
+                        self.wp.scaling = *mode; self.dirty = true; return;
+                    }
+                }
+                // Image tiles
+                let start = self.wpscr;
+                let end = (start + 2 * TCOLS).min(self.wp.images.len());
+                for idx in start..end {
+                    let (tx, tiy) = self.tile_rect(idx - start);
+                    if in_rect(mx, my, tx, tiy, TW, TH) {
+                        self.wp.pick_image(idx); self.dirty = true; return;
+                    }
+                }
+            }
+        }
     }
 
     fn on_res_click(&mut self, mx: i32, my: i32) {
