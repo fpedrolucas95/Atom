@@ -471,6 +471,15 @@ struct Window {
     surface_region_id: Option<SharedRegionId>,
     content_dirty: bool,
     surface_ready: bool,
+    /// Compositor-owned snapshot of the client surface, refreshed only when the
+    /// app commits a frame. Compositing always reads from this copy, never from
+    /// the live shared surface the client may be half-way through redrawing —
+    /// otherwise any recomposite (cursor damage, window drag, ...) that lands
+    /// mid-frame shows a torn/incomplete frame (the "blinking ball" bug).
+    front_region: Option<SharedRegionId>,
+    front_ptr: *mut u32,
+    front_width: u32,
+    front_height: u32,
     saved_x: i32,
     saved_y: i32,
     saved_width: u32,
@@ -494,6 +503,10 @@ impl Window {
             surface_region_id: None,
             content_dirty: false,
             surface_ready: false,
+            front_region: None,
+            front_ptr: core::ptr::null_mut(),
+            front_width: 0,
+            front_height: 0,
             saved_x: x,
             saved_y: y,
             saved_width: width,
@@ -538,6 +551,10 @@ impl Window {
             surface: Some(surface),
             content_dirty: false,
             surface_ready: false,
+            front_region: None,
+            front_ptr: core::ptr::null_mut(),
+            front_width: 0,
+            front_height: 0,
             saved_x: x,
             saved_y: y,
             saved_width: width,
@@ -556,6 +573,68 @@ impl Window {
     }
     fn content_height(&self) -> u32 {
         self.height.saturating_sub(WINDOW_HEADER_HEIGHT + WINDOW_BORDER_WIDTH)
+    }
+
+    /// Release the compositor-side front buffer (shared region + mapping).
+    /// Must be called before the window is dropped, since the region is a
+    /// kernel resource not tied to the struct's lifetime.
+    fn release_front_buffer(&mut self) {
+        if let Some(region) = self.front_region.take() {
+            let _ = shared_region_unmap(region);
+            let _ = shared_region_destroy(region);
+        }
+        self.front_ptr = core::ptr::null_mut();
+        self.front_width = 0;
+        self.front_height = 0;
+    }
+
+    /// Copy the client's live shared surface into the compositor-owned front
+    /// buffer. Called on frame commit, so the snapshot is taken right after the
+    /// app finished drawing (it is typically asleep between frames), while
+    /// composites can then read a stable, complete frame at any time.
+    /// Returns `false` (leaving any previous snapshot intact) on failure.
+    fn snapshot_surface(&mut self) -> bool {
+        let (src_addr, w, h, stride) = match self.surface {
+            Some(ref s) => match s.address() {
+                Some(addr) => (addr as usize, s.width(), s.height(), s.stride()),
+                None => return false,
+            },
+            None => return false,
+        };
+        if w == 0 || h == 0 {
+            return false;
+        }
+
+        if self.front_region.is_none() || self.front_width != w || self.front_height != h {
+            self.release_front_buffer();
+            let size = (w as usize) * (h as usize) * 4;
+            let region = match shared_region_create(size) {
+                Ok(r) => r,
+                Err(_) => return false,
+            };
+            let ptr = match shared_region_map(region, 0, SharedMemFlags::READ_WRITE) {
+                Ok(p) => p as *mut u32,
+                Err(_) => {
+                    let _ = shared_region_destroy(region);
+                    return false;
+                }
+            };
+            self.front_region = Some(region);
+            self.front_ptr = ptr;
+            self.front_width = w;
+            self.front_height = h;
+        }
+
+        let row_px = w as usize;
+        for row in 0..h as usize {
+            let src = (src_addr + row * stride as usize * 4) as *const u32;
+            // SAFETY: src rows are within the mapped client surface (stride ×
+            // height × 4 bytes); dst is our freshly mapped w × h × 4 region.
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, self.front_ptr.add(row * row_px), row_px);
+            }
+        }
+        true
     }
 
     fn contains(&self, px: i32, py: i32) -> bool {
@@ -736,7 +815,10 @@ impl WindowManager {
     }
 
     fn close_window(&mut self, id: WindowId) {
-        self.windows.retain(|w| w.id != id);
+        if let Some(pos) = self.windows.iter().position(|w| w.id == id) {
+            let mut window = self.windows.remove(pos);
+            window.release_front_buffer();
+        }
         if self.focused_id == Some(id) {
             self.refocus_topmost();
         }
@@ -1768,13 +1850,17 @@ impl Compositor {
             MessageType::MouseMove => {
                 let payload_start = MessageHeader::SIZE;
                 if let Some(event) = MouseMoveEvent::from_bytes(&data[payload_start..]) {
+                    let old_x = self.cursor.x;
+                    let old_y = self.cursor.y;
                     self.cursor.apply_delta(
                         event.dx as i32,
                         event.dy as i32,
                         self.fb.width(),
                         self.fb.height(),
                     );
-                    self.dirty = true;
+                    let r1 = Rect::new(old_x, old_y, 24, 24);
+                    let r2 = Rect::new(self.cursor.x, self.cursor.y, 24, 24);
+                    self.mark_dirty_rect(r1.union(&r2));
                 }
             }
             MessageType::MouseButtonDown => {
@@ -1887,7 +1973,7 @@ impl Compositor {
 
                     self.wm.windows.push(window);
                     self.wm.focus_window(id);
-                    self.dirty = true;
+                    self.mark_window_dirty(id);
 
                     let header = MessageHeader::new(
                         MessageType::WmResponse,
@@ -1993,15 +2079,25 @@ impl Compositor {
         }
     }
 
+    /// On-screen footprint of the context menu (frame + AA edge + drop shadow),
+    /// matching the geometry painted by `draw_context_menu`.
+    fn context_menu_rect(&self) -> Rect {
+        let item_h = atom_theme::spacing::XXXL as u32;
+        let padding_v = atom_theme::spacing::SM as u32 - 2;
+        let menu_h = self.context_menu.items.len() as u32 * item_h + padding_v * 2;
+        Rect::new(self.context_menu.x - 1, self.context_menu.y - 1, 200 + 4, menu_h + 6)
+    }
+
     fn handle_click(&mut self, x: i32, y: i32) {
         if self.context_menu.visible {
+            let menu_rect = self.context_menu_rect();
             if self.handle_context_menu_click(x, y) {
                 self.context_menu.visible = false;
-                self.dirty = true;
+                self.mark_dirty_rect(menu_rect);
                 return;
             }
             self.context_menu.visible = false;
-            self.dirty = true;
+            self.mark_dirty_rect(menu_rect);
         }
 
         // The top bar and the dock are always rendered on top of every window,
@@ -2145,7 +2241,10 @@ impl Compositor {
                 let screen_w = self.fb.width() as i32;
                 let (old_rect, new_rect, clamped_x, clamped_y) =
                     if let Some(w) = self.wm.get_window(window_id) {
-                        let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
+                        // Footprint matches mark_window_dirty / draw_all (h + 12
+                        // from y - 4): the drop shadow extends a few rows below
+                        // the frame, and missing them leaves trails when dragging.
+                        let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
                         // Keep the title bar reachable. The framebuffer primitives
                         // are u32-based and only clip on the high edge, so a
                         // negative x would wrap and render nothing (the "transparent"
@@ -2155,7 +2254,7 @@ impl Compositor {
                         let max_x = (screen_w - min_visible).max(0);
                         let nx = (start_win_x + dx).clamp(0, max_x);
                         let ny = (start_win_y + dy).max(PANEL_HEIGHT as i32);
-                        let new = Rect::new(nx - 4, ny - 4, w.width + 8, w.height + 8);
+                        let new = Rect::new(nx - 4, ny - 4, w.width + 8, w.height + 12);
                         (old, new, nx, ny)
                     } else {
                         return;
@@ -2182,8 +2281,8 @@ impl Compositor {
                 let new_h = (start_win_h as i32 + dy).max(WINDOW_MIN_HEIGHT as i32) as u32;
 
                 let (old_rect, new_rect) = if let Some(w) = self.wm.get_window(window_id) {
-                    let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 8);
-                    let new = Rect::new(w.x - 4, w.y - 4, new_w + 8, new_h + 8);
+                    let old = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
+                    let new = Rect::new(w.x - 4, w.y - 4, new_w + 8, new_h + 12);
                     (old, new)
                 } else {
                     return;
@@ -2245,6 +2344,10 @@ impl Compositor {
     }
 
     fn handle_right_click(&mut self, x: i32, y: i32) {
+        if self.context_menu.visible {
+            let old_rect = self.context_menu_rect();
+            self.mark_dirty_rect(old_rect);
+        }
         self.context_menu.visible = false;
 
         if self.wm.window_at(x, y).is_some() {
@@ -2263,7 +2366,8 @@ impl Compositor {
         self.context_menu.x = x;
         self.context_menu.y = y;
         self.context_menu.visible = true;
-        self.dirty = true;
+        let menu_rect = self.context_menu_rect();
+        self.mark_dirty_rect(menu_rect);
     }
 
     fn handle_context_menu_click(&mut self, x: i32, y: i32) -> bool {
@@ -2368,19 +2472,31 @@ impl Compositor {
         }
     }
 
-    /// Flag a window's freshly rendered surface as ready and mark its footprint
-    /// dirty. Called whenever an app commits/presents a frame. Uses a single
-    /// window lookup on this hot path.
+    /// Snapshot a window's freshly committed frame into its compositor-owned
+    /// front buffer and mark its footprint dirty. Called whenever an app
+    /// commits/presents a frame. Uses a single window lookup on this hot path.
     fn present_window(&mut self, window_id: WindowId) {
         let rect = match self.wm.get_window_mut(window_id) {
             Some(window) => {
                 window.content_dirty = true;
-                window.surface_ready = true;
+                if window.snapshot_surface() {
+                    window.surface_ready = true;
+                }
                 Rect::new(window.x - 4, window.y - 4, window.width + 8, window.height + 12)
             }
             None => return,
         };
         self.mark_dirty_rect(rect);
+    }
+
+    /// Mark the entire screen dirty so the next `draw_all` repaints everything.
+    /// Setting `dirty = true` alone is NOT enough for a full redraw: `draw_all`
+    /// honours any pending `dirty_rect`, so a stale cursor-sized rect would
+    /// silently clip the intended full repaint down to a few pixels (black
+    /// screen / trails that only heal where the mouse happens to move).
+    fn mark_dirty_all(&mut self) {
+        self.dirty_rect = Some(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+        self.dirty = true;
     }
 
     fn mark_dirty_rect(&mut self, rect: Rect) {
@@ -2463,6 +2579,12 @@ impl Compositor {
             ResolutionConfig { width: self.fb.width(), height: self.fb.height() };
 
         self.wallpaper_cache_valid = false;
+
+        // The fresh backbuffer is uninitialised and any pending dirty_rect is in
+        // the old resolution's coordinates — repaint the whole new screen, or it
+        // stays black except where later damage (e.g. the cursor) happens to land.
+        self.dirty_rect = None;
+        self.mark_dirty_all();
         true
     }
 
@@ -2552,6 +2674,7 @@ impl Compositor {
             .map(|w| w.id)
         {
             self.wm.focus_window(id);
+            self.mark_window_dirty(id);
         }
 
         let msg = OpenInTabMsg {
@@ -2725,7 +2848,7 @@ impl Compositor {
         if persist {
             self.config_save_pending = true;
         }
-        self.dirty = true;
+        self.mark_dirty_all();
         Ok(())
     }
 
@@ -2766,7 +2889,7 @@ impl Compositor {
             scaling_mode: ScalingMode::Fill,
         };
         self.config_save_pending = true;
-        self.dirty = true;
+        self.mark_dirty_all();
     }
 
     fn flush_deferred_desktop_work(&mut self) {
@@ -2827,7 +2950,7 @@ impl Compositor {
                 self.wallpaper_cache_valid = false;
             }
             self.wallpaper_recompute_pending = false;
-            self.dirty = true;
+            self.mark_dirty_all();
         }
 
         if self.config_save_pending {
@@ -3136,7 +3259,7 @@ impl Compositor {
             None => return,
         };
         self.pending_windows.push(PendingWindow { window_id });
-        self.dirty = true;
+        self.mark_window_dirty(window_id);
     }
 
     fn spawn_fileman(&mut self) {
@@ -3309,48 +3432,54 @@ impl Compositor {
             .draw_string(lx, label_y, &icon.label, theme::ICON_LABEL, self.desktop_bg);
     }
 
-    fn blit_surface_bottom_rounded(
+    /// Blit a window's committed front buffer into the backbuffer, rounding
+    /// the bottom two corners. Reads exclusively from the compositor-owned
+    /// snapshot so a client mid-redraw can never tear the composited output.
+    fn blit_front_buffer_bottom_rounded(
         &self,
-        surface: &SharedSurface,
+        window: &Window,
         dest_x: u32,
         dest_y: u32,
         radius: u32,
     ) {
-        let Some(src_addr) = surface.address() else {
+        let src_addr = window.front_ptr as usize;
+        if src_addr == 0 {
             return;
-        };
+        }
+        let src_width = window.front_width;
+        let src_height = window.front_height;
+        let src_stride = src_width;
 
         let fb_bpp = self.backbuffer_fb.bytes_per_pixel();
-        if fb_bpp != surface.bytes_per_pixel() {
-            surface.blit_to_framebuffer(&self.backbuffer_fb, dest_x, dest_y);
+        if fb_bpp != 4 {
+            // Cold path: backbuffer is not 32-bit; fall back to per-pixel writes.
+            for sy in 0..src_height {
+                for sx in 0..src_width {
+                    let off = ((sy * src_stride + sx) as usize) * 4;
+                    let pixel = unsafe { ((src_addr + off) as *const u32).read() };
+                    self.backbuffer_fb
+                        .draw_pixel(dest_x + sx, dest_y + sy, rgb32_to_color(pixel));
+                }
+            }
             return;
         }
 
-        let copy_width = surface
-            .width()
-            .min(self.backbuffer_fb.width().saturating_sub(dest_x));
-        let copy_height = surface
-            .height()
-            .min(self.backbuffer_fb.height().saturating_sub(dest_y));
+        let copy_width = src_width.min(self.backbuffer_fb.width().saturating_sub(dest_x));
+        let copy_height = src_height.min(self.backbuffer_fb.height().saturating_sub(dest_y));
         if copy_width == 0 || copy_height == 0 {
             return;
         }
 
         let r = radius.min(copy_width / 2).min(copy_height);
-        if r == 0 {
-            surface.blit_to_framebuffer(&self.backbuffer_fb, dest_x, dest_y);
-            return;
-        }
 
         let fb_addr = self.backbuffer_fb.address();
         let fb_stride = self.backbuffer_fb.stride();
-        let src_stride = surface.stride();
         let straight_height = copy_height.saturating_sub(r);
 
         for sy in 0..straight_height {
             let src_offset = (sy * src_stride) as usize * fb_bpp;
             let dst_offset = ((dest_y + sy) * fb_stride + dest_x) as usize * fb_bpp;
-            let src_ptr = ((src_addr as usize) + src_offset) as *const u8;
+            let src_ptr = (src_addr + src_offset) as *const u8;
             let dst_ptr = (fb_addr + dst_offset) as *mut u8;
             unsafe {
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize * fb_bpp);
@@ -3370,7 +3499,7 @@ impl Compositor {
             if row_width > 0 {
                 let src_offset = (sy * src_stride + int_offset) as usize * fb_bpp;
                 let dst_offset = (row_y * fb_stride + dest_x + int_offset) as usize * fb_bpp;
-                let src_ptr = ((src_addr as usize) + src_offset) as *const u8;
+                let src_ptr = (src_addr + src_offset) as *const u8;
                 let dst_ptr = (fb_addr + dst_offset) as *mut u8;
                 unsafe {
                     core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_width as usize * fb_bpp);
@@ -3383,7 +3512,7 @@ impl Compositor {
                 let left_src_x = int_offset - 1;
                 let left_src_offset = (sy * src_stride + left_src_x) as usize * fb_bpp;
                 let left_pixel = unsafe {
-                    (((src_addr as usize) + left_src_offset) as *const u32).read_volatile()
+                    ((src_addr + left_src_offset) as *const u32).read_volatile()
                 };
                 self.backbuffer_fb.fill_rect_alpha(
                     dest_x + left_src_x,
@@ -3397,7 +3526,7 @@ impl Compositor {
                 let right_src_x = copy_width - int_offset;
                 let right_src_offset = (sy * src_stride + right_src_x) as usize * fb_bpp;
                 let right_pixel = unsafe {
-                    (((src_addr as usize) + right_src_offset) as *const u32).read_volatile()
+                    ((src_addr + right_src_offset) as *const u32).read_volatile()
                 };
                 self.backbuffer_fb.fill_rect_alpha(
                     dest_x + right_src_x,
@@ -3525,14 +3654,12 @@ impl Compositor {
         );
 
         if window.surface_ready {
-            if let Some(ref surface) = window.surface {
-                self.blit_surface_bottom_rounded(
-                    surface,
-                    window.content_x(),
-                    window.content_y(),
-                    inner_r,
-                );
-            }
+            self.blit_front_buffer_bottom_rounded(
+                window,
+                window.content_x(),
+                window.content_y(),
+                inner_r,
+            );
         }
     }
 
