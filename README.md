@@ -240,6 +240,30 @@ Contributions are welcome, especially around:
 - **User-space evolution** — new services, drivers, and applications
 - **Debugging and tracing tools**
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/security_pipeline.md`](docs/security_pipeline.md).
+
+---
+
+## Security pipeline
+
+Atom OS ships a mandatory security pipeline (enforced in CI with **no**
+`continue-on-error`). One documented way to run each thing:
+
+```bash
+make ci-build       # build every critical crate + bootable image
+make ci-security    # fmt, clippy, syscall-policy gate, security-TODO gate,
+                    # unsafe baseline, cargo audit, cargo deny, semgrep
+make ci-qemu        # adversarial QEMU smoke (SMP 1/2/4); fails unless the
+                    # serial log shows `SECURITY_SMOKE PASS all`
+```
+
+The pipeline fails the build on: a new syscall without an explicit policy
+classification, an unjustified increase in `unsafe`, an untracked security
+`TODO`, a supply-chain advisory/license/source violation, or any adversarial
+QEMU scenario (PR1–PR5) not passing. Full reference and the security model are
+in [`docs/security_pipeline.md`](docs/security_pipeline.md),
+[`SECURITY.md`](SECURITY.md) and [`SECURITY_DEBT.md`](SECURITY_DEBT.md).
+
 ---
 
 ## License

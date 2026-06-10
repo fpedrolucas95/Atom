@@ -293,6 +293,12 @@ fn boot_sequence() {
     // Phase 5: Applications
     // -----------------------------------------------------------------------
     log("");
+    #[cfg(feature = "smoke")]
+    {
+        log("[Phase 5] smoke build — auto-launching security_smoke via app_launcher");
+        launch_security_smoke();
+    }
+    #[cfg(not(feature = "smoke"))]
     log("[Phase 5] No applications configured for auto-start");
 
     // -----------------------------------------------------------------------
@@ -302,6 +308,46 @@ fn boot_sequence() {
     log("===========================================");
     log("Init: Boot sequence complete");
     log("===========================================");
+}
+
+/// Ask `app_launcher` to spawn the unprivileged `security_smoke` app.
+///
+/// Only compiled into smoke builds (`--features smoke`). Launching via
+/// app_launcher (which holds the `SpawnFromPath` cap) keeps security_smoke a
+/// genuinely unprivileged app with ZERO sensitive capabilities — exactly the
+/// adversary the test models. init holds no spawn-from-path authority itself.
+#[cfg(feature = "smoke")]
+fn launch_security_smoke() {
+    use libipc::messages::{AppLaunchRequestMsg, MessageType};
+
+    // app_launcher came up in Phase 1; make sure it is registered.
+    if !wait_for_service("app_launcher") {
+        log("[Phase 5] smoke: app_launcher not available — cannot launch security_smoke");
+        return;
+    }
+
+    let launcher = match libipc::protocol::lookup_service("app_launcher") {
+        Ok(p) => p,
+        Err(_) => {
+            log("[Phase 5] smoke: lookup of app_launcher failed");
+            return;
+        }
+    };
+
+    // Fire-and-forget: we do not need the reply, only the app's serial output.
+    let path = "/apps/user/security_smoke.atxf";
+    let req = match AppLaunchRequestMsg::new(0, path) {
+        Some(r) => r,
+        None => {
+            log("[Phase 5] smoke: security_smoke path too long");
+            return;
+        }
+    };
+
+    match libipc::protocol::send_message(launcher, MessageType::AppLaunchRequest, &req.to_bytes()) {
+        Ok(()) => log("[Phase 5] smoke: launch request sent for security_smoke"),
+        Err(_) => log("[Phase 5] smoke: failed to send launch request"),
+    }
 }
 
 // ============================================================================

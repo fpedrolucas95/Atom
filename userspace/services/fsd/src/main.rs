@@ -14,80 +14,39 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
 use core::panic::PanicInfo;
 use alloc::format;
 
-// Simple bump allocator for userspace
-mod allocator {
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::cell::UnsafeCell;
-    use core::ptr::null_mut;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+// Reusable, mmap-backed heap allocator (see allocator.rs). Replaces the old
+// irreversible bump allocator: memory freed by one request is reclaimed and
+// reused by the next, so a flood of requests no longer grows memory
+// monotonically until an irreversible crash.
+mod allocator;
+// Defensive per-request limits (path/payload/read/write/handles/...).
+mod limits;
 
-    const HEAP_SIZE: usize = 1024 * 1024; // 1 MB heap for fsd
+/// Exit codes used when `fsd` terminates so it can be restarted by
+/// `service_manager`.
+const EXIT_OOM: u64 = 12; // ENOMEM
+const EXIT_FATAL: u64 = 70;
 
-    #[repr(align(4096))]
-    struct Heap {
-        data: UnsafeCell<[u8; HEAP_SIZE]>,
-        next: AtomicUsize,
-    }
-
-    unsafe impl Sync for Heap {}
-
-    static HEAP: Heap = Heap {
-        data: UnsafeCell::new([0; HEAP_SIZE]),
-        next: AtomicUsize::new(0),
-    };
-
-    pub struct BumpAllocator;
-
-    unsafe impl GlobalAlloc for BumpAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let size = layout.size();
-            let align = layout.align().max(16);
-            let heap_start = HEAP.data.get() as *mut u8;
-
-            loop {
-                let current = HEAP.next.load(Ordering::Relaxed);
-                let aligned = (current + align - 1) & !(align - 1);
-                let new_next = aligned + size;
-
-                if new_next > HEAP_SIZE {
-                    atom_syscall::debug::log("fsd: HEAP EXHAUSTED — bump allocator out of memory");
-                    return null_mut();
-                }
-
-                if HEAP.next.compare_exchange_weak(
-                    current, new_next, Ordering::SeqCst, Ordering::Relaxed
-                ).is_ok() {
-                    // Warn when heap usage crosses 75% so we can catch pressure early.
-                    if new_next > HEAP_SIZE * 3 / 4 && current <= HEAP_SIZE * 3 / 4 {
-                        atom_syscall::debug::log("fsd: HEAP WARNING — usage crossed 75%");
-                    }
-                    return heap_start.add(aligned);
-                }
-            }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // LIFO optimisation: reclaim the most-recently-allocated block so
-            // transient Vec allocations (IPC buffers etc.) don't exhaust the heap.
-            let heap_start = HEAP.data.get() as usize;
-            let blk_offset = ptr as usize - heap_start;
-            let blk_end = blk_offset + layout.size();
-
-            // Only attempt to roll back if this was the very last allocation.
-            let _ = HEAP.next.compare_exchange(
-                blk_end, blk_offset, Ordering::SeqCst, Ordering::Relaxed,
-            );
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: BumpAllocator = BumpAllocator;
+/// Out-of-memory handler.
+///
+/// An infallible allocation failed (the reusable allocator returned null after
+/// the pool and every oversized mapping were exhausted). This is treated as an
+/// *irrecoverable* daemon state: we log a machine-readable line and exit
+/// cleanly so `service_manager` observes the process death and restarts a fresh
+/// `fsd`, which re-claims the reserved FS port and re-registers with `namesvc`.
+/// We deliberately do NOT spin-loop here — a panic/spin loop would wedge the
+/// filesystem permanently.
+#[alloc_error_handler]
+fn oom(_layout: core::alloc::Layout) -> ! {
+    log("fsd: ENOMEM — heap exhausted, exiting for restart");
+    atom_syscall::thread::exit(EXIT_OOM);
 }
 
 // ============================================================================
@@ -154,9 +113,7 @@ fn main() -> ! {
             let mut jm = JournalManager::new(bd as *const BlockDevice);
             if !jm.init() {
                 log("fsd: ERROR - failed to initialize journal, exiting");
-                loop {
-                    atom_syscall::thread::yield_now();
-                }
+                atom_syscall::thread::exit(EXIT_FATAL);
             }
 
             // Check if recovery is needed from previous crash
@@ -164,9 +121,7 @@ fn main() -> ! {
                 log("fsd: WARNING - running crash recovery...");
                 if !jm.recovery_replay() {
                     log("fsd: ERROR - recovery failed");
-                    loop {
-                        atom_syscall::thread::yield_now();
-                    }
+                    atom_syscall::thread::exit(EXIT_FATAL);
                 }
                 log("fsd: recovery completed successfully");
             }
@@ -184,9 +139,7 @@ fn main() -> ! {
         }
         Err(_) => {
             log("fsd: ERROR - failed to claim reserved FS port; refusing dynamic fallback");
-            loop {
-                atom_syscall::thread::yield_now();
-            }
+            atom_syscall::thread::exit(EXIT_FATAL);
         }
     };
 
@@ -203,9 +156,7 @@ fn main() -> ! {
         Ok(()) => log("fsd: VFS subsystem initialized"),
         Err(_) => {
             log("fsd: ERROR - failed to initialize VFS");
-            loop {
-                atom_syscall::thread::yield_now();
-            }
+            atom_syscall::thread::exit(EXIT_FATAL);
         }
     }
 
@@ -219,9 +170,7 @@ fn main() -> ! {
     // Initialize userspace-owned FAT32 backend on top of raw block I/O.
     if !fat32::init() {
         log("fsd: ERROR - failed to initialize userspace FAT32 backend");
-        loop {
-            atom_syscall::thread::yield_now();
-        }
+        atom_syscall::thread::exit(EXIT_FATAL);
     }
 
     // Create IPC handler with pluggable backend implementation.
@@ -308,10 +257,8 @@ fn main_loop(fs_port: atom_syscall::ipc::PortId, ipc_handler: &mut FsdIpcHandler
                 }
             }
             Err(_e) => {
-                log("fsd: FATAL recv error, terminating");
-                loop {
-                    atom_syscall::thread::yield_now();
-                }
+                log("fsd: FATAL recv error, terminating for restart");
+                atom_syscall::thread::exit(EXIT_FATAL);
             }
         }
     }
@@ -334,7 +281,7 @@ fn panic(info: &PanicInfo) -> ! {
         log("fsd: PANIC (location unavailable)");
     }
     log(&format!("fsd: PANIC message: {}", info.message()));
-    loop {
-        atom_syscall::thread::yield_now();
-    }
+    // Exit cleanly so service_manager restarts a fresh fsd instead of leaving
+    // the daemon wedged in a spin loop with the FS port held.
+    atom_syscall::thread::exit(EXIT_FATAL);
 }

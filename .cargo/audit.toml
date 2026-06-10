@@ -1,0 +1,16 @@
+# cargo-audit configuration for Atom OS.
+#
+# Run with: cargo audit
+# A security gate — a relevant advisory fails CI (never continue-on-error).
+
+[advisories]
+# No advisories are ignored. Any addition here must reference a SECURITY_DEBT.md
+# entry explaining why the advisory does not apply to a no_std OS TCB.
+ignore = []
+# Treat unmaintained and unsound advisories as failures, not just warnings.
+informational_warnings = ["unmaintained", "unsound", "notice"]
+severity_threshold = "low"
+
+[output]
+deny = ["warnings", "unmaintained", "unsound", "yanked"]
+quiet = false

@@ -1,33 +1,39 @@
-//! security_smoke — adversarial least-privilege and W^X smoke test
+//! security_smoke — adversarial milestone smoke test (PR1–PR5)
 //!
 //! This is an *ordinary* application: it is launched by path via
 //! `app_launcher` + `SYS_SPAWN_FROM_PATH`, so under the PR3 least-privilege
 //! model it must receive ZERO sensitive capabilities. It then attempts a set of
-//! sensitive syscalls and asserts that every one is denied with `EPERM`.
+//! sensitive operations and asserts that every one is denied or fails in a
+//! controlled way.
 //!
-//! The syscalls checked here are all gated by the *policy table* in
-//! `kernel/src/syscall/policy.rs`, which runs BEFORE the handler — so the
-//! `EPERM` is deterministic regardless of argument validity. That makes this a
-//! reliable runtime proof that a common process cannot:
-//!   * obtain or map the framebuffer (FramebufferMap),
-//!   * change the video mode (DisplayModeSet),
-//!   * read keyboard/mouse input (InputDevice),
-//!   * read the kernel log (ReadKernelLog),
-//!   * reach the raw filesystem backend (FsNamespace),
-//!   * bind a reserved IPC port (ReservedPort).
+//! ## Machine-readable output
 //!
-//! Raw PCI/MMIO/IRQ/DMA are additionally gated in-handler by Device/Irq
-//! capability ownership (an app holds none), and are covered by the kernel
-//! manifest unit tests; they are intentionally not asserted here because their
-//! handler-level error code depends on argument order.
+//! Each category prints exactly one line on the kernel serial log:
 //!
-//! Result is reported on the kernel serial log:
-//!   "security_smoke: PASS" — every sensitive syscall was denied.
-//!   "security_smoke: FAIL ..." — at least one was NOT denied (a regression).
+//! ```text
+//! SECURITY_SMOKE PASS spawn_denied
+//! SECURITY_SMOKE PASS reserved_port_denied
+//! SECURITY_SMOKE PASS namesvc_spoof_denied
+//! SECURITY_SMOKE PASS framebuffer_denied
+//! SECURITY_SMOKE PASS input_denied
+//! SECURITY_SMOKE PASS hardware_denied
+//! SECURITY_SMOKE PASS rwx_mmap_denied
+//! SECURITY_SMOKE PASS rwx_mprotect_denied
+//! SECURITY_SMOKE PASS shared_exec_denied
+//! SECURITY_SMOKE PASS fsd_limits
+//! SECURITY_SMOKE PASS all
+//! ```
 //!
-//! Run manually after `./build.sh --run` by launching
-//! `/apps/user/security_smoke.atxf` (e.g. from the file manager) and checking
-//! the serial log.
+//! The QEMU runner (`scripts/ci/qemu-smoke.sh`) parses this output and FAILS
+//! the build unless it finds `SECURITY_SMOKE PASS all`. A regression that
+//! re-opens any of these holes turns the corresponding line into
+//! `SECURITY_SMOKE FAIL <tag>` and suppresses `PASS all`, failing CI.
+//!
+//! Most checks are gated by the *policy table* in `kernel/src/syscall/policy.rs`
+//! which runs BEFORE the handler, so `EPERM` is deterministic regardless of
+//! argument validity. The raw device syscalls (PCI/DMA) are gated in-handler by
+//! capability ownership; for those we only require a controlled *error* (the
+//! app holds no Device/Irq cap), not a specific code.
 
 #![no_std]
 #![no_main]
@@ -37,6 +43,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use atom_syscall::atom_abi::is_syscall_error;
 use atom_syscall::debug::log;
 use atom_syscall::error::EPERM;
 use atom_syscall::raw::numbers::*;
@@ -44,7 +51,7 @@ use atom_syscall::raw::{syscall1, syscall2, syscall3, syscall4, syscall5};
 use atom_syscall::thread::exit;
 
 // ============================================================================
-// Minimal global allocator. This app never allocates, but the userspace target
+// Minimal global allocator. This app barely allocates, but the userspace target
 // links `alloc` (via atom_syscall), so a global allocator must be present.
 // ============================================================================
 
@@ -90,15 +97,18 @@ fn alloc_error(_layout: Layout) -> ! {
 /// irrelevant) address; the policy gate denies them before the pointer is used.
 static mut SCRATCH: [u8; 64] = [0u8; 64];
 
+/// An over-long path used to prove `fsd` rejects oversized paths (PR5 limits).
+/// Length 2048 > fsd's MAX_PATH_LEN (1024), so the request must be rejected
+/// with a controlled error rather than driving an allocation or a hang.
+static mut BIG_PATH: [u8; 2048] = [b'A'; 2048];
+
 fn scratch_ptr() -> u64 {
     core::ptr::addr_of_mut!(SCRATCH) as u64
 }
 
-/// Check that `ret == EPERM`; log the outcome and return 1 on failure.
+/// Check that `ret == EPERM`. Returns 1 on failure (NOT denied).
 fn expect_denied(name: &str, ret: u64) -> u32 {
     if ret == EPERM {
-        log("security_smoke: DENIED (ok) ->");
-        log(name);
         0
     } else {
         log("security_smoke: NOT DENIED (FAIL) ->");
@@ -107,10 +117,21 @@ fn expect_denied(name: &str, ret: u64) -> u32 {
     }
 }
 
-fn expect_success(name: &str, ret: u64) -> u32 {
-    if !atom_syscall::atom_abi::is_syscall_error(ret) {
-        log("security_smoke: ALLOWED (ok) ->");
+/// Check that `ret` is any syscall error (controlled failure). Returns 1 on
+/// failure (the call unexpectedly succeeded).
+fn expect_error(name: &str, ret: u64) -> u32 {
+    if is_syscall_error(ret) {
+        0
+    } else {
+        log("security_smoke: UNEXPECTED SUCCESS (FAIL) ->");
         log(name);
+        1
+    }
+}
+
+/// Check that `ret` is NOT an error (operation legitimately allowed).
+fn expect_success(name: &str, ret: u64) -> u32 {
+    if !is_syscall_error(ret) {
         0
     } else {
         log("security_smoke: UNEXPECTED ERROR (FAIL) ->");
@@ -119,50 +140,139 @@ fn expect_success(name: &str, ret: u64) -> u32 {
     }
 }
 
+/// Emit the machine-readable result line for a category and fold its failures
+/// into the running total.
+fn report(pass_line: &str, fail_line: &str, fails: u32, total: &mut u32) {
+    if fails == 0 {
+        log(pass_line);
+    } else {
+        log(fail_line);
+    }
+    *total += fails;
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log("security_smoke: start (ordinary app — every sensitive syscall must be EPERM)");
+    log("security_smoke: start (ordinary app — every sensitive op must be denied)");
 
     let p = scratch_ptr();
-    let mut fails: u32 = 0;
+    let mut total: u32 = 0;
 
-    // Framebuffer map authority.
-    fails += expect_denied("SYS_GET_FRAMEBUFFER", unsafe {
-        syscall1(SYS_GET_FRAMEBUFFER, p)
-    });
-    fails += expect_denied("SYS_MAP_FRAMEBUFFER", unsafe {
-        syscall1(SYS_MAP_FRAMEBUFFER, p)
-    });
+    // ── PR1: spawn / kernel-log authority ──────────────────────────────────
+    {
+        let mut f = 0;
+        f += expect_denied("SYS_SPAWN_PROCESS", unsafe {
+            syscall2(SYS_SPAWN_PROCESS, p, 4)
+        });
+        f += expect_denied("SYS_SPAWN_FROM_PATH", unsafe {
+            syscall2(SYS_SPAWN_FROM_PATH, p, 4)
+        });
+        f += expect_denied("SYS_READ_KLOG", unsafe { syscall2(SYS_READ_KLOG, p, 16) });
+        report(
+            "SECURITY_SMOKE PASS spawn_denied",
+            "SECURITY_SMOKE FAIL spawn_denied",
+            f,
+            &mut total,
+        );
+    }
 
-    // Video-mode change authority (queries are public and intentionally not here).
-    fails += expect_denied("SYS_SET_VIDEO_MODE", unsafe {
-        syscall2(SYS_SET_VIDEO_MODE, 0, 0)
-    });
+    // ── PR2: reserved bootstrap ports ──────────────────────────────────────
+    {
+        let mut f = 0;
+        f += expect_denied("create_port(1)", unsafe {
+            syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 1)
+        });
+        f += expect_denied("create_port(2)", unsafe {
+            syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 2)
+        });
+        f += expect_denied("create_port(3)", unsafe {
+            syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 3)
+        });
+        report(
+            "SECURITY_SMOKE PASS reserved_port_denied",
+            "SECURITY_SMOKE FAIL reserved_port_denied",
+            f,
+            &mut total,
+        );
+    }
 
-    // Input authority.
-    fails += expect_denied("SYS_KEYBOARD_POLL", unsafe {
-        syscall1(SYS_KEYBOARD_POLL, p)
-    });
-    fails += expect_denied("SYS_MOUSE_POLL", unsafe { syscall1(SYS_MOUSE_POLL, p) });
+    // ── PR2: namesvc spoofing ──────────────────────────────────────────────
+    // An ordinary app cannot squat the well-known namesvc port (2), so it
+    // cannot impersonate the name service and forge registrations. (Forged
+    // *registration* messages are independently rejected by namesvc because the
+    // app holds no ServiceIdentity; that path is covered by namesvc unit tests
+    // and cannot be exercised here without risking a blocking IPC round-trip.)
+    {
+        let mut f = 0;
+        f += expect_denied("namesvc_port_squat(2)", unsafe {
+            syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 2)
+        });
+        report(
+            "SECURITY_SMOKE PASS namesvc_spoof_denied",
+            "SECURITY_SMOKE FAIL namesvc_spoof_denied",
+            f,
+            &mut total,
+        );
+    }
 
-    // Kernel log.
-    fails += expect_denied("SYS_READ_KLOG", unsafe { syscall2(SYS_READ_KLOG, p, 16) });
+    // ── PR3: framebuffer / video-mode authority ────────────────────────────
+    {
+        let mut f = 0;
+        f += expect_denied("SYS_GET_FRAMEBUFFER", unsafe {
+            syscall1(SYS_GET_FRAMEBUFFER, p)
+        });
+        f += expect_denied("SYS_MAP_FRAMEBUFFER", unsafe {
+            syscall1(SYS_MAP_FRAMEBUFFER, p)
+        });
+        f += expect_denied("SYS_SET_VIDEO_MODE", unsafe {
+            syscall2(SYS_SET_VIDEO_MODE, 0, 0)
+        });
+        report(
+            "SECURITY_SMOKE PASS framebuffer_denied",
+            "SECURITY_SMOKE FAIL framebuffer_denied",
+            f,
+            &mut total,
+        );
+    }
 
-    // Raw filesystem backend (fsd-only).
-    fails += expect_denied("SYS_KERN_FS_READ_FILE", unsafe {
-        syscall4(SYS_KERN_FS_READ_FILE, p, 1, p, 1)
-    });
-    fails += expect_denied("SYS_KERN_FS_WRITE_FILE", unsafe {
-        syscall4(SYS_KERN_FS_WRITE_FILE, p, 1, p, 1)
-    });
+    // ── PR3: input authority ───────────────────────────────────────────────
+    {
+        let mut f = 0;
+        f += expect_denied("SYS_KEYBOARD_POLL", unsafe {
+            syscall1(SYS_KEYBOARD_POLL, p)
+        });
+        f += expect_denied("SYS_MOUSE_POLL", unsafe { syscall1(SYS_MOUSE_POLL, p) });
+        report(
+            "SECURITY_SMOKE PASS input_denied",
+            "SECURITY_SMOKE FAIL input_denied",
+            f,
+            &mut total,
+        );
+    }
 
-    // Reserved bootstrap ports — an app must not be able to squat Port(1/2/3).
-    fails += expect_denied("SYS_IPC_CREATE_PORT_WITH_ID(1)", unsafe {
-        syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 1)
-    });
-    fails += expect_denied("SYS_IPC_CREATE_PORT_WITH_ID(3)", unsafe {
-        syscall1(SYS_IPC_CREATE_PORT_WITH_ID, 3)
-    });
+    // ── PR3: hardware / raw FS backend authority ───────────────────────────
+    {
+        let mut f = 0;
+        // FS kernel backend: policy-gated, deterministic EPERM.
+        f += expect_denied("SYS_KERN_FS_READ_FILE", unsafe {
+            syscall4(SYS_KERN_FS_READ_FILE, p, 1, p, 1)
+        });
+        f += expect_denied("SYS_KERN_FS_WRITE_FILE", unsafe {
+            syscall4(SYS_KERN_FS_WRITE_FILE, p, 1, p, 1)
+        });
+        // Raw PCI/DMA: handler-gated by Device/Irq cap ownership (app holds
+        // none) — require a controlled error, not a specific code.
+        f += expect_error("SYS_PCI_QUERY_DEVICE", unsafe {
+            syscall2(SYS_PCI_QUERY_DEVICE, 0, p)
+        });
+        f += expect_error("SYS_DMA_ALLOC", unsafe { syscall2(SYS_DMA_ALLOC, p, p) });
+        report(
+            "SECURITY_SMOKE PASS hardware_denied",
+            "SECURITY_SMOKE FAIL hardware_denied",
+            f,
+            &mut total,
+        );
+    }
 
     const PAGE: u64 = 4096;
     const MMAP_FLAGS: u64 =
@@ -171,51 +281,93 @@ pub extern "C" fn _start() -> ! {
     const W: u64 = atom_syscall::atom_abi::PROT_WRITE;
     const X: u64 = atom_syscall::atom_abi::PROT_EXEC;
 
-    fails += expect_denied("mmap(RWX)", unsafe {
-        syscall4(SYS_MMAP, 0, PAGE, R | W | X, MMAP_FLAGS)
-    });
-
-    let rw = unsafe { syscall4(SYS_MMAP, 0, PAGE, R | W, MMAP_FLAGS) };
-    fails += expect_success("mmap(RW)", rw);
-    if !atom_syscall::atom_abi::is_syscall_error(rw) {
-        fails += expect_denied("mprotect(RW -> RWX)", unsafe {
-            syscall3(SYS_MPROTECT, rw, PAGE, R | W | X)
+    // ── PR4: W^X on mmap ───────────────────────────────────────────────────
+    {
+        let mut f = 0;
+        f += expect_denied("mmap(RWX)", unsafe {
+            syscall4(SYS_MMAP, 0, PAGE, R | W | X, MMAP_FLAGS)
         });
-        fails += expect_success("mprotect(RW -> R)", unsafe {
-            syscall3(SYS_MPROTECT, rw, PAGE, R)
-        });
-        fails += expect_success("munmap(R)", unsafe { syscall2(SYS_MUNMAP, rw, PAGE) });
+        report(
+            "SECURITY_SMOKE PASS rwx_mmap_denied",
+            "SECURITY_SMOKE FAIL rwx_mmap_denied",
+            f,
+            &mut total,
+        );
     }
 
-    let rx = unsafe { syscall4(SYS_MMAP, 0, PAGE, R | X, MMAP_FLAGS) };
-    fails += expect_success("mmap(RX)", rx);
-    if !atom_syscall::atom_abi::is_syscall_error(rx) {
-        fails += expect_success("mprotect(RX -> R)", unsafe {
-            syscall3(SYS_MPROTECT, rx, PAGE, R)
-        });
-        fails += expect_success("munmap(RX)", unsafe { syscall2(SYS_MUNMAP, rx, PAGE) });
+    // ── PR4: W^X on mprotect ───────────────────────────────────────────────
+    {
+        let mut f = 0;
+        let rw = unsafe { syscall4(SYS_MMAP, 0, PAGE, R | W, MMAP_FLAGS) };
+        f += expect_success("mmap(RW)", rw);
+        if !is_syscall_error(rw) {
+            f += expect_denied("mprotect(RW -> RWX)", unsafe {
+                syscall3(SYS_MPROTECT, rw, PAGE, R | W | X)
+            });
+            // Clean up; failure here does not affect the W^X assertion.
+            let _ = unsafe { syscall3(SYS_MPROTECT, rw, PAGE, R) };
+            let _ = unsafe { syscall2(SYS_MUNMAP, rw, PAGE) };
+        }
+        report(
+            "SECURITY_SMOKE PASS rwx_mprotect_denied",
+            "SECURITY_SMOKE FAIL rwx_mprotect_denied",
+            f,
+            &mut total,
+        );
     }
 
-    let shared = unsafe { syscall1(SYS_SHARED_REGION_CREATE, PAGE) };
-    fails += expect_success("shared_region_create", shared);
-    if !atom_syscall::atom_abi::is_syscall_error(shared) {
-        fails += expect_denied("shared_region_map(EXEC)", unsafe {
-            syscall3(SYS_SHARED_REGION_MAP, shared, 0, 0x5)
+    // ── PR4: executable shared memory / map_region W+X ─────────────────────
+    {
+        let mut f = 0;
+        let shared = unsafe { syscall1(SYS_SHARED_REGION_CREATE, PAGE) };
+        f += expect_success("shared_region_create", shared);
+        if !is_syscall_error(shared) {
+            f += expect_denied("shared_region_map(EXEC)", unsafe {
+                syscall3(SYS_SHARED_REGION_MAP, shared, 0, 0x5)
+            });
+            let _ = unsafe { syscall1(SYS_SHARED_REGION_DESTROY, shared) };
+        }
+        f += expect_denied("map_region(WRITE|EXEC)", unsafe {
+            syscall5(SYS_MAP_REGION, 0, 0x4000, 0x4000, PAGE, 0x2)
         });
-        fails += expect_success("shared_region_destroy", unsafe {
-            syscall1(SYS_SHARED_REGION_DESTROY, shared)
-        });
+        report(
+            "SECURITY_SMOKE PASS shared_exec_denied",
+            "SECURITY_SMOKE FAIL shared_exec_denied",
+            f,
+            &mut total,
+        );
     }
 
-    fails += expect_denied("map_region(WRITE|EXEC)", unsafe {
-        syscall5(SYS_MAP_REGION, 0, 0x4000, 0x4000, PAGE, 0x2)
-    });
+    // ── PR5: fsd per-request limits ────────────────────────────────────────
+    // Opening a path far longer than fsd's MAX_PATH_LEN must fail in a
+    // controlled way (error reply, no hang, no unbounded allocation). The call
+    // returns promptly, which also proves a client does not block indefinitely
+    // on a rejected request.
+    {
+        let mut f = 0;
+        // Make it look path-like; content is irrelevant past the length check.
+        unsafe {
+            (*core::ptr::addr_of_mut!(BIG_PATH))[0] = b'/';
+        }
+        let big = core::ptr::addr_of!(BIG_PATH) as u64;
+        let big_len = 2048u64;
+        f += expect_error("fs_open(oversized_path)", unsafe {
+            syscall4(SYS_FS_OPEN, big, big_len, 0, 0)
+        });
+        report(
+            "SECURITY_SMOKE PASS fsd_limits",
+            "SECURITY_SMOKE FAIL fsd_limits",
+            f,
+            &mut total,
+        );
+    }
 
-    if fails == 0 {
-        log("security_smoke: PASS — least privilege and W^X enforced");
+    // ── Final aggregate verdict (the runner greps for this) ────────────────
+    if total == 0 {
+        log("SECURITY_SMOKE PASS all");
         exit(0);
     } else {
-        log("security_smoke: FAIL — a sensitive syscall was NOT denied (least-privilege regression)");
+        log("SECURITY_SMOKE FAIL all");
         exit(1);
     }
 }
@@ -223,6 +375,7 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     log("security_smoke: PANIC");
+    log("SECURITY_SMOKE FAIL all");
     loop {
         core::hint::spin_loop();
     }

@@ -1,0 +1,96 @@
+# Semgrep rules enforcing that every syscall is gated by an explicit policy.
+#
+# Run with:  semgrep --config .semgrep/ --error
+# Covered by: scripts/ci/security-checks.sh and .github/workflows/security.yml
+#
+# These rules are a static-analysis backstop to scripts/ci/check-syscall-policy.sh
+# (which does the authoritative ABI-vs-policy diff). They catch the *shape* of a
+# regression — a dispatcher arm or an unjustified ExplicitlyUnrestricted — even
+# before the ABI/policy sets diverge.
+
+rules:
+  # ────────────────────────────────────────────────────────────────────────
+  # An `ExplicitlyUnrestricted` policy decision must be justified by a comment.
+  # A bare, comment-less ExplicitlyUnrestricted is how a sensitive syscall
+  # silently loses its gate.
+  # ────────────────────────────────────────────────────────────────────────
+  - id: explicitly-unrestricted-needs-comment
+    languages: [rust]
+    severity: ERROR
+    message: >
+      `ExplicitlyUnrestricted` must be preceded by a comment justifying why this
+      syscall needs no capability gate (e.g. "handler-gated by IoPort cap", or
+      "public, non-sensitive"). Add a justification or change the classification.
+    paths:
+      include:
+        - kernel/src/syscall/policy.rs
+    patterns:
+      - pattern: ExplicitlyUnrestricted
+      - pattern-not-inside: |
+          // ...
+          $X => ExplicitlyUnrestricted,
+      - pattern-not-inside: |
+          // ...
+          $A | $B => ExplicitlyUnrestricted,
+      - pattern-not: SysPolicy::ExplicitlyUnrestricted
+      - pattern-not: |
+          enum $E { ... }
+
+  # ────────────────────────────────────────────────────────────────────────
+  # A sensitive-resource handler must perform an authorization check
+  # (validate_thread_capability*, validate_io_port_access, ownership check, …).
+  # Flag handlers that touch device/IPC/FS resources but call none of them.
+  # ────────────────────────────────────────────────────────────────────────
+  - id: sensitive-handler-missing-cap-check
+    languages: [rust]
+    severity: WARNING
+    message: >
+      This syscall handler appears to touch a sensitive resource but does not
+      call any capability/ownership check (validate_thread_capability,
+      validate_io_port_access, port_owner, ownership comparison). Confirm the
+      policy table gates it, or add an in-handler check.
+    paths:
+      include:
+        - kernel/src/syscall/mod.rs
+    patterns:
+      - pattern: |
+          fn $HANDLER(...) -> u64 { ... }
+      - metavariable-regex:
+          metavariable: $HANDLER
+          regex: ^sys_(pci|dma|mmio|io_port|irq|map_framebuffer|set_video|shared_region_map)_.*
+      - pattern-not: |
+          fn $HANDLER(...) -> u64 {
+            ...
+            validate_io_port_access(...)
+            ...
+          }
+      - pattern-not: |
+          fn $HANDLER(...) -> u64 {
+            ...
+            validate_thread_capability(...)
+            ...
+          }
+      - pattern-not: |
+          fn $HANDLER(...) -> u64 {
+            ...
+            validate_thread_capability_by_type(...)
+            ...
+          }
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Forbid insecure ATXF/loader fallbacks being reintroduced (PR4 regression):
+  # accepting an unsigned or v1 image, or skipping authenticity verification.
+  # ────────────────────────────────────────────────────────────────────────
+  - id: no-unsigned-atxf-fallback
+    languages: [rust]
+    severity: ERROR
+    message: >
+      Possible reintroduction of an insecure ATXF fallback (unsigned/v1/skip
+      verification). PR4 requires ATXF v2 with authenticity verified before
+      mapping. Remove the fallback.
+    paths:
+      include:
+        - kernel/src/**
+        - shared/atxf/**
+    patterns:
+      - pattern-regex: (?i)(allow[_ ]?unsigned|skip[_ ]?(sig|signature|verif)|atxf[_ ]?v1[_ ]?fallback|insecure[_ ]?fallback)
