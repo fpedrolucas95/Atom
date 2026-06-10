@@ -30,16 +30,16 @@
 // - Called once during kernel boot, before spawning threads or enabling
 //   user-space execution
 
-pub mod pmm;
-pub mod heap;
-pub mod vm;
 pub mod addrspace;
-pub mod policy;
 pub mod admission;
-#[allow(dead_code)]
-pub mod vma;
+pub mod heap;
 #[allow(dead_code)]
 pub mod oom;
+pub mod pmm;
+pub mod policy;
+pub mod vm;
+#[allow(dead_code)]
+pub mod vma;
 
 use crate::boot::MemoryMap;
 use core::fmt;
@@ -66,32 +66,24 @@ pub enum ValidationError {
         required_alignment: usize,
     },
     /// Address is outside valid bounds
-    OutOfBounds {
-        addr: usize,
-        min: usize,
-        max: usize,
-    },
+    OutOfBounds { addr: usize, min: usize, max: usize },
     /// Attempted operation on a protected resource
-    ProtectedResource {
-        resource_id: u64,
-    },
+    ProtectedResource { resource_id: u64 },
     /// Operation attempted before subsystem initialization
     NotInitialized,
     /// Size parameter is invalid
-    InvalidSize {
-        size: usize,
-        max_size: usize,
-    },
+    InvalidSize { size: usize, max_size: usize },
     /// Registry capacity exhausted — cannot register more entries.
-    RegistryExhausted {
-        current_capacity: usize,
-    },
+    RegistryExhausted { current_capacity: usize },
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValidationError::Unaligned { addr, required_alignment } => {
+            ValidationError::Unaligned {
+                addr,
+                required_alignment,
+            } => {
                 write!(
                     f,
                     "Address 0x{:x} is not aligned to {} bytes",
@@ -116,11 +108,7 @@ impl fmt::Display for ValidationError {
                 write!(f, "Memory subsystem not yet initialized")
             }
             ValidationError::InvalidSize { size, max_size } => {
-                write!(
-                    f,
-                    "Invalid size {} (maximum allowed: {})",
-                    size, max_size
-                )
+                write!(f, "Invalid size {} (maximum allowed: {})", size, max_size)
             }
             ValidationError::RegistryExhausted { current_capacity } => {
                 write!(
@@ -150,7 +138,7 @@ impl fmt::Display for ValidationError {
 /// ```
 /// // Valid page-aligned address
 /// assert!(validate_page_alignment(0x1000).is_ok());
-/// 
+///
 /// // Invalid unaligned address
 /// assert!(validate_page_alignment(0x1001).is_err());
 /// ```
@@ -182,10 +170,10 @@ pub fn validate_page_alignment(addr: usize) -> Result<(), ValidationError> {
 /// ```
 /// // Valid page-aligned range
 /// assert!(validate_page_range(0x1000, 0x2000).is_ok());
-/// 
+///
 /// // Invalid range with unaligned start
 /// assert!(validate_page_range(0x1001, 0x2000).is_err());
-/// 
+///
 /// // Invalid range with unaligned end
 /// assert!(validate_page_range(0x1000, 0x2001).is_err());
 /// ```
@@ -251,7 +239,9 @@ mod tests {
     fn protected_resource_validation_rejects_protected_ids() {
         assert_eq!(
             validate_unprotected_resource(0x1234, true),
-            Err(ValidationError::ProtectedResource { resource_id: 0x1234 })
+            Err(ValidationError::ProtectedResource {
+                resource_id: 0x1234
+            })
         );
     }
 
@@ -283,5 +273,4 @@ mod tests {
             })
         );
     }
-
 }

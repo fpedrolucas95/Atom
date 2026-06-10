@@ -298,9 +298,7 @@ impl<'a> BitReader<'a> {
 
     fn read(&mut self, count: u32) -> Option<usize> {
         while self.bits < count {
-            let Some(&byte) = self.data.get(self.pos) else {
-                return None;
-            };
+            let &byte = self.data.get(self.pos)?;
             self.pos += 1;
             self.buffer |= (byte as u32) << self.bits;
             self.bits += 8;
@@ -320,8 +318,8 @@ fn lzw_decode(data: &[u8], min_code_size: u8, expected: usize) -> Result<Vec<u8>
 
     let mut prefix = [0u16; MAX_CODES];
     let mut suffix = [0u8; MAX_CODES];
-    for i in 0..clear_code {
-        suffix[i] = i as u8;
+    for (i, s) in suffix.iter_mut().enumerate().take(clear_code) {
+        *s = i as u8;
     }
 
     let mut stack = [0u8; MAX_CODES];

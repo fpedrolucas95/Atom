@@ -238,7 +238,8 @@ fn cluster_to_sector(cluster: u32) -> u32 {
 
 #[inline]
 fn entry_first_cluster(entry: &DirEntry) -> u32 {
-    ((u16::from_le(entry.first_cluster_hi) as u32) << 16) | (u16::from_le(entry.first_cluster_lo) as u32)
+    ((u16::from_le(entry.first_cluster_hi) as u32) << 16)
+        | (u16::from_le(entry.first_cluster_lo) as u32)
 }
 
 fn set_entry_first_cluster(entry: &mut DirEntry, cluster: u32) {
@@ -277,7 +278,9 @@ fn write_fat_entry(cluster: u32, value: u32) -> bool {
     );
 
     for fat_idx in 0..info.num_fats {
-        let fat_sector = info.fat_start_sector + fat_idx * info.fat_size_sectors + fat_offset / info.bytes_per_sector;
+        let fat_sector = info.fat_start_sector
+            + fat_idx * info.fat_size_sectors
+            + fat_offset / info.bytes_per_sector;
         let mut sector_data = match ahci::read_sectors(fat_sector as u64, 1) {
             Some(data) => data,
             None => return false,
@@ -473,7 +476,10 @@ fn decode_lfn_part(lfn: &LfnEntry) -> String {
         chars.push(c);
     }
 
-    chars.iter().filter_map(|&c| char::from_u32(c as u32)).collect()
+    chars
+        .iter()
+        .filter_map(|&c| char::from_u32(c as u32))
+        .collect()
 }
 
 fn find_in_directory_located(dir_cluster: u32, name: &str) -> Option<LocatedEntry> {
@@ -483,7 +489,8 @@ fn find_in_directory_located(dir_cluster: u32, name: &str) -> Option<LocatedEntr
     let mut lfn_name = String::new();
 
     while i + 32 <= dir_data.len() {
-        let entry = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
+        let entry =
+            unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
 
         if entry.name[0] == 0x00 {
             break;
@@ -494,7 +501,8 @@ fn find_in_directory_located(dir_cluster: u32, name: &str) -> Option<LocatedEntr
         }
 
         if entry.attr == ATTR_LFN {
-            let lfn = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
+            let lfn =
+                unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
             let part = decode_lfn_part(&lfn);
             if (lfn.order & 0x40) != 0 {
                 lfn_name = part;
@@ -642,9 +650,8 @@ fn write_dir_entry_at(dir_cluster: u32, entry_index: usize, entry: &DirEntry) ->
         None => return false,
     };
 
-    let entry_bytes = unsafe {
-        core::slice::from_raw_parts((entry as *const DirEntry) as *const u8, 32)
-    };
+    let entry_bytes =
+        unsafe { core::slice::from_raw_parts((entry as *const DirEntry) as *const u8, 32) };
     cluster_data[offset..offset + 32].copy_from_slice(entry_bytes);
     crate::log_info!(
         "fat32",
@@ -816,12 +823,14 @@ pub fn write_file(path: &str, data: &[u8]) -> bool {
     }
     crate::log_info!("fat32", "WRITE_FILE SYNC1 OK: path={}", path);
 
-    if old_cluster >= 2 {
-        if !free_cluster_chain(old_cluster) {
-            // New file contents are already durable; failure here only leaks space.
-            crate::log_warn!("fat32", "write_file: leaked old cluster chain for path {}", path);
-            return true;
-        }
+    if old_cluster >= 2 && !free_cluster_chain(old_cluster) {
+        // New file contents are already durable; failure here only leaks space.
+        crate::log_warn!(
+            "fat32",
+            "write_file: leaked old cluster chain for path {}",
+            path
+        );
+        return true;
     }
 
     let synced = sync();
@@ -850,10 +859,12 @@ pub fn mkdir(path: &str) -> bool {
     };
 
     let mut initial = alloc::vec![0u8; cluster_size()];
-    let dot = build_entry([b'.', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' '], ATTR_DIRECTORY, cluster, 0);
-    let dotdot = build_entry([b'.', b'.', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' '], ATTR_DIRECTORY, parent_cluster, 0);
-    let dot_bytes = unsafe { core::slice::from_raw_parts((&dot as *const DirEntry) as *const u8, 32) };
-    let dotdot_bytes = unsafe { core::slice::from_raw_parts((&dotdot as *const DirEntry) as *const u8, 32) };
+    let dot = build_entry(*b".          ", ATTR_DIRECTORY, cluster, 0);
+    let dotdot = build_entry(*b"..         ", ATTR_DIRECTORY, parent_cluster, 0);
+    let dot_bytes =
+        unsafe { core::slice::from_raw_parts((&dot as *const DirEntry) as *const u8, 32) };
+    let dotdot_bytes =
+        unsafe { core::slice::from_raw_parts((&dotdot as *const DirEntry) as *const u8, 32) };
     initial[0..32].copy_from_slice(dot_bytes);
     initial[32..64].copy_from_slice(dotdot_bytes);
     if !write_cluster(cluster, &initial) {
@@ -911,11 +922,9 @@ pub fn unlink(path: &str) -> bool {
     if !sync() {
         return false;
     }
-    if first_cluster >= 2 {
-        if !free_cluster_chain(first_cluster) {
-            crate::log_warn!("fat32", "unlink: leaked cluster chain for path {}", path);
-            return true;
-        }
+    if first_cluster >= 2 && !free_cluster_chain(first_cluster) {
+        crate::log_warn!("fat32", "unlink: leaked cluster chain for path {}", path);
+        return true;
     }
     sync()
 }
@@ -990,7 +999,10 @@ fn find_path_entry(path: &str) -> Option<LocatedEntry> {
     }
 
     let mut current_cluster = info.root_cluster;
-    let parts: Vec<&str> = trimmed.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = trimmed
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
     for (idx, part) in parts.iter().enumerate() {
         let located = find_in_directory_located(current_cluster, part)?;
         if idx == parts.len() - 1 {
@@ -1033,7 +1045,10 @@ pub fn sync() -> bool {
 pub fn stat_path(path: &str) -> Option<FileStat> {
     let trimmed = path.trim_start_matches(['/', '\\']);
     if trimmed.is_empty() {
-        return Some(FileStat { size: 0, is_dir: true });
+        return Some(FileStat {
+            size: 0,
+            is_dir: true,
+        });
     }
     let located = find_path_entry(path)?;
     Some(FileStat {
@@ -1050,7 +1065,8 @@ pub fn list_directory(path: &str) -> Option<Vec<String>> {
     let mut lfn_name = String::new();
 
     while i + 32 <= dir_data.len() {
-        let entry = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
+        let entry =
+            unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const DirEntry) };
 
         if entry.name[0] == 0x00 {
             break;
@@ -1060,7 +1076,8 @@ pub fn list_directory(path: &str) -> Option<Vec<String>> {
             continue;
         }
         if entry.attr == ATTR_LFN {
-            let lfn = unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
+            let lfn =
+                unsafe { core::ptr::read_unaligned(dir_data.as_ptr().add(i) as *const LfnEntry) };
             let part = decode_lfn_part(&lfn);
             if (lfn.order & 0x40) != 0 {
                 lfn_name = part;
@@ -1082,7 +1099,11 @@ pub fn list_directory(path: &str) -> Option<Vec<String>> {
             lfn_name.clone()
         };
 
-        let suffix = if entry.attr & ATTR_DIRECTORY != 0 { "/" } else { "" };
+        let suffix = if entry.attr & ATTR_DIRECTORY != 0 {
+            "/"
+        } else {
+            ""
+        };
         files.push(format!("{}{}", display_name, suffix));
         lfn_name.clear();
         i += 32;

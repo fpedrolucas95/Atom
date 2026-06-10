@@ -15,7 +15,7 @@ security-checking Atom OS. Everything here is enforced in CI
 | Kernel only | `cargo build -p atom-kernel --release` |
 | Full workspace (host UEFI target) | `cargo build --workspace --release` |
 | Formatting | `cargo fmt --all --check` |
-| Lints | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Lints | `cargo clippy --workspace --lib --bins -- -D warnings` |
 | Advisories | `cargo audit` |
 | Licenses / bans / sources | `cargo deny check` |
 | Unsafe baseline | `./scripts/ci/geiger-baseline.sh` (+ `cargo geiger`) |

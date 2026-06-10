@@ -1,7 +1,7 @@
 // Process management syscalls
 
-use crate::raw::{syscall0, syscall2, numbers::*};
 use crate::error::{SyscallError, SyscallResult};
+use crate::raw::{numbers::*, syscall0, syscall2};
 
 /// Process ID type
 pub type ProcessId = u64;
@@ -85,9 +85,7 @@ pub fn spawn_process(name: &str) -> SyscallResult<ProcessId> {
     let name_ptr = name.as_ptr() as u64;
     let name_len = name.len() as u64;
 
-    let result = unsafe {
-        syscall2(SYS_SPAWN_PROCESS, name_ptr, name_len)
-    };
+    let result = unsafe { syscall2(SYS_SPAWN_PROCESS, name_ptr, name_len) };
 
     // Check for errors - error codes are high values (u64::MAX - N)
     if crate::error::is_syscall_error(result) {
@@ -126,7 +124,7 @@ pub fn spawn_from_path(path: &str) -> SyscallResult<ProcessId> {
     if crate::error::is_syscall_error(result) {
         // Map filesystem-specific codes that SyscallError::from_raw does not
         // cover by default (they would become Unknown(v) otherwise).
-        use crate::error::{ENOENT, ENOTSUP, EIO};
+        use crate::error::{EIO, ENOENT, ENOTSUP};
         let err = if result == ENOENT {
             // Kernel could not locate the file on the FAT32 volume.
             SyscallError::NotFound
@@ -161,7 +159,7 @@ pub fn list_processes(buffer: &mut [ProcessInfo]) -> usize {
         syscall2(
             SYS_LIST_PROCESSES,
             buffer.as_mut_ptr() as u64,
-            buffer.len() as u64
+            buffer.len() as u64,
         )
     };
 

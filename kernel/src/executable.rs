@@ -8,8 +8,8 @@
 
 use alloc::vec::Vec;
 
-pub use atom_atxf::loader::{ExecutableImageV2, ExecutableSegment, SegmentKind};
 use atom_atxf::loader::{self, ParseError};
+pub use atom_atxf::loader::{ExecutableImageV2, ExecutableSegment, SegmentKind};
 use atom_atxf::{ATXF_DEV_VERIFYING_KEY, PERM_EXECUTE, PERM_READ, PERM_WRITE};
 
 use crate::log_info;

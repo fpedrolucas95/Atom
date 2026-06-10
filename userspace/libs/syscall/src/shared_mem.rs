@@ -1,7 +1,7 @@
 //! Shared Memory Syscalls
 
-use crate::error::{ESUCCESS, EINVAL, ENOMEM, EBUSY, EPERM, SyscallError, SyscallResult};
-use crate::raw::{syscall1, syscall3, numbers::*};
+use crate::error::{SyscallError, SyscallResult, EBUSY, EINVAL, ENOMEM, EPERM, ESUCCESS};
+use crate::raw::{numbers::*, syscall1, syscall3};
 
 pub type RegionId = u64;
 

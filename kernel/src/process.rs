@@ -8,22 +8,14 @@
 // and calls try_finalize_process_after_reap(). This prevents use-after-removal
 // of the process -> PML4 association during final stack/address-space cleanup.
 
-
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::cap::{
-    CapError,
-    CapHandle,
-    CapPermissions,
-    Capability,
-    CapabilityTable,
-    ResourceType,
-};
-use crate::{log_debug, log_error, log_info, log_warn};
+use crate::cap::{CapError, CapHandle, CapPermissions, Capability, CapabilityTable, ResourceType};
 use crate::thread::ThreadId;
+use crate::{log_debug, log_error, log_info, log_warn};
 
 const LOG_ORIGIN: &str = "process";
 
@@ -143,12 +135,9 @@ fn ensure_pml4_mapping(process_id: ProcessId, pml4_phys: u64) {
     let mut pml4_map = PML4_TO_PROCESS.lock();
     if let Some(existing) = pml4_map.get(&pml4_phys).copied() {
         debug_assert_eq!(
-            existing,
-            process_id,
+            existing, process_id,
             "PML4 0x{:X} already mapped to process {} while registering {}",
-            pml4_phys,
-            existing,
-            process_id
+            pml4_phys, existing, process_id
         );
     } else {
         pml4_map.insert(pml4_phys, process_id);
@@ -156,7 +145,11 @@ fn ensure_pml4_mapping(process_id: ProcessId, pml4_phys: u64) {
 }
 
 pub fn register_process(process_id: ProcessId, pml4_phys: u64, primary_thread: ThreadId) {
-    debug_assert_ne!(pml4_phys, 0, "userspace process {} must have non-zero PML4", process_id);
+    debug_assert_ne!(
+        pml4_phys, 0,
+        "userspace process {} must have non-zero PML4",
+        process_id
+    );
     debug_assert_eq!(
         process_id.raw(),
         primary_thread.raw(),
@@ -198,7 +191,11 @@ pub fn register_process(process_id: ProcessId, pml4_phys: u64, primary_thread: T
 }
 
 pub fn attach_thread_to_process(process_id: ProcessId, thread_id: ThreadId, pml4_phys: u64) {
-    debug_assert_ne!(pml4_phys, 0, "userspace process {} must have non-zero PML4", process_id);
+    debug_assert_ne!(
+        pml4_phys, 0,
+        "userspace process {} must have non-zero PML4",
+        process_id
+    );
 
     ensure_pml4_mapping(process_id, pml4_phys);
 
@@ -231,13 +228,9 @@ pub fn attach_thread_to_process(process_id: ProcessId, thread_id: ThreadId, pml4
     };
 
     debug_assert_eq!(
-        process.pml4_phys,
-        pml4_phys,
+        process.pml4_phys, pml4_phys,
         "Thread {} tried to join process {} with mismatched PML4 0x{:X} != 0x{:X}",
-        thread_id,
-        process_id,
-        pml4_phys,
-        process.pml4_phys
+        thread_id, process_id, pml4_phys, process.pml4_phys
     );
 
     if !process.threads.contains(&thread_id) {
@@ -263,19 +256,14 @@ pub fn debug_assert_thread_process_alignment(
     };
 
     debug_assert_eq!(
-        process.id,
-        process_id,
+        process.id, process_id,
         "Process registry entry corrupted for process {}",
         process_id
     );
     debug_assert_eq!(
-        process.pml4_phys,
-        pml4_phys,
+        process.pml4_phys, pml4_phys,
         "Thread {} cache PML4 0x{:X} does not match process {} PML4 0x{:X}",
-        thread_id,
-        pml4_phys,
-        process_id,
-        process.pml4_phys
+        thread_id, pml4_phys, process_id, process.pml4_phys
     );
     // AUDIT: Class B — operational condition, will be replaced with structured error
     if !process.threads.contains(&thread_id) {
@@ -289,11 +277,9 @@ pub fn debug_assert_thread_process_alignment(
 
     if process_id.raw() == thread_id.raw() {
         debug_assert_eq!(
-            process.primary_thread,
-            thread_id,
+            process.primary_thread, thread_id,
             "Process {} primary thread must remain {}",
-            process_id,
-            thread_id
+            process_id, thread_id
         );
     }
 }
@@ -493,7 +479,11 @@ pub fn terminate_process(
         pml4_phys
     );
 
-    log_debug!(LOG_ORIGIN, "[terminate] step=2 pid={} block_new_ops=true", process_id);
+    log_debug!(
+        LOG_ORIGIN,
+        "[terminate] step=2 pid={} block_new_ops=true",
+        process_id
+    );
 
     for thread_id in &thread_ids {
         let _ = crate::thread::set_thread_state(*thread_id, crate::thread::ThreadState::Exited);
@@ -517,11 +507,19 @@ pub fn terminate_process(
     );
 
     crate::shared_mem::cleanup_process_shared_memory(process_id);
-    log_debug!(LOG_ORIGIN, "[terminate] step=5 pid={} shared_mem_cleanup=done", process_id);
+    log_debug!(
+        LOG_ORIGIN,
+        "[terminate] step=5 pid={} shared_mem_cleanup=done",
+        process_id
+    );
 
     crate::cap::revoke_all_process_capabilities(process_id);
     crate::syscall::close_fds_for_process(process_id);
-    log_debug!(LOG_ORIGIN, "[terminate] step=6 pid={} caps_fd_cleanup=done", process_id);
+    log_debug!(
+        LOG_ORIGIN,
+        "[terminate] step=6 pid={} caps_fd_cleanup=done",
+        process_id
+    );
 
     let thread_reason = reason.as_thread_reason();
     let mut terminated_threads = 0usize;
@@ -540,10 +538,18 @@ pub fn terminate_process(
     );
 
     reset_process_memory_accounting(process_id);
-    log_debug!(LOG_ORIGIN, "[terminate] step=8 pid={} accounting=zeroed", process_id);
+    log_debug!(
+        LOG_ORIGIN,
+        "[terminate] step=8 pid={} accounting=zeroed",
+        process_id
+    );
 
     mark_process_terminated(process_id);
-    log_info!(LOG_ORIGIN, "[terminate] step=9 pid={} state=terminated", process_id);
+    log_info!(
+        LOG_ORIGIN,
+        "[terminate] step=9 pid={} state=terminated",
+        process_id
+    );
 
     Ok(())
 }
@@ -566,13 +572,9 @@ pub fn claim_process_cleanup(
     };
 
     debug_assert_eq!(
-        process.pml4_phys,
-        pml4_phys,
+        process.pml4_phys, pml4_phys,
         "Process {} PML4 0x{:X} must match exiting thread {} PML4 0x{:X}",
-        process_id,
-        process.pml4_phys,
-        exiting_thread,
-        pml4_phys
+        process_id, process.pml4_phys, exiting_thread, pml4_phys
     );
     // AUDIT: Class B — operational condition, will be replaced with structured error
     if !process.threads.contains(&exiting_thread) {
@@ -623,12 +625,9 @@ pub fn add_process_capability(
     let process = registry.get_mut(&process_id).ok_or(CapError::NotFound)?;
     debug_assert_capability_store_owner(process);
     debug_assert_eq!(
-        capability.owner,
-        process_id,
+        capability.owner, process_id,
         "Capability {} owner {} does not match target process {}",
-        capability.handle,
-        capability.owner,
-        process_id
+        capability.handle, capability.owner, process_id
     );
     process.capability_table.insert(capability)
 }
@@ -643,10 +642,7 @@ pub fn remove_process_capability(
     process.capability_table.remove(cap_handle)
 }
 
-pub fn get_process_capability(
-    process_id: ProcessId,
-    cap_handle: CapHandle,
-) -> Option<Capability> {
+pub fn get_process_capability(process_id: ProcessId, cap_handle: CapHandle) -> Option<Capability> {
     let registry = PROCESS_REGISTRY.lock();
     let process = registry.get(&process_id)?;
     debug_assert_capability_store_owner(process);
@@ -819,7 +815,8 @@ pub fn account_process_resident_pages_add(
 
     let mut registry = PROCESS_REGISTRY.lock();
     if let Some(process) = registry.get_mut(&process_id) {
-        process.resident_private_pages = process.resident_private_pages.saturating_add(private_pages);
+        process.resident_private_pages =
+            process.resident_private_pages.saturating_add(private_pages);
         process.resident_shared_pages = process.resident_shared_pages.saturating_add(shared_pages);
     }
 }
@@ -836,7 +833,8 @@ pub fn account_process_resident_pages_sub(
 
     let mut registry = PROCESS_REGISTRY.lock();
     if let Some(process) = registry.get_mut(&process_id) {
-        process.resident_private_pages = process.resident_private_pages.saturating_sub(private_pages);
+        process.resident_private_pages =
+            process.resident_private_pages.saturating_sub(private_pages);
         process.resident_shared_pages = process.resident_shared_pages.saturating_sub(shared_pages);
     }
 }
@@ -1024,9 +1022,9 @@ pub fn verify_process_accounting_sample(limit: usize, context: &'static str) {
 pub fn set_process_memory_limit(process_id: ProcessId, limit_pages: usize) -> Result<(), ()> {
     let mut registry = PROCESS_REGISTRY.lock();
     let process = registry.get_mut(&process_id).ok_or(())?;
-    
+
     process.memory_limit_pages = limit_pages;
-    
+
     log_info!(
         LOG_ORIGIN,
         "Set memory limit for process {} to {} pages ({} KB)",
@@ -1034,7 +1032,7 @@ pub fn set_process_memory_limit(process_id: ProcessId, limit_pages: usize) -> Re
         limit_pages,
         limit_pages * 4 // 4KB pages
     );
-    
+
     Ok(())
 }
 

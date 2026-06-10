@@ -13,11 +13,11 @@
 // - Kernel threads are never selected as OOM victims
 // - The system avoids killing the last remaining userspace process if possible
 
+#[cfg(debug_assertions)]
+use crate::log_debug;
 use crate::mm::pmm;
 use crate::process::{ProcessId, ProcessMemorySnapshot};
 use crate::{log_info, log_warn};
-#[cfg(debug_assertions)]
-use crate::log_debug;
 
 const LOG_ORIGIN: &str = "oom";
 
@@ -68,10 +68,7 @@ impl MemoryPressureInfo {
 
     /// Check if memory reclamation should be attempted
     pub fn should_reclaim(&self) -> bool {
-        matches!(
-            self.level,
-            MemoryPressure::Critical | MemoryPressure::Oom
-        )
+        matches!(self.level, MemoryPressure::Critical | MemoryPressure::Oom)
     }
 }
 
@@ -229,10 +226,7 @@ pub enum OomError {
 #[derive(Debug)]
 pub enum OomResult {
     /// Successfully killed a process, freeing approximately this many pages
-    Killed {
-        pid: ProcessId,
-        pages_freed: usize,
-    },
+    Killed { pid: ProcessId, pages_freed: usize },
     /// No killable process found
     NoVictim {
         reason: NoVictimReason,
@@ -261,8 +255,8 @@ struct VictimCandidate {
 }
 
 fn select_victim(snapshot: &[ProcessMemorySnapshot]) -> Option<VictimCandidate> {
-    let current_process = crate::sched::current_thread()
-        .and_then(|tid| crate::thread::get_thread_process_id(tid));
+    let current_process =
+        crate::sched::current_thread().and_then(crate::thread::get_thread_process_id);
 
     let mut best: Option<VictimCandidate> = None;
     for process in snapshot {
@@ -279,9 +273,7 @@ fn select_victim(snapshot: &[ProcessMemorySnapshot]) -> Option<VictimCandidate> 
         let over_limit_pages = if process.limit_pages == 0 {
             0
         } else {
-            process
-                .resident_pages
-                .saturating_sub(process.limit_pages)
+            process.resident_pages.saturating_sub(process.limit_pages)
         };
         let reason = if over_limit_pages > 0 {
             VictimReason::OverLimit
@@ -345,10 +337,17 @@ pub fn oom_kill() -> OomResult {
 
     // Try reclamation strategies if pressure is Critical or Oom
     if pressure.should_reclaim() {
-        log_info!(LOG_ORIGIN, "Attempting memory reclamation before victim selection");
-        
+        log_info!(
+            LOG_ORIGIN,
+            "Attempting memory reclamation before victim selection"
+        );
+
         // Try each reclamation strategy in order
-        for strategy in [ReclaimStrategy::CacheEviction, ReclaimStrategy::CompactMemory, ReclaimStrategy::SwapOut] {
+        for strategy in [
+            ReclaimStrategy::CacheEviction,
+            ReclaimStrategy::CompactMemory,
+            ReclaimStrategy::SwapOut,
+        ] {
             match try_reclaim_memory(strategy) {
                 Ok(pages_freed) if pages_freed > 0 => {
                     log_info!(
@@ -370,12 +369,20 @@ pub fn oom_kill() -> OomResult {
                     continue;
                 }
                 Err(err) => {
-                    log_warn!(LOG_ORIGIN, "Reclamation strategy {:?} failed: {:?}", strategy, err);
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "Reclamation strategy {:?} failed: {:?}",
+                        strategy,
+                        err
+                    );
                 }
             }
         }
-        
-        log_info!(LOG_ORIGIN, "All reclamation strategies exhausted, proceeding with victim selection");
+
+        log_info!(
+            LOG_ORIGIN,
+            "All reclamation strategies exhausted, proceeding with victim selection"
+        );
     }
 
     let process_snapshot = crate::process::collect_process_memory_snapshot();
@@ -413,8 +420,9 @@ pub fn oom_kill() -> OomResult {
                 Ok(()) => {
                     let (_, free_after) = pmm::get_stats();
                     let freed_pages = free_after.saturating_sub(free_before);
-                    let teardown_ms =
-                        crate::interrupts::get_ticks().saturating_sub(start_tick).saturating_mul(10);
+                    let teardown_ms = crate::interrupts::get_ticks()
+                        .saturating_sub(start_tick)
+                        .saturating_mul(10);
 
                     log_warn!(
                         LOG_ORIGIN,
@@ -429,9 +437,10 @@ pub fn oom_kill() -> OomResult {
                     {
                         match crate::process::verify_process_accounting(victim.pid) {
                             Ok(()) => {
-                                let remaining = crate::process::get_process_memory_usage(victim.pid)
-                                    .map(|usage| usage.resident_pages)
-                                    .unwrap_or(0);
+                                let remaining =
+                                    crate::process::get_process_memory_usage(victim.pid)
+                                        .map(|usage| usage.resident_pages)
+                                        .unwrap_or(0);
                                 if remaining > 0 {
                                     log_warn!(
                                         LOG_ORIGIN,
@@ -479,8 +488,8 @@ pub fn oom_kill() -> OomResult {
         }
         None => {
             // No victim found - determine reason and fallback action
-            let current_process = crate::sched::current_thread()
-                .and_then(|tid| crate::thread::get_thread_process_id(tid));
+            let current_process =
+                crate::sched::current_thread().and_then(crate::thread::get_thread_process_id);
             let has_active_process = process_snapshot
                 .iter()
                 .any(|process| !process.terminating && !process.terminated);
@@ -551,7 +560,10 @@ pub fn try_reclaim() -> bool {
             false
         }
         MemoryPressure::Critical => {
-            log_warn!(LOG_ORIGIN, "Critical memory pressure — future allocations may trigger OOM");
+            log_warn!(
+                LOG_ORIGIN,
+                "Critical memory pressure — future allocations may trigger OOM"
+            );
             // In the future, this is where page cache eviction would go
             false
         }
@@ -567,12 +579,28 @@ pub fn try_reclaim() -> bool {
                     );
                     true
                 }
-                OomResult::NoVictim { reason, fallback_action } => {
-                    log_warn!(LOG_ORIGIN, "No OOM victim found: {:?}, fallback: {:?}", reason, fallback_action);
+                OomResult::NoVictim {
+                    reason,
+                    fallback_action,
+                } => {
+                    log_warn!(
+                        LOG_ORIGIN,
+                        "No OOM victim found: {:?}, fallback: {:?}",
+                        reason,
+                        fallback_action
+                    );
                     false
                 }
-                OomResult::Reclaimed { strategy, pages_freed } => {
-                    log_info!(LOG_ORIGIN, "Reclaimed {} pages using {:?}", pages_freed, strategy);
+                OomResult::Reclaimed {
+                    strategy,
+                    pages_freed,
+                } => {
+                    log_info!(
+                        LOG_ORIGIN,
+                        "Reclaimed {} pages using {:?}",
+                        pages_freed,
+                        strategy
+                    );
                     true
                 }
             }
@@ -596,7 +624,11 @@ pub fn try_reclaim() -> bool {
 /// # Requirements
 /// Implements Req 6.1, Req 6.5
 pub fn try_reclaim_memory(strategy: ReclaimStrategy) -> Result<usize, OomError> {
-    log_info!(LOG_ORIGIN, "Attempting memory reclamation using strategy: {:?}", strategy);
+    log_info!(
+        LOG_ORIGIN,
+        "Attempting memory reclamation using strategy: {:?}",
+        strategy
+    );
 
     match strategy {
         ReclaimStrategy::CacheEviction => {
@@ -622,7 +654,11 @@ pub fn try_reclaim_memory(strategy: ReclaimStrategy) -> Result<usize, OomError> 
 
 pub fn init() {
     let pressure = check_pressure();
-    log_info!(LOG_ORIGIN, "OOM subsystem initialized — current pressure: {:?}", pressure);
+    log_info!(
+        LOG_ORIGIN,
+        "OOM subsystem initialized — current pressure: {:?}",
+        pressure
+    );
 }
 
 #[cfg(test)]
@@ -641,7 +677,7 @@ mod tests {
             fragmentation_score: 0.6,
             processes_over_limit: 2,
         };
-        
+
         assert_eq!(info.level, MemoryPressure::Low);
         assert_eq!(info.free_pages, 5000);
         assert_eq!(info.total_pages, 10000);
@@ -663,7 +699,10 @@ mod tests {
             fragmentation_score: 0.5,
             processes_over_limit: 0,
         };
-        assert!(info_oom.should_trigger_oom(), "OOM level should trigger OOM");
+        assert!(
+            info_oom.should_trigger_oom(),
+            "OOM level should trigger OOM"
+        );
 
         let info_low_free = MemoryPressureInfo {
             level: MemoryPressure::Critical,
@@ -674,7 +713,10 @@ mod tests {
             fragmentation_score: 0.75,
             processes_over_limit: 0,
         };
-        assert!(info_low_free.should_trigger_oom(), "Low free pages with small run should trigger OOM");
+        assert!(
+            info_low_free.should_trigger_oom(),
+            "Low free pages with small run should trigger OOM"
+        );
 
         let info_ok = MemoryPressureInfo {
             level: MemoryPressure::Low,
@@ -685,7 +727,10 @@ mod tests {
             fragmentation_score: 0.5,
             processes_over_limit: 0,
         };
-        assert!(!info_ok.should_trigger_oom(), "Healthy memory should not trigger OOM");
+        assert!(
+            !info_ok.should_trigger_oom(),
+            "Healthy memory should not trigger OOM"
+        );
     }
 
     #[test]
@@ -700,7 +745,10 @@ mod tests {
             fragmentation_score: 0.5,
             processes_over_limit: 0,
         };
-        assert!(info_critical.should_reclaim(), "Critical pressure should trigger reclaim");
+        assert!(
+            info_critical.should_reclaim(),
+            "Critical pressure should trigger reclaim"
+        );
 
         let info_oom = MemoryPressureInfo {
             level: MemoryPressure::Oom,
@@ -711,7 +759,10 @@ mod tests {
             fragmentation_score: 0.5,
             processes_over_limit: 0,
         };
-        assert!(info_oom.should_reclaim(), "OOM pressure should trigger reclaim");
+        assert!(
+            info_oom.should_reclaim(),
+            "OOM pressure should trigger reclaim"
+        );
 
         let info_low = MemoryPressureInfo {
             level: MemoryPressure::Low,
@@ -722,7 +773,10 @@ mod tests {
             fragmentation_score: 0.5,
             processes_over_limit: 0,
         };
-        assert!(!info_low.should_reclaim(), "Low pressure should not trigger reclaim");
+        assert!(
+            !info_low.should_reclaim(),
+            "Low pressure should not trigger reclaim"
+        );
     }
 
     #[test]
@@ -738,7 +792,10 @@ mod tests {
             fragmentation_score: 0.0,
             processes_over_limit: 0,
         };
-        assert_eq!(no_frag.fragmentation_score, 0.0, "No fragmentation should have score 0.0");
+        assert_eq!(
+            no_frag.fragmentation_score, 0.0,
+            "No fragmentation should have score 0.0"
+        );
 
         // High fragmentation: free pages are scattered
         let high_frag = MemoryPressureInfo {
@@ -750,7 +807,10 @@ mod tests {
             fragmentation_score: 0.9,
             processes_over_limit: 0,
         };
-        assert!(high_frag.fragmentation_score > 0.8, "High fragmentation should have score > 0.8");
+        assert!(
+            high_frag.fragmentation_score > 0.8,
+            "High fragmentation should have score > 0.8"
+        );
     }
 
     #[test]
@@ -760,10 +820,10 @@ mod tests {
         // 1. check_memory_pressure_detailed() is called before victim selection
         // 2. Reclamation strategies are attempted when pressure is Critical or Oom
         // 3. Pressure info is included in log messages
-        
+
         // Note: This is a structural test that verifies the integration exists.
         // Actual behavior testing would require mocking the PMM and thread subsystems.
-        
+
         // Verify that MemoryPressureInfo has all required fields for logging
         let pressure = MemoryPressureInfo {
             level: MemoryPressure::Oom,
@@ -774,12 +834,17 @@ mod tests {
             fragmentation_score: 0.8,
             processes_over_limit: 2,
         };
-        
+
         // Verify should_reclaim returns true for Oom pressure
-        assert!(pressure.should_reclaim(), "Oom pressure should trigger reclamation");
-        
+        assert!(
+            pressure.should_reclaim(),
+            "Oom pressure should trigger reclamation"
+        );
+
         // Verify should_trigger_oom returns true for Oom pressure
-        assert!(pressure.should_trigger_oom(), "Oom pressure should trigger OOM killer");
+        assert!(
+            pressure.should_trigger_oom(),
+            "Oom pressure should trigger OOM killer"
+        );
     }
 }
-

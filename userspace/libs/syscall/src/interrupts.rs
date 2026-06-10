@@ -1,8 +1,8 @@
 // Interrupt handling syscalls
 
-use crate::raw::{syscall2, numbers::*};
-use crate::error::{ESUCCESS, SyscallError, SyscallResult};
+use crate::error::{SyscallError, SyscallResult, ESUCCESS};
 use crate::ipc::PortId;
+use crate::raw::{numbers::*, syscall2};
 
 /// Register an IPC port to receive notifications for a hardware IRQ.
 ///

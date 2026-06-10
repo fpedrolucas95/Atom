@@ -6,11 +6,13 @@
 extern crate alloc;
 use alloc::string::String;
 
-use libgui::color::Color;
-use libgui::font::{FONT_WIDTH, FONT_HEIGHT};
-use libgui::surface::Surface;
-use atom_theme::colors::{ATOM_COLOR_TEXT_PRIMARY, ATOM_COLOR_TEXT_SECONDARY, ATOM_COLOR_TEXT_MUTED};
+use atom_theme::colors::{
+    ATOM_COLOR_TEXT_MUTED, ATOM_COLOR_TEXT_PRIMARY, ATOM_COLOR_TEXT_SECONDARY,
+};
 use atom_theme::TypographyStyle;
+use libgui::color::Color;
+use libgui::font::{FONT_HEIGHT, FONT_WIDTH};
+use libgui::surface::Surface;
 
 /// Semantic colour role for labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,18 +30,18 @@ pub enum LabelColor {
 impl LabelColor {
     pub fn to_color(self) -> Color {
         match self {
-            Self::Primary           => ATOM_COLOR_TEXT_PRIMARY.into(),
-            Self::Secondary         => ATOM_COLOR_TEXT_SECONDARY.into(),
-            Self::Muted             => ATOM_COLOR_TEXT_MUTED.into(),
-            Self::Custom(c)         => c,
+            Self::Primary => ATOM_COLOR_TEXT_PRIMARY.into(),
+            Self::Secondary => ATOM_COLOR_TEXT_SECONDARY.into(),
+            Self::Muted => ATOM_COLOR_TEXT_MUTED.into(),
+            Self::Custom(c) => c,
         }
     }
 }
 
 /// A single-line text label.
 pub struct TextLabel {
-    pub x:    u32,
-    pub y:    u32,
+    pub x: u32,
+    pub y: u32,
     pub text: String,
     pub color: LabelColor,
     /// Background color (transparent = fully opaque black fill from draw_string;
@@ -54,24 +56,40 @@ impl TextLabel {
     /// Create a body-text label at the given position.
     pub fn new(x: u32, y: u32, text: impl Into<String>) -> Self {
         Self {
-            x, y,
-            text:  text.into(),
+            x,
+            y,
+            text: text.into(),
             color: LabelColor::Primary,
-            bg:    None,
+            bg: None,
             style: atom_theme::typography::BODY,
         }
     }
 
     /// Apply `LabelColor::Secondary`.
-    pub fn secondary(mut self) -> Self { self.color = LabelColor::Secondary; self }
+    pub fn secondary(mut self) -> Self {
+        self.color = LabelColor::Secondary;
+        self
+    }
     /// Apply `LabelColor::Muted`.
-    pub fn muted(mut self) -> Self { self.color = LabelColor::Muted; self }
+    pub fn muted(mut self) -> Self {
+        self.color = LabelColor::Muted;
+        self
+    }
     /// Apply a custom colour.
-    pub fn with_color(mut self, c: Color) -> Self { self.color = LabelColor::Custom(c); self }
+    pub fn with_color(mut self, c: Color) -> Self {
+        self.color = LabelColor::Custom(c);
+        self
+    }
     /// Set background (used to clear the label area before drawing glyphs).
-    pub fn with_bg(mut self, bg: Color) -> Self { self.bg = Some(bg); self }
+    pub fn with_bg(mut self, bg: Color) -> Self {
+        self.bg = Some(bg);
+        self
+    }
     /// Set the typography style hint.
-    pub fn with_style(mut self, style: TypographyStyle) -> Self { self.style = style; self }
+    pub fn with_style(mut self, style: TypographyStyle) -> Self {
+        self.style = style;
+        self
+    }
 
     /// Width of the label in pixels (characters × FONT_WIDTH).
     pub fn pixel_width(&self) -> u32 {
@@ -107,7 +125,7 @@ impl TextLabel {
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x as i32
             && y >= self.y as i32
-            && x < (self.x + self.pixel_width())  as i32
+            && x < (self.x + self.pixel_width()) as i32
             && y < (self.y + self.pixel_height()) as i32
     }
 }

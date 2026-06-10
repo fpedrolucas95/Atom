@@ -1,6 +1,6 @@
 // Debug and logging syscalls
 
-use crate::raw::{syscall2, numbers::*};
+use crate::raw::{numbers::*, syscall2};
 
 /// Send a debug log message to the kernel
 ///
@@ -33,9 +33,7 @@ pub fn get_memory_info() -> (u64, u64) {
     use crate::raw::syscall1;
 
     let mut info = [0u64; 2];
-    let result = unsafe {
-        syscall1(SYS_GET_MEMORY_INFO, info.as_mut_ptr() as u64)
-    };
+    let result = unsafe { syscall1(SYS_GET_MEMORY_INFO, info.as_mut_ptr() as u64) };
 
     // Check if syscall succeeded (ESUCCESS = 0)
     if result == 0 {
@@ -59,7 +57,7 @@ pub fn read_klog(buffer: &mut [u8]) -> usize {
         syscall2(
             SYS_READ_KLOG,
             buffer.as_mut_ptr() as u64,
-            buffer.len() as u64
+            buffer.len() as u64,
         )
     };
 
@@ -84,7 +82,7 @@ pub fn get_cpu_brand(buffer: &mut [u8]) -> usize {
         syscall2(
             SYS_GET_CPU_BRAND,
             buffer.as_mut_ptr() as u64,
-            buffer.len() as u64
+            buffer.len() as u64,
         )
     };
 

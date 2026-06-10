@@ -12,25 +12,25 @@
 #![no_std]
 #![allow(dead_code)]
 
-pub mod raw;
-pub mod thread;
-pub mod input;
-pub mod interrupts;
-pub mod graphics;
-pub mod io;
-pub mod ipc;
+pub mod cap;
 pub mod debug;
 pub mod error;
-pub mod process;
 pub mod fs;
-pub mod vm;
+pub mod graphics;
+pub mod input;
+pub mod interrupts;
+pub mod io;
+pub mod ipc;
+pub mod process;
+pub mod raw;
 pub mod shared_mem;
-pub mod cap;
+pub mod thread;
+pub mod vm;
 
 pub use atom_abi;
 
 // Re-export common types at crate root
-pub use error::{SyscallError, SyscallResult};
-pub use raw::{syscall0, syscall1, syscall2, syscall3};
-pub use fs::{FsError, FsResult, FsStat, FsStatvfs, FsDirent, OpenFlags, FileType as FsFileType};
 pub use atom_abi::{UserOffset, UserVirtAddr};
+pub use error::{SyscallError, SyscallResult};
+pub use fs::{FileType as FsFileType, FsDirent, FsError, FsResult, FsStat, FsStatvfs, OpenFlags};
+pub use raw::{syscall0, syscall1, syscall2, syscall3};

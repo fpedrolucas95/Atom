@@ -7,7 +7,7 @@
 // - Global flags for cross-subsystem signaling
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool};
+use core::sync::atomic::AtomicBool;
 
 #[allow(dead_code)]
 #[inline(always)]
@@ -38,6 +38,6 @@ where
 
     result
 }
-                            
+
 #[allow(dead_code)]
 pub static UI_DIRTY: AtomicBool = AtomicBool::new(false);

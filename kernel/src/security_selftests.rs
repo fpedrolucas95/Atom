@@ -65,7 +65,11 @@ fn aslr_base_invariants() {
     let first = random::random_user_base(span).expect("ASLR base unavailable");
     let second = random::random_user_base(span).expect("ASLR base unavailable");
     for base in [first, second] {
-        assert_eq!(base % (2 * 1024 * 1024), 0, "ASLR base must be 2MiB-aligned");
+        assert_eq!(
+            base % (2 * 1024 * 1024),
+            0,
+            "ASLR base must be 2MiB-aligned"
+        );
         assert!(base >= 0x0100_0000, "ASLR base below user window");
     }
     assert_ne!(first, second, "consecutive ASLR bases must differ");

@@ -110,7 +110,7 @@ fn parse_status(response: &[u8]) -> u16 {
     let status_bytes = &first_line[after_version..after_version + 3];
     let mut status: u16 = 0;
     for &b in status_bytes {
-        if b >= b'0' && b <= b'9' {
+        if b.is_ascii_digit() {
             status = status * 10 + (b - b'0') as u16;
         } else {
             return 0;
@@ -264,7 +264,7 @@ fn starts_with_ignore_ascii_case(value: &[u8], prefix: &[u8]) -> bool {
         && value[..prefix.len()]
             .iter()
             .zip(prefix.iter())
-            .all(|(&a, &b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            .all(|(&a, &b)| a.eq_ignore_ascii_case(&b))
 }
 
 fn contains_ignore_ascii_case(value: &[u8], needle: &[u8]) -> bool {
@@ -278,5 +278,5 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
-            .all(|(&a, &b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            .all(|(&a, &b)| a.eq_ignore_ascii_case(&b))
 }

@@ -95,8 +95,7 @@ impl NsRegisterRequest {
             return None;
         }
         let port = u64::from_le_bytes([
-            data[4], data[5], data[6], data[7],
-            data[8], data[9], data[10], data[11],
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
         ]);
         let name_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
         if data.len() < 16 + name_len {
@@ -163,8 +162,7 @@ impl NsPortResponse {
             return None;
         }
         let port = u64::from_le_bytes([
-            data[4], data[5], data[6], data[7],
-            data[8], data[9], data[10], data[11],
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
         ]);
         Some(Self { port })
     }
@@ -214,11 +212,20 @@ impl NsListResponse {
                 return None;
             }
             let port = u64::from_le_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-                data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
             ]);
             let name_len = u32::from_le_bytes([
-                data[offset + 8], data[offset + 9], data[offset + 10], data[offset + 11],
+                data[offset + 8],
+                data[offset + 9],
+                data[offset + 10],
+                data[offset + 11],
             ]) as usize;
             offset += 12;
 
@@ -380,8 +387,7 @@ impl SmStatusResponse {
         Some(Self {
             state: ServiceState::from_u8(data[4])?,
             pid: u64::from_le_bytes([
-                data[5], data[6], data[7], data[8],
-                data[9], data[10], data[11], data[12],
+                data[5], data[6], data[7], data[8], data[9], data[10], data[11], data[12],
             ]),
             restart_count: u32::from_le_bytes([data[13], data[14], data[15], data[16]]),
         })
@@ -435,11 +441,20 @@ impl SmListResponse {
             }
             let state = ServiceState::from_u8(data[offset])?;
             let pid = u64::from_le_bytes([
-                data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4],
-                data[offset + 5], data[offset + 6], data[offset + 7], data[offset + 8],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+                data[offset + 8],
             ]);
             let name_len = u32::from_le_bytes([
-                data[offset + 9], data[offset + 10], data[offset + 11], data[offset + 12],
+                data[offset + 9],
+                data[offset + 10],
+                data[offset + 11],
+                data[offset + 12],
             ]) as usize;
             offset += 13;
 

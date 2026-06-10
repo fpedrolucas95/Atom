@@ -68,30 +68,30 @@ pub mod colors {
     // ── Backgrounds ──────────────────────────────────────────────────────────
 
     /// Main desktop / app background                   `#0B0E13`
-    pub const ATOM_COLOR_BG: Color          = Color::new(0x0B, 0x0E, 0x13);
+    pub const ATOM_COLOR_BG: Color = Color::new(0x0B, 0x0E, 0x13);
     /// Surface (cards, panels, dialogs)                `#141922`
-    pub const ATOM_COLOR_SURFACE: Color     = Color::new(0x14, 0x19, 0x22);
+    pub const ATOM_COLOR_SURFACE: Color = Color::new(0x14, 0x19, 0x22);
     /// Alternate / elevated surface                    `#1B2130`
     pub const ATOM_COLOR_SURFACE_ALT: Color = Color::new(0x1B, 0x21, 0x30);
 
     // ── Borders ──────────────────────────────────────────────────────────────
 
     /// Default border                                  `#2A3142`
-    pub const ATOM_COLOR_BORDER: Color      = Color::new(0x2A, 0x31, 0x42);
+    pub const ATOM_COLOR_BORDER: Color = Color::new(0x2A, 0x31, 0x42);
 
     // ── Text ─────────────────────────────────────────────────────────────────
 
     /// Primary text                                    `#E8ECF4`
-    pub const ATOM_COLOR_TEXT_PRIMARY: Color   = Color::new(0xE8, 0xEC, 0xF4);
+    pub const ATOM_COLOR_TEXT_PRIMARY: Color = Color::new(0xE8, 0xEC, 0xF4);
     /// Secondary / subheading text                     `#AAB2C5`
     pub const ATOM_COLOR_TEXT_SECONDARY: Color = Color::new(0xAA, 0xB2, 0xC5);
     /// Muted / disabled text                           `#6C7486`
-    pub const ATOM_COLOR_TEXT_MUTED: Color     = Color::new(0x6C, 0x74, 0x86);
+    pub const ATOM_COLOR_TEXT_MUTED: Color = Color::new(0x6C, 0x74, 0x86);
 
     // ── Accent ───────────────────────────────────────────────────────────────
 
     /// Primary accent blue                             `#4C8DFF`
-    pub const ATOM_COLOR_ACCENT: Color      = Color::new(0x4C, 0x8D, 0xFF);
+    pub const ATOM_COLOR_ACCENT: Color = Color::new(0x4C, 0x8D, 0xFF);
     /// Accent glow / hover state                       `#6AA8FF`
     pub const ATOM_COLOR_ACCENT_GLOW: Color = Color::new(0x6A, 0xA8, 0xFF);
 
@@ -102,50 +102,50 @@ pub mod colors {
     /// Warning (amber)                                 `#F59E0B`
     pub const ATOM_COLOR_WARNING: Color = Color::new(0xF5, 0x9E, 0x0B);
     /// Error / danger (red)                            `#EF4444`
-    pub const ATOM_COLOR_ERROR: Color   = Color::new(0xEF, 0x44, 0x44);
+    pub const ATOM_COLOR_ERROR: Color = Color::new(0xEF, 0x44, 0x44);
 
     // ── Gradient endpoints ───────────────────────────────────────────────────
 
     /// Primary gradient — start (accent blue)          `#4C8DFF`
     pub const ATOM_GRADIENT_PRIMARY_START: Color = Color::new(0x4C, 0x8D, 0xFF);
     /// Primary gradient — end (violet)                 `#7C5CFF`
-    pub const ATOM_GRADIENT_PRIMARY_END: Color   = Color::new(0x7C, 0x5C, 0xFF);
+    pub const ATOM_GRADIENT_PRIMARY_END: Color = Color::new(0x7C, 0x5C, 0xFF);
 
     // ── Convenience re-exports for common DS usage ────────────────────────────
 
     /// Window chrome background (matches SURFACE_ALT)
-    pub const ATOM_COLOR_WIN_BG: Color     = ATOM_COLOR_SURFACE_ALT;
+    pub const ATOM_COLOR_WIN_BG: Color = ATOM_COLOR_SURFACE_ALT;
     /// Window header (slightly lighter than win bg)
-    pub const ATOM_COLOR_WIN_HDR: Color    = Color::new(0x1E, 0x26, 0x36);
+    pub const ATOM_COLOR_WIN_HDR: Color = Color::new(0x1E, 0x26, 0x36);
     /// Window header when focused
     pub const ATOM_COLOR_WIN_HDR_FOC: Color = Color::new(0x22, 0x2C, 0x3E);
     /// Window border (matches BORDER)
-    pub const ATOM_COLOR_WIN_BORDER: Color  = ATOM_COLOR_BORDER;
+    pub const ATOM_COLOR_WIN_BORDER: Color = ATOM_COLOR_BORDER;
     /// Window border when focused (brighter)
     pub const ATOM_COLOR_WIN_BORDER_FOC: Color = Color::new(0x3E, 0x4E, 0x6E);
 
     /// Dock background
-    pub const ATOM_COLOR_DOCK_BG: Color   = Color::new(0x10, 0x13, 0x1C);
+    pub const ATOM_COLOR_DOCK_BG: Color = Color::new(0x10, 0x13, 0x1C);
     /// Dock border
     pub const ATOM_COLOR_DOCK_BORDER: Color = Color::new(0x2C, 0x34, 0x48);
 
     /// Traffic-light close button
-    pub const ATOM_COLOR_BTN_CLOSE: Color    = ATOM_COLOR_ERROR;
+    pub const ATOM_COLOR_BTN_CLOSE: Color = ATOM_COLOR_ERROR;
     /// Traffic-light maximise button
-    pub const ATOM_COLOR_BTN_MAX: Color      = ATOM_COLOR_SUCCESS;
+    pub const ATOM_COLOR_BTN_MAX: Color = ATOM_COLOR_SUCCESS;
     /// Traffic-light minimise button
-    pub const ATOM_COLOR_BTN_MIN: Color      = ATOM_COLOR_WARNING;
+    pub const ATOM_COLOR_BTN_MIN: Color = ATOM_COLOR_WARNING;
     /// Traffic-light button when window is not focused
     pub const ATOM_COLOR_BTN_INACTIVE: Color = Color::new(0x38, 0x3E, 0x52);
 
     /// Context-menu background
-    pub const ATOM_COLOR_MENU_BG: Color     = ATOM_COLOR_SURFACE;
+    pub const ATOM_COLOR_MENU_BG: Color = ATOM_COLOR_SURFACE;
     /// Context-menu border
     pub const ATOM_COLOR_MENU_BORDER: Color = ATOM_COLOR_BORDER;
     /// Context-menu text
-    pub const ATOM_COLOR_MENU_TEXT: Color   = ATOM_COLOR_TEXT_PRIMARY;
+    pub const ATOM_COLOR_MENU_TEXT: Color = ATOM_COLOR_TEXT_PRIMARY;
     /// Context-menu hover/selected background
-    pub const ATOM_COLOR_MENU_SEL: Color    = Color::new(0x25, 0x30, 0x48);
+    pub const ATOM_COLOR_MENU_SEL: Color = Color::new(0x25, 0x30, 0x48);
 
     /// Shadow base colour (near-black with blue tint)
     pub const ATOM_COLOR_SHADOW: Color = Color::new(0x04, 0x05, 0x0A);
@@ -161,17 +161,17 @@ pub mod colors {
 /// that the entire UI snaps to the grid automatically.
 pub mod spacing {
     /// 4 px  — icon padding, micro gap
-    pub const XS:   u32 = 4;
+    pub const XS: u32 = 4;
     /// 8 px  — inner padding (tight)
-    pub const SM:   u32 = 8;
+    pub const SM: u32 = 8;
     /// 12 px — inner padding (comfortable)
-    pub const MD:   u32 = 12;
+    pub const MD: u32 = 12;
     /// 16 px — section gap, outer padding
-    pub const LG:   u32 = 16;
+    pub const LG: u32 = 16;
     /// 20 px — large section gap
-    pub const XL:   u32 = 20;
+    pub const XL: u32 = 20;
     /// 24 px — component separation
-    pub const XXL:  u32 = 24;
+    pub const XXL: u32 = 24;
     /// 32 px — page/panel margin
     pub const XXXL: u32 = 32;
 }
@@ -231,8 +231,8 @@ pub mod shadows {
     /// DS spec: offset (0, 2), blur 8, global alpha 0.20
     pub const SOFT: ShadowSpec = ShadowSpec {
         offset_y: 2,
-        layers:   4,
-        alpha:    51,   // 0.20 × 255 ≈ 51
+        layers: 4,
+        alpha: 51, // 0.20 × 255 ≈ 51
     };
 
     /// Window drop shadow.
@@ -240,8 +240,8 @@ pub mod shadows {
     /// DS spec: offset (0, 6), blur 18, global alpha 0.35
     pub const WINDOW: ShadowSpec = ShadowSpec {
         offset_y: 6,
-        layers:   9,
-        alpha:    89,   // 0.35 × 255 ≈ 89
+        layers: 9,
+        alpha: 89, // 0.35 × 255 ≈ 89
     };
 }
 
@@ -252,11 +252,11 @@ pub mod shadows {
 /// Easing durations in milliseconds.  All DS transitions use **ease-out**.
 pub mod animation {
     /// 80 ms — fast micro-interaction (button press, icon tap)
-    pub const FAST:   u32 = 80;
+    pub const FAST: u32 = 80;
     /// 120 ms — default transition (hover, focus, menu open)
     pub const NORMAL: u32 = 120;
     /// 200 ms — slow reveal (panel open, page transition)
-    pub const SLOW:   u32 = 200;
+    pub const SLOW: u32 = 200;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -296,32 +296,50 @@ pub mod typography {
 
     /// Display — hero text, splash titles.  Target: Inter Bold 24 pt
     pub const DISPLAY: TypographyStyle = TypographyStyle {
-        desired_size_pt: 24, letter_spacing_x100: 100, all_caps: false, line_height_mul: 1,
+        desired_size_pt: 24,
+        letter_spacing_x100: 100,
+        all_caps: false,
+        line_height_mul: 1,
     };
 
     /// Window / panel title.  Target: Inter SemiBold 16 pt
     pub const WINDOW_TITLE: TypographyStyle = TypographyStyle {
-        desired_size_pt: 16, letter_spacing_x100: 100, all_caps: false, line_height_mul: 1,
+        desired_size_pt: 16,
+        letter_spacing_x100: 100,
+        all_caps: false,
+        line_height_mul: 1,
     };
 
     /// Body — main UI text.  Target: Inter Regular 14 pt
     pub const BODY: TypographyStyle = TypographyStyle {
-        desired_size_pt: 14, letter_spacing_x100: 100, all_caps: false, line_height_mul: 1,
+        desired_size_pt: 14,
+        letter_spacing_x100: 100,
+        all_caps: false,
+        line_height_mul: 1,
     };
 
     /// Small — secondary labels, hints.  Target: Inter Regular 12 pt
     pub const SMALL: TypographyStyle = TypographyStyle {
-        desired_size_pt: 12, letter_spacing_x100: 100, all_caps: false, line_height_mul: 1,
+        desired_size_pt: 12,
+        letter_spacing_x100: 100,
+        all_caps: false,
+        line_height_mul: 1,
     };
 
     /// Mono — terminal, code blocks.  Target: JetBrains Mono Regular 13 pt
     pub const MONO: TypographyStyle = TypographyStyle {
-        desired_size_pt: 13, letter_spacing_x100: 100, all_caps: false, line_height_mul: 1,
+        desired_size_pt: 13,
+        letter_spacing_x100: 100,
+        all_caps: false,
+        line_height_mul: 1,
     };
 
     /// Label — tiny caption, badge.  Target: Inter Medium 11 pt, tracked
     pub const LABEL: TypographyStyle = TypographyStyle {
-        desired_size_pt: 11, letter_spacing_x100: 110, all_caps: true, line_height_mul: 1,
+        desired_size_pt: 11,
+        letter_spacing_x100: 110,
+        all_caps: true,
+        line_height_mul: 1,
     };
 }
 
@@ -366,42 +384,132 @@ pub struct AtomThemeV1;
 
 impl AtomThemeV1 {
     // ── Colors ────────────────────────────────────────────────────────────────
-    #[inline] pub const fn bg()                     -> Color { colors::ATOM_COLOR_BG }
-    #[inline] pub const fn surface()                -> Color { colors::ATOM_COLOR_SURFACE }
-    #[inline] pub const fn surface_alt()            -> Color { colors::ATOM_COLOR_SURFACE_ALT }
-    #[inline] pub const fn border()                 -> Color { colors::ATOM_COLOR_BORDER }
-    #[inline] pub const fn text_primary()           -> Color { colors::ATOM_COLOR_TEXT_PRIMARY }
-    #[inline] pub const fn text_secondary()         -> Color { colors::ATOM_COLOR_TEXT_SECONDARY }
-    #[inline] pub const fn text_muted()             -> Color { colors::ATOM_COLOR_TEXT_MUTED }
-    #[inline] pub const fn accent()                 -> Color { colors::ATOM_COLOR_ACCENT }
-    #[inline] pub const fn accent_glow()            -> Color { colors::ATOM_COLOR_ACCENT_GLOW }
-    #[inline] pub const fn success()                -> Color { colors::ATOM_COLOR_SUCCESS }
-    #[inline] pub const fn warning()                -> Color { colors::ATOM_COLOR_WARNING }
-    #[inline] pub const fn error()                  -> Color { colors::ATOM_COLOR_ERROR }
-    #[inline] pub const fn gradient_start()         -> Color { colors::ATOM_GRADIENT_PRIMARY_START }
-    #[inline] pub const fn gradient_end()           -> Color { colors::ATOM_GRADIENT_PRIMARY_END }
+    #[inline]
+    pub const fn bg() -> Color {
+        colors::ATOM_COLOR_BG
+    }
+    #[inline]
+    pub const fn surface() -> Color {
+        colors::ATOM_COLOR_SURFACE
+    }
+    #[inline]
+    pub const fn surface_alt() -> Color {
+        colors::ATOM_COLOR_SURFACE_ALT
+    }
+    #[inline]
+    pub const fn border() -> Color {
+        colors::ATOM_COLOR_BORDER
+    }
+    #[inline]
+    pub const fn text_primary() -> Color {
+        colors::ATOM_COLOR_TEXT_PRIMARY
+    }
+    #[inline]
+    pub const fn text_secondary() -> Color {
+        colors::ATOM_COLOR_TEXT_SECONDARY
+    }
+    #[inline]
+    pub const fn text_muted() -> Color {
+        colors::ATOM_COLOR_TEXT_MUTED
+    }
+    #[inline]
+    pub const fn accent() -> Color {
+        colors::ATOM_COLOR_ACCENT
+    }
+    #[inline]
+    pub const fn accent_glow() -> Color {
+        colors::ATOM_COLOR_ACCENT_GLOW
+    }
+    #[inline]
+    pub const fn success() -> Color {
+        colors::ATOM_COLOR_SUCCESS
+    }
+    #[inline]
+    pub const fn warning() -> Color {
+        colors::ATOM_COLOR_WARNING
+    }
+    #[inline]
+    pub const fn error() -> Color {
+        colors::ATOM_COLOR_ERROR
+    }
+    #[inline]
+    pub const fn gradient_start() -> Color {
+        colors::ATOM_GRADIENT_PRIMARY_START
+    }
+    #[inline]
+    pub const fn gradient_end() -> Color {
+        colors::ATOM_GRADIENT_PRIMARY_END
+    }
 
     // ── Spacing ───────────────────────────────────────────────────────────────
-    #[inline] pub const fn spacing_xs()   -> u32 { spacing::XS }
-    #[inline] pub const fn spacing_sm()   -> u32 { spacing::SM }
-    #[inline] pub const fn spacing_md()   -> u32 { spacing::MD }
-    #[inline] pub const fn spacing_lg()   -> u32 { spacing::LG }
-    #[inline] pub const fn spacing_xl()   -> u32 { spacing::XL }
-    #[inline] pub const fn spacing_xxl()  -> u32 { spacing::XXL }
-    #[inline] pub const fn spacing_xxxl() -> u32 { spacing::XXXL }
+    #[inline]
+    pub const fn spacing_xs() -> u32 {
+        spacing::XS
+    }
+    #[inline]
+    pub const fn spacing_sm() -> u32 {
+        spacing::SM
+    }
+    #[inline]
+    pub const fn spacing_md() -> u32 {
+        spacing::MD
+    }
+    #[inline]
+    pub const fn spacing_lg() -> u32 {
+        spacing::LG
+    }
+    #[inline]
+    pub const fn spacing_xl() -> u32 {
+        spacing::XL
+    }
+    #[inline]
+    pub const fn spacing_xxl() -> u32 {
+        spacing::XXL
+    }
+    #[inline]
+    pub const fn spacing_xxxl() -> u32 {
+        spacing::XXXL
+    }
 
     // ── Radius ────────────────────────────────────────────────────────────────
-    #[inline] pub const fn radius_xs() -> u32 { radius::XS }
-    #[inline] pub const fn radius_sm() -> u32 { radius::SM }
-    #[inline] pub const fn radius_md() -> u32 { radius::MD }
-    #[inline] pub const fn radius_lg() -> u32 { radius::LG }
+    #[inline]
+    pub const fn radius_xs() -> u32 {
+        radius::XS
+    }
+    #[inline]
+    pub const fn radius_sm() -> u32 {
+        radius::SM
+    }
+    #[inline]
+    pub const fn radius_md() -> u32 {
+        radius::MD
+    }
+    #[inline]
+    pub const fn radius_lg() -> u32 {
+        radius::LG
+    }
 
     // ── Shadows ───────────────────────────────────────────────────────────────
-    #[inline] pub const fn shadow_soft()   -> ShadowSpec { shadows::SOFT }
-    #[inline] pub const fn shadow_window() -> ShadowSpec { shadows::WINDOW }
+    #[inline]
+    pub const fn shadow_soft() -> ShadowSpec {
+        shadows::SOFT
+    }
+    #[inline]
+    pub const fn shadow_window() -> ShadowSpec {
+        shadows::WINDOW
+    }
 
     // ── Animation ─────────────────────────────────────────────────────────────
-    #[inline] pub const fn anim_fast()   -> u32 { animation::FAST }
-    #[inline] pub const fn anim_normal() -> u32 { animation::NORMAL }
-    #[inline] pub const fn anim_slow()   -> u32 { animation::SLOW }
+    #[inline]
+    pub const fn anim_fast() -> u32 {
+        animation::FAST
+    }
+    #[inline]
+    pub const fn anim_normal() -> u32 {
+        animation::NORMAL
+    }
+    #[inline]
+    pub const fn anim_slow() -> u32 {
+        animation::SLOW
+    }
 }

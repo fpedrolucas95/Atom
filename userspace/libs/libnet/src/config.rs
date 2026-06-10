@@ -19,7 +19,7 @@ pub fn net_get_config(netd_port: PortId) -> Result<NetworkConfig, NetError> {
         reply_port: reply_port as u64,
     };
 
-    if let Err(_) = send_message(netd_port, MessageType::NetGetConfig, &msg.to_bytes()) {
+    if send_message(netd_port, MessageType::NetGetConfig, &msg.to_bytes()).is_err() {
         let _ = atom_syscall::ipc::close_port(reply_port);
         return Err(NetError::IpcError);
     }

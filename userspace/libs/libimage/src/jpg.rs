@@ -3,9 +3,9 @@
 //! Supports SOF0 (Baseline DCT), Huffman coding, YCbCr 4:4:4, 4:2:2, 4:2:0.
 //! Implementation uses fixed-point integer arithmetic for IDCT.
 
-use alloc::vec::Vec;
-use alloc::vec;
 use crate::image::{DecodedImage, ImageDecoder, ImageError};
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub struct JpgDecoder;
 
@@ -50,14 +50,9 @@ struct HuffmanTable {
 }
 
 const ZIGZAG: [usize; 64] = [
-     0,  1,  8, 16,  9,  2,  3, 10,
-    17, 24, 32, 25, 18, 11,  4,  5,
-    12, 19, 26, 33, 40, 48, 41, 34,
-    27, 20, 13,  6,  7, 14, 21, 28,
-    35, 42, 49, 56, 57, 50, 43, 36,
-    29, 22, 15, 23, 30, 37, 44, 51,
-    58, 59, 52, 45, 38, 31, 39, 46,
-    53, 60, 61, 54, 47, 55, 62, 63,
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
 impl<'a> JpgInternalDecoder<'a> {
@@ -99,8 +94,12 @@ impl<'a> JpgInternalDecoder<'a> {
 
         loop {
             let mut marker = self.read_u8()?;
-            while marker != 0xFF { marker = self.read_u8()?; }
-            while marker == 0xFF { marker = self.read_u8()?; }
+            while marker != 0xFF {
+                marker = self.read_u8()?;
+            }
+            while marker == 0xFF {
+                marker = self.read_u8()?;
+            }
 
             match marker {
                 0xD9 => break, // EOI
@@ -121,7 +120,7 @@ impl<'a> JpgInternalDecoder<'a> {
         }
 
         if self.width == 0 || self.height == 0 || self.components.is_empty() {
-             return Err(ImageError::CorruptData("Incomplete JPEG data"));
+            return Err(ImageError::CorruptData("Incomplete JPEG data"));
         }
 
         self.render()
@@ -131,7 +130,9 @@ impl<'a> JpgInternalDecoder<'a> {
         let _len = self.read_u16()?;
         let precision = self.read_u8()?;
         if precision != 8 {
-            return Err(ImageError::UnsupportedFormat("Only 8-bit precision supported"));
+            return Err(ImageError::UnsupportedFormat(
+                "Only 8-bit precision supported",
+            ));
         }
         self.height = self.read_u16()?;
         self.width = self.read_u16()?;
@@ -143,8 +144,12 @@ impl<'a> JpgInternalDecoder<'a> {
             let v_samp = samp & 0x0F;
             let qt_id = self.read_u8()?;
             self.components.push(Component {
-                id, h_samp, v_samp, qt_id,
-                dc_table_id: 0, ac_table_id: 0,
+                id,
+                h_samp,
+                v_samp,
+                qt_id,
+                dc_table_id: 0,
+                ac_table_id: 0,
                 dc_pred: 0,
                 blocks: Vec::new(),
             });
@@ -159,7 +164,9 @@ impl<'a> JpgInternalDecoder<'a> {
             let info = self.read_u8()?;
             let id = (info & 0x0F) as usize;
             let precision = info >> 4;
-            if id >= 4 { return Err(ImageError::CorruptData("Invalid QT ID")); }
+            if id >= 4 {
+                return Err(ImageError::CorruptData("Invalid QT ID"));
+            }
             let mut table = [0u16; 64];
             for i in 0..64 {
                 let value = if precision == 0 {
@@ -181,13 +188,19 @@ impl<'a> JpgInternalDecoder<'a> {
             let info = self.read_u8()?;
             let id = (info & 0x0F) as usize;
             let table_class = info >> 4;
-            if id >= 4 { return Err(ImageError::CorruptData("Invalid DHT ID")); }
+            if id >= 4 {
+                return Err(ImageError::CorruptData("Invalid DHT ID"));
+            }
 
             let mut counts = [0u8; 16];
-            for i in 0..16 { counts[i] = self.read_u8()?; }
+            for c in &mut counts {
+                *c = self.read_u8()?;
+            }
             let total: usize = counts.iter().map(|&c| c as usize).sum();
             let mut values = vec![0u8; total];
-            for i in 0..total { values[i] = self.read_u8()?; }
+            for v in values.iter_mut() {
+                *v = self.read_u8()?;
+            }
 
             let table = self.build_huffman_table(&counts, values);
             if table_class == 0 {
@@ -210,15 +223,15 @@ impl<'a> JpgInternalDecoder<'a> {
         let mut k = 0;
         for i in 1..=16 {
             h.val_ptr[i] = k as u16;
-            if counts[i-1] > 0 {
+            if counts[i - 1] > 0 {
                 h.min_codes[i] = code;
-                code += counts[i-1] as u32;
+                code += counts[i - 1] as u32;
                 h.max_codes[i] = code - 1;
             } else {
                 h.max_codes[i] = 0xFFFFFFFF;
             }
             code <<= 1;
-            k += counts[i-1] as usize;
+            k += counts[i - 1] as usize;
         }
         h
     }
@@ -281,7 +294,8 @@ impl<'a> JpgInternalDecoder<'a> {
                 self.huffman_tables_ac[table_idx].as_ref()
             } else {
                 self.huffman_tables_dc[table_idx].as_ref()
-            }.ok_or(ImageError::CorruptData("Missing Huffman table"))?;
+            }
+            .ok_or(ImageError::CorruptData("Missing Huffman table"))?;
             if table.max_codes[i] != 0xFFFFFFFF
                 && code >= table.min_codes[i]
                 && code <= table.max_codes[i]
@@ -296,7 +310,9 @@ impl<'a> JpgInternalDecoder<'a> {
     }
 
     fn receive_extend(&mut self, category: u8) -> Result<i32, ImageError> {
-        if category == 0 { return Ok(0); }
+        if category == 0 {
+            return Ok(0);
+        }
         let vt = self.get_bits(category)?;
         let mut v = vt as i32;
         if v < (1 << (category - 1)) {
@@ -308,13 +324,13 @@ impl<'a> JpgInternalDecoder<'a> {
     fn decode_scan(&mut self, scan_components: &[usize]) -> Result<(), ImageError> {
         let max_h = self.components.iter().map(|c| c.h_samp).max().unwrap_or(1);
         let max_v = self.components.iter().map(|c| c.v_samp).max().unwrap_or(1);
-        let mcus_x = (self.width as usize + (max_h as usize * 8) - 1) / (max_h as usize * 8);
-        let mcus_y = (self.height as usize + (max_v as usize * 8) - 1) / (max_v as usize * 8);
+        let mcus_x = (self.width as usize).div_ceil(max_h as usize * 8);
+        let mcus_y = (self.height as usize).div_ceil(max_v as usize * 8);
 
         for comp_idx in 0..self.components.len() {
-             let c = &self.components[comp_idx];
-             let blocks_count = (mcus_x * c.h_samp as usize) * (mcus_y * c.v_samp as usize);
-             self.components[comp_idx].blocks = vec![[0i32; 64]; blocks_count];
+            let c = &self.components[comp_idx];
+            let blocks_count = (mcus_x * c.h_samp as usize) * (mcus_y * c.v_samp as usize);
+            self.components[comp_idx].blocks = vec![[0i32; 64]; blocks_count];
         }
 
         for my in 0..mcus_y {
@@ -329,22 +345,43 @@ impl<'a> JpgInternalDecoder<'a> {
                             let block_idx = block_y * (mcus_x * h_samp) + block_x;
 
                             let mut block = [0i32; 64];
-                            let s = self.decode_huffman(self.components[comp_idx].dc_table_id as usize, false)?;
+                            let s = self.decode_huffman(
+                                self.components[comp_idx].dc_table_id as usize,
+                                false,
+                            )?;
                             let diff = self.receive_extend(s)?;
                             self.components[comp_idx].dc_pred += diff;
                             block[0] = self.components[comp_idx].dc_pred;
 
                             let mut k = 1usize;
                             while k < 64 {
-                                let rs = self.decode_huffman(self.components[comp_idx].ac_table_id as usize, true)?;
+                                let rs = self.decode_huffman(
+                                    self.components[comp_idx].ac_table_id as usize,
+                                    true,
+                                )?;
                                 let r = rs >> 4;
                                 let s = rs & 0x0F;
-                                if s == 0 { if r == 15 { k += 16; } else { break; } }
-                                else { k += r as usize; if k < 64 { block[ZIGZAG[k]] = self.receive_extend(s)?; k += 1; } }
+                                if s == 0 {
+                                    if r == 15 {
+                                        k += 16;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    k += r as usize;
+                                    if k < 64 {
+                                        block[ZIGZAG[k]] = self.receive_extend(s)?;
+                                        k += 1;
+                                    }
+                                }
                             }
 
-                            if let Some(qt) = self.quantization_tables[self.components[comp_idx].qt_id as usize] {
-                                for i in 0..64 { block[i] *= qt[i] as i32; }
+                            if let Some(qt) =
+                                self.quantization_tables[self.components[comp_idx].qt_id as usize]
+                            {
+                                for i in 0..64 {
+                                    block[i] *= qt[i] as i32;
+                                }
                             }
                             self.components[comp_idx].blocks[block_idx] = block;
                         }
@@ -359,7 +396,7 @@ impl<'a> JpgInternalDecoder<'a> {
         let mut pixels = vec![0u8; self.width as usize * self.height as usize * 4];
         let max_h = self.components.iter().map(|c| c.h_samp).max().unwrap_or(1) as usize;
         let max_v = self.components.iter().map(|c| c.v_samp).max().unwrap_or(1) as usize;
-        let mcus_x = (self.width as usize + (max_h * 8) - 1) / (max_h * 8);
+        let mcus_x = (self.width as usize).div_ceil(max_h * 8);
 
         let mut block_buffers = Vec::new();
         for c in &self.components {
@@ -387,13 +424,17 @@ impl<'a> JpgInternalDecoder<'a> {
                 let g = yuv[0] - ((344 * (yuv[1] - 128)) / 1000) - ((714 * (yuv[2] - 128)) / 1000);
                 let b = yuv[0] + ((1772 * (yuv[1] - 128)) / 1000);
                 let off = (y * self.width as usize + x) * 4;
-                pixels[off]   = r.clamp(0, 255) as u8;
-                pixels[off+1] = g.clamp(0, 255) as u8;
-                pixels[off+2] = b.clamp(0, 255) as u8;
-                pixels[off+3] = 255;
+                pixels[off] = r.clamp(0, 255) as u8;
+                pixels[off + 1] = g.clamp(0, 255) as u8;
+                pixels[off + 2] = b.clamp(0, 255) as u8;
+                pixels[off + 3] = 255;
             }
         }
-        Ok(DecodedImage::new(self.width as u32, self.height as u32, pixels))
+        Ok(DecodedImage::new(
+            self.width as u32,
+            self.height as u32,
+            pixels,
+        ))
     }
 }
 
@@ -415,13 +456,10 @@ fn idct_8x8(b: &[i32; 64]) -> [i16; 64] {
             let mut sum = 0i64;
             for v in 0..8 {
                 for u in 0..8 {
-                    sum += b[v * 8 + u] as i64
-                        * BASIS[u][x] as i64
-                        * BASIS[v][y] as i64;
+                    sum += b[v * 8 + u] as i64 * BASIS[u][x] as i64 * BASIS[v][y] as i64;
                 }
             }
-            let value = ((sum + (1 << 29)) >> 30)
-                .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+            let value = ((sum + (1 << 29)) >> 30).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
             out[y * 8 + x] = value;
         }
     }
@@ -434,6 +472,9 @@ mod tests {
     #[test]
     fn test_invalid_signature() {
         let data = [0u8; 10];
-        assert_eq!(JpgDecoder::decode(&data).err(), Some(ImageError::InvalidSignature));
+        assert_eq!(
+            JpgDecoder::decode(&data).err(),
+            Some(ImageError::InvalidSignature)
+        );
     }
 }

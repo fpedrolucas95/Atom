@@ -45,18 +45,18 @@
 #![no_std]
 extern crate alloc;
 
-pub mod widget;
-pub mod panel;
-pub mod label;
 pub mod button;
 pub mod input;
+pub mod label;
 pub mod menu;
+pub mod panel;
 pub mod scrollbar;
+pub mod widget;
 
-pub use widget::WidgetEvent;
-pub use panel::Panel;
-pub use label::TextLabel;
 pub use button::{Button, ButtonStyle};
 pub use input::Input;
+pub use label::TextLabel;
 pub use menu::{Menu, MenuItem};
+pub use panel::Panel;
 pub use scrollbar::ScrollBar;
+pub use widget::WidgetEvent;

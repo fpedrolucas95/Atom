@@ -9,40 +9,40 @@ use core::ptr;
 use spin::Mutex;
 
 // AHCI register offsets
-const AHCI_CAP: usize = 0x00;      // Host Capabilities
-const AHCI_GHC: usize = 0x04;      // Global Host Control
-const AHCI_IS: usize = 0x08;       // Interrupt Status
-const AHCI_PI: usize = 0x0C;       // Ports Implemented
-const AHCI_VS: usize = 0x10;       // Version
+const AHCI_CAP: usize = 0x00; // Host Capabilities
+const AHCI_GHC: usize = 0x04; // Global Host Control
+const AHCI_IS: usize = 0x08; // Interrupt Status
+const AHCI_PI: usize = 0x0C; // Ports Implemented
+const AHCI_VS: usize = 0x10; // Version
 const AHCI_PORT_BASE: usize = 0x100;
 const AHCI_PORT_SIZE: usize = 0x80;
 
 // Port register offsets
-const PORT_CLB: usize = 0x00;      // Command List Base Address
-const PORT_CLBU: usize = 0x04;     // Command List Base Address Upper
-const PORT_FB: usize = 0x08;       // FIS Base Address
-const PORT_FBU: usize = 0x0C;      // FIS Base Address Upper
-const PORT_IS: usize = 0x10;       // Interrupt Status
-const PORT_IE: usize = 0x14;       // Interrupt Enable
-const PORT_CMD: usize = 0x18;      // Command and Status
-const PORT_TFD: usize = 0x20;      // Task File Data
-const PORT_SIG: usize = 0x24;      // Signature
-const PORT_SSTS: usize = 0x28;     // SATA Status
-const PORT_SCTL: usize = 0x2C;     // SATA Control
-const PORT_SERR: usize = 0x30;     // SATA Error
-const PORT_SACT: usize = 0x34;     // SATA Active
-const PORT_CI: usize = 0x38;       // Command Issue
+const PORT_CLB: usize = 0x00; // Command List Base Address
+const PORT_CLBU: usize = 0x04; // Command List Base Address Upper
+const PORT_FB: usize = 0x08; // FIS Base Address
+const PORT_FBU: usize = 0x0C; // FIS Base Address Upper
+const PORT_IS: usize = 0x10; // Interrupt Status
+const PORT_IE: usize = 0x14; // Interrupt Enable
+const PORT_CMD: usize = 0x18; // Command and Status
+const PORT_TFD: usize = 0x20; // Task File Data
+const PORT_SIG: usize = 0x24; // Signature
+const PORT_SSTS: usize = 0x28; // SATA Status
+const PORT_SCTL: usize = 0x2C; // SATA Control
+const PORT_SERR: usize = 0x30; // SATA Error
+const PORT_SACT: usize = 0x34; // SATA Active
+const PORT_CI: usize = 0x38; // Command Issue
 
 // Port CMD bits
-const PORT_CMD_ST: u32 = 1 << 0;   // Start
-const PORT_CMD_FRE: u32 = 1 << 4;  // FIS Receive Enable
-const PORT_CMD_FR: u32 = 1 << 14;  // FIS Receive Running
-const PORT_CMD_CR: u32 = 1 << 15;  // Command List Running
+const PORT_CMD_ST: u32 = 1 << 0; // Start
+const PORT_CMD_FRE: u32 = 1 << 4; // FIS Receive Enable
+const PORT_CMD_FR: u32 = 1 << 14; // FIS Receive Running
+const PORT_CMD_CR: u32 = 1 << 15; // Command List Running
 
 // GHC bits
-const GHC_AE: u32 = 1 << 31;       // AHCI Enable
-const GHC_IE: u32 = 1 << 1;        // Interrupt Enable
-const GHC_HR: u32 = 1 << 0;        // HBA Reset
+const GHC_AE: u32 = 1 << 31; // AHCI Enable
+const GHC_IE: u32 = 1 << 1; // Interrupt Enable
+const GHC_HR: u32 = 1 << 0; // HBA Reset
 
 // SATA signatures
 const SATA_SIG_ATA: u32 = 0x00000101;
@@ -58,26 +58,26 @@ const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
 // PCI configuration for AHCI
-const AHCI_CLASS: u8 = 0x01;       // Mass Storage
-const AHCI_SUBCLASS: u8 = 0x06;    // SATA
-const AHCI_PROGIF: u8 = 0x01;      // AHCI
+const AHCI_CLASS: u8 = 0x01; // Mass Storage
+const AHCI_SUBCLASS: u8 = 0x06; // SATA
+const AHCI_PROGIF: u8 = 0x01; // AHCI
 
 // Command header
 #[repr(C)]
 struct CommandHeader {
     flags: u16,
-    prdtl: u16,          // Physical Region Descriptor Table Length
-    prdbc: u32,          // PRD Byte Count
-    ctba: u32,           // Command Table Base Address
-    ctbau: u32,          // Command Table Base Address Upper
+    prdtl: u16, // Physical Region Descriptor Table Length
+    prdbc: u32, // PRD Byte Count
+    ctba: u32,  // Command Table Base Address
+    ctbau: u32, // Command Table Base Address Upper
     reserved: [u32; 4],
 }
 
 // Command table
 #[repr(C)]
 struct CommandTable {
-    cfis: [u8; 64],      // Command FIS
-    acmd: [u8; 16],      // ATAPI Command
+    cfis: [u8; 64], // Command FIS
+    acmd: [u8; 16], // ATAPI Command
     reserved: [u8; 48],
     prdt: [PrdtEntry; 8], // Physical Region Descriptor Table
 }
@@ -85,17 +85,17 @@ struct CommandTable {
 // PRDT entry
 #[repr(C)]
 struct PrdtEntry {
-    dba: u32,            // Data Base Address
-    dbau: u32,           // Data Base Address Upper
+    dba: u32,  // Data Base Address
+    dbau: u32, // Data Base Address Upper
     reserved: u32,
-    dbc: u32,            // Data Byte Count (bit 31 = Interrupt on Completion)
+    dbc: u32, // Data Byte Count (bit 31 = Interrupt on Completion)
 }
 
 // FIS Register H2D
 #[repr(C)]
 struct FisRegH2D {
     fis_type: u8,
-    flags: u8,           // bit 7: C (command), bits 0-3: PM Port
+    flags: u8, // bit 7: C (command), bits 0-3: PM Port
     command: u8,
     feature_lo: u8,
     lba0: u8,
@@ -132,12 +132,7 @@ pub fn init() -> bool {
             AHCI_BASE = match crate::mm::vm::map_kernel_mmio(base, 0x2000) {
                 Ok(virt) => virt,
                 Err(err) => {
-                    crate::log_error!(
-                        "ahci",
-                        "Failed to map MMIO BAR 0x{:X}: {:?}",
-                        base,
-                        err
-                    );
+                    crate::log_error!("ahci", "Failed to map MMIO BAR 0x{:X}: {:?}", base, err);
                     return false;
                 }
             };
@@ -157,12 +152,11 @@ pub fn init() -> bool {
             crate::log_debug!("ahci", "Ports implemented: 0x{:X}", pi);
 
             for port in 0..32 {
-                if (pi >> port) & 1 != 0
-                    && init_port(port) {
-                        ACTIVE_PORT = Some(port);
-                        crate::log_info!("ahci", "Initialized port {}", port);
-                        return true;
-                    }
+                if (pi >> port) & 1 != 0 && init_port(port) {
+                    ACTIVE_PORT = Some(port);
+                    crate::log_info!("ahci", "Initialized port {}", port);
+                    return true;
+                }
             }
         }
     }
@@ -211,11 +205,11 @@ fn find_ahci_controller() -> Option<usize> {
 }
 
 fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    ((bus as u32) << 16) |
-    ((device as u32) << 11) |
-    ((function as u32) << 8) |
-    ((offset as u32) & 0xFC) |
-    0x80000000
+    ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xFC)
+        | 0x80000000
 }
 
 fn pci_read_config(address: u32) -> u32 {
@@ -488,7 +482,12 @@ pub fn write_sectors(lba: u64, data: &[u8]) -> bool {
                     return false;
                 }
                 write_port_reg(port, PORT_IS, is);
-                crate::log_info!("ahci", "AHCI WRITE OK: lba={} sectors={}", lba, sector_count);
+                crate::log_info!(
+                    "ahci",
+                    "AHCI WRITE OK: lba={} sectors={}",
+                    lba,
+                    sector_count
+                );
                 return true;
             }
         }

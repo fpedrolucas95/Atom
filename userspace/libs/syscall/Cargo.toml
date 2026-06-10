@@ -1,5 +1,7 @@
 [package]
 name = "atom_syscall"
+license = "Apache-2.0"
+publish = false
 version = "0.1.0"
 edition = "2021"
 description = "System call wrappers for Atom OS userspace programs"

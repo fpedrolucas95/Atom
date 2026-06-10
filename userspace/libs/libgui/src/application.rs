@@ -6,17 +6,16 @@
 
 extern crate alloc;
 
+use crate::event::{Event, MouseEvent, WindowEvent};
+use crate::surface::Surface;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::surface::Surface;
-use crate::event::{Event, MouseEvent, WindowEvent};
-use atom_syscall::ipc::{PortId, create_port, wait_any};
+use atom_syscall::ipc::{create_port, wait_any, PortId};
 use atom_syscall::SyscallResult;
-use libipc::protocol::{lookup_service, send_message, get_payload};
 use libipc::messages::{
-    MessageType, MouseScrollEvent, SurfaceAssignMsg, WmCreateWindowRequest,
-    WmCreateWindowResponse,
+    MessageType, MouseScrollEvent, SurfaceAssignMsg, WmCreateWindowRequest, WmCreateWindowResponse,
 };
+use libipc::protocol::{get_payload, lookup_service, send_message};
 
 /// Application state and context
 pub struct Application {
@@ -56,7 +55,12 @@ impl Application {
     }
 
     /// Create a window and get its drawing surface
-    pub fn create_window(&mut self, title: &str, width: u32, height: u32) -> SyscallResult<Surface> {
+    pub fn create_window(
+        &mut self,
+        title: &str,
+        width: u32,
+        height: u32,
+    ) -> SyscallResult<Surface> {
         let req = WmCreateWindowRequest {
             reply_port: self.event_port,
             width,
@@ -69,7 +73,9 @@ impl Application {
         // Wait for response
         let mut buffer = [0u8; 256];
         loop {
-            if let Ok(Some((header, len))) = libipc::protocol::try_recv_message(self.event_port, &mut buffer) {
+            if let Ok(Some((header, len))) =
+                libipc::protocol::try_recv_message(self.event_port, &mut buffer)
+            {
                 if header.msg_type == MessageType::WmResponse {
                     let payload = get_payload(&buffer, len);
                     if let Some(resp) = WmCreateWindowResponse::from_bytes(payload) {
@@ -107,7 +113,9 @@ impl Application {
 
         // Poll IPC port for messages
         let mut buffer = [0u8; 256];
-        while let Ok(Some((header, len))) = libipc::protocol::try_recv_message(self.event_port, &mut buffer) {
+        while let Ok(Some((header, len))) =
+            libipc::protocol::try_recv_message(self.event_port, &mut buffer)
+        {
             let payload = get_payload(&buffer, len);
             match header.msg_type {
                 MessageType::KeyPress => {
@@ -126,7 +134,8 @@ impl Application {
                     }
                 }
                 MessageType::MouseMove => {
-                    if let Some(mouse_event) = libipc::messages::MouseMoveEvent::from_bytes(payload) {
+                    if let Some(mouse_event) = libipc::messages::MouseMoveEvent::from_bytes(payload)
+                    {
                         return Event::Mouse(MouseEvent::Move {
                             x: mouse_event.x,
                             y: mouse_event.y,
@@ -136,11 +145,17 @@ impl Application {
                     }
                 }
                 MessageType::MouseButtonDown => {
-                    if let Some(mouse_event) = libipc::messages::MouseButtonEvent::from_bytes(payload) {
+                    if let Some(mouse_event) =
+                        libipc::messages::MouseButtonEvent::from_bytes(payload)
+                    {
                         let button = match mouse_event.button {
                             libipc::messages::MouseButton::Left => crate::event::MouseButton::Left,
-                            libipc::messages::MouseButton::Right => crate::event::MouseButton::Right,
-                            libipc::messages::MouseButton::Middle => crate::event::MouseButton::Middle,
+                            libipc::messages::MouseButton::Right => {
+                                crate::event::MouseButton::Right
+                            }
+                            libipc::messages::MouseButton::Middle => {
+                                crate::event::MouseButton::Middle
+                            }
                             _ => crate::event::MouseButton::Left,
                         };
                         return Event::Mouse(MouseEvent::ButtonDown {
@@ -151,11 +166,17 @@ impl Application {
                     }
                 }
                 MessageType::MouseButtonUp => {
-                    if let Some(mouse_event) = libipc::messages::MouseButtonEvent::from_bytes(payload) {
+                    if let Some(mouse_event) =
+                        libipc::messages::MouseButtonEvent::from_bytes(payload)
+                    {
                         let button = match mouse_event.button {
                             libipc::messages::MouseButton::Left => crate::event::MouseButton::Left,
-                            libipc::messages::MouseButton::Right => crate::event::MouseButton::Right,
-                            libipc::messages::MouseButton::Middle => crate::event::MouseButton::Middle,
+                            libipc::messages::MouseButton::Right => {
+                                crate::event::MouseButton::Right
+                            }
+                            libipc::messages::MouseButton::Middle => {
+                                crate::event::MouseButton::Middle
+                            }
                             _ => crate::event::MouseButton::Left,
                         };
                         return Event::Mouse(MouseEvent::ButtonUp {
@@ -180,9 +201,19 @@ impl Application {
                 }
                 MessageType::SurfaceAssign => {
                     if let Some(msg) = SurfaceAssignMsg::from_bytes(payload) {
-                        if let Some(surface) = self.surfaces.iter_mut().find(|s| s.window_id() == msg.window_id) {
+                        if let Some(surface) = self
+                            .surfaces
+                            .iter_mut()
+                            .find(|s| s.window_id() == msg.window_id)
+                        {
                             // Update shared surface transparently
-                            if let Ok(new_shared) = atom_syscall::graphics::SharedSurface::from_region(msg.region_id, msg.width, msg.height) {
+                            if let Ok(new_shared) =
+                                atom_syscall::graphics::SharedSurface::from_region(
+                                    msg.region_id,
+                                    msg.width,
+                                    msg.height,
+                                )
+                            {
                                 let mut inner = surface.inner.borrow_mut();
                                 inner.shared = new_shared;
                                 inner.scale_factor = msg.scale_factor;
@@ -198,7 +229,8 @@ impl Application {
                     }
                 }
                 MessageType::WmEvent => {
-                    if let Some(wm_event) = libipc::messages::WmWindowEventMsg::from_bytes(payload) {
+                    if let Some(wm_event) = libipc::messages::WmWindowEventMsg::from_bytes(payload)
+                    {
                         match wm_event.event_type {
                             libipc::messages::WindowEventType::Close => {
                                 self.quit_requested = true;

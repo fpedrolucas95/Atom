@@ -1,9 +1,9 @@
 // Thread management syscalls
 
-use crate::raw::{syscall0, syscall1, syscall2, numbers::*};
+use crate::raw::{numbers::*, syscall0, syscall1, syscall2};
 
 /// Yield CPU to scheduler
-/// 
+///
 /// Gives up the current timeslice and allows other threads to run.
 /// This is a cooperative yielding mechanism.
 #[inline]
@@ -45,17 +45,14 @@ pub fn sleep_ms(milliseconds: u64) {
 /// Each tick is typically 10ms (100Hz timer).
 #[inline]
 pub fn get_ticks() -> u64 {
-    unsafe {
-        syscall0(SYS_GET_TICKS)
-    }
+    unsafe { syscall0(SYS_GET_TICKS) }
 }
 
 /// Get approximate system time in milliseconds since boot
 #[inline]
 pub fn get_time_ms() -> u64 {
-    get_ticks() * 10  // Assuming 100Hz timer (10ms per tick)
+    get_ticks() * 10 // Assuming 100Hz timer (10ms per tick)
 }
-
 
 /// Return the logical CPU id currently executing this thread.
 #[inline]
@@ -82,4 +79,3 @@ pub fn set_affinity(mask: u64) -> bool {
 pub fn get_affinity() -> u64 {
     unsafe { syscall1(SYS_GET_THREAD_AFFINITY, 0) }
 }
-

@@ -49,6 +49,7 @@ impl<'a> RingProducer<'a> {
         (tail + 1) % self.header.capacity != head
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn push(&mut self, entry: RingEntry) -> Result<(), ()> {
         let tail = self.header.tail.load(Ordering::Relaxed);
         let head = self.header.head.load(Ordering::Acquire);
@@ -58,7 +59,9 @@ impl<'a> RingProducer<'a> {
         }
 
         self.entries[tail] = entry;
-        self.header.tail.store((tail + 1) % self.header.capacity, Ordering::Release);
+        self.header
+            .tail
+            .store((tail + 1) % self.header.capacity, Ordering::Release);
         Ok(())
     }
 }
@@ -88,7 +91,9 @@ impl<'a> RingConsumer<'a> {
         }
 
         let entry = self.entries[head];
-        self.header.head.store((head + 1) % self.header.capacity, Ordering::Release);
+        self.header
+            .head
+            .store((head + 1) % self.header.capacity, Ordering::Release);
         Some(entry)
     }
 }

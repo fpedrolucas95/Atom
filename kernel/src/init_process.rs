@@ -35,7 +35,7 @@ const LOG_ORIGIN: &str = "init";
 
 const USER_STACK_PAGES: usize = atom_abi::DEFAULT_USER_STACK_PAGES;
 const USER_STACK_TOP: usize = atom_abi::USER_STACK_TOP as usize;
-const KERNEL_STACK_PAGES: usize = 16;  // 64KB kernel stack to handle deep call stacks
+const KERNEL_STACK_PAGES: usize = 16; // 64KB kernel stack to handle deep call stacks
 
 /// Result of launching the init process
 #[allow(dead_code)]
@@ -78,10 +78,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
 
     // Step 1: Validate boot payload exists
     if !boot_info.init_payload.is_present() {
-        log_panic!(
-            LOG_ORIGIN,
-            "FATAL: No boot payload provided by bootloader!"
-        );
+        log_panic!(LOG_ORIGIN, "FATAL: No boot payload provided by bootloader!");
         log_panic!(
             LOG_ORIGIN,
             "The kernel requires init.atxf to be loaded by the bootloader."
@@ -104,8 +101,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
     );
 
     // Authenticate and validate the complete ATXF v3 image before mapping.
-    let payload_bytes =
-        unsafe { core::slice::from_raw_parts(payload_ptr, payload_size) };
+    let payload_bytes = unsafe { core::slice::from_raw_parts(payload_ptr, payload_size) };
 
     let image = match executable::parse_image(payload_bytes) {
         Ok(s) => s,
@@ -162,8 +158,7 @@ fn create_init_process(
     use crate::mm::vma::{self, PageSource, Vma, VmaBacking, VmaPermissions};
 
     // Create a new address space for init (no longer shares kernel_cr3)
-    let init_pml4_phys = pmm::alloc_pages_zeroed(1)
-        .ok_or(InitError::MemoryAllocationFailed)?;
+    let init_pml4_phys = pmm::alloc_pages_zeroed(1).ok_or(InitError::MemoryAllocationFailed)?;
     let process_id = crate::process::ProcessId::from(pid);
 
     log_info!(
@@ -173,16 +168,12 @@ fn create_init_process(
     );
 
     // Clone kernel mappings to the new address space
-    vm::clone_kernel_mappings(init_pml4_phys)
-        .map_err(|_| InitError::MemoryAllocationFailed)?;
+    vm::clone_kernel_mappings(init_pml4_phys).map_err(|_| InitError::MemoryAllocationFailed)?;
 
     // Register the PML4 as protected (Req 2.4)
     let _ = pmm::register_active_pml4(init_pml4_phys);
 
-    log_info!(
-        LOG_ORIGIN,
-        "Cloned kernel mappings to init's PML4"
-    );
+    log_info!(LOG_ORIGIN, "Cloned kernel mappings to init's PML4");
 
     vma::create_bootstrap_process_vma_map(process_id, init_pml4_phys);
 
@@ -196,28 +187,39 @@ fn create_init_process(
     let user_stack_base = stack_layout.usable_base as usize;
     let heap_start = atom_abi::USER_HEAP_START as usize;
 
-    vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
-        start: user_stack_base,
-        end: USER_STACK_TOP,
-        perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Anonymous,
-        label: "stack",
-    }).map_err(|_| InitError::MemoryAllocationFailed)?;
+    vma::insert_bootstrap_process_vma(
+        process_id,
+        init_pml4_phys,
+        Vma {
+            start: user_stack_base,
+            end: USER_STACK_TOP,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "stack",
+        },
+    )
+    .map_err(|_| InitError::MemoryAllocationFailed)?;
     vma::account_pre_mapped_range(
         process_id,
         init_pml4_phys,
         user_stack_base,
         USER_STACK_TOP,
         PageSource::Anonymous,
-    ).map_err(|_| InitError::MemoryAllocationFailed)?;
+    )
+    .map_err(|_| InitError::MemoryAllocationFailed)?;
 
-    vma::insert_bootstrap_process_vma(process_id, init_pml4_phys, Vma {
-        start: heap_start,
-        end: heap_start + PAGE_SIZE,
-        perms: VmaPermissions::read_write(),
-        backing: VmaBacking::Anonymous,
-        label: "heap",
-    }).map_err(|_| InitError::MemoryAllocationFailed)?;
+    vma::insert_bootstrap_process_vma(
+        process_id,
+        init_pml4_phys,
+        Vma {
+            start: heap_start,
+            end: heap_start + PAGE_SIZE,
+            perms: VmaPermissions::read_write(),
+            backing: VmaBacking::Anonymous,
+            label: "heap",
+        },
+    )
+    .map_err(|_| InitError::MemoryAllocationFailed)?;
 
     // Create CPU context for Ring 3 execution with init's own PML4
     let context = CpuContext::new_user(
@@ -253,7 +255,8 @@ fn create_init_process(
         if readback != STACK_CANARY {
             crate::serial_println!(
                 "[CANARY_SET] WARNING: Canary read-back mismatch! Got {:#X} expected {:#X}",
-                readback, STACK_CANARY
+                readback,
+                STACK_CANARY
             );
         }
     }
@@ -335,8 +338,8 @@ fn create_init_process(
 fn allocate_user_stack(pml4_phys: usize) -> Result<usize, InitError> {
     let stack_layout = thread::UserStackMetadata::default_for_top(USER_STACK_TOP);
     let virt_base = stack_layout.usable_base as usize;
-    let phys_base = pmm::alloc_pages_zeroed(USER_STACK_PAGES)
-        .ok_or(InitError::MemoryAllocationFailed)?;
+    let phys_base =
+        pmm::alloc_pages_zeroed(USER_STACK_PAGES).ok_or(InitError::MemoryAllocationFailed)?;
 
     for i in 0..USER_STACK_PAGES {
         let virt = virt_base + i * PAGE_SIZE;
@@ -373,8 +376,7 @@ fn allocate_user_stack(pml4_phys: usize) -> Result<usize, InitError> {
 /// is active (e.g., during context-switch trampolines that load a new CR3 before
 /// building the IRET frame on the current stack).
 fn allocate_kernel_stack() -> Result<u64, InitError> {
-    let phys = pmm::alloc_pages(KERNEL_STACK_PAGES)
-        .ok_or(InitError::MemoryAllocationFailed)?;
+    let phys = pmm::alloc_pages(KERNEL_STACK_PAGES).ok_or(InitError::MemoryAllocationFailed)?;
     let size = KERNEL_STACK_PAGES * PAGE_SIZE;
     let virt = vm::HIGHER_HALF_BASE + phys;
     let top = (virt + size) as u64;
@@ -399,7 +401,10 @@ fn allocate_kernel_stack() -> Result<u64, InitError> {
 /// compositor (ui_shell), granted directly from its own manifest profile at
 /// spawn. init never delegates ambient graphics/input authority.
 fn grant_init_capabilities(pid: ThreadId) -> Result<(), InitError> {
-    log_info!(LOG_ORIGIN, "Granting bootstrap capabilities to init process");
+    log_info!(
+        LOG_ORIGIN,
+        "Granting bootstrap capabilities to init process"
+    );
 
     // init is the first userspace process, but it is NOT privileged by virtue of
     // being first. Its authority comes entirely from the SystemServiceManifest.

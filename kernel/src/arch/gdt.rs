@@ -69,8 +69,8 @@ impl Gdt {
                 0,
                 GDT_KERNEL_CODE,
                 GDT_KERNEL_DATA,
-                GDT_USER_DATA,  // 0x18 → USER_DATA_SELECTOR = 0x1B (must precede code for SYSRETQ)
-                GDT_USER_CODE,  // 0x20 → USER_CODE_SELECTOR = 0x23
+                GDT_USER_DATA, // 0x18 → USER_DATA_SELECTOR = 0x1B (must precede code for SYSRETQ)
+                GDT_USER_CODE, // 0x20 → USER_CODE_SELECTOR = 0x23
                 0,
                 0,
             ],
@@ -88,7 +88,11 @@ static mut TSS_TABLE: [Tss; MAX_CPUS] = [Tss::new(); MAX_CPUS];
 #[inline]
 fn current_cpu_index() -> usize {
     let cpu = crate::smp::current_cpu_id();
-    if cpu < MAX_CPUS { cpu } else { 0 }
+    if cpu < MAX_CPUS {
+        cpu
+    } else {
+        0
+    }
 }
 
 pub fn init(tss_rsp0: u64) {
@@ -113,7 +117,8 @@ pub fn init_for_cpu(cpu_id: usize, tss_rsp0: u64) {
 
 unsafe fn write_tss_descriptor(cpu: usize) {
     // Use higher-half mirror address for TSS to ensure it is accessible in all address spaces
-    let tss_addr = crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(TSS_TABLE[cpu]) as usize) as u64;
+    let tss_addr =
+        crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(TSS_TABLE[cpu]) as usize) as u64;
     let limit = (size_of::<Tss>() - 1) as u64;
 
     let low = limit & 0xFFFF
@@ -173,6 +178,8 @@ unsafe fn double_fault_stack_top(cpu: usize) -> u64 {
     // Use higher-half mirror address for the IST stack.
     // The kernel binary is identity-mapped, so its physical address is equal to its
     // load-time virtual address. phys_to_virt_ptr converts this to the shared higher-half mirror.
-    let stack_ptr = crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as usize) as u64;
+    let stack_ptr =
+        crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(DOUBLE_FAULT_STACKS[cpu]) as usize)
+            as u64;
     stack_ptr + DOUBLE_FAULT_STACK_SIZE as u64
 }

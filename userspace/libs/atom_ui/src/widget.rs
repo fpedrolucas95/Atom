@@ -32,15 +32,12 @@ pub trait Widget {
 }
 
 /// Interactive widget state machine (Normal → Hover → Pressed → Normal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InteractiveState {
+    #[default]
     Normal,
     Hover,
     Pressed,
     Disabled,
     Focused,
-}
-
-impl Default for InteractiveState {
-    fn default() -> Self { Self::Normal }
 }

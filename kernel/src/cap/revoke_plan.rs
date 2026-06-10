@@ -90,12 +90,7 @@ mod tests {
     use super::*;
     use crate::cap::{CapPermissions, Capability, ProcessId, ResourceType, ThreadId};
 
-    fn make_cap(
-        handle: u64,
-        owner: u64,
-        parent: Option<u64>,
-        children: &[u64],
-    ) -> Capability {
+    fn make_cap(handle: u64, owner: u64, parent: Option<u64>, children: &[u64]) -> Capability {
         Capability {
             handle: CapHandle::from_raw(handle),
             resource: ResourceType::Thread(ThreadId::from_raw(handle)),

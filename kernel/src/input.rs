@@ -30,9 +30,9 @@
 // - `poll_mouse_byte()` - Syscall: get next mouse byte
 // - `get_mouse_id()` - Return detected mouseID (0, 3, or 4)
 
-use spin::Mutex;
-use core::sync::atomic::{AtomicU8, Ordering};
 use crate::log_info;
+use core::sync::atomic::{AtomicU8, Ordering};
+use spin::Mutex;
 
 // ============================================================================
 // PS/2 Hardware Constants
@@ -75,11 +75,11 @@ const PS2_SELF_TEST_PASS: u8 = 0xAA;
 const PS2_SELF_TEST_FAIL: u8 = 0xFC;
 
 /// Controller config bits
-const CONFIG_IRQ1_ENABLE: u8 = 0x01;     // bit 0: keyboard interrupt
-const CONFIG_IRQ12_ENABLE: u8 = 0x02;    // bit 1: mouse interrupt
-const CONFIG_KEYBOARD_CLOCK: u8 = 0x10;  // bit 4: disable keyboard clock
-const CONFIG_MOUSE_CLOCK: u8 = 0x20;     // bit 5: disable mouse clock
-const CONFIG_TRANSLATION: u8 = 0x40;     // bit 6: scancode translation
+const CONFIG_IRQ1_ENABLE: u8 = 0x01; // bit 0: keyboard interrupt
+const CONFIG_IRQ12_ENABLE: u8 = 0x02; // bit 1: mouse interrupt
+const CONFIG_KEYBOARD_CLOCK: u8 = 0x10; // bit 4: disable keyboard clock
+const CONFIG_MOUSE_CLOCK: u8 = 0x20; // bit 5: disable mouse clock
+const CONFIG_TRANSLATION: u8 = 0x40; // bit 6: scancode translation
 
 /// Timeout for waiting on PS/2 controller (iterations)
 const PS2_TIMEOUT: u32 = 100_000;
@@ -136,10 +136,8 @@ impl<const N: usize> RingBuffer<N> {
 // Global State
 // ============================================================================
 
-static KEYBOARD_BUFFER: Mutex<RingBuffer<KEYBOARD_BUFFER_SIZE>> =
-    Mutex::new(RingBuffer::new());
-static MOUSE_BUFFER: Mutex<RingBuffer<MOUSE_BUFFER_SIZE>> =
-    Mutex::new(RingBuffer::new());
+static KEYBOARD_BUFFER: Mutex<RingBuffer<KEYBOARD_BUFFER_SIZE>> = Mutex::new(RingBuffer::new());
+static MOUSE_BUFFER: Mutex<RingBuffer<MOUSE_BUFFER_SIZE>> = Mutex::new(RingBuffer::new());
 
 /// Detected mouse ID: 0 = basic, 3 = scroll wheel, 4 = scroll + 5 buttons
 static MOUSE_ID: AtomicU8 = AtomicU8::new(0);
@@ -277,9 +275,16 @@ fn read_mouse_id() -> u8 {
 
 /// Initialize the input subsystem
 pub fn init() {
-    log_info!("input", "Input subsystem initialized (userspace driver model)");
-    log_info!("input", "Keyboard buffer: {} bytes, Mouse buffer: {} bytes",
-        KEYBOARD_BUFFER_SIZE, MOUSE_BUFFER_SIZE);
+    log_info!(
+        "input",
+        "Input subsystem initialized (userspace driver model)"
+    );
+    log_info!(
+        "input",
+        "Keyboard buffer: {} bytes, Mouse buffer: {} bytes",
+        KEYBOARD_BUFFER_SIZE,
+        MOUSE_BUFFER_SIZE
+    );
 }
 
 /// Return the detected mouseID (0, 3, or 4).
@@ -354,7 +359,10 @@ pub fn push_mouse_byte(byte: u8) {
 /// - Configures sample rate (60/sec), resolution (8 count/mm), linear scaling
 /// - Enables streaming mode for automatic packet generation
 pub fn init_ps2_mouse_full() {
-    log_info!("input", "Initializing PS/2 controller (keyboard + mouse)...");
+    log_info!(
+        "input",
+        "Initializing PS/2 controller (keyboard + mouse)..."
+    );
 
     // ========================================================================
     // Phase 1: Controller Configuration
@@ -383,8 +391,12 @@ pub fn init_ps2_mouse_full() {
     let new_config = (config | CONFIG_IRQ1_ENABLE | CONFIG_IRQ12_ENABLE | CONFIG_TRANSLATION)
         & !(CONFIG_KEYBOARD_CLOCK | CONFIG_MOUSE_CLOCK);
 
-    log_info!("input", "PS/2 config: 0x{:02X} -> 0x{:02X} (IRQ1+IRQ12+Translation)",
-        config, new_config);
+    log_info!(
+        "input",
+        "PS/2 config: 0x{:02X} -> 0x{:02X} (IRQ1+IRQ12+Translation)",
+        config,
+        new_config
+    );
 
     wait_for_input_buffer();
     write_command(CMD_WRITE_CONFIG);
@@ -428,7 +440,9 @@ pub fn init_ps2_mouse_full() {
                 break;
             }
         }
-        for _ in 0..10_000 { core::hint::spin_loop(); }
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
     }
 
     // Set scancode set 2 (with translation enabled, CPU sees Set 1 codes)
@@ -441,14 +455,22 @@ pub fn init_ps2_mouse_full() {
     write_data(0x02); // Scancode Set 2
     wait_for_output_buffer();
     let scanset_ack = read_data();
-    log_info!("input", "PS/2 keyboard: Scancode set 2 response: 0x{:02X}", scanset_ack);
+    log_info!(
+        "input",
+        "PS/2 keyboard: Scancode set 2 response: 0x{:02X}",
+        scanset_ack
+    );
 
     // Enable keyboard scanning
     wait_for_input_buffer();
     write_data(MOUSE_CMD_ENABLE_STREAMING); // 0xF4 enables keyboard scanning too
     wait_for_output_buffer();
     let kbd_ack = read_data();
-    log_info!("input", "PS/2 keyboard: Scanning enabled (0x{:02X})", kbd_ack);
+    log_info!(
+        "input",
+        "PS/2 keyboard: Scanning enabled (0x{:02X})",
+        kbd_ack
+    );
 
     // ========================================================================
     // Phase 3: Mouse Initialization
@@ -473,7 +495,11 @@ pub fn init_ps2_mouse_full() {
     set_mouse_sample_rate(80);
 
     let mouse_id = read_mouse_id();
-    log_info!("input", "PS/2 mouse: After wheel detection sequence, mouseID = {}", mouse_id);
+    log_info!(
+        "input",
+        "PS/2 mouse: After wheel detection sequence, mouseID = {}",
+        mouse_id
+    );
 
     let mut final_id = mouse_id;
 
@@ -487,7 +513,11 @@ pub fn init_ps2_mouse_full() {
         set_mouse_sample_rate(80);
 
         let mouse_id2 = read_mouse_id();
-        log_info!("input", "PS/2 mouse: After 5-button detection sequence, mouseID = {}", mouse_id2);
+        log_info!(
+            "input",
+            "PS/2 mouse: After 5-button detection sequence, mouseID = {}",
+            mouse_id2
+        );
 
         if mouse_id2 == 4 {
             log_info!("input", "PS/2 mouse: 5-button mouse detected (mouseID 4)");
@@ -541,10 +571,20 @@ pub fn init_ps2_mouse_full() {
     write_command(CMD_READ_CONFIG);
     wait_for_output_buffer();
     let final_config = read_data();
-    log_info!("input", "PS/2 controller final config: 0x{:02X} (IRQ1={}, IRQ12={})",
+    log_info!(
+        "input",
+        "PS/2 controller final config: 0x{:02X} (IRQ1={}, IRQ12={})",
         final_config,
-        if final_config & CONFIG_IRQ1_ENABLE != 0 { "on" } else { "OFF" },
-        if final_config & CONFIG_IRQ12_ENABLE != 0 { "on" } else { "OFF" }
+        if final_config & CONFIG_IRQ1_ENABLE != 0 {
+            "on"
+        } else {
+            "OFF"
+        },
+        if final_config & CONFIG_IRQ12_ENABLE != 0 {
+            "on"
+        } else {
+            "OFF"
+        }
     );
 
     // Clear any leftover ACK bytes from the mouse buffer
@@ -557,6 +597,9 @@ pub fn init_ps2_mouse_full() {
     // Drain hardware buffer
     flush_output_buffer();
 
-    log_info!("input", "PS/2 mouse initialized: mouseID={}, 1:1 scaling, 8 count/mm, 60 samples/sec",
-        final_id);
+    log_info!(
+        "input",
+        "PS/2 mouse initialized: mouseID={}, 1:1 scaling, 8 count/mm, 60 samples/sec",
+        final_id
+    );
 }

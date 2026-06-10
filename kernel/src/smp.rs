@@ -98,7 +98,9 @@ pub fn init_cpu_local_syscall_state(cpu_id: usize, initial_kstack: u64) {
         CPU_LOCAL_ASM_STATE[cpu].cpu_id = cpu as u64;
 
         // Use higher-half mirror address for the per-CPU data structure
-        let ptr = crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(CPU_LOCAL_ASM_STATE[cpu]) as usize) as u64;
+        let ptr =
+            crate::mm::vm::phys_to_virt_ptr(core::ptr::addr_of!(CPU_LOCAL_ASM_STATE[cpu]) as usize)
+                as u64;
 
         // When in kernel mode (now), IA32_GS_BASE is the active GS base.
         // IA32_KERNEL_GS_BASE is the one used by SWAPGS when entering from Ring 3.
@@ -223,8 +225,11 @@ pub fn detect_cpu_apic_ids(rsdp_addr: u64) -> Vec<u32> {
 
             for i in 0..entries {
                 let table_phys = unsafe { *entries_ptr.add(i) };
-                if table_phys == 0 { continue; }
-                let hdr_ptr = crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
+                if table_phys == 0 {
+                    continue;
+                }
+                let hdr_ptr =
+                    crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
                 let hdr = unsafe { &*hdr_ptr };
                 if &hdr.signature == b"APIC" {
                     madt_phys = table_phys;
@@ -246,8 +251,11 @@ pub fn detect_cpu_apic_ids(rsdp_addr: u64) -> Vec<u32> {
 
             for i in 0..entries {
                 let table_phys = unsafe { *entries_ptr.add(i) } as u64;
-                if table_phys == 0 { continue; }
-                let hdr_ptr = crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
+                if table_phys == 0 {
+                    continue;
+                }
+                let hdr_ptr =
+                    crate::mm::vm::phys_to_virt_ptr(table_phys as usize) as *const SdtHeader;
                 let hdr = unsafe { &*hdr_ptr };
                 if &hdr.signature == b"APIC" {
                     madt_phys = table_phys;
@@ -445,7 +453,10 @@ fn prepare_trampoline(stack_top: u64, entry: u64) {
     }
 
     if !crate::mm::pmm::reserve_page(TRAMPOLINE_PHYS) {
-        panic!("Failed to reserve AP trampoline page at {:#X}", TRAMPOLINE_PHYS);
+        panic!(
+            "Failed to reserve AP trampoline page at {:#X}",
+            TRAMPOLINE_PHYS
+        );
     }
 
     let mut page = [0u8; crate::mm::pmm::PAGE_SIZE];
@@ -494,11 +505,18 @@ fn alloc_stack_top(pages: usize) -> Option<u64> {
 pub fn bringup_aps() {
     let total = cpu_count();
     if total <= 1 {
-        log_info!(LOG_ORIGIN, "SMP: single-core topology, no AP startup needed");
+        log_info!(
+            LOG_ORIGIN,
+            "SMP: single-core topology, no AP startup needed"
+        );
         return;
     }
 
-    log_info!(LOG_ORIGIN, "Starting AP bootstrap for {} additional CPU(s)", total - 1);
+    log_info!(
+        LOG_ORIGIN,
+        "Starting AP bootstrap for {} additional CPU(s)",
+        total - 1
+    );
 
     let bsp = current_cpu_id();
 
@@ -516,7 +534,11 @@ pub fn bringup_aps() {
         };
 
         let Some(bootstrap_stack) = alloc_stack_top(4) else {
-            log_warn!(LOG_ORIGIN, "AP{} startup skipped: failed to allocate bootstrap stack", cpu_id);
+            log_warn!(
+                LOG_ORIGIN,
+                "AP{} startup skipped: failed to allocate bootstrap stack",
+                cpu_id
+            );
             set_cpu_state(cpu_id, CpuState::Offline);
             continue;
         };
@@ -562,7 +584,12 @@ pub fn bringup_aps() {
         }
 
         if online {
-            log_info!(LOG_ORIGIN, "AP cpu_id={} apic_id={} online", cpu_id, apic_id);
+            log_info!(
+                LOG_ORIGIN,
+                "AP cpu_id={} apic_id={} online",
+                cpu_id,
+                apic_id
+            );
         } else {
             log_warn!(
                 LOG_ORIGIN,
@@ -619,7 +646,12 @@ pub extern "C" fn smp_ap_entry() -> ! {
     crate::interrupts::init_timer(100);
     crate::interrupts::enable();
 
-    log_info!(LOG_ORIGIN, "AP{} entering scheduler with idle thread {}", cpu_id, idle_id);
+    log_info!(
+        LOG_ORIGIN,
+        "AP{} entering scheduler with idle thread {}",
+        cpu_id,
+        idle_id
+    );
 
     crate::thread::jump_to_thread(idle_id)
 }

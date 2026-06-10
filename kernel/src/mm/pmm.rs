@@ -33,12 +33,14 @@
 // - Zeroed variants for page tables and heap init
 // - get_stats / get_detailed_stats / get_memory_stats — diagnostics
 
+use crate::boot::{
+    MemoryMap, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA, EFI_CONVENTIONAL_MEMORY,
+};
+use crate::{log_debug, log_info, log_warn};
 use alloc::collections::BTreeMap;
-use crate::boot::{MemoryMap, EFI_CONVENTIONAL_MEMORY, EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA};
 #[allow(unused_imports)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
-use crate::{log_info, log_debug, log_warn};
 
 /// Page size: 4 KiB
 pub const PAGE_SIZE: usize = 4096;
@@ -173,8 +175,7 @@ impl ProtectedPml4Registry {
     }
 }
 
-static PROTECTED_PML4S: Mutex<ProtectedPml4Registry> =
-    Mutex::new(ProtectedPml4Registry::new());
+static PROTECTED_PML4S: Mutex<ProtectedPml4Registry> = Mutex::new(ProtectedPml4Registry::new());
 
 #[cfg(debug_assertions)]
 #[allow(dead_code)]
@@ -187,9 +188,7 @@ static ALLOC_TRACE: AtomicBool = AtomicBool::new(false);
 /// Check if an EFI memory type is usable by the kernel after ExitBootServices()
 #[inline]
 fn is_usable_memory(typ: u32) -> bool {
-    typ == EFI_CONVENTIONAL_MEMORY
-        || typ == EFI_BOOT_SERVICES_CODE
-        || typ == EFI_BOOT_SERVICES_DATA
+    typ == EFI_CONVENTIONAL_MEMORY || typ == EFI_BOOT_SERVICES_CODE || typ == EFI_BOOT_SERVICES_DATA
 }
 
 /// Get human-readable name for EFI memory type
@@ -411,7 +410,11 @@ pub unsafe fn init(memory_map: &MemoryMap) {
             let region_size = d.number_of_pages as usize * PAGE_SIZE;
 
             // Skip page 0 region
-            let effective_start = if region_start == 0 { PAGE_SIZE } else { region_start };
+            let effective_start = if region_start == 0 {
+                PAGE_SIZE
+            } else {
+                region_start
+            };
             let effective_size = region_size.saturating_sub(effective_start - region_start);
 
             if effective_size >= bitmap_alloc_size {
@@ -471,7 +474,9 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     for d in memory_map.descriptors() {
         let start_page = (d.physical_start as usize) / PAGE_SIZE;
         let num_pages = d.number_of_pages as usize;
-        let end_page = start_page.saturating_add(num_pages).min(effective_tracked_pages);
+        let end_page = start_page
+            .saturating_add(num_pages)
+            .min(effective_tracked_pages);
         let size_mb = (num_pages * PAGE_SIZE) / (1024 * 1024);
 
         if size_mb > 0 && is_usable_memory(d.typ) {
@@ -536,8 +541,8 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     // The SMP AP trampoline is copied to physical 0x8000 during bring-up.
     // Keep the trampoline page and one guard page out of the allocator so
     // early page-table allocations cannot be overwritten by trampoline code.
-    for page in AP_TRAMPOLINE_RESERVED_START
-        ..(AP_TRAMPOLINE_RESERVED_START + AP_TRAMPOLINE_RESERVED_PAGES)
+    for page in
+        AP_TRAMPOLINE_RESERVED_START..(AP_TRAMPOLINE_RESERVED_START + AP_TRAMPOLINE_RESERVED_PAGES)
     {
         if is_page_free(page) {
             set_page_allocated(page);
@@ -647,13 +652,46 @@ pub unsafe fn init(memory_map: &MemoryMap) {
     log_info!("[pmm]", "========================================");
     log_info!("[pmm]", "PMM INITIALIZED — Memory Summary");
     log_info!("[pmm]", "========================================");
-    log_info!("[pmm]", "  Physical RAM:   {} MiB ({} pages)", physical_ram_mb, physical_ram_pages);
-    log_info!("[pmm]", "  Reserved/MMIO:  {} MiB ({} pages)", reserved_mb, reserved_pages);
-    log_info!("[pmm]", "  Tracked range:  {} MiB ({} pages)", tracked_mb, effective_total);
-    log_info!("[pmm]", "  Free pages:     {} ({} MiB)", effective_free, free_mb);
-    log_info!("[pmm]", "  Bitmap type:    {}", if USING_DYNAMIC.load(Ordering::Relaxed) { "dynamic" } else { "static (.bss)" });
+    log_info!(
+        "[pmm]",
+        "  Physical RAM:   {} MiB ({} pages)",
+        physical_ram_mb,
+        physical_ram_pages
+    );
+    log_info!(
+        "[pmm]",
+        "  Reserved/MMIO:  {} MiB ({} pages)",
+        reserved_mb,
+        reserved_pages
+    );
+    log_info!(
+        "[pmm]",
+        "  Tracked range:  {} MiB ({} pages)",
+        tracked_mb,
+        effective_total
+    );
+    log_info!(
+        "[pmm]",
+        "  Free pages:     {} ({} MiB)",
+        effective_free,
+        free_mb
+    );
+    log_info!(
+        "[pmm]",
+        "  Bitmap type:    {}",
+        if USING_DYNAMIC.load(Ordering::Relaxed) {
+            "dynamic"
+        } else {
+            "static (.bss)"
+        }
+    );
     log_info!("[pmm]", "  Bitmap size:    {} KiB", bitmap_kb);
-    log_info!("[pmm]", "  Largest run:    {} pages ({} MiB)", max_run, (max_run * PAGE_SIZE) / (1024 * 1024));
+    log_info!(
+        "[pmm]",
+        "  Largest run:    {} pages ({} MiB)",
+        max_run,
+        (max_run * PAGE_SIZE) / (1024 * 1024)
+    );
     log_info!("[pmm]", "========================================");
 }
 
@@ -1091,7 +1129,11 @@ pub fn register_active_pml4(pml4_phys: usize) -> Result<(), crate::mm::Validatio
     }
 
     if !was_present {
-        log_debug!("[pmm]", "Registered protected PML4 at phys 0x{:X}", pml4_phys);
+        log_debug!(
+            "[pmm]",
+            "Registered protected PML4 at phys 0x{:X}",
+            pml4_phys
+        );
     }
 
     Ok(())
@@ -1111,7 +1153,11 @@ pub fn unregister_active_pml4(pml4_phys: usize) -> Result<(), crate::mm::Validat
     let mut guard = PROTECTED_PML4S.lock();
 
     if guard.remove(pml4_phys) {
-        log_debug!("[pmm]", "Unregistered protected PML4 at phys 0x{:X}", pml4_phys);
+        log_debug!(
+            "[pmm]",
+            "Unregistered protected PML4 at phys 0x{:X}",
+            pml4_phys
+        );
     }
 
     Ok(())

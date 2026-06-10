@@ -53,7 +53,10 @@ impl UserVAddr {
 
     #[inline]
     pub fn checked_add(self, offset: usize) -> Result<Self, UserAddressError> {
-        let next = self.0.checked_add(offset).ok_or(UserAddressError::Overflow)?;
+        let next = self
+            .0
+            .checked_add(offset)
+            .ok_or(UserAddressError::Overflow)?;
         validate_user_addr(next)
     }
 }
@@ -180,6 +183,11 @@ impl UserRange {
     }
 
     #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
     pub const fn start(self) -> usize {
         self.base.as_usize()
     }
@@ -284,19 +292,19 @@ pub const ENOTSUP: u64 = u64::MAX - 29;
 pub const EAGAIN: u64 = u64::MAX - 30;
 pub const EINTR: u64 = u64::MAX - 31;
 pub const E2BIG: u64 = u64::MAX - 32;
-pub const ENODEV: u64 = u64::MAX - 33;  // No such device
+pub const ENODEV: u64 = u64::MAX - 33; // No such device
 
 // ---------------------------------------------------------------------------
 // Infrastructure / Networking Phase 1 syscalls
 // ---------------------------------------------------------------------------
-pub const SYS_PCI_GET_BAR:            u64 = 81;
-pub const SYS_DEVICE_BIND_IRQ:        u64 = 82;
-pub const SYS_IRQ_LISTEN:             u64 = 83;
-pub const SYS_DMA_ALLOC:              u64 = 84;
-pub const SYS_DMA_MAP:                u64 = 85;
-pub const SYS_DMA_FREE:               u64 = 86;
-pub const SYS_MAP_MMIO:               u64 = 87;
-pub const SYS_IRQ_ACK:                u64 = 88;
+pub const SYS_PCI_GET_BAR: u64 = 81;
+pub const SYS_DEVICE_BIND_IRQ: u64 = 82;
+pub const SYS_IRQ_LISTEN: u64 = 83;
+pub const SYS_DMA_ALLOC: u64 = 84;
+pub const SYS_DMA_MAP: u64 = 85;
+pub const SYS_DMA_FREE: u64 = 86;
+pub const SYS_MAP_MMIO: u64 = 87;
+pub const SYS_IRQ_ACK: u64 = 88;
 
 /// Check whether a raw syscall return value represents an error code.
 ///
@@ -329,13 +337,13 @@ pub fn is_canonical_user_va(addr: UserVirtAddr) -> bool {
 /// Returns true when `addr` is a non-null userspace address accepted by the ABI.
 #[inline]
 pub fn is_valid_user_va(addr: UserVirtAddr) -> bool {
-    addr >= USER_SPACE_MIN && addr < USER_SPACE_MAX
+    (USER_SPACE_MIN..USER_SPACE_MAX).contains(&addr)
 }
 
 /// Returns true when `addr` lies inside the anonymous mmap window.
 #[inline]
 pub fn is_user_mmap_addr(addr: UserVirtAddr) -> bool {
-    addr >= USER_MMAP_START && addr < USER_MMAP_END
+    (USER_MMAP_START..USER_MMAP_END).contains(&addr)
 }
 
 /// Returns true when the upper bits of `addr` look suspicious for a lower-half
@@ -394,9 +402,13 @@ pub fn validate_user_range(base: usize, len: usize) -> Result<UserRange, UserAdd
 
 /// Validates a userspace range that must be page-aligned.
 #[inline]
-pub fn validate_user_page_aligned_range(base: usize, len: usize) -> Result<UserRange, UserAddressError> {
+pub fn validate_user_page_aligned_range(
+    base: usize,
+    len: usize,
+) -> Result<UserRange, UserAddressError> {
     let range = validate_user_range(base, len)?;
-    if !range.start().is_multiple_of(USER_PAGE_SIZE) || !range.len().is_multiple_of(USER_PAGE_SIZE) {
+    if !range.start().is_multiple_of(USER_PAGE_SIZE) || !range.len().is_multiple_of(USER_PAGE_SIZE)
+    {
         return Err(UserAddressError::Unaligned);
     }
     Ok(range)
@@ -739,7 +751,10 @@ mod tests {
     fn user_return_range_validation_reuses_abi_contract() {
         assert!(validate_user_return_range(USER_SPACE_MIN as usize, USER_PAGE_SIZE).is_ok());
         assert_eq!(
-            validate_user_return_range((USER_SPACE_MAX - USER_PAGE_SIZE as u64 / 2) as usize, USER_PAGE_SIZE),
+            validate_user_return_range(
+                (USER_SPACE_MAX - USER_PAGE_SIZE as u64 / 2) as usize,
+                USER_PAGE_SIZE
+            ),
             Err(UserAddressError::AboveUserMax)
         );
     }
@@ -749,7 +764,10 @@ mod tests {
         assert!(validate_user_mmap_range(USER_MMAP_START as usize, USER_PAGE_SIZE).is_ok());
 
         assert_eq!(
-            validate_user_mmap_range((USER_MMAP_START - USER_PAGE_SIZE as u64) as usize, USER_PAGE_SIZE),
+            validate_user_mmap_range(
+                (USER_MMAP_START - USER_PAGE_SIZE as u64) as usize,
+                USER_PAGE_SIZE
+            ),
             Err(UserAddressError::BelowUserMin)
         );
         assert_eq!(
@@ -757,11 +775,17 @@ mod tests {
             Err(UserAddressError::AboveUserMax)
         );
         assert_eq!(
-            validate_user_mmap_range((USER_MMAP_END - USER_PAGE_SIZE as u64 / 2) as usize, USER_PAGE_SIZE),
+            validate_user_mmap_range(
+                (USER_MMAP_END - USER_PAGE_SIZE as u64 / 2) as usize,
+                USER_PAGE_SIZE
+            ),
             Err(UserAddressError::Unaligned)
         );
         assert_eq!(
-            validate_user_mmap_range((USER_MMAP_END - USER_PAGE_SIZE as u64) as usize, USER_PAGE_SIZE * 2),
+            validate_user_mmap_range(
+                (USER_MMAP_END - USER_PAGE_SIZE as u64) as usize,
+                USER_PAGE_SIZE * 2
+            ),
             Err(UserAddressError::AboveUserMax)
         );
         assert_eq!(

@@ -31,9 +31,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use super::{
-    KEYBOARD_INTERRUPT_VECTOR,
-    MOUSE_INTERRUPT_VECTOR,
-    RESCHEDULE_INTERRUPT_VECTOR,
+    KEYBOARD_INTERRUPT_VECTOR, MOUSE_INTERRUPT_VECTOR, RESCHEDULE_INTERRUPT_VECTOR,
     TIMER_INTERRUPT_VECTOR,
 };
 use crate::{log_debug, log_info, log_warn};
@@ -318,7 +316,10 @@ const PIT_FREQ: u32 = 1_193_182; // 8254 base oscillator (Hz)
 /// Initialize the interrupt controllers on the boot CPU.
 pub fn init() {
     if !apic_supported() {
-        log_warn!(LOG_ORIGIN, "APIC not reported by CPUID; falling back to PIC + PIT");
+        log_warn!(
+            LOG_ORIGIN,
+            "APIC not reported by CPUID; falling back to PIC + PIT"
+        );
         init_pic(true);
         return;
     }
@@ -334,7 +335,11 @@ pub fn init() {
         configure_ioapic();
     }
 
-    log_info!(LOG_ORIGIN, "APIC subsystem initialized (mode={})", mode_name());
+    log_info!(
+        LOG_ORIGIN,
+        "APIC subsystem initialized (mode={})",
+        mode_name()
+    );
 }
 
 /// Bring up the Local APIC on the *current* CPU.
@@ -368,7 +373,13 @@ pub fn init_local_current_cpu() {
 
         let id = local_apic_id();
         let version = lapic_read(REG_VERSION) & 0xFF;
-        log_debug!(LOG_ORIGIN, "LAPIC up: id={} version={:#X} mode={}", id, version, mode_name());
+        log_debug!(
+            LOG_ORIGIN,
+            "LAPIC up: id={} version={:#X} mode={}",
+            id,
+            version,
+            mode_name()
+        );
     }
 
     log_info!(LOG_ORIGIN, "Local APIC online (id={})", local_apic_id());
@@ -384,7 +395,14 @@ unsafe fn configure_ioapic() {
     // The periodic tick comes from the LAPIC timer, so keep the PIT line masked.
     ioapic_set_redirect(GSI_PIT, 0, dest, true, false, false);
 
-    ioapic_set_redirect(GSI_KEYBOARD, KEYBOARD_INTERRUPT_VECTOR, dest, false, false, false);
+    ioapic_set_redirect(
+        GSI_KEYBOARD,
+        KEYBOARD_INTERRUPT_VECTOR,
+        dest,
+        false,
+        false,
+        false,
+    );
     ioapic_set_redirect(GSI_MOUSE, MOUSE_INTERRUPT_VECTOR, dest, false, false, false);
 
     log_info!(
@@ -410,7 +428,11 @@ unsafe fn set_imcr_to_apic() {
     let cur = inb(IMCR_DATA);
     outb(IMCR_DATA, cur | 0x01);
     io_wait();
-    log_debug!(LOG_ORIGIN, "IMCR set to APIC routing (val={:#04X})", cur | 0x01);
+    log_debug!(
+        LOG_ORIGIN,
+        "IMCR set to APIC routing (val={:#04X})",
+        cur | 0x01
+    );
 }
 
 /// Remap the 8259A vectors out of the CPU-exception range, then mask every
@@ -462,7 +484,12 @@ fn send_ipi(dest: u32, icr_low: u32) {
     unsafe {
         match mode() {
             ApicMode::Disabled => {
-                log_warn!(LOG_ORIGIN, "Ignoring IPI in PIC mode: dest={} icr={:#X}", dest, icr_low);
+                log_warn!(
+                    LOG_ORIGIN,
+                    "Ignoring IPI in PIC mode: dest={} icr={:#X}",
+                    dest,
+                    icr_low
+                );
             }
             ApicMode::X2Apic => {
                 // Single 64-bit ICR write; destination occupies bits 63:32.
@@ -543,9 +570,17 @@ unsafe fn init_apic_timer(frequency_hz: u32) {
     // Fast path: reuse a prior calibration.
     let cached = TIMER_CALIBRATED_COUNT.load(Ordering::Acquire);
     if cached != 0 {
-        lapic_write(REG_LVT_TIMER, (TIMER_INTERRUPT_VECTOR as u32) | TIMER_MODE_PERIODIC);
+        lapic_write(
+            REG_LVT_TIMER,
+            (TIMER_INTERRUPT_VECTOR as u32) | TIMER_MODE_PERIODIC,
+        );
         lapic_write(REG_TIMER_INIT, cached);
-        log_debug!(LOG_ORIGIN, "APIC timer armed from cache: init={} for {}Hz", cached, freq);
+        log_debug!(
+            LOG_ORIGIN,
+            "APIC timer armed from cache: init={} for {}Hz",
+            cached,
+            freq
+        );
         return;
     }
 
@@ -584,7 +619,10 @@ unsafe fn init_apic_timer(frequency_hz: u32) {
         freq
     );
 
-    lapic_write(REG_LVT_TIMER, (TIMER_INTERRUPT_VECTOR as u32) | TIMER_MODE_PERIODIC);
+    lapic_write(
+        REG_LVT_TIMER,
+        (TIMER_INTERRUPT_VECTOR as u32) | TIMER_MODE_PERIODIC,
+    );
     lapic_write(REG_TIMER_INIT, final_count);
 }
 
@@ -700,6 +738,10 @@ pub fn dump_apic_state() {
         log_debug!(LOG_ORIGIN, "  ISR[31:0] = {:#010X}", lapic_read(REG_ISR0));
         log_debug!(LOG_ORIGIN, "  IRR[31:0] = {:#010X}", lapic_read(REG_IRR0));
         log_debug!(LOG_ORIGIN, "  TPR       = {:#010X}", lapic_read(REG_TPR));
-        log_debug!(LOG_ORIGIN, "  LVT Timer = {:#010X}", lapic_read(REG_LVT_TIMER));
+        log_debug!(
+            LOG_ORIGIN,
+            "  LVT Timer = {:#010X}",
+            lapic_read(REG_LVT_TIMER)
+        );
     }
 }

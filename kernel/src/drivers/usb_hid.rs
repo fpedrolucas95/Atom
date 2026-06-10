@@ -16,14 +16,24 @@ pub struct HidDevice {
 }
 
 pub fn init_hid_device(slot_id: u8, protocol: u8) {
-    log_info!("usb_hid", "Initializing HID device on slot {}, protocol {}", slot_id, protocol);
+    log_info!(
+        "usb_hid",
+        "Initializing HID device on slot {}, protocol {}",
+        slot_id,
+        protocol
+    );
     // In next steps: setup interrupt endpoints and start polling
 }
 
 pub fn handle_hid_report(slot_id: u8, report: &[u8]) {
     // Production-grade HID parsing would go here.
     // Requirement: No PS/2 translation, No input injection.
-    log_info!("usb_hid", "Received HID report from slot {}: {:02x?}", slot_id, report);
+    log_info!(
+        "usb_hid",
+        "Received HID report from slot {}: {:02x?}",
+        slot_id,
+        report
+    );
 
     // In a full implementation, we would decode the report according to the
     // HID Report Descriptor and either push it to a USB-specific input queue

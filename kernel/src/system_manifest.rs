@@ -55,7 +55,10 @@ pub struct InitialCapability {
 
 impl InitialCapability {
     const fn new(resource: ResourceType, permissions: CapPermissions) -> Self {
-        Self { resource, permissions }
+        Self {
+            resource,
+            permissions,
+        }
     }
 }
 
@@ -138,24 +141,32 @@ const FS_PERM: CapPermissions = CapPermissions::READ
     .union(CapPermissions::GRANT);
 
 const fn identity(sid: ServiceId) -> InitialCapability {
-    InitialCapability::new(ResourceType::ServiceIdentity { service_id: sid.0 }, IDENTITY_PERM)
+    InitialCapability::new(
+        ResourceType::ServiceIdentity { service_id: sid.0 },
+        IDENTITY_PERM,
+    )
 }
 const fn reserved(port_id: u64) -> InitialCapability {
     InitialCapability::new(ResourceType::ReservedPort { port_id }, RESERVED_PORT_PERM)
 }
 const fn keyboard() -> InitialCapability {
     InitialCapability::new(
-        ResourceType::InputDevice { device_type: InputDeviceType::Keyboard },
+        ResourceType::InputDevice {
+            device_type: InputDeviceType::Keyboard,
+        },
         INPUT_PERM,
     )
 }
 const fn mouse() -> InitialCapability {
     InitialCapability::new(
-        ResourceType::InputDevice { device_type: InputDeviceType::Mouse },
+        ResourceType::InputDevice {
+            device_type: InputDeviceType::Mouse,
+        },
         INPUT_PERM,
     )
 }
-const MODESET: InitialCapability = InitialCapability::new(ResourceType::DisplayModeSet, MODESET_PERM);
+const MODESET: InitialCapability =
+    InitialCapability::new(ResourceType::DisplayModeSet, MODESET_PERM);
 
 // ── Per-service capability profiles (least privilege) ───────────────────────
 //
@@ -188,8 +199,7 @@ const NETD_CAPS: &[InitialCapability] = &[identity(SID_NETD)];
 // ui_shell is the compositor / display server in the current design: it is the
 // single owner of the framebuffer and the input router. Documented exception —
 // these are declared here, never granted ambiently.
-const UI_SHELL_CAPS: &[InitialCapability] =
-    &[identity(SID_UI_SHELL), keyboard(), mouse(), MODESET];
+const UI_SHELL_CAPS: &[InitialCapability] = &[identity(SID_UI_SHELL), keyboard(), mouse(), MODESET];
 const DISPLAY_CAPS: &[InitialCapability] = &[identity(SID_DISPLAY)];
 
 // Environment-grant profiles.
@@ -389,7 +399,9 @@ pub fn app_grants_for_path(path: &str) -> SpawnGrants {
 // ── Lookups ─────────────────────────────────────────────────────────────────
 
 pub fn lookup_by_name(name: &str) -> Option<&'static SystemServiceManifestEntry> {
-    SYSTEM_SERVICE_MANIFEST.iter().find(|e| e.canonical_name == name)
+    SYSTEM_SERVICE_MANIFEST
+        .iter()
+        .find(|e| e.canonical_name == name)
 }
 
 pub fn lookup_by_id(id: ServiceId) -> Option<&'static SystemServiceManifestEntry> {
@@ -428,7 +440,12 @@ static SERVICE_IDENTITY: Mutex<BTreeMap<ProcessId, ServiceId>> = Mutex::new(BTre
 
 pub fn assign_service_identity(process: ProcessId, service_id: ServiceId) {
     SERVICE_IDENTITY.lock().insert(process, service_id);
-    crate::log_info!(LOG_ORIGIN, "assigned service identity {:?} to process {}", service_id, process);
+    crate::log_info!(
+        LOG_ORIGIN,
+        "assigned service identity {:?} to process {}",
+        service_id,
+        process
+    );
 }
 
 pub fn service_identity_of(process: ProcessId) -> Option<ServiceId> {
@@ -482,10 +499,15 @@ mod tests {
     fn init_holds_only_bootstrap_authority() {
         let init = lookup_by_id(SID_INIT).unwrap();
         assert_eq!(init.spawn_kind, SpawnKind::BootImage);
-        assert!(init.initial_capabilities.iter().any(|c| c.resource == ResourceType::SpawnSystemService));
+        assert!(init
+            .initial_capabilities
+            .iter()
+            .any(|c| c.resource == ResourceType::SpawnSystemService));
         assert!(!init.initial_capabilities.iter().any(|c| matches!(
             c.resource,
-            ResourceType::Framebuffer { .. } | ResourceType::InputDevice { .. } | ResourceType::DisplayModeSet
+            ResourceType::Framebuffer { .. }
+                | ResourceType::InputDevice { .. }
+                | ResourceType::DisplayModeSet
         )));
         assert!(init.environment_grants.is_empty());
     }
@@ -518,11 +540,16 @@ mod tests {
     #[test]
     fn fsd_has_fs_but_no_display_or_input() {
         let fsd = lookup_by_id(SID_FSD).unwrap();
-        assert!(fsd.initial_capabilities.iter().any(|c| matches!(c.resource, ResourceType::FsNamespace { .. })));
+        assert!(fsd
+            .initial_capabilities
+            .iter()
+            .any(|c| matches!(c.resource, ResourceType::FsNamespace { .. })));
         assert!(fsd.environment_grants.is_empty());
         assert!(!fsd.initial_capabilities.iter().any(|c| matches!(
             c.resource,
-            ResourceType::InputDevice { .. } | ResourceType::Framebuffer { .. } | ResourceType::DisplayModeSet
+            ResourceType::InputDevice { .. }
+                | ResourceType::Framebuffer { .. }
+                | ResourceType::DisplayModeSet
         )));
     }
 
@@ -552,18 +579,28 @@ mod tests {
     #[test]
     fn trusted_apps_are_exact_path_and_minimal() {
         let p = lookup_trusted_app("/apps/system/display_settings.atxf").unwrap();
-        assert!(p.capabilities.iter().all(|c| c.resource == ResourceType::DisplayModeSet));
+        assert!(p
+            .capabilities
+            .iter()
+            .all(|c| c.resource == ResourceType::DisplayModeSet));
         assert!(p.environment_grants.is_empty());
         assert!(lookup_trusted_app("/apps/user/terminal.atxf").is_none());
         let none = app_grants_for_path("/apps/user/browser.atxf");
-        assert!(none.capabilities.is_empty() && none.environment_grants.is_empty() && none.service_id.is_none());
+        assert!(
+            none.capabilities.is_empty()
+                && none.environment_grants.is_empty()
+                && none.service_id.is_none()
+        );
     }
 
     #[test]
     fn service_manager_cannot_start_init() {
         let sm = ProcessId::from_raw(0xB001);
         assign_service_identity(sm, SID_SERVICE_MANAGER);
-        assert!(matches!(authorize_system_service_spawn(sm, "init"), Err(SpawnAuthError::NotAllowedChild)));
+        assert!(matches!(
+            authorize_system_service_spawn(sm, "init"),
+            Err(SpawnAuthError::NotAllowedChild)
+        ));
         clear_service_identity(sm);
     }
 

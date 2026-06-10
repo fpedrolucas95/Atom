@@ -4,9 +4,9 @@
 //! It maintains a registry of discovered devices to facilitate
 //! capability-based delegation to userspace drivers.
 
-use spin::Mutex;
-use alloc::vec::Vec;
 use crate::log_info;
+use alloc::vec::Vec;
+use spin::Mutex;
 
 /// PCI configuration space registers
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
@@ -46,10 +46,18 @@ pub fn init() {
             if let Some(device) = probe_device(0, dev, func) {
                 devices.push(device);
 
-                log_info!("pci", "Device found: {:02x}:{:02x}.{} ID={:04x}:{:04x} Class={:02x}.{:02x} IRQ={}",
-                    device.bus, device.device, device.function,
-                    device.vendor_id, device.device_id,
-                    device.class, device.subclass, device.irq_line);
+                log_info!(
+                    "pci",
+                    "Device found: {:02x}:{:02x}.{} ID={:04x}:{:04x} Class={:02x}.{:02x} IRQ={}",
+                    device.bus,
+                    device.device,
+                    device.function,
+                    device.vendor_id,
+                    device.device_id,
+                    device.class,
+                    device.subclass,
+                    device.irq_line
+                );
 
                 // If not a multi-function device, don't scan other functions
                 if func == 0 {
@@ -62,7 +70,11 @@ pub fn init() {
         }
     }
 
-    log_info!("pci", "Enumeration complete: {} devices found", devices.len());
+    log_info!(
+        "pci",
+        "Enumeration complete: {} devices found",
+        devices.len()
+    );
 }
 
 fn probe_device(bus: u8, dev: u8, func: u8) -> Option<PciDevice> {
@@ -96,27 +108,40 @@ fn probe_device(bus: u8, dev: u8, func: u8) -> Option<PciDevice> {
 /// Find a device by vendor and device ID
 #[allow(dead_code)]
 pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
-    DISCOVERED_DEVICES.lock().iter().find(|d| d.vendor_id == vendor && d.device_id == device).copied()
+    DISCOVERED_DEVICES
+        .lock()
+        .iter()
+        .find(|d| d.vendor_id == vendor && d.device_id == device)
+        .copied()
 }
 
 /// Find a device by BDF (Bus/Device/Function)
 pub fn find_by_bdf(bdf: u16) -> Option<PciDevice> {
-    DISCOVERED_DEVICES.lock().iter().find(|d| d.bdf() == bdf).copied()
+    DISCOVERED_DEVICES
+        .lock()
+        .iter()
+        .find(|d| d.bdf() == bdf)
+        .copied()
 }
 
 /// Return all devices matching a PCI class code.
 /// The kernel uses this to grant capabilities without knowing specific drivers.
 pub fn get_devices_by_class(class: u8) -> alloc::vec::Vec<PciDevice> {
-    DISCOVERED_DEVICES.lock().iter().filter(|d| d.class == class).copied().collect()
+    DISCOVERED_DEVICES
+        .lock()
+        .iter()
+        .filter(|d| d.class == class)
+        .copied()
+        .collect()
 }
 
 /// Read a 32-bit dword from PCI config space
 pub fn read_config_dword(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    let address = ((bus as u32) << 16) |
-                  ((dev as u32) << 11) |
-                  ((func as u32) << 8) |
-                  ((offset as u32) & 0xFC) |
-                  0x80000000;
+    let address = ((bus as u32) << 16)
+        | ((dev as u32) << 11)
+        | ((func as u32) << 8)
+        | ((offset as u32) & 0xFC)
+        | 0x80000000;
 
     unsafe {
         crate::arch::outl(PCI_CONFIG_ADDRESS, address);
@@ -126,11 +151,11 @@ pub fn read_config_dword(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
 
 /// Write a 32-bit dword to PCI config space
 pub fn write_config_dword(bus: u8, dev: u8, func: u8, offset: u8, value: u32) {
-    let address = ((bus as u32) << 16) |
-                  ((dev as u32) << 11) |
-                  ((func as u32) << 8) |
-                  ((offset as u32) & 0xFC) |
-                  0x80000000;
+    let address = ((bus as u32) << 16)
+        | ((dev as u32) << 11)
+        | ((func as u32) << 8)
+        | ((offset as u32) & 0xFC)
+        | 0x80000000;
 
     unsafe {
         crate::arch::outl(PCI_CONFIG_ADDRESS, address);

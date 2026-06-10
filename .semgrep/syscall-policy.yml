@@ -55,27 +55,27 @@ rules:
     patterns:
       - pattern: |
           fn $HANDLER(...) -> u64 { ... }
+      # `map_framebuffer`/`set_video` are intentionally excluded: they are gated
+      # at the dispatcher via the policy table (`Requires(FramebufferMap)` /
+      # `Requires(DisplayModeSet)` in policy.rs), not in-handler, so the
+      # in-handler heuristic below does not apply to them.
       - metavariable-regex:
           metavariable: $HANDLER
-          regex: ^sys_(pci|dma|mmio|io_port|irq|map_framebuffer|set_video|shared_region_map)_.*
+          regex: ^sys_(pci|dma|mmio|io_port|irq|shared_region_map)_.*
+      # Gating calls in this tree are written with module qualification
+      # (`policy::validate_io_port_access`, `crate::thread::validate_thread_capability`),
+      # so match the gate by name as a substring rather than as a bare call —
+      # an unqualified `pattern-not` call would miss the qualified path and
+      # false-positive on handlers that are in fact gated.
+      - pattern-not-regex: validate_io_port_access
+      - pattern-not-regex: validate_thread_capability
+      # Ownership / process-association gating: e.g. `sys_dma_alloc` binds the
+      # minted DmaBuffer capability to the caller's process identity and rejects
+      # callers with no process (EPERM).
+      - pattern-not-regex: get_thread_process_id
+      # No-op stubs that touch no resource (return ENOSYS) need no gate.
       - pattern-not: |
-          fn $HANDLER(...) -> u64 {
-            ...
-            validate_io_port_access(...)
-            ...
-          }
-      - pattern-not: |
-          fn $HANDLER(...) -> u64 {
-            ...
-            validate_thread_capability(...)
-            ...
-          }
-      - pattern-not: |
-          fn $HANDLER(...) -> u64 {
-            ...
-            validate_thread_capability_by_type(...)
-            ...
-          }
+          fn $HANDLER(...) -> u64 { ENOSYS }
 
   # ────────────────────────────────────────────────────────────────────────
   # Forbid insecure ATXF/loader fallbacks being reintroduced (PR4 regression):
@@ -86,8 +86,8 @@ rules:
     severity: ERROR
     message: >
       Possible reintroduction of an insecure ATXF fallback (unsigned/v1/skip
-      verification). PR4 requires ATXF v2 with authenticity verified before
-      mapping. Remove the fallback.
+      verification). The loader requires a signed ATXF image (currently v3,
+      Ed25519) with authenticity verified before mapping. Remove the fallback.
     paths:
       include:
         - kernel/src/**

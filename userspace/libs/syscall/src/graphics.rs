@@ -1,10 +1,9 @@
 // Framebuffer and graphics syscalls
 
-use crate::error::{ESUCCESS, EPERM, EINVAL, ENOMEM, EBUSY, ENOTSUP, SyscallError, SyscallResult};
-use crate::raw::{syscall0, syscall1, syscall2, syscall3, numbers::*};
+use crate::error::{SyscallError, SyscallResult, EBUSY, EINVAL, ENOMEM, ENOTSUP, EPERM, ESUCCESS};
+use crate::raw::{numbers::*, syscall0, syscall1, syscall2, syscall3};
 use atom_abi::{
-    has_suspicious_user_high_bits, is_canonical, is_user_mmap_addr, is_valid_user_va,
-    UserVirtAddr,
+    has_suspicious_user_high_bits, is_canonical, is_user_mmap_addr, is_valid_user_va, UserVirtAddr,
 };
 
 /// Maximum number of video modes reported by the kernel (mirrors `atom_abi::VIDEO_MAX_MODES`).
@@ -49,7 +48,10 @@ enum ReturnedAddrKind {
 }
 
 #[inline]
-fn validate_returned_user_va(addr: UserVirtAddr, kind: ReturnedAddrKind) -> SyscallResult<UserVirtAddr> {
+fn validate_returned_user_va(
+    addr: UserVirtAddr,
+    kind: ReturnedAddrKind,
+) -> SyscallResult<UserVirtAddr> {
     if !is_canonical(addr) {
         return Err(SyscallError::Unknown(addr));
     }
@@ -77,9 +79,7 @@ fn validate_returned_user_va(addr: UserVirtAddr, kind: ReturnedAddrKind) -> Sysc
 pub fn get_framebuffer() -> Option<FramebufferInfo> {
     // DEBUG: Try just the syscall without any processing
     let mut info = [0u64; 6];
-    let result = unsafe {
-        syscall1(SYS_GET_FRAMEBUFFER, info.as_mut_ptr() as u64)
-    };
+    let result = unsafe { syscall1(SYS_GET_FRAMEBUFFER, info.as_mut_ptr() as u64) };
 
     if result == ESUCCESS {
         Some(FramebufferInfo {
@@ -100,7 +100,13 @@ pub fn get_framebuffer() -> Option<FramebufferInfo> {
 /// Returns an error if framebuffer is not available
 pub fn get_framebuffer_info() -> crate::SyscallResult<(UserVirtAddr, u32, u32, u32, u32)> {
     match get_framebuffer() {
-        Some(info) => Ok((info.address, info.width, info.height, info.stride, info.bytes_per_pixel)),
+        Some(info) => Ok((
+            info.address,
+            info.width,
+            info.height,
+            info.stride,
+            info.bytes_per_pixel,
+        )),
         None => Err(crate::error::SyscallError::PermissionDenied),
     }
 }
@@ -110,9 +116,7 @@ pub fn get_framebuffer_info() -> crate::SyscallResult<(UserVirtAddr, u32, u32, u
 /// Similar to get_framebuffer but may also perform memory mapping.
 pub fn map_framebuffer() -> Option<FramebufferInfo> {
     let mut info = [0u64; 6];
-    let result = unsafe {
-        syscall1(SYS_MAP_FRAMEBUFFER, info.as_mut_ptr() as u64)
-    };
+    let result = unsafe { syscall1(SYS_MAP_FRAMEBUFFER, info.as_mut_ptr() as u64) };
 
     if result == ESUCCESS {
         Some(FramebufferInfo {
@@ -143,16 +147,44 @@ pub struct Color {
 impl Color {
     // Common colors
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0 };
-    pub const WHITE: Color = Color { r: 255, g: 255, b: 255 };
+    pub const WHITE: Color = Color {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
     pub const RED: Color = Color { r: 255, g: 0, b: 0 };
     pub const GREEN: Color = Color { r: 0, g: 255, b: 0 };
     pub const BLUE: Color = Color { r: 0, g: 0, b: 255 };
-    pub const YELLOW: Color = Color { r: 255, g: 255, b: 0 };
-    pub const CYAN: Color = Color { r: 0, g: 255, b: 255 };
-    pub const MAGENTA: Color = Color { r: 255, g: 0, b: 255 };
-    pub const GRAY: Color = Color { r: 128, g: 128, b: 128 };
-    pub const DARK_GRAY: Color = Color { r: 64, g: 64, b: 64 };
-    pub const LIGHT_GRAY: Color = Color { r: 192, g: 192, b: 192 };
+    pub const YELLOW: Color = Color {
+        r: 255,
+        g: 255,
+        b: 0,
+    };
+    pub const CYAN: Color = Color {
+        r: 0,
+        g: 255,
+        b: 255,
+    };
+    pub const MAGENTA: Color = Color {
+        r: 255,
+        g: 0,
+        b: 255,
+    };
+    pub const GRAY: Color = Color {
+        r: 128,
+        g: 128,
+        b: 128,
+    };
+    pub const DARK_GRAY: Color = Color {
+        r: 64,
+        g: 64,
+        b: 64,
+    };
+    pub const LIGHT_GRAY: Color = Color {
+        r: 192,
+        g: 192,
+        b: 192,
+    };
 
     /// Create a new color from RGB values
     #[inline]
@@ -186,21 +218,25 @@ impl Framebuffer {
     /// Create a new framebuffer handle
     pub fn new() -> Option<Self> {
         // Explicit match to avoid closure that could cause indirect calls
-        match get_framebuffer() {
-            Some(info) => Some(Self { info }),
-            None => None,
-        }
+        get_framebuffer().map(|info| Self { info })
     }
 
     /// Create a custom framebuffer pointing to a specific memory location.
     /// Includes validation to prevent common memory safety issues.
-    pub fn new_custom(address: UserVirtAddr, width: u32, height: u32, stride: u32, bpp: u32) -> Option<Self> {
+    pub fn new_custom(
+        address: UserVirtAddr,
+        width: u32,
+        height: u32,
+        stride: u32,
+        bpp: u32,
+    ) -> Option<Self> {
         if address == 0 || width == 0 || height == 0 || stride < width || (bpp != 4 && bpp != 3) {
             return None;
         }
 
         // Check for potential overflow in size calculation
-        let size = (stride as usize).checked_mul(height as usize)?
+        let size = (stride as usize)
+            .checked_mul(height as usize)?
             .checked_mul(bpp as usize)?;
 
         Some(Self {
@@ -211,16 +247,13 @@ impl Framebuffer {
                 stride,
                 bytes_per_pixel: bpp,
                 size,
-            }
+            },
         })
     }
 
     /// Create from mapped framebuffer
     pub fn from_mapped() -> Option<Self> {
-        match map_framebuffer() {
-            Some(info) => Some(Self { info }),
-            None => None,
-        }
+        map_framebuffer().map(|info| Self { info })
     }
 
     #[inline]
@@ -266,19 +299,19 @@ impl Framebuffer {
     /// Fill a rectangle
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: Color) {
         let pixel = color.to_rgb32();
-        
+
         for dy in 0..height {
             let py = y + dy;
             if py >= self.info.height {
                 break;
             }
-            
+
             for dx in 0..width {
                 let px = x + dx;
                 if px >= self.info.width {
                     break;
                 }
-                
+
                 let ptr = self.info.pixel_ptr(px, py);
                 unsafe {
                     core::ptr::write_volatile(ptr, pixel);
@@ -296,9 +329,9 @@ impl Framebuffer {
     pub fn draw_char(&self, x: u32, y: u32, ch: u8, fg: Color, bg: Color) {
         let glyph = get_font_glyph(ch);
 
-        for row in 0..8 {
+        for (row, &glyph_row) in glyph.iter().enumerate().take(8) {
             for col in 0..8 {
-                let bit = (glyph[row] >> col) & 1;
+                let bit = (glyph_row >> col) & 1;
                 let color = if bit == 1 { fg } else { bg };
                 self.draw_pixel(x + col as u32, y + row as u32, color);
             }
@@ -336,8 +369,18 @@ impl Framebuffer {
     }
 
     /// Fill a rectangle with rounded corners (radius in pixels)
-    pub fn fill_rect_rounded(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_rounded(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.fill_rect(x, y, width, height, color);
@@ -360,8 +403,18 @@ impl Framebuffer {
     }
 
     /// Draw a rounded rectangle outline
-    pub fn draw_rect_rounded(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn draw_rect_rounded(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.draw_rect(x, y, width, height, color);
@@ -388,20 +441,34 @@ impl Framebuffer {
     }
 
     /// Fill a rectangle with alpha blending (alpha 0-255, 255=opaque)
-    pub fn fill_rect_alpha(&self, x: u32, y: u32, width: u32, height: u32, color: Color, alpha: u8) {
+    pub fn fill_rect_alpha(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        color: Color,
+        alpha: u8,
+    ) {
         if alpha == 255 {
             self.fill_rect(x, y, width, height, color);
             return;
         }
-        if alpha == 0 { return; }
+        if alpha == 0 {
+            return;
+        }
         let a = alpha as u32;
         let inv_a = 255 - a;
         for dy in 0..height {
             let py = y + dy;
-            if py >= self.info.height { break; }
+            if py >= self.info.height {
+                break;
+            }
             for dx in 0..width {
                 let px = x + dx;
-                if px >= self.info.width { break; }
+                if px >= self.info.width {
+                    break;
+                }
                 let ptr = self.info.pixel_ptr(px, py);
                 unsafe {
                     let existing = core::ptr::read_volatile(ptr);
@@ -419,8 +486,20 @@ impl Framebuffer {
     }
 
     /// Fill a rounded rectangle with alpha blending
-    pub fn fill_rect_rounded_alpha(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color, alpha: u8) {
-        if width == 0 || height == 0 { return; }
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rect_rounded_alpha(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+        alpha: u8,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.fill_rect_alpha(x, y, width, height, color, alpha);
@@ -441,8 +520,18 @@ impl Framebuffer {
 
     /// Fill a rectangle with anti-aliased rounded corners.
     /// Corner edges are sub-pixel blended, eliminating the staircase effect.
-    pub fn fill_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.fill_rect(x, y, width, height, color);
@@ -451,8 +540,8 @@ impl Framebuffer {
         self.fill_rect(x, y + r, width, height.saturating_sub(r * 2), color);
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
             let int_offset = r - sq;
 
@@ -460,8 +549,8 @@ impl Framebuffer {
                 let aa = frac as u8;
                 let ax_l = x + int_offset - 1;
                 let ax_r = x + width - int_offset;
-                self.fill_rect_alpha(ax_l, y + dy,              1, 1, color, aa);
-                self.fill_rect_alpha(ax_r, y + dy,              1, 1, color, aa);
+                self.fill_rect_alpha(ax_l, y + dy, 1, 1, color, aa);
+                self.fill_rect_alpha(ax_r, y + dy, 1, 1, color, aa);
                 self.fill_rect_alpha(ax_l, y + height - 1 - dy, 1, 1, color, aa);
                 self.fill_rect_alpha(ax_r, y + height - 1 - dy, 1, 1, color, aa);
             }
@@ -469,37 +558,47 @@ impl Framebuffer {
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
             if row_w > 0 {
-                self.fill_rect(row_x, y + dy,              row_w, 1, color);
+                self.fill_rect(row_x, y + dy, row_w, 1, color);
                 self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color);
             }
         }
     }
 
     /// Draw an anti-aliased rounded rectangle outline (1-pixel border).
-    pub fn draw_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn draw_rect_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.draw_rect(x, y, width, height, color);
             return;
         }
-        self.draw_hline(x + r, y,              width.saturating_sub(r * 2), color);
+        self.draw_hline(x + r, y, width.saturating_sub(r * 2), color);
         self.draw_hline(x + r, y + height - 1, width.saturating_sub(r * 2), color);
-        self.draw_vline(x,             y + r, height.saturating_sub(r * 2), color);
+        self.draw_vline(x, y + r, height.saturating_sub(r * 2), color);
         self.draw_vline(x + width - 1, y + r, height.saturating_sub(r * 2), color);
 
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
             let int_offset = r - sq;
 
             // Main arc pixel
             let mx_l = x + int_offset;
             let mx_r = x + width - 1 - int_offset;
-            self.draw_pixel(mx_l, y + dy,              color);
-            self.draw_pixel(mx_r, y + dy,              color);
+            self.draw_pixel(mx_l, y + dy, color);
+            self.draw_pixel(mx_r, y + dy, color);
             self.draw_pixel(mx_l, y + height - 1 - dy, color);
             self.draw_pixel(mx_r, y + height - 1 - dy, color);
 
@@ -508,8 +607,8 @@ impl Framebuffer {
                 let aa = frac as u8;
                 let ax_l = x + int_offset - 1;
                 let ax_r = x + width - int_offset;
-                self.fill_rect_alpha(ax_l, y + dy,              1, 1, color, aa);
-                self.fill_rect_alpha(ax_r, y + dy,              1, 1, color, aa);
+                self.fill_rect_alpha(ax_l, y + dy, 1, 1, color, aa);
+                self.fill_rect_alpha(ax_r, y + dy, 1, 1, color, aa);
                 self.fill_rect_alpha(ax_l, y + height - 1 - dy, 1, 1, color, aa);
                 self.fill_rect_alpha(ax_r, y + height - 1 - dy, 1, 1, color, aa);
             }
@@ -518,10 +617,23 @@ impl Framebuffer {
 
     /// Fill a rectangle with only the TOP two corners anti-aliased and rounded.
     /// Bottom edge is flat (no rounding). Used for header bars inside rounded windows.
-    pub fn fill_rect_top_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_top_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height);
-        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
         // Solid lower part (below the rounded top strip)
         if height > r {
             self.fill_rect(x, y + r, width, height - r, color);
@@ -529,8 +641,8 @@ impl Framebuffer {
         // Top rounded strip
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
             let int_offset = r - sq;
             if frac > 0 && int_offset > 0 {
@@ -540,16 +652,31 @@ impl Framebuffer {
             }
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
-            if row_w > 0 { self.fill_rect(row_x, y + dy, row_w, 1, color); }
+            if row_w > 0 {
+                self.fill_rect(row_x, y + dy, row_w, 1, color);
+            }
         }
     }
 
     /// Fill a rectangle with only the BOTTOM two corners anti-aliased and rounded.
     /// Top edge is flat (no rounding). Used for content areas inside rounded windows.
-    pub fn fill_rect_bottom_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_bottom_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height);
-        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
         // Solid upper part
         if height > r {
             self.fill_rect(x, y, width, height - r, color);
@@ -557,8 +684,8 @@ impl Framebuffer {
         // Bottom rounded strip
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
             let int_offset = r - sq;
             let row_y = y + height - 1 - dy;
@@ -569,7 +696,9 @@ impl Framebuffer {
             }
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
-            if row_w > 0 { self.fill_rect(row_x, row_y, row_w, 1, color); }
+            if row_w > 0 {
+                self.fill_rect(row_x, row_y, row_w, 1, color);
+            }
         }
     }
 
@@ -622,7 +751,9 @@ impl Framebuffer {
         let y_end = (y + height).min(self.height()).min(other.height());
 
         let copy_width = x_end.saturating_sub(x_start);
-        if copy_width == 0 { return; }
+        if copy_width == 0 {
+            return;
+        }
 
         for sy in y_start..y_end {
             let src_offset = (sy * self.stride() + x_start) as usize * bpp;
@@ -743,7 +874,7 @@ fn get_font_glyph(ch: u8) -> &'static [u8; 8] {
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // DEL
     ];
 
-    let index = if ch >= 32 && ch < 128 {
+    let index = if (32..128).contains(&ch) {
         (ch - 32) as usize
     } else {
         0
@@ -757,9 +888,11 @@ fn get_font_glyph(ch: u8) -> &'static [u8; 8] {
 // ============================================================================
 
 fn isqrt(n: u32) -> u32 {
-    if n == 0 { return 0; }
+    if n == 0 {
+        return 0;
+    }
     let mut x = n;
-    let mut y = (x + 1) / 2;
+    let mut y = x.div_ceil(2);
     while y < x {
         x = y;
         y = (x + n / x) / 2;
@@ -773,7 +906,9 @@ fn isqrt(n: u32) -> u32 {
 /// sub-pixel anti-aliasing.
 #[inline]
 fn frac_sqrt_256(n: u32, sq_int: u32) -> u32 {
-    if sq_int == 0 { return 0; }
+    if sq_int == 0 {
+        return 0;
+    }
     let step = 2 * sq_int + 1; // distance between sq_int² and (sq_int+1)²
     let remainder = n - sq_int * sq_int;
     (remainder * 256) / step
@@ -794,7 +929,11 @@ fn lerp_u8(a: u8, b: u8, t: u8) -> u8 {
 /// Linearly interpolate between two colours given t in 0..=255.
 #[inline(always)]
 fn lerp_color(a: Color, b: Color, t: u8) -> Color {
-    Color::new(lerp_u8(a.r, b.r, t), lerp_u8(a.g, b.g, t), lerp_u8(a.b, b.b, t))
+    Color::new(
+        lerp_u8(a.r, b.r, t),
+        lerp_u8(a.g, b.g, t),
+        lerp_u8(a.b, b.b, t),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -823,9 +962,7 @@ unsafe fn fill_row(dst: *mut u32, count: usize, value: u32) {
         // 4-wide SIMD stores
         let wide_end = dst.add(count & !3);
         while ptr < wide_end {
-            core::arch::x86_64::_mm_storeu_si128(
-                ptr as *mut core::arch::x86_64::__m128i, v,
-            );
+            core::arch::x86_64::_mm_storeu_si128(ptr as *mut core::arch::x86_64::__m128i, v);
             ptr = ptr.add(4);
         }
         // Scalar tail (0–3 remaining pixels)
@@ -859,20 +996,22 @@ unsafe fn fill_row_alpha(dst: *mut u32, count: usize, value: u32, alpha: u8) {
         fill_row(dst, count, value);
         return;
     }
-    if alpha == 0 { return; }
+    if alpha == 0 {
+        return;
+    }
 
     let a = alpha as u32;
     let ia = 255 - a;
-    let sr = (value        & 0xFF) * a;
+    let sr = (value & 0xFF) * a;
     let sg = ((value >> 8) & 0xFF) * a;
-    let sb = ((value >> 16)& 0xFF) * a;
+    let sb = ((value >> 16) & 0xFF) * a;
 
     for i in 0..count {
         let p = dst.add(i);
         let existing = core::ptr::read_volatile(p);
-        let nr = ((existing        & 0xFF) * ia + sr) / 255;
+        let nr = ((existing & 0xFF) * ia + sr) / 255;
         let ng = (((existing >> 8) & 0xFF) * ia + sg) / 255;
-        let nb = (((existing >> 16)& 0xFF) * ia + sb) / 255;
+        let nb = (((existing >> 16) & 0xFF) * ia + sb) / 255;
         core::ptr::write_volatile(p, (nb << 16) | (ng << 8) | nr);
     }
 }
@@ -892,13 +1031,23 @@ pub struct SharedMemFlags {
 }
 
 impl SharedMemFlags {
-    pub const READ_ONLY: Self = Self { read: true, write: false };
-    pub const READ_WRITE: Self = Self { read: true, write: true };
+    pub const READ_ONLY: Self = Self {
+        read: true,
+        write: false,
+    };
+    pub const READ_WRITE: Self = Self {
+        read: true,
+        write: true,
+    };
 
     pub fn to_raw(&self) -> u64 {
         let mut raw = 0u64;
-        if self.read { raw |= 0x1; }
-        if self.write { raw |= 0x2; }
+        if self.read {
+            raw |= 0x1;
+        }
+        if self.write {
+            raw |= 0x2;
+        }
         raw
     }
 }
@@ -925,10 +1074,12 @@ pub fn shared_region_create(size: usize) -> SyscallResult<SharedRegionId> {
 ///
 /// Shared-memory mappings are only required to be valid canonical userspace
 /// VAs. They do not share the anonymous `mmap` window contract.
-pub fn shared_region_map(region_id: SharedRegionId, virt_addr: UserVirtAddr, flags: SharedMemFlags) -> SyscallResult<UserVirtAddr> {
-    let result = unsafe {
-        syscall3(SYS_SHARED_REGION_MAP, region_id, virt_addr, flags.to_raw())
-    };
+pub fn shared_region_map(
+    region_id: SharedRegionId,
+    virt_addr: UserVirtAddr,
+    flags: SharedMemFlags,
+) -> SyscallResult<UserVirtAddr> {
+    let result = unsafe { syscall3(SYS_SHARED_REGION_MAP, region_id, virt_addr, flags.to_raw()) };
 
     // Error codes live near u64::MAX; valid VA addresses are always below
     // SYSCALL_ERROR_THRESHOLD.
@@ -1105,17 +1256,24 @@ impl SharedSurface {
     /// `alpha` = 0 → fully transparent (no-op), 255 → fully opaque (same as draw_pixel).
     #[inline]
     fn draw_pixel_blend(&self, x: u32, y: u32, color: Color, alpha: u8) {
-        if x >= self.width || y >= self.height { return; }
-        if alpha == 255 { self.draw_pixel(x, y, color); return; }
-        if alpha == 0   { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        if alpha == 255 {
+            self.draw_pixel(x, y, color);
+            return;
+        }
+        if alpha == 0 {
+            return;
+        }
         if let Some(ptr) = self.pixel_ptr(x, y) {
             unsafe {
                 // Pixel layout is RGB32: R in bits 16-23, G in 8-15, B in 0-7.
                 let existing = core::ptr::read_volatile(ptr);
-                let eb = (existing         & 0xFF) as u32;  // B in LSB
-                let eg = ((existing >> 8)  & 0xFF) as u32;  // G in mid
-                let er = ((existing >> 16) & 0xFF) as u32;  // R in MSB
-                let a  = alpha as u32;
+                let eb = (existing & 0xFF) as u32; // B in LSB
+                let eg = ((existing >> 8) & 0xFF) as u32; // G in mid
+                let er = ((existing >> 16) & 0xFF) as u32; // R in MSB
+                let a = alpha as u32;
                 let ia = 255 - a;
                 let nb = (eb * ia + color.b as u32 * a) / 255;
                 let ng = (eg * ia + color.g as u32 * a) / 255;
@@ -1132,17 +1290,21 @@ impl SharedSurface {
     /// (SSE2 4-wide stores on x86_64, tight scalar loop elsewhere).
     pub fn fill_rect(&self, x: u32, y: u32, width: u32, height: u32, color: Color) {
         let Some(base) = self.mapped_addr else { return };
-        if x >= self.width || y >= self.height || width == 0 || height == 0 { return; }
+        if x >= self.width || y >= self.height || width == 0 || height == 0 {
+            return;
+        }
 
-        let pixel    = color.to_rgb32();
-        let x_end    = (x + width).min(self.width);
-        let y_end    = (y + height).min(self.height);
+        let pixel = color.to_rgb32();
+        let x_end = (x + width).min(self.width);
+        let y_end = (y + height).min(self.height);
         let row_count = (x_end - x) as usize;
 
         for py in y..y_end {
             let row_ptr = ((base as usize) + self.pixel_offset(x, py)) as *mut u32;
             // SAFETY: bounds checked above; ptr is within the mapped shared region.
-            unsafe { fill_row(row_ptr, row_count, pixel); }
+            unsafe {
+                fill_row(row_ptr, row_count, pixel);
+            }
         }
     }
 
@@ -1155,9 +1317,9 @@ impl SharedSurface {
     pub fn draw_char(&self, x: u32, y: u32, ch: u8, fg: Color, bg: Color) {
         let glyph = get_font_glyph(ch);
 
-        for row in 0..8 {
+        for (row, &glyph_row) in glyph.iter().enumerate().take(8) {
             for col in 0..8 {
-                let bit = (glyph[row] >> col) & 1;
+                let bit = (glyph_row >> col) & 1;
                 let color = if bit == 1 { fg } else { bg };
                 self.draw_pixel(x + col as u32, y + row as u32, color);
             }
@@ -1195,8 +1357,18 @@ impl SharedSurface {
     }
 
     /// Fill a rectangle with rounded corners
-    pub fn fill_rect_rounded(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_rounded(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.fill_rect(x, y, width, height, color);
@@ -1218,8 +1390,18 @@ impl SharedSurface {
     /// Fill a rectangle with anti-aliased rounded corners.
     /// Corner edges are sub-pixel blended with whatever is already on the surface,
     /// eliminating the staircase effect present in `fill_rect_rounded`.
-    pub fn fill_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.fill_rect(x, y, width, height, color);
@@ -1230,9 +1412,9 @@ impl SharedSurface {
 
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
-            let frac = frac_sqrt_256(n, sq);  // (sqrt(n) - sq) * 256
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
+            let frac = frac_sqrt_256(n, sq); // (sqrt(n) - sq) * 256
 
             // exact offset from edge = r - (sq + frac/256) = int_offset - frac/256
             let int_offset = r - sq;
@@ -1243,42 +1425,52 @@ impl SharedSurface {
                 let aa = frac as u8;
                 let ax_l = x + int_offset - 1;
                 let ax_r = x + width - int_offset;
-                self.draw_pixel_blend(ax_l, y + dy,                  color, aa);
-                self.draw_pixel_blend(ax_r, y + dy,                  color, aa);
-                self.draw_pixel_blend(ax_l, y + height - 1 - dy,     color, aa);
-                self.draw_pixel_blend(ax_r, y + height - 1 - dy,     color, aa);
+                self.draw_pixel_blend(ax_l, y + dy, color, aa);
+                self.draw_pixel_blend(ax_r, y + dy, color, aa);
+                self.draw_pixel_blend(ax_l, y + height - 1 - dy, color, aa);
+                self.draw_pixel_blend(ax_r, y + height - 1 - dy, color, aa);
             }
 
             // Solid fill for this row
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
             if row_w > 0 {
-                self.fill_rect(row_x, y + dy,                 row_w, 1, color);
-                self.fill_rect(row_x, y + height - 1 - dy,    row_w, 1, color);
+                self.fill_rect(row_x, y + dy, row_w, 1, color);
+                self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color);
             }
         }
     }
 
     /// Draw an anti-aliased rounded rectangle outline (1-pixel border).
     /// Each corner arc pixel is sub-pixel blended for smoothness.
-    pub fn draw_rect_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn draw_rect_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.draw_rect(x, y, width, height, color);
             return;
         }
         // Straight edges
-        self.draw_hline(x + r, y,                width.saturating_sub(r * 2), color);
-        self.draw_hline(x + r, y + height - 1,   width.saturating_sub(r * 2), color);
-        self.draw_vline(x,                y + r, height.saturating_sub(r * 2), color);
-        self.draw_vline(x + width - 1,    y + r, height.saturating_sub(r * 2), color);
+        self.draw_hline(x + r, y, width.saturating_sub(r * 2), color);
+        self.draw_hline(x + r, y + height - 1, width.saturating_sub(r * 2), color);
+        self.draw_vline(x, y + r, height.saturating_sub(r * 2), color);
+        self.draw_vline(x + width - 1, y + r, height.saturating_sub(r * 2), color);
 
         // Corner arcs — Wu-style: main pixel + outer AA pixel
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
 
             let int_offset = r - sq;
@@ -1291,16 +1483,16 @@ impl SharedSurface {
             // Left side
             let mx_l = x + int_offset;
             let mx_r = x + width - 1 - int_offset;
-            self.draw_pixel_blend(mx_l, y + dy,              color, main_alpha);
-            self.draw_pixel_blend(mx_r, y + dy,              color, main_alpha);
+            self.draw_pixel_blend(mx_l, y + dy, color, main_alpha);
+            self.draw_pixel_blend(mx_r, y + dy, color, main_alpha);
             self.draw_pixel_blend(mx_l, y + height - 1 - dy, color, main_alpha);
             self.draw_pixel_blend(mx_r, y + height - 1 - dy, color, main_alpha);
 
             if aa_alpha > 0 && int_offset > 0 {
                 let ax_l = x + int_offset - 1;
                 let ax_r = x + width - int_offset;
-                self.draw_pixel_blend(ax_l, y + dy,              color, aa_alpha);
-                self.draw_pixel_blend(ax_r, y + dy,              color, aa_alpha);
+                self.draw_pixel_blend(ax_l, y + dy, color, aa_alpha);
+                self.draw_pixel_blend(ax_r, y + dy, color, aa_alpha);
                 self.draw_pixel_blend(ax_l, y + height - 1 - dy, color, aa_alpha);
                 self.draw_pixel_blend(ax_r, y + height - 1 - dy, color, aa_alpha);
             }
@@ -1309,50 +1501,84 @@ impl SharedSurface {
 
     /// Fill a rectangle with only the TOP two corners anti-aliased and rounded.
     /// Bottom edge is flat. Used for header bars inside rounded windows.
-    pub fn fill_rect_top_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_top_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height);
-        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
-        if height > r { self.fill_rect(x, y + r, width, height - r, color); }
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        if height > r {
+            self.fill_rect(x, y + r, width, height - r, color);
+        }
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
             let int_offset = r - sq;
             if frac > 0 && int_offset > 0 {
                 let aa = frac as u8;
-                self.draw_pixel_blend(x + int_offset - 1,  y + dy, color, aa);
+                self.draw_pixel_blend(x + int_offset - 1, y + dy, color, aa);
                 self.draw_pixel_blend(x + width - int_offset, y + dy, color, aa);
             }
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
-            if row_w > 0 { self.fill_rect(row_x, y + dy, row_w, 1, color); }
+            if row_w > 0 {
+                self.fill_rect(row_x, y + dy, row_w, 1, color);
+            }
         }
     }
 
     /// Fill a rectangle with only the BOTTOM two corners anti-aliased and rounded.
     /// Top edge is flat. Used for content areas inside rounded windows.
-    pub fn fill_rect_bottom_rounded_aa(&self, x: u32, y: u32, width: u32, height: u32, radius: u32, color: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_bottom_rounded_aa(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height);
-        if r == 0 { self.fill_rect(x, y, width, height, color); return; }
-        if height > r { self.fill_rect(x, y, width, height - r, color); }
+        if r == 0 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        if height > r {
+            self.fill_rect(x, y, width, height - r, color);
+        }
         for dy in 0..r {
             let fy = r - dy;
-            let n    = r * r - fy * fy;
-            let sq   = isqrt(n);
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
             let frac = frac_sqrt_256(n, sq);
             let int_offset = r - sq;
             let row_y = y + height - 1 - dy;
             if frac > 0 && int_offset > 0 {
                 let aa = frac as u8;
-                self.draw_pixel_blend(x + int_offset - 1,  row_y, color, aa);
+                self.draw_pixel_blend(x + int_offset - 1, row_y, color, aa);
                 self.draw_pixel_blend(x + width - int_offset, row_y, color, aa);
             }
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
-            if row_w > 0 { self.fill_rect(row_x, row_y, row_w, 1, color); }
+            if row_w > 0 {
+                self.fill_rect(row_x, row_y, row_w, 1, color);
+            }
         }
     }
 
@@ -1364,23 +1590,39 @@ impl SharedSurface {
     ///
     /// `alpha = 255` is equivalent to `fill_rect`. `alpha = 0` is a no-op.
     /// Uses [`fill_row_alpha`] which is SSE2-accelerated on x86_64.
-    pub fn fill_rect_alpha(&self, x: u32, y: u32, width: u32, height: u32,
-                           color: Color, alpha: u8) {
-        if alpha == 0 || width == 0 || height == 0 { return; }
-        if alpha == 255 { self.fill_rect(x, y, width, height, color); return; }
+    pub fn fill_rect_alpha(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        color: Color,
+        alpha: u8,
+    ) {
+        if alpha == 0 || width == 0 || height == 0 {
+            return;
+        }
+        if alpha == 255 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
 
         let Some(base) = self.mapped_addr else { return };
-        if x >= self.width || y >= self.height { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
 
-        let pixel     = color.to_rgb32();
-        let x_end     = (x + width).min(self.width);
-        let y_end     = (y + height).min(self.height);
+        let pixel = color.to_rgb32();
+        let x_end = (x + width).min(self.width);
+        let y_end = (y + height).min(self.height);
         let row_count = (x_end - x) as usize;
 
         for py in y..y_end {
             let row_ptr = ((base as usize) + self.pixel_offset(x, py)) as *mut u32;
             // SAFETY: bounds checked above.
-            unsafe { fill_row_alpha(row_ptr, row_count, pixel, alpha); }
+            unsafe {
+                fill_row_alpha(row_ptr, row_count, pixel, alpha);
+            }
         }
     }
 
@@ -1388,10 +1630,24 @@ impl SharedSurface {
     ///
     /// Delegates to `fill_rect_alpha` for the solid band and individually
     /// blended corner arc rows.
-    pub fn fill_rect_rounded_alpha(&self, x: u32, y: u32, width: u32, height: u32,
-                                   radius: u32, color: Color, alpha: u8) {
-        if alpha == 0 || width == 0 || height == 0 { return; }
-        if alpha == 255 { self.fill_rect_rounded_aa(x, y, width, height, radius, color); return; }
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rect_rounded_alpha(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Color,
+        alpha: u8,
+    ) {
+        if alpha == 0 || width == 0 || height == 0 {
+            return;
+        }
+        if alpha == 255 {
+            self.fill_rect_rounded_aa(x, y, width, height, radius, color);
+            return;
+        }
 
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
@@ -1407,7 +1663,7 @@ impl SharedSurface {
             let row_x = x + offset;
             let row_w = width.saturating_sub(offset * 2);
             if row_w > 0 {
-                self.fill_rect_alpha(row_x, y + dy,              row_w, 1, color, alpha);
+                self.fill_rect_alpha(row_x, y + dy, row_w, 1, color, alpha);
                 self.fill_rect_alpha(row_x, y + height - 1 - dy, row_w, 1, color, alpha);
             }
         }
@@ -1418,24 +1674,37 @@ impl SharedSurface {
     /// `color_start` is painted at the top row; `color_end` at the bottom
     /// row.  Intermediate rows are linearly interpolated in RGB space.
     /// Each row is filled with the optimised [`fill_row`] (SSE2 on x86_64).
-    pub fn fill_rect_gradient_v(&self, x: u32, y: u32, width: u32, height: u32,
-                                color_start: Color, color_end: Color) {
-        if width == 0 || height == 0 { return; }
+    pub fn fill_rect_gradient_v(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        color_start: Color,
+        color_end: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let Some(base) = self.mapped_addr else { return };
-        if x >= self.width || y >= self.height { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
 
-        let x_end     = (x + width).min(self.width);
-        let y_end     = (y + height).min(self.height);
+        let x_end = (x + width).min(self.width);
+        let y_end = (y + height).min(self.height);
         let row_count = (x_end - x) as usize;
-        let total     = (y_end - y).saturating_sub(1).max(1);
+        let total = (y_end - y).saturating_sub(1).max(1);
 
         for dy in 0..(y_end - y) {
-            let t     = ((dy * 255) / total) as u8;
+            let t = ((dy * 255) / total) as u8;
             let color = lerp_color(color_start, color_end, t);
             let pixel = color.to_rgb32();
             let row_ptr = ((base as usize) + self.pixel_offset(x, y + dy)) as *mut u32;
             // SAFETY: bounds checked above.
-            unsafe { fill_row(row_ptr, row_count, pixel); }
+            unsafe {
+                fill_row(row_ptr, row_count, pixel);
+            }
         }
     }
 
@@ -1443,10 +1712,20 @@ impl SharedSurface {
     ///
     /// The gradient spans the full height of the bounding box including corner
     /// arcs.  Corner AA pixels are blended at each row's interpolated colour.
-    pub fn fill_rect_rounded_aa_gradient_v(&self, x: u32, y: u32, width: u32, height: u32,
-                                           radius: u32,
-                                           color_start: Color, color_end: Color) {
-        if width == 0 || height == 0 { return; }
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_rect_rounded_aa_gradient_v(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color_start: Color,
+        color_end: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
         let r = radius.min(width / 2).min(height / 2);
         if r == 0 {
             self.fill_rect_gradient_v(x, y, width, height, color_start, color_end);
@@ -1462,42 +1741,44 @@ impl SharedSurface {
 
         // ── Middle band (full width, no corner math) ──────────────────────
         let mid_start = r;
-        let mid_end   = height.saturating_sub(r);
+        let mid_end = height.saturating_sub(r);
         if mid_end > mid_start {
             let Some(base) = self.mapped_addr else { return };
-            let x_end     = (x + width).min(self.width);
+            let x_end = (x + width).min(self.width);
             let row_count = (x_end - x) as usize;
             for dy in mid_start..mid_end {
                 let color = row_color(dy);
                 let pixel = color.to_rgb32();
                 let row_ptr = ((base as usize) + self.pixel_offset(x, y + dy)) as *mut u32;
-                unsafe { fill_row(row_ptr, row_count, pixel); }
+                unsafe {
+                    fill_row(row_ptr, row_count, pixel);
+                }
             }
         }
 
         // ── Top & bottom rounded arcs ─────────────────────────────────────
         for dy in 0..r {
-            let fy          = r - dy;
-            let n           = r * r - fy * fy;
-            let sq          = isqrt(n);
-            let frac        = frac_sqrt_256(n, sq);
-            let int_offset  = r - sq;
+            let fy = r - dy;
+            let n = r * r - fy * fy;
+            let sq = isqrt(n);
+            let frac = frac_sqrt_256(n, sq);
+            let int_offset = r - sq;
 
-            let color_top   = row_color(dy);
-            let color_bot   = row_color(height - 1 - dy);
+            let color_top = row_color(dy);
+            let color_bot = row_color(height - 1 - dy);
 
             if frac > 0 && int_offset > 0 {
                 let aa = frac as u8;
-                self.draw_pixel_blend(x + int_offset - 1,    y + dy,              color_top, aa);
-                self.draw_pixel_blend(x + width - int_offset, y + dy,              color_top, aa);
-                self.draw_pixel_blend(x + int_offset - 1,    y + height - 1 - dy, color_bot, aa);
+                self.draw_pixel_blend(x + int_offset - 1, y + dy, color_top, aa);
+                self.draw_pixel_blend(x + width - int_offset, y + dy, color_top, aa);
+                self.draw_pixel_blend(x + int_offset - 1, y + height - 1 - dy, color_bot, aa);
                 self.draw_pixel_blend(x + width - int_offset, y + height - 1 - dy, color_bot, aa);
             }
 
             let row_x = x + int_offset;
             let row_w = width.saturating_sub(int_offset * 2);
             if row_w > 0 {
-                self.fill_rect(row_x, y + dy,              row_w, 1, color_top);
+                self.fill_rect(row_x, y + dy, row_w, 1, color_top);
                 self.fill_rect(row_x, y + height - 1 - dy, row_w, 1, color_bot);
             }
         }
@@ -1519,15 +1800,22 @@ impl SharedSurface {
     /// * `offset_y`               — vertical offset (positive = shadow below).
     /// * `layers`                 — number of alpha rings (3–9 for best look).
     /// * `base_alpha`             — alpha of the *outermost* ring (0–255).
-    pub fn draw_shadow_layers(&self,
-                              x: i32, y: i32,
-                              width: u32, height: u32,
-                              corner_radius: u32,
-                              shadow_color: Color,
-                              offset_y: i32,
-                              layers: u32,
-                              base_alpha: u8) {
-        if layers == 0 || base_alpha == 0 { return; }
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_shadow_layers(
+        &self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        corner_radius: u32,
+        shadow_color: Color,
+        offset_y: i32,
+        layers: u32,
+        base_alpha: u8,
+    ) {
+        if layers == 0 || base_alpha == 0 {
+            return;
+        }
         for i in 0..layers {
             // i = 0 → outermost (expand = layers, most transparent)
             // i = layers-1 → innermost (expand = 1, most opaque)
@@ -1537,17 +1825,21 @@ impl SharedSurface {
 
             let sx = x - expand;
             let sy = y - expand + offset_y;
-            let sw = width  as i32 + expand * 2;
+            let sw = width as i32 + expand * 2;
             let sh = height as i32 + expand * 2;
 
-            if sx < 0 || sy < 0 || sw <= 0 || sh <= 0 { continue; }
+            if sx < 0 || sy < 0 || sw <= 0 || sh <= 0 {
+                continue;
+            }
 
             let r = (corner_radius + expand as u32)
                 .min(sw as u32 / 2)
                 .min(sh as u32 / 2);
             self.fill_rect_rounded_alpha(
-                sx as u32, sy as u32,
-                sw as u32, sh as u32,
+                sx as u32,
+                sy as u32,
+                sw as u32,
+                sh as u32,
                 r,
                 shadow_color,
                 alpha,
@@ -1558,7 +1850,9 @@ impl SharedSurface {
     /// Blit this surface to a framebuffer at the specified position.
     /// Uses optimized line-by-line copy.
     pub fn blit_to_framebuffer(&self, fb: &Framebuffer, dest_x: u32, dest_y: u32) {
-        let Some(src_addr) = self.mapped_addr else { return };
+        let Some(src_addr) = self.mapped_addr else {
+            return;
+        };
 
         let fb_addr = fb.address();
         let fb_stride = fb.stride();
@@ -1568,10 +1862,14 @@ impl SharedSurface {
             // Fallback if formats differ
             for sy in 0..self.height {
                 let dy = dest_y + sy;
-                if dy >= fb.height() { break; }
+                if dy >= fb.height() {
+                    break;
+                }
                 for sx in 0..self.width {
                     let dx = dest_x + sx;
-                    if dx >= fb.width() { break; }
+                    if dx >= fb.width() {
+                        break;
+                    }
                     let src_ptr = ((src_addr as usize) + self.pixel_offset(sx, sy)) as *const u32;
                     let pixel = unsafe { src_ptr.read_volatile() };
                     let dst_ptr = fb.info.pixel_ptr(dx, dy);
@@ -1582,7 +1880,9 @@ impl SharedSurface {
         }
 
         let copy_width = self.width.min(fb.width().saturating_sub(dest_x));
-        if copy_width == 0 { return; }
+        if copy_width == 0 {
+            return;
+        }
 
         for sy in 0..self.height {
             let dy = dest_y + sy;
@@ -1657,7 +1957,9 @@ impl SharedSurfaceInfo {
             return None;
         }
         Some(Self {
-            region_id: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
+            region_id: u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
             width: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             height: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             stride: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
@@ -1677,12 +1979,12 @@ impl SharedSurfaceInfo {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VideoModeEntry {
-    pub width:        u32,
-    pub height:       u32,
-    pub bpp:          u32,
+    pub width: u32,
+    pub height: u32,
+    pub bpp: u32,
     pub refresh_rate: u32,
     /// Flags: bit 0 = LFB available (always 1 for BGA modes)
-    pub flags:        u32,
+    pub flags: u32,
 }
 
 impl VideoModeEntry {
@@ -1699,15 +2001,23 @@ impl VideoModeEntry {
 fn format_mode_label(buf: &mut [u8; 32], width: u32, height: u32, bpp: u32) -> usize {
     let mut pos = 0;
     pos += write_u32_decimal(buf, pos, width);
-    if pos < 32 { buf[pos] = b'x'; pos += 1; }
+    if pos < 32 {
+        buf[pos] = b'x';
+        pos += 1;
+    }
     pos += write_u32_decimal(buf, pos, height);
-    if pos < 32 { buf[pos] = b'x'; pos += 1; }
+    if pos < 32 {
+        buf[pos] = b'x';
+        pos += 1;
+    }
     pos += write_u32_decimal(buf, pos, bpp);
     pos
 }
 
 fn write_u32_decimal(buf: &mut [u8; 32], start: usize, mut n: u32) -> usize {
-    if start >= 32 { return 0; }
+    if start >= 32 {
+        return 0;
+    }
     if n == 0 {
         buf[start] = b'0';
         return 1;
@@ -1733,16 +2043,16 @@ fn write_u32_decimal(buf: &mut [u8; 32], start: usize, mut n: u32) -> usize {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CurrentVideoMode {
     /// Physical address of the Linear Framebuffer (may be 0 if BGA not active)
-    pub lfb_phys:         u64,
-    pub width:            u32,
-    pub height:           u32,
+    pub lfb_phys: u64,
+    pub width: u32,
+    pub height: u32,
     /// Bytes per scanline (pitch)
-    pub pitch:            u32,
-    pub bytes_per_pixel:  u32,
+    pub pitch: u32,
+    pub bytes_per_pixel: u32,
     /// 1 if BGA is present and initialized
-    pub bga_available:    u32,
+    pub bga_available: u32,
     /// 1 if a mode has been actively set via SYS_SET_VIDEO_MODE
-    pub mode_active:      u32,
+    pub mode_active: u32,
 }
 
 /// Request a video mode change.
@@ -1762,11 +2072,11 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8) -> SyscallResult<()> {
         Ok(())
     } else {
         match result {
-            x if x == EINVAL   => Err(SyscallError::InvalidArgument),
-            x if x == ENOTSUP  => Err(SyscallError::NotSupported),
-            x if x == ENOMEM   => Err(SyscallError::OutOfMemory),
+            x if x == EINVAL => Err(SyscallError::InvalidArgument),
+            x if x == ENOTSUP => Err(SyscallError::NotSupported),
+            x if x == ENOMEM => Err(SyscallError::OutOfMemory),
             x if x == crate::error::ENODEV => Err(SyscallError::NoDevice),
-            _                   => Err(SyscallError::Unknown(result)),
+            _ => Err(SyscallError::Unknown(result)),
         }
     }
 }
@@ -1790,9 +2100,7 @@ pub fn get_video_modes(out: &mut [VideoModeEntry]) -> usize {
     let buf_ptr = out.as_mut_ptr() as *mut u32;
     let max_modes = out.len() as u64;
 
-    let result = unsafe {
-        crate::raw::syscall2(SYS_GET_VIDEO_MODES, buf_ptr as u64, max_modes)
-    };
+    let result = unsafe { crate::raw::syscall2(SYS_GET_VIDEO_MODES, buf_ptr as u64, max_modes) };
 
     if result > 0x8000_0000_0000_0000u64 {
         // Error code
@@ -1806,9 +2114,8 @@ pub fn get_video_modes(out: &mut [VideoModeEntry]) -> usize {
 /// Returns `Some(CurrentVideoMode)` on success, `None` if the syscall fails.
 pub fn get_current_video_mode() -> Option<CurrentVideoMode> {
     let mut buf = [0u64; 4];
-    let result = unsafe {
-        crate::raw::syscall1(SYS_GET_CURRENT_VIDEO_MODE, buf.as_mut_ptr() as u64)
-    };
+    let result =
+        unsafe { crate::raw::syscall1(SYS_GET_CURRENT_VIDEO_MODE, buf.as_mut_ptr() as u64) };
 
     if result != ESUCCESS {
         return None;
@@ -1821,12 +2128,12 @@ pub fn get_current_video_mode() -> Option<CurrentVideoMode> {
     //   buf[2] = (bytes_per_pixel << 32) | pitch
     //   buf[3] = (mode_active << 32) | bga_available
     Some(CurrentVideoMode {
-        lfb_phys:        buf[0],
-        width:           (buf[1] & 0xFFFF_FFFF) as u32,
-        height:          ((buf[1] >> 32) & 0xFFFF_FFFF) as u32,
-        pitch:           (buf[2] & 0xFFFF_FFFF) as u32,
+        lfb_phys: buf[0],
+        width: (buf[1] & 0xFFFF_FFFF) as u32,
+        height: ((buf[1] >> 32) & 0xFFFF_FFFF) as u32,
+        pitch: (buf[2] & 0xFFFF_FFFF) as u32,
         bytes_per_pixel: ((buf[2] >> 32) & 0xFFFF_FFFF) as u32,
-        bga_available:   (buf[3] & 0xFFFF_FFFF) as u32,
-        mode_active:     ((buf[3] >> 32) & 0xFFFF_FFFF) as u32,
+        bga_available: (buf[3] & 0xFFFF_FFFF) as u32,
+        mode_active: ((buf[3] >> 32) & 0xFFFF_FFFF) as u32,
     })
 }

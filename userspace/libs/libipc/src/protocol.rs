@@ -5,10 +5,10 @@
 
 extern crate alloc;
 
+use crate::messages::{MessageHeader, MessageType, NsLookupMsg, NsRegisterMsg, NsResponseMsg};
 use alloc::vec::Vec;
-use atom_syscall::ipc::{PortId, send, recv, send_async, try_recv, close_port};
+use atom_syscall::ipc::{close_port, recv, send, send_async, try_recv, PortId};
 use atom_syscall::SyscallResult;
-use crate::messages::{MessageHeader, MessageType, NsRegisterMsg, NsLookupMsg, NsResponseMsg};
 
 /// Maximum payload that fits in the stack-based send buffer.
 /// Control messages are well under this limit; variable-length data
@@ -41,7 +41,11 @@ pub fn send_message(port: PortId, msg_type: MessageType, payload: &[u8]) -> Sysc
 /// Send a typed message asynchronously.
 ///
 /// Uses a stack buffer for messages up to `MAX_STACK_MSG` bytes.
-pub fn send_message_async(port: PortId, msg_type: MessageType, payload: &[u8]) -> SyscallResult<()> {
+pub fn send_message_async(
+    port: PortId,
+    msg_type: MessageType,
+    payload: &[u8],
+) -> SyscallResult<()> {
     let header = MessageHeader::new(msg_type, payload.len() as u32);
     let header_bytes = header.to_bytes();
     let total = MessageHeader::SIZE + payload.len();
@@ -74,7 +78,10 @@ pub fn recv_message(port: PortId, buffer: &mut [u8]) -> SyscallResult<(MessageHe
 }
 
 /// Try to receive a message without blocking
-pub fn try_recv_message(port: PortId, buffer: &mut [u8]) -> SyscallResult<Option<(MessageHeader, usize)>> {
+pub fn try_recv_message(
+    port: PortId,
+    buffer: &mut [u8],
+) -> SyscallResult<Option<(MessageHeader, usize)>> {
     match try_recv(port, buffer)? {
         Some(len) if len >= MessageHeader::SIZE => {
             let header = MessageHeader::from_bytes(&buffer[..MessageHeader::SIZE])
@@ -111,10 +118,14 @@ fn str_to_name(name: &str) -> [u8; 32] {
 /// Register a service with the name service
 pub fn register_service(name: &str, port: PortId) -> SyscallResult<()> {
     let msg = NsRegisterMsg {
-        port: port,
+        port,
         name: str_to_name(name),
     };
-    send_message(crate::well_known::NAME_SERVICE, MessageType::NsRegister, &msg.to_bytes())
+    send_message(
+        crate::well_known::NAME_SERVICE,
+        MessageType::NsRegister,
+        &msg.to_bytes(),
+    )
 }
 
 /// Look up a service by name via the name service
@@ -122,11 +133,15 @@ pub fn lookup_service(name: &str) -> SyscallResult<PortId> {
     let reply_port = atom_syscall::ipc::create_port()?;
 
     let lookup_msg = NsLookupMsg {
-        reply_port: reply_port,
+        reply_port,
         name: str_to_name(name),
     };
 
-    if let Err(e) = send_message(crate::well_known::NAME_SERVICE, MessageType::NsLookup, &lookup_msg.to_bytes()) {
+    if let Err(e) = send_message(
+        crate::well_known::NAME_SERVICE,
+        MessageType::NsLookup,
+        &lookup_msg.to_bytes(),
+    ) {
         let _ = close_port(reply_port);
         return Err(e);
     }

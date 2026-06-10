@@ -3,19 +3,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use crate::cap::{
-    self,
-    CallbackError,
-    CallbackResult,
-    CapHandle,
-    CapPermissions,
-    ResourceType,
-    RevokeStatus,
+    self, CallbackError, CallbackResult, CapHandle, CapPermissions, ResourceType, RevokeStatus,
 };
+use crate::log_info;
 use crate::mm::{oom, pmm, vm, vma};
 use crate::process::{self, ProcessId, ProcessTerminationError, TerminationReason};
 use crate::sched;
 use crate::thread::{self, CpuContext, Thread, ThreadId, ThreadPriority, ThreadState};
-use crate::log_info;
 
 const LOG_ORIGIN: &str = "arch_invariants";
 
@@ -58,7 +52,9 @@ fn callback_probe(handle: CapHandle) -> CallbackResult {
 
 fn callback_error(handle: CapHandle) -> CallbackResult {
     CALLBACK_TRACE.lock().push(("error", handle.raw()));
-    Err(CallbackError::Recoverable("architectural invariants callback failure"))
+    Err(CallbackError::Recoverable(
+        "architectural invariants callback failure",
+    ))
 }
 
 fn callback_reentrant_register(handle: CapHandle) -> CallbackResult {
@@ -151,7 +147,9 @@ fn cleanup_process_fixture(fixture: &ProcessFixture) {
     }
 
     process::PROCESS_REGISTRY.lock().remove(&fixture.pid);
-    process::PML4_TO_PROCESS.lock().remove(&(fixture.pml4 as u64));
+    process::PML4_TO_PROCESS
+        .lock()
+        .remove(&(fixture.pml4 as u64));
     vma::destroy_vma_map(fixture.pml4);
     crate::shared_mem::forget_process_shared_memory_cleanup(fixture.pid);
 
@@ -221,11 +219,9 @@ fn reap_fixture_zombies_and_finalize(fixture: &ProcessFixture) {
 
     panic!(
         "arch_invariants: process {} still had unreaped zombie threads after {} reap rounds",
-        fixture.pid,
-        MAX_REAP_ROUNDS
+        fixture.pid, MAX_REAP_ROUNDS
     );
 }
-
 
 fn install_revoke_tree(owner_tid: ThreadId, resource_port: u64) -> CapHandle {
     let root_perms = CapPermissions::READ
@@ -252,21 +248,11 @@ fn install_revoke_tree(owner_tid: ThreadId, resource_port: u64) -> CapHandle {
     )
     .expect("arch_invariants: first child derivation must succeed");
 
-    let _ = cap::derive_capability(
-        root.handle,
-        owner_tid,
-        owner_tid,
-        CapPermissions::READ,
-    )
-    .expect("arch_invariants: sibling derivation must succeed");
+    let _ = cap::derive_capability(root.handle, owner_tid, owner_tid, CapPermissions::READ)
+        .expect("arch_invariants: sibling derivation must succeed");
 
-    let _ = cap::derive_capability(
-        child_a,
-        owner_tid,
-        owner_tid,
-        CapPermissions::READ,
-    )
-    .expect("arch_invariants: grandchild derivation must succeed");
+    let _ = cap::derive_capability(child_a, owner_tid, owner_tid, CapPermissions::READ)
+        .expect("arch_invariants: grandchild derivation must succeed");
 
     root.handle
 }
@@ -450,8 +436,8 @@ fn test_revoke_two_phase_callbacks_and_reports() {
     );
 
     let root = install_revoke_tree(owner_tid, CALLBACK_PORT_PROBE);
-    let plan = cap::revoke_plan::build_revoke_plan(root)
-        .expect("arch_invariants: revoke plan must build");
+    let plan =
+        cap::revoke_plan::build_revoke_plan(root).expect("arch_invariants: revoke plan must build");
     let report = cap::revoke_capability(root, owner_tid)
         .expect("arch_invariants: revoke must return report");
 
@@ -479,7 +465,10 @@ fn test_revoke_two_phase_callbacks_and_reports() {
     let first_reentrant = cap::revoke_capability(reentrant_root_a, owner_tid)
         .expect("arch_invariants: first reentrant revoke must succeed");
     assert_eq!(first_reentrant.status, RevokeStatus::Complete);
-    assert_eq!(first_reentrant.callbacks_executed(), first_reentrant.revoked.len());
+    assert_eq!(
+        first_reentrant.callbacks_executed(),
+        first_reentrant.revoked.len()
+    );
 
     let reentrant_root_b = install_revoke_tree(owner_tid, CALLBACK_PORT_REENTRANT);
     let second_reentrant = cap::revoke_capability(reentrant_root_b, owner_tid)
@@ -489,7 +478,10 @@ fn test_revoke_two_phase_callbacks_and_reports() {
         second_reentrant.callbacks_executed(),
         second_reentrant.revoked.len() * 2
     );
-    assert!(CALLBACK_TRACE.lock().iter().any(|(name, _)| *name == "late"));
+    assert!(CALLBACK_TRACE
+        .lock()
+        .iter()
+        .any(|(name, _)| *name == "late"));
 
     *CALLBACK_FIXTURE.lock() = None;
     cleanup_process_fixture(&fixture);
@@ -509,7 +501,10 @@ fn test_oom_semantics_single_and_multithread() {
             assert_eq!(pid, heavy.pid);
         }
         other => {
-            panic!("arch_invariants: expected OOM kill for heavy process, got {:?}", other);
+            panic!(
+                "arch_invariants: expected OOM kill for heavy process, got {:?}",
+                other
+            );
         }
     }
 
@@ -596,7 +591,6 @@ fn test_multithread_teardown_consistency_under_repeated_kill() {
 
     cleanup_process_fixture(&fixture);
 }
-
 
 fn test_smp_affinity_contracts() {
     let Some(current) = sched::current_thread() else {

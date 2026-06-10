@@ -2,14 +2,20 @@
 //!
 //! Stores decoded images (DecodedImage) to avoid re-decoding from disk.
 
+use crate::image::DecodedImage;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::image::DecodedImage;
 
 pub struct ImageCache {
     images: Vec<(String, Arc<DecodedImage>)>,
     max_entries: usize,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ImageCache {
@@ -34,7 +40,11 @@ impl ImageCache {
     }
 
     pub fn insert(&mut self, path: String, image: DecodedImage) {
-        if let Some(pos) = self.images.iter().position(|(cached_path, _)| *cached_path == path) {
+        if let Some(pos) = self
+            .images
+            .iter()
+            .position(|(cached_path, _)| *cached_path == path)
+        {
             self.images.remove(pos);
         } else if self.images.len() >= self.max_entries {
             self.images.remove(0);
@@ -45,6 +55,10 @@ impl ImageCache {
 
     pub fn len(&self) -> usize {
         self.images.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.images.is_empty()
     }
 }
 

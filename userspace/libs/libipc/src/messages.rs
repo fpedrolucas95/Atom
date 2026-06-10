@@ -118,14 +118,25 @@ impl WmCreateWindowRequest {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 24 { return None; }
-        let reply_port = u64::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11]]);
+        if bytes.len() < 24 {
+            return None;
+        }
+        let reply_port = u64::from_le_bytes([
+            bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+        ]);
         let width = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
         let height = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
         let title_len = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]) as usize;
-        if bytes.len() < 24 + title_len { return None; }
+        if bytes.len() < 24 + title_len {
+            return None;
+        }
         let title = core::str::from_utf8(&bytes[24..24 + title_len]).ok()?;
-        Some(Self { reply_port, width, height, title: String::from(title) })
+        Some(Self {
+            reply_port,
+            width,
+            height,
+            title: String::from(title),
+        })
     }
 }
 
@@ -153,10 +164,14 @@ impl WmCreateWindowResponse {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            region_id: u64::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11]]),
+            region_id: u64::from_le_bytes([
+                bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+            ]),
             width: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             height: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             stride: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
@@ -190,7 +205,9 @@ impl WmWindowEventMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             event_type: WindowEventType::from_u8(bytes[4])?,
@@ -216,7 +233,9 @@ impl WmCommitFrameMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
         })
@@ -234,7 +253,7 @@ pub enum MessageType {
     // Input Events (1-99)
     KeyDown = 1,
     KeyUp = 2,
-    KeyPress = 3,  // Key with character
+    KeyPress = 3, // Key with character
     MouseMove = 10,
     MouseButtonDown = 11,
     MouseButtonUp = 12,
@@ -325,7 +344,6 @@ pub enum MessageType {
     /// Service manager error
     SmError = 711,
 
-
     // Block Device Protocol (1000-1099) — ahcid on PORT_BLOCK_SERVICE (10)
     /// Read sectors from block device: LBA + count + region_id for output
     BlockRead = 1000,
@@ -349,7 +367,7 @@ pub enum MessageType {
     BlockDiscardReply = 1009,
     /// Block device error notification (asynchronous)
     BlockError = 1099,
- 
+
     // Filesystem Protocol (1100-1199) — fsd (Filesystem Daemon) server
     /// open(path, flags, mode) -> handle
     FsOpen = 1100,
@@ -464,7 +482,6 @@ pub enum MessageType {
     //   LAUNCH_ERR_NOFS     = 6   filesystem service unavailable (FAT32 not ready)
     //   LAUNCH_ERR_INTERNAL = 99  unspecified launcher-internal error
     // ──────────────────────────────────────────────────────────────────────
-
     /// Request the app_launcher to start an ATXF application by path.
     AppLaunchRequest = 1200,
     /// Response from app_launcher back to the requesting process.
@@ -715,12 +732,17 @@ impl SurfaceAssignMsg {
         }
         Some(Self {
             window_id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            region_id: u64::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11]]),
+            region_id: u64::from_le_bytes([
+                bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+            ]),
             width: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             height: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             stride: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
             bytes_per_pixel: u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
-            compositor_port: u64::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31], bytes[32], bytes[33], bytes[34], bytes[35]]),
+            compositor_port: u64::from_le_bytes([
+                bytes[28], bytes[29], bytes[30], bytes[31], bytes[32], bytes[33], bytes[34],
+                bytes[35],
+            ]),
             scale_factor: u32::from_le_bytes([bytes[36], bytes[37], bytes[38], bytes[39]]),
         })
     }
@@ -741,7 +763,9 @@ impl NetGetConfigMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
         })
@@ -775,13 +799,15 @@ impl NetGetConfigReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut mac = [0u8; 6];
         mac.copy_from_slice(&bytes[16..22]);
         Some(Self {
-            own_ip:     u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            netmask:    u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-            gateway:    u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            own_ip: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            netmask: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            gateway: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             dns_server: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             mac,
             _pad: [bytes[22], bytes[23]],
@@ -868,8 +894,13 @@ impl AppRegisterMsg {
             return None;
         }
         Some(Self {
-            app_port: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
-            pid: u64::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]]),
+            app_port: u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
+            pid: u64::from_le_bytes([
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15],
+            ]),
         })
     }
 }
@@ -890,10 +921,18 @@ pub struct KeyModifiers {
 impl KeyModifiers {
     pub fn to_u8(&self) -> u8 {
         let mut flags = 0u8;
-        if self.shift { flags |= 0x01; }
-        if self.ctrl { flags |= 0x02; }
-        if self.alt { flags |= 0x04; }
-        if self.caps_lock { flags |= 0x08; }
+        if self.shift {
+            flags |= 0x01;
+        }
+        if self.ctrl {
+            flags |= 0x02;
+        }
+        if self.alt {
+            flags |= 0x04;
+        }
+        if self.caps_lock {
+            flags |= 0x08;
+        }
         flags
     }
 
@@ -1144,7 +1183,7 @@ pub enum WindowEventType {
     Focus = 3,
     Unfocus = 4,
     Close = 5,
-    Expose = 6,  // Area needs redraw
+    Expose = 6, // Area needs redraw
 }
 
 impl WindowEventType {
@@ -1231,12 +1270,17 @@ impl FramebufferInfo {
             return None;
         }
         Some(Self {
-            address: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
+            address: u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
             width: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             height: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
             stride: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             bytes_per_pixel: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
-            size: u64::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30], bytes[31]]),
+            size: u64::from_le_bytes([
+                bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30],
+                bytes[31],
+            ]),
         })
     }
 }
@@ -1252,7 +1296,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 16] {
@@ -1292,7 +1341,7 @@ impl Rect {
 //     [0..8]   error: u64   (0 = success, non-zero = ABI error code)
 //     [8..16]  value: u64   (bytes read/written, or other return value)
 // ============================================================================
- 
+
 /// BlockRead request payload (after common 12-byte header).
 /// Total: 12 + 24 = 36 bytes.
 #[derive(Debug, Clone, Copy)]
@@ -1305,10 +1354,10 @@ pub struct BlockReadReq {
     pub region_id: u64,
     _pad: u32,
 }
- 
+
 impl BlockReadReq {
     pub const SIZE: usize = 24;
- 
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
         b[0..8].copy_from_slice(&self.lba.to_le_bytes());
@@ -1317,9 +1366,11 @@ impl BlockReadReq {
         b[20..24].copy_from_slice(&self._pad.to_le_bytes());
         b
     }
- 
+
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::SIZE { return None; }
+        if b.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             lba: u64::from_le_bytes(b[0..8].try_into().ok()?),
             sector_count: u32::from_le_bytes(b[8..12].try_into().ok()?),
@@ -1328,10 +1379,10 @@ impl BlockReadReq {
         })
     }
 }
- 
+
 /// BlockWrite request payload (same layout as BlockRead).
 pub type BlockWriteReq = BlockReadReq;
- 
+
 /// Identify reply payload (written to shared region, 256 bytes).
 #[derive(Debug, Clone, Copy)]
 pub struct BlockIdentifyInfo {
@@ -1353,10 +1404,10 @@ pub struct BlockIdentifyInfo {
     pub read_only: u8,
     _pad: [u8; 126],
 }
- 
+
 impl BlockIdentifyInfo {
     pub const SIZE: usize = 256;
- 
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
         b[0..8].copy_from_slice(&self.total_sectors.to_le_bytes());
@@ -1369,9 +1420,11 @@ impl BlockIdentifyInfo {
         b[85] = self.read_only;
         b
     }
- 
+
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::SIZE { return None; }
+        if b.len() < Self::SIZE {
+            return None;
+        }
         let mut info = Self {
             total_sectors: u64::from_le_bytes(b[0..8].try_into().ok()?),
             sector_size: u32::from_le_bytes(b[8..12].try_into().ok()?),
@@ -1389,7 +1442,7 @@ impl BlockIdentifyInfo {
         Some(info)
     }
 }
- 
+
 // ============================================================================
 // Filesystem Protocol — reply wire format
 //
@@ -1400,61 +1453,72 @@ impl BlockIdentifyInfo {
 // Larger data (stat structs, dir entries, file data) go in a shared region
 // whose ID was sent in the request.
 // ============================================================================
- 
+
 /// Generic FS reply (16 bytes).
 #[derive(Debug, Clone, Copy)]
 pub struct FsReply {
     pub error: u64,
     pub value: u64,
 }
- 
+
 impl FsReply {
     pub const SIZE: usize = 16;
     pub const SUCCESS: Self = Self { error: 0, value: 0 };
- 
-    pub fn ok(value: u64) -> Self { Self { error: 0, value } }
-    pub fn err(code: u64) -> Self { Self { error: code, value: 0 } }
- 
+
+    pub fn ok(value: u64) -> Self {
+        Self { error: 0, value }
+    }
+    pub fn err(code: u64) -> Self {
+        Self {
+            error: code,
+            value: 0,
+        }
+    }
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
         b[0..8].copy_from_slice(&self.error.to_le_bytes());
         b[8..16].copy_from_slice(&self.value.to_le_bytes());
         b
     }
- 
+
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::SIZE { return None; }
+        if b.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             error: u64::from_le_bytes(b[0..8].try_into().ok()?),
             value: u64::from_le_bytes(b[8..16].try_into().ok()?),
         })
     }
- 
-    pub fn is_ok(&self) -> bool { self.error == 0 }
+
+    pub fn is_ok(&self) -> bool {
+        self.error == 0
+    }
 }
- 
+
 /// On-wire stat structure (80 bytes) written into shared region by fsd.
 /// Layout is fixed and shared between kernel, fsd, and userspace programs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FsStatBuf {
-    pub size:     u64,    // file size in bytes
-    pub inode:    u64,    // inode number
-    pub mtime_ns: u64,    // modification time (nanoseconds since epoch)
-    pub atime_ns: u64,    // access time
-    pub ctime_ns: u64,    // change time (metadata)
-    pub mode:     u32,    // type + permissions (POSIX-style)
-    pub uid:      u16,
-    pub gid:      u16,
-    pub nlinks:   u32,    // hard link count
-    pub nblocks:  u32,    // 512-byte blocks allocated
-    pub blksize:  u32,    // preferred I/O block size
-    pub dev:      u32,    // device ID (mount number)
-    _reserved:    [u8; 16],
+    pub size: u64,     // file size in bytes
+    pub inode: u64,    // inode number
+    pub mtime_ns: u64, // modification time (nanoseconds since epoch)
+    pub atime_ns: u64, // access time
+    pub ctime_ns: u64, // change time (metadata)
+    pub mode: u32,     // type + permissions (POSIX-style)
+    pub uid: u16,
+    pub gid: u16,
+    pub nlinks: u32,  // hard link count
+    pub nblocks: u32, // 512-byte blocks allocated
+    pub blksize: u32, // preferred I/O block size
+    pub dev: u32,     // device ID (mount number)
+    _reserved: [u8; 16],
 }
- 
+
 impl FsStatBuf {
     pub const SIZE: usize = 80;
- 
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
         b[0..8].copy_from_slice(&self.size.to_le_bytes());
@@ -1471,45 +1535,47 @@ impl FsStatBuf {
         b[60..64].copy_from_slice(&self.dev.to_le_bytes());
         b
     }
- 
+
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::SIZE { return None; }
+        if b.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
-            size:     u64::from_le_bytes(b[0..8].try_into().ok()?),
-            inode:    u64::from_le_bytes(b[8..16].try_into().ok()?),
+            size: u64::from_le_bytes(b[0..8].try_into().ok()?),
+            inode: u64::from_le_bytes(b[8..16].try_into().ok()?),
             mtime_ns: u64::from_le_bytes(b[16..24].try_into().ok()?),
             atime_ns: u64::from_le_bytes(b[24..32].try_into().ok()?),
             ctime_ns: u64::from_le_bytes(b[32..40].try_into().ok()?),
-            mode:     u32::from_le_bytes(b[40..44].try_into().ok()?),
-            uid:      u16::from_le_bytes(b[44..46].try_into().ok()?),
-            gid:      u16::from_le_bytes(b[46..48].try_into().ok()?),
-            nlinks:   u32::from_le_bytes(b[48..52].try_into().ok()?),
-            nblocks:  u32::from_le_bytes(b[52..56].try_into().ok()?),
-            blksize:  u32::from_le_bytes(b[56..60].try_into().ok()?),
-            dev:      u32::from_le_bytes(b[60..64].try_into().ok()?),
+            mode: u32::from_le_bytes(b[40..44].try_into().ok()?),
+            uid: u16::from_le_bytes(b[44..46].try_into().ok()?),
+            gid: u16::from_le_bytes(b[46..48].try_into().ok()?),
+            nlinks: u32::from_le_bytes(b[48..52].try_into().ok()?),
+            nblocks: u32::from_le_bytes(b[52..56].try_into().ok()?),
+            blksize: u32::from_le_bytes(b[56..60].try_into().ok()?),
+            dev: u32::from_le_bytes(b[60..64].try_into().ok()?),
             _reserved: [0u8; 16],
         })
     }
 }
- 
+
 /// On-wire statvfs structure (72 bytes) for filesystem statistics.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FsStatvfsBuf {
-    pub bsize:    u64,    // filesystem block size
-    pub frsize:   u64,    // fundamental block size (for f_blocks, f_bfree, f_bavail)
-    pub blocks:   u64,    // total data blocks
-    pub bfree:    u64,    // free blocks
-    pub bavail:   u64,    // free blocks available to non-root
-    pub files:    u64,    // total inodes
-    pub ffree:    u64,    // free inodes
-    pub favail:   u64,    // free inodes for non-root
-    pub namemax:  u32,    // max filename length
-    pub flags:    u32,    // mount flags (ST_RDONLY etc.)
+    pub bsize: u64,   // filesystem block size
+    pub frsize: u64,  // fundamental block size (for f_blocks, f_bfree, f_bavail)
+    pub blocks: u64,  // total data blocks
+    pub bfree: u64,   // free blocks
+    pub bavail: u64,  // free blocks available to non-root
+    pub files: u64,   // total inodes
+    pub ffree: u64,   // free inodes
+    pub favail: u64,  // free inodes for non-root
+    pub namemax: u32, // max filename length
+    pub flags: u32,   // mount flags (ST_RDONLY etc.)
 }
- 
+
 impl FsStatvfsBuf {
     pub const SIZE: usize = 72;
- 
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
         b[0..8].copy_from_slice(&self.bsize.to_le_bytes());
@@ -1524,24 +1590,26 @@ impl FsStatvfsBuf {
         b[68..72].copy_from_slice(&self.flags.to_le_bytes());
         b
     }
- 
+
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        if b.len() < Self::SIZE { return None; }
+        if b.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
-            bsize:   u64::from_le_bytes(b[0..8].try_into().ok()?),
-            frsize:  u64::from_le_bytes(b[8..16].try_into().ok()?),
-            blocks:  u64::from_le_bytes(b[16..24].try_into().ok()?),
-            bfree:   u64::from_le_bytes(b[24..32].try_into().ok()?),
-            bavail:  u64::from_le_bytes(b[32..40].try_into().ok()?),
-            files:   u64::from_le_bytes(b[40..48].try_into().ok()?),
-            ffree:   u64::from_le_bytes(b[48..56].try_into().ok()?),
-            favail:  u64::from_le_bytes(b[56..64].try_into().ok()?),
+            bsize: u64::from_le_bytes(b[0..8].try_into().ok()?),
+            frsize: u64::from_le_bytes(b[8..16].try_into().ok()?),
+            blocks: u64::from_le_bytes(b[16..24].try_into().ok()?),
+            bfree: u64::from_le_bytes(b[24..32].try_into().ok()?),
+            bavail: u64::from_le_bytes(b[32..40].try_into().ok()?),
+            files: u64::from_le_bytes(b[40..48].try_into().ok()?),
+            ffree: u64::from_le_bytes(b[48..56].try_into().ok()?),
+            favail: u64::from_le_bytes(b[56..64].try_into().ok()?),
             namemax: u32::from_le_bytes(b[64..68].try_into().ok()?),
-            flags:   u32::from_le_bytes(b[68..72].try_into().ok()?),
+            flags: u32::from_le_bytes(b[68..72].try_into().ok()?),
         })
     }
 }
- 
+
 /// On-wire directory entry (variable length, serialized in a shared region).
 /// Multiple entries packed contiguously; rec_len must be 4-byte aligned.
 ///
@@ -1554,46 +1622,57 @@ impl FsStatvfsBuf {
 ///   [8..]    name bytes (not NUL-terminated)
 pub struct FsDirentIter<'a> {
     data: &'a [u8],
-    pos:  usize,
+    pos: usize,
 }
- 
+
 impl<'a> FsDirentIter<'a> {
-    pub fn new(data: &'a [u8]) -> Self { Self { data, pos: 0 } }
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
 }
- 
+
 #[derive(Debug, Clone)]
 pub struct FsDirentEntry {
-    pub ino:       u32,
+    pub ino: u32,
     pub file_type: u8,
-    pub name:      alloc::string::String,
+    pub name: alloc::string::String,
 }
- 
+
 impl<'a> Iterator for FsDirentIter<'a> {
     type Item = FsDirentEntry;
- 
+
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos + 8 > self.data.len() { return None; }
+        if self.pos + 8 > self.data.len() {
+            return None;
+        }
         let b = &self.data[self.pos..];
         let ino = u32::from_le_bytes(b[0..4].try_into().ok()?);
         let rec_len = u16::from_le_bytes(b[4..6].try_into().ok()?) as usize;
         let name_len = b[6] as usize;
         let file_type = b[7];
- 
-        if rec_len < 8 || rec_len % 4 != 0 || self.pos + rec_len > self.data.len() {
+
+        if rec_len < 8 || !rec_len.is_multiple_of(4) || self.pos + rec_len > self.data.len() {
             return None;
         }
-        if 8 + name_len > rec_len { return None; }
- 
-        let name = String::from(core::str::from_utf8(&b[8..8 + name_len])
-            .unwrap_or(""));
- 
+        if 8 + name_len > rec_len {
+            return None;
+        }
+
+        let name = String::from(core::str::from_utf8(&b[8..8 + name_len]).unwrap_or(""));
+
         self.pos += rec_len;
-        if ino == 0 { return self.next(); } // skip deleted entries
- 
-        Some(FsDirentEntry { ino, file_type, name })
+        if ino == 0 {
+            return self.next();
+        } // skip deleted entries
+
+        Some(FsDirentEntry {
+            ino,
+            file_type,
+            name,
+        })
     }
 }
- 
+
 /// Serialize a directory entry into a Vec for writing into a shared region.
 pub fn serialize_fs_dirent(ino: u32, file_type: u8, name: &str) -> alloc::vec::Vec<u8> {
     let name_bytes = name.as_bytes();
@@ -1636,7 +1715,9 @@ impl NsRegisterMsg {
         if bytes.len() < Self::SIZE {
             return None;
         }
-        let port = u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let port = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
         let mut name = [0u8; 32];
         name.copy_from_slice(&bytes[8..40]);
         Some(Self { port, name })
@@ -1666,7 +1747,9 @@ impl NsLookupMsg {
         if bytes.len() < Self::SIZE {
             return None;
         }
-        let reply_port = u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let reply_port = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
         let mut name = [0u8; 32];
         name.copy_from_slice(&bytes[8..40]);
         Some(Self { reply_port, name })
@@ -1692,7 +1775,9 @@ impl NsResponseMsg {
             return None;
         }
         Some(Self {
-            port: u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
+            port: u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
         })
     }
 }
@@ -1820,7 +1905,12 @@ impl AppLaunchRequestMsg {
         let path_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
         let mut path = [0u8; APP_LAUNCH_MAX_PATH];
         path.copy_from_slice(&bytes[16..16 + APP_LAUNCH_MAX_PATH]);
-        Some(Self { reply_port, protocol_version, path_len, path })
+        Some(Self {
+            reply_port,
+            protocol_version,
+            path_len,
+            path,
+        })
     }
 }
 
@@ -1897,7 +1987,12 @@ impl AppLaunchReplyMsg {
         let err_msg_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
         let mut err_msg = [0u8; APP_LAUNCH_ERR_MSG_MAX];
         err_msg.copy_from_slice(&bytes[16..16 + APP_LAUNCH_ERR_MSG_MAX]);
-        Some(Self { status, pid, err_msg_len, err_msg })
+        Some(Self {
+            status,
+            pid,
+            err_msg_len,
+            err_msg,
+        })
     }
 }
 // ============================================================================
@@ -1932,6 +2027,7 @@ impl WallpaperSourceType {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "Image" => Some(Self::Image),
@@ -1978,6 +2074,7 @@ impl ScalingMode {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "Fill" => Some(Self::Fill),
@@ -2009,14 +2106,14 @@ impl OpenInTabMsg {
         let mut bytes = Vec::new();
         let target_bytes = self.target_app.as_bytes();
         let tab_bytes = self.tab_name.as_bytes();
-        
+
         bytes.extend_from_slice(&(target_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(target_bytes);
         bytes.extend_from_slice(&(tab_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(tab_bytes);
         bytes
     }
-    
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 8 {
             return None;
@@ -2053,9 +2150,10 @@ impl OpenInTabMsg {
             return None;
         }
 
-        let tab_name = core::str::from_utf8(
-            &bytes[tab_len_offset + 4..tab_len_offset + 4 + tab_len]
-        ).ok()?.trim();
+        let tab_name =
+            core::str::from_utf8(&bytes[tab_len_offset + 4..tab_len_offset + 4 + tab_len])
+                .ok()?
+                .trim();
         if tab_name != "Wallpaper" && tab_name != "Resolution" {
             return None;
         }
@@ -2089,15 +2187,18 @@ impl ApplyWallpaperMsg {
         let lower = path.to_ascii_lowercase();
         lower.ends_with(".jpg") || lower.ends_with(".jpeg")
     }
-    
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.push(self.source_type.to_u8());
         bytes.push(self.scaling_mode.to_u8());
-        
+
         match self.source_type {
             WallpaperSourceType::Image => {
-                let path = self.image_path.as_ref().expect("Image source requires path");
+                let path = self
+                    .image_path
+                    .as_ref()
+                    .expect("Image source requires path");
                 let path_bytes = path.as_bytes();
                 bytes.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
                 bytes.extend_from_slice(path_bytes);
@@ -2109,21 +2210,22 @@ impl ApplyWallpaperMsg {
         }
         bytes
     }
-    
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 2 {
             return None;
         }
-        
+
         let source_type = WallpaperSourceType::from_u8(bytes[0])?;
         let scaling_mode = ScalingMode::from_u8(bytes[1])?;
-        
+
         let (image_path, color_rgb) = match source_type {
             WallpaperSourceType::Image => {
                 if bytes.len() < 6 {
                     return None;
                 }
-                let path_len = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+                let path_len =
+                    u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
                 if path_len > Self::MAX_PATH_LEN {
                     return None;
                 }
@@ -2153,7 +2255,7 @@ impl ApplyWallpaperMsg {
                 (None, Some(rgb))
             }
         };
-        
+
         Some(Self {
             source_type,
             image_path,
@@ -2171,11 +2273,11 @@ pub struct WallpaperAppliedMsg {
 
 impl WallpaperAppliedMsg {
     pub const SIZE: usize = 0;
-    
+
     pub fn to_bytes(&self) -> [u8; 0] {
         []
     }
-    
+
     pub fn from_bytes(_bytes: &[u8]) -> Option<Self> {
         Some(Self {})
     }
@@ -2189,7 +2291,7 @@ pub struct WallpaperFailedMsg {
 
 impl WallpaperFailedMsg {
     pub const MAX_ERROR_LEN: usize = 128;
-    
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         let msg_bytes = self.error_message.as_bytes();
@@ -2198,7 +2300,7 @@ impl WallpaperFailedMsg {
         bytes.extend_from_slice(&msg_bytes[..len]);
         bytes
     }
-    
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 4 {
             return None;
@@ -2240,7 +2342,10 @@ impl NetIpAddr {
     }
 
     pub fn ipv6(addr: [u8; 16]) -> Self {
-        Self { family: 6, data: addr }
+        Self {
+            family: 6,
+            data: addr,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 17] {
@@ -2251,10 +2356,15 @@ impl NetIpAddr {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 17 { return None; }
+        if bytes.len() < 17 {
+            return None;
+        }
         let mut data = [0u8; 16];
         data.copy_from_slice(&bytes[1..17]);
-        Some(Self { family: bytes[0], data })
+        Some(Self {
+            family: bytes[0],
+            data,
+        })
     }
 }
 
@@ -2276,7 +2386,9 @@ impl NetAssignRingsMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             region_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
             ring_capacity: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
@@ -2311,7 +2423,9 @@ impl NetIcmpEchoRequestMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let reply_port = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
         let dest_ip = NetIpAddr::from_bytes(&bytes[8..25])?;
         let sequence = u16::from_le_bytes(bytes[25..27].try_into().ok()?);
@@ -2359,7 +2473,9 @@ impl NetIcmpEchoReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let src_ip = NetIpAddr::from_bytes(&bytes[0..17])?;
         let sequence = u16::from_le_bytes(bytes[17..19].try_into().ok()?);
         let ttl = bytes[19];
@@ -2399,10 +2515,15 @@ impl NetDriverReadyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut mac = [0u8; 6];
         mac.copy_from_slice(&bytes[0..6]);
-        Some(Self { mac, _pad: [bytes[6], bytes[7]] })
+        Some(Self {
+            mac,
+            _pad: [bytes[6], bytes[7]],
+        })
     }
 }
 
@@ -2429,11 +2550,13 @@ impl NetConfigureMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
-            own_ip:     u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            netmask:    u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-            gateway:    u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            own_ip: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            netmask: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            gateway: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             dns_server: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
         })
     }
@@ -2444,7 +2567,7 @@ impl NetConfigureMsg {
 #[repr(C)]
 pub struct NetSocketMsg {
     pub reply_port: u64,
-    pub proto: u8,       // 0=TCP, 1=UDP
+    pub proto: u8, // 0=TCP, 1=UDP
     pub _pad: [u8; 7],
 }
 
@@ -2460,7 +2583,9 @@ impl NetSocketMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut pad = [0u8; 7];
         pad.copy_from_slice(&bytes[9..16]);
         Some(Self {
@@ -2490,10 +2615,12 @@ impl NetSocketReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            error:     u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
         })
     }
 }
@@ -2523,11 +2650,13 @@ impl NetConnectMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
-            reply_port:  u64::from_le_bytes(bytes[0..8].try_into().ok()?),
-            socket_id:   u32::from_le_bytes(bytes[8..12].try_into().ok()?),
-            remote_ip:   u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            socket_id: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            remote_ip: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             remote_port: u16::from_le_bytes(bytes[16..18].try_into().ok()?),
             _pad: [bytes[18], bytes[19]],
         })
@@ -2553,10 +2682,12 @@ impl NetConnectReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            error:     u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
         })
     }
 }
@@ -2584,13 +2715,15 @@ impl NetSendMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut data = [0u8; 1024];
         data.copy_from_slice(&bytes[16..1040]);
         Some(Self {
             reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
-            socket_id:  u32::from_le_bytes(bytes[8..12].try_into().ok()?),
-            len:        u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            socket_id: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            len: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             data,
         })
     }
@@ -2617,11 +2750,13 @@ impl NetSendReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            sent:      u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-            error:     u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            sent: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
         })
     }
 }
@@ -2649,11 +2784,13 @@ impl NetRecvMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
-            socket_id:  u32::from_le_bytes(bytes[8..12].try_into().ok()?),
-            max_len:    u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            socket_id: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            max_len: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             timeout_ms: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
         })
     }
@@ -2682,13 +2819,15 @@ impl NetRecvReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut data = [0u8; 1024];
         data.copy_from_slice(&bytes[12..1036]);
         Some(Self {
             socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            len:       u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-            error:     u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            len: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             data,
         })
     }
@@ -2715,12 +2854,14 @@ impl NetCloseMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut pad = [0u8; 4];
         pad.copy_from_slice(&bytes[12..16]);
         Some(Self {
             reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
-            socket_id:  u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            socket_id: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             _pad: pad,
         })
     }
@@ -2745,10 +2886,12 @@ impl NetCloseReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
             socket_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            error:     u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            error: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
         })
     }
 }
@@ -2774,12 +2917,14 @@ impl NetResolveMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         let mut name = [0u8; 256];
         name.copy_from_slice(&bytes[12..268]);
         Some(Self {
             reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
-            name_len:   u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            name_len: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             name,
         })
     }
@@ -2804,9 +2949,11 @@ impl NetResolveReplyMsg {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < Self::SIZE { return None; }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
         Some(Self {
-            ip:    u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            ip: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
             error: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
         })
     }
@@ -2849,7 +2996,10 @@ mod tests {
 
         let decoded = ApplyWallpaperMsg::from_bytes(&msg.to_bytes()).unwrap();
         assert_eq!(decoded.source_type, WallpaperSourceType::Image);
-        assert_eq!(decoded.image_path.as_deref(), Some("/system/wallpapers/mountain.jpg"));
+        assert_eq!(
+            decoded.image_path.as_deref(),
+            Some("/system/wallpapers/mountain.jpg")
+        );
         assert_eq!(decoded.scaling_mode, ScalingMode::Fit);
     }
 

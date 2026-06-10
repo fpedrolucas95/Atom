@@ -233,10 +233,7 @@ impl SchedulerInner {
             return false;
         }
 
-        match self.ownership.get(&id).copied() {
-            Some(owner) if owner != NO_CPU_OWNER => false,
-            _ => true,
-        }
+        !matches!(self.ownership.get(&id).copied(), Some(owner) if owner != NO_CPU_OWNER)
     }
 
     fn pop_local_candidate(&mut self, cpu_id: usize) -> Option<ThreadId> {
@@ -255,11 +252,7 @@ impl SchedulerInner {
                 continue;
             }
 
-            loop {
-                let Some(id) = self.cpus[victim_cpu].ready.pop_back_raw() else {
-                    break;
-                };
-
+            while let Some(id) = self.cpus[victim_cpu].ready.pop_back_raw() {
                 if self.is_valid_ready_candidate(id, thief_cpu) {
                     self.cpus[thief_cpu].steals = self.cpus[thief_cpu].steals.saturating_add(1);
                     log_debug!(
@@ -316,7 +309,10 @@ impl SchedulerInner {
     fn enqueue_ready_locked(&mut self, id: ThreadId, preferred_cpu: Option<usize>) -> usize {
         self.remove_from_all_ready_queues(id);
 
-        if matches!(thread::get_thread_state(id), Some(ThreadState::Exited) | None) {
+        if matches!(
+            thread::get_thread_state(id),
+            Some(ThreadState::Exited) | None
+        ) {
             self.ownership.remove(&id);
             return self.select_target_cpu(id, preferred_cpu);
         }
@@ -487,7 +483,9 @@ impl Scheduler {
         let cpu_id = cpu_id.min(inner.cpu_count().saturating_sub(1));
 
         inner.base_priorities.insert(idle_id, ThreadPriority::Idle);
-        inner.effective_priorities.insert(idle_id, ThreadPriority::Idle);
+        inner
+            .effective_priorities
+            .insert(idle_id, ThreadPriority::Idle);
         inner.affinity_masks.insert(idle_id, 1u64 << cpu_id.min(63));
         inner.ownership.insert(idle_id, cpu_id);
         inner.remove_from_all_ready_queues(idle_id);
@@ -549,8 +547,10 @@ impl Scheduler {
 
         if chosen.is_none() {
             if let Some(prev) = previous {
-                if matches!(thread::get_thread_state(prev), Some(ThreadState::Running) | Some(ThreadState::Ready))
-                    && inner.affinity_allows_cpu(prev, cpu_id)
+                if matches!(
+                    thread::get_thread_state(prev),
+                    Some(ThreadState::Running) | Some(ThreadState::Ready)
+                ) && inner.affinity_allows_cpu(prev, cpu_id)
                 {
                     chosen = Some(prev);
                 }
@@ -564,7 +564,8 @@ impl Scheduler {
         let switching = previous != chosen;
 
         if switching {
-            inner.cpus[cpu_id].context_switches = inner.cpus[cpu_id].context_switches.saturating_add(1);
+            inner.cpus[cpu_id].context_switches =
+                inner.cpus[cpu_id].context_switches.saturating_add(1);
             inner.cpus[cpu_id].pending_switch_from = previous;
             if stole {
                 inner.cpus[cpu_id].steals = inner.cpus[cpu_id].steals.saturating_add(1);
@@ -578,7 +579,10 @@ impl Scheduler {
                 let prev_state = thread::get_thread_state(prev);
                 let prev_is_idle = inner.cpus[cpu_id].idle == Some(prev);
                 if !prev_is_idle
-                    && matches!(prev_state, Some(ThreadState::Running) | Some(ThreadState::Ready))
+                    && matches!(
+                        prev_state,
+                        Some(ThreadState::Running) | Some(ThreadState::Ready)
+                    )
                     && inner.affinity_allows_cpu(prev, cpu_id)
                 {
                     inner.remove_from_all_ready_queues(prev);
@@ -673,7 +677,9 @@ impl Scheduler {
         }
 
         match thread::get_thread_state(id) {
-            Some(ThreadState::Ready) | Some(ThreadState::Blocked) | Some(ThreadState::WaitingIpc) => {
+            Some(ThreadState::Ready)
+            | Some(ThreadState::Blocked)
+            | Some(ThreadState::WaitingIpc) => {
                 let old_state = thread::get_thread_state(id);
                 let target = inner.enqueue_ready_locked(id, None);
                 let priority = inner.effective_priority(id);
@@ -824,7 +830,10 @@ impl Scheduler {
         }
 
         if let Some(owner_cpu) = inner.ownership.get(&id).copied() {
-            if owner_cpu != NO_CPU_OWNER && owner_cpu < inner.cpu_count() && !inner.affinity_allows_cpu(id, owner_cpu) {
+            if owner_cpu != NO_CPU_OWNER
+                && owner_cpu < inner.cpu_count()
+                && !inner.affinity_allows_cpu(id, owner_cpu)
+            {
                 inner.cpus[owner_cpu].resched_pending = true;
                 if owner_cpu != self.local_cpu_id(&inner) {
                     if let Some(apic_id) = crate::smp::cpu_apic_id(owner_cpu) {
@@ -869,7 +878,11 @@ fn scheduler() -> &'static Scheduler {
 pub fn init(idle_thread: Thread) -> ThreadId {
     let scheduler = SCHEDULER.call_once(|| Scheduler::new(crate::smp::cpu_count().max(1)));
     let idle = scheduler.init_cpu(crate::smp::current_cpu_id(), idle_thread);
-    log_info!(LOG_ORIGIN, "scheduler initialized for {} CPUs", scheduler.cpu_count());
+    log_info!(
+        LOG_ORIGIN,
+        "scheduler initialized for {} CPUs",
+        scheduler.cpu_count()
+    );
     idle
 }
 

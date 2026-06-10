@@ -58,8 +58,8 @@ pub(super) enum SysPolicy {
 /// Evaluate `req` against the current thread.  Returns true if the
 /// requirement is satisfied.
 pub(super) fn check_cap_requirement(req: CapRequirement) -> bool {
-    use crate::cap::{CapPermissions, ResourceType};
     use crate::cap::InputDeviceType;
+    use crate::cap::{CapPermissions, ResourceType};
 
     let caller = match crate::sched::current_thread() {
         Some(t) => t,
@@ -67,65 +67,63 @@ pub(super) fn check_cap_requirement(req: CapRequirement) -> bool {
     };
 
     match req {
-        CapRequirement::InputMouse =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::InputDevice {
-                    device_type: InputDeviceType::Mouse
-                }),
-            ),
+        CapRequirement::InputMouse => {
+            crate::thread::validate_thread_capability_by_type(caller, CapPermissions::READ, |r| {
+                matches!(
+                    r,
+                    ResourceType::InputDevice {
+                        device_type: InputDeviceType::Mouse
+                    }
+                )
+            })
+        }
 
-        CapRequirement::InputKeyboard =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::InputDevice {
-                    device_type: InputDeviceType::Keyboard
-                }),
-            ),
+        CapRequirement::InputKeyboard => {
+            crate::thread::validate_thread_capability_by_type(caller, CapPermissions::READ, |r| {
+                matches!(
+                    r,
+                    ResourceType::InputDevice {
+                        device_type: InputDeviceType::Keyboard
+                    }
+                )
+            })
+        }
 
-        CapRequirement::FramebufferMap =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::Framebuffer { .. }),
-            ),
+        CapRequirement::FramebufferMap => {
+            crate::thread::validate_thread_capability_by_type(caller, CapPermissions::READ, |r| {
+                matches!(r, ResourceType::Framebuffer { .. })
+            })
+        }
 
-        CapRequirement::DisplayModeSet =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::EXECUTE,
-                |r| matches!(r, ResourceType::DisplayModeSet),
-            ),
+        CapRequirement::DisplayModeSet => crate::thread::validate_thread_capability_by_type(
+            caller,
+            CapPermissions::EXECUTE,
+            |r| matches!(r, ResourceType::DisplayModeSet),
+        ),
 
-        CapRequirement::AnyFsNamespace =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::FsNamespace { .. }),
-            ),
+        CapRequirement::AnyFsNamespace => {
+            crate::thread::validate_thread_capability_by_type(caller, CapPermissions::READ, |r| {
+                matches!(r, ResourceType::FsNamespace { .. })
+            })
+        }
 
-        CapRequirement::SpawnSystemService =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::EXECUTE,
-                |r| matches!(r, ResourceType::SpawnSystemService),
-            ),
+        CapRequirement::SpawnSystemService => crate::thread::validate_thread_capability_by_type(
+            caller,
+            CapPermissions::EXECUTE,
+            |r| matches!(r, ResourceType::SpawnSystemService),
+        ),
 
-        CapRequirement::SpawnFromPath =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::EXECUTE,
-                |r| matches!(r, ResourceType::SpawnFromPath),
-            ),
+        CapRequirement::SpawnFromPath => crate::thread::validate_thread_capability_by_type(
+            caller,
+            CapPermissions::EXECUTE,
+            |r| matches!(r, ResourceType::SpawnFromPath),
+        ),
 
-        CapRequirement::ReadKernelLog =>
-            crate::thread::validate_thread_capability_by_type(
-                caller,
-                CapPermissions::READ,
-                |r| matches!(r, ResourceType::ReadKernelLog),
-            ),
+        CapRequirement::ReadKernelLog => {
+            crate::thread::validate_thread_capability_by_type(caller, CapPermissions::READ, |r| {
+                matches!(r, ResourceType::ReadKernelLog)
+            })
+        }
     }
 }
 
@@ -134,27 +132,33 @@ pub(super) fn check_cap_requirement(req: CapRequirement) -> bool {
 /// Every syscall number that the kernel handles should appear here.
 /// Unclassified syscalls are denied by default (fail-closed).
 pub(super) fn syscall_policy(num: u64) -> SysPolicy {
-    use SysPolicy::*;
     use CapRequirement::*;
+    use SysPolicy::*;
 
     match num {
         // ── Thread management ──────────────────────────────────────────────
         // yield/exit/sleep carry no sensitive effect; thread_create's handler
         // already validates Thread(WRITE) capability.
-        SYS_THREAD_YIELD | SYS_THREAD_EXIT | SYS_THREAD_SLEEP | SYS_THREAD_CREATE
-            => ExplicitlyUnrestricted,
+        SYS_THREAD_YIELD | SYS_THREAD_EXIT | SYS_THREAD_SLEEP | SYS_THREAD_CREATE => {
+            ExplicitlyUnrestricted
+        }
 
         // ── IPC ────────────────────────────────────────────────────────────
         // All IPC handlers perform parametric port-ownership checks; no
         // additional class-level gate needed here.
-        SYS_IPC_CREATE_PORT | SYS_IPC_CLOSE_PORT
-        | SYS_IPC_SEND | SYS_IPC_RECV
+        SYS_IPC_CREATE_PORT
+        | SYS_IPC_CLOSE_PORT
+        | SYS_IPC_SEND
+        | SYS_IPC_RECV
         | SYS_IPC_SEND_WITH_CAP
-        | SYS_IPC_SEND_BATCH | SYS_IPC_RECV_BATCH
-        | SYS_IPC_SEND_ASYNC | SYS_IPC_TRY_RECV
-        | SYS_IPC_TRACE_READ | SYS_IPC_PORT_STATS
-        | SYS_IPC_WAIT_ANY | SYS_IPC_CREATE_PORT_WITH_ID
-            => ExplicitlyUnrestricted,
+        | SYS_IPC_SEND_BATCH
+        | SYS_IPC_RECV_BATCH
+        | SYS_IPC_SEND_ASYNC
+        | SYS_IPC_TRY_RECV
+        | SYS_IPC_TRACE_READ
+        | SYS_IPC_PORT_STATS
+        | SYS_IPC_WAIT_ANY
+        | SYS_IPC_CREATE_PORT_WITH_ID => ExplicitlyUnrestricted,
 
         // ── Authenticated IPC support (PR2) ───────────────────────────────
         // recv_envelope only reveals who sent to the caller's OWN port, so it
@@ -163,52 +167,64 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         // namesvc needs to authorise registration; none grant authority.
         // SYS_IPC_CREATE_PORT_WITH_ID additionally enforces the ReservedPort
         // capability inside its handler for ids 1..=255.
-        SYS_IPC_RECV_ENVELOPE | SYS_SERVICE_NAME_ALLOWED
-        | SYS_IPC_PORT_OWNER | SYS_PROCESS_ALIVE
-            => ExplicitlyUnrestricted,
+        SYS_IPC_RECV_ENVELOPE
+        | SYS_SERVICE_NAME_ALLOWED
+        | SYS_IPC_PORT_OWNER
+        | SYS_PROCESS_ALIVE => ExplicitlyUnrestricted,
 
         // ── Capability management ──────────────────────────────────────────
         // Individual handlers enforce ownership / derivation rules.
         // (sys_cap_create is additionally guarded in its own body.)
-        SYS_CAP_CREATE | SYS_CAP_CHECK | SYS_CAP_REVOKE | SYS_CAP_DERIVE
-        | SYS_CAP_LIST | SYS_CAP_TRANSFER
-        | SYS_CAP_QUERY_PARENT | SYS_CAP_QUERY_CHILDREN
-            => ExplicitlyUnrestricted,
+        SYS_CAP_CREATE
+        | SYS_CAP_CHECK
+        | SYS_CAP_REVOKE
+        | SYS_CAP_DERIVE
+        | SYS_CAP_LIST
+        | SYS_CAP_TRANSFER
+        | SYS_CAP_QUERY_PARENT
+        | SYS_CAP_QUERY_CHILDREN => ExplicitlyUnrestricted,
 
         // ── Shared memory / address space ──────────────────────────────────
-        SYS_SHARED_REGION_CREATE | SYS_SHARED_REGION_MAP
-        | SYS_SHARED_REGION_UNMAP | SYS_SHARED_REGION_DESTROY
-        | SYS_ADDRSPACE_CREATE | SYS_ADDRSPACE_DESTROY
-        | SYS_MAP_REGION | SYS_UNMAP_REGION | SYS_REMAP_REGION
+        SYS_SHARED_REGION_CREATE
+        | SYS_SHARED_REGION_MAP
+        | SYS_SHARED_REGION_UNMAP
+        | SYS_SHARED_REGION_DESTROY
+        | SYS_ADDRSPACE_CREATE
+        | SYS_ADDRSPACE_DESTROY
+        | SYS_MAP_REGION
+        | SYS_UNMAP_REGION
+        | SYS_REMAP_REGION
         | SYS_REGISTER_FAULT_HANDLER
-        | SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | SYS_FORK
-            => ExplicitlyUnrestricted,
+        | SYS_MMAP
+        | SYS_MUNMAP
+        | SYS_MPROTECT
+        | SYS_BRK
+        | SYS_FORK => ExplicitlyUnrestricted,
 
         // ── Input devices ─────────────────────────────────────────────────
         // Gated by InputDevice capability type. These caps are granted only to
         // the compositor (ui_shell) through the SystemServiceManifest; ordinary
         // apps hold none and are denied EPERM here. There are no ambient grants.
-        SYS_MOUSE_POLL | SYS_MOUSE_GET_ID   => Requires(InputMouse),
-        SYS_KEYBOARD_POLL                    => Requires(InputKeyboard),
+        SYS_MOUSE_POLL | SYS_MOUSE_GET_ID => Requires(InputMouse),
+        SYS_KEYBOARD_POLL => Requires(InputKeyboard),
 
         // ── Framebuffer / display ──────────────────────────────────────────
         // Gated by Framebuffer cap, granted only to the compositor (ui_shell)
         // via the manifest's FramebufferMap environment grant.
-        SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER
-            => Requires(FramebufferMap),
-        SYS_SET_VIDEO_MODE
-            => Requires(DisplayModeSet),
+        SYS_GET_FRAMEBUFFER | SYS_MAP_FRAMEBUFFER => Requires(FramebufferMap),
+        SYS_SET_VIDEO_MODE => Requires(DisplayModeSet),
 
         // Video info queries — non-sensitive, public.
-        SYS_GET_VIDEO_MODES | SYS_GET_CURRENT_VIDEO_MODE | SYS_VIDEO_MODE_COUNT
-            => ExplicitlyUnrestricted,
+        SYS_GET_VIDEO_MODES | SYS_GET_CURRENT_VIDEO_MODE | SYS_VIDEO_MODE_COUNT => {
+            ExplicitlyUnrestricted
+        }
 
         // ── Infrastructure / Networking Phase 1 ───────────────────────────
         // Handlers perform parametric capability checks.
-        SYS_PCI_GET_BAR | SYS_DEVICE_BIND_IRQ | SYS_IRQ_LISTEN
-        | SYS_DMA_ALLOC | SYS_DMA_MAP | SYS_DMA_FREE | SYS_MAP_MMIO
-        | SYS_IRQ_ACK | SYS_PCI_QUERY_DEVICE
-            => ExplicitlyUnrestricted,
+        SYS_PCI_GET_BAR | SYS_DEVICE_BIND_IRQ | SYS_IRQ_LISTEN | SYS_DMA_ALLOC | SYS_DMA_MAP
+        | SYS_DMA_FREE | SYS_MAP_MMIO | SYS_IRQ_ACK | SYS_PCI_QUERY_DEVICE => {
+            ExplicitlyUnrestricted
+        }
 
         // ── Raw I/O ports ─────────────────────────────────────────────────
         // Gated in-handler by `validate_io_port_access`, which requires an
@@ -216,35 +232,38 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         // permission. An ordinary process holds none and is denied EPERM by the
         // handler. Classified here explicitly so these syscalls do not rely on
         // the fail-closed wildcard (which would make the handler unreachable).
-        SYS_IO_PORT_READ | SYS_IO_PORT_WRITE
-            => ExplicitlyUnrestricted,
+        SYS_IO_PORT_READ | SYS_IO_PORT_WRITE => ExplicitlyUnrestricted,
 
         // ── IRQ management ────────────────────────────────────────────────
         // Handler uses ALLOWED_IRQS allowlist today; no additional class gate.
-        SYS_REGISTER_IRQ_HANDLER | SYS_UNREGISTER_IRQ_HANDLER | SYS_GET_IRQ_COUNT
-            => ExplicitlyUnrestricted,
+        SYS_REGISTER_IRQ_HANDLER | SYS_UNREGISTER_IRQ_HANDLER | SYS_GET_IRQ_COUNT => {
+            ExplicitlyUnrestricted
+        }
 
         // ── Kernel FS backend (for fsd only) ──────────────────────────────
         // These syscalls bypass fsd and talk directly to the kernel FAT32
         // driver.  Gated by FsNamespace cap which is granted only to "fsd"
         // at spawn time.  This is the first hard enforcement of the rule
         // "only fsd calls kern_fs_*".
-        SYS_KERN_FS_READ_FILE | SYS_KERN_FS_LIST_DIR | SYS_KERN_FS_STAT_PATH
-        | SYS_KERN_FS_WRITE_FILE | SYS_KERN_FS_MKDIR | SYS_KERN_FS_RMDIR
-        | SYS_KERN_FS_UNLINK | SYS_KERN_FS_RENAME | SYS_KERN_FS_SYNC
-        | SYS_KERN_BLOCK_READ | SYS_KERN_BLOCK_WRITE | SYS_KERN_BLOCK_FLUSH
-            => Requires(AnyFsNamespace),
+        SYS_KERN_FS_READ_FILE
+        | SYS_KERN_FS_LIST_DIR
+        | SYS_KERN_FS_STAT_PATH
+        | SYS_KERN_FS_WRITE_FILE
+        | SYS_KERN_FS_MKDIR
+        | SYS_KERN_FS_RMDIR
+        | SYS_KERN_FS_UNLINK
+        | SYS_KERN_FS_RENAME
+        | SYS_KERN_FS_SYNC
+        | SYS_KERN_BLOCK_READ
+        | SYS_KERN_BLOCK_WRITE
+        | SYS_KERN_BLOCK_FLUSH => Requires(AnyFsNamespace),
 
         // ── POSIX FS (via fsd IPC) ─────────────────────────────────────────
-        SYS_FS_OPEN | SYS_FS_CLOSE | SYS_FS_READ | SYS_FS_WRITE | SYS_FS_SEEK
-        | SYS_FS_STAT | SYS_FS_FSTAT
-        | SYS_FS_MKDIR | SYS_FS_RMDIR | SYS_FS_UNLINK | SYS_FS_RENAME
-        | SYS_FS_READDIR | SYS_FS_TRUNCATE | SYS_FS_FSYNC
-        | SYS_FS_MOUNT | SYS_FS_UMOUNT | SYS_FS_CHMOD
-        | SYS_FS_DUP | SYS_FS_DUP2
-        | SYS_FS_LINK | SYS_FS_SYMLINK | SYS_FS_READLINK
-        | SYS_FS_UTIMES | SYS_FS_STATVFS
-            => ExplicitlyUnrestricted,
+        SYS_FS_OPEN | SYS_FS_CLOSE | SYS_FS_READ | SYS_FS_WRITE | SYS_FS_SEEK | SYS_FS_STAT
+        | SYS_FS_FSTAT | SYS_FS_MKDIR | SYS_FS_RMDIR | SYS_FS_UNLINK | SYS_FS_RENAME
+        | SYS_FS_READDIR | SYS_FS_TRUNCATE | SYS_FS_FSYNC | SYS_FS_MOUNT | SYS_FS_UMOUNT
+        | SYS_FS_CHMOD | SYS_FS_DUP | SYS_FS_DUP2 | SYS_FS_LINK | SYS_FS_SYMLINK
+        | SYS_FS_READLINK | SYS_FS_UTIMES | SYS_FS_STATVFS => ExplicitlyUnrestricted,
 
         // ── Process / spawn ───────────────────────────────────────────────
         // Deny-by-default: spawn is a kernel-authorized operation. The cap is
@@ -252,7 +271,7 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         // SystemServiceManifest (declaration + allowed_children) for
         // SYS_SPAWN_PROCESS and path/system-directory rules for
         // SYS_SPAWN_FROM_PATH.
-        SYS_SPAWN_PROCESS   => Requires(SpawnSystemService),
+        SYS_SPAWN_PROCESS => Requires(SpawnSystemService),
         SYS_SPAWN_FROM_PATH => Requires(SpawnFromPath),
 
         // ── Sensitive system information ───────────────────────────────────
@@ -262,14 +281,16 @@ pub(super) fn syscall_policy(num: u64) -> SysPolicy {
         SYS_READ_KLOG => Requires(ReadKernelLog),
 
         // Process enumeration — used by service_manager for health monitoring.
-        SYS_LIST_PROCESSES | SYS_GET_PROCESS_COUNT
-            => ExplicitlyUnrestricted,
+        SYS_LIST_PROCESSES | SYS_GET_PROCESS_COUNT => ExplicitlyUnrestricted,
 
         // Non-sensitive system information — public.
-        SYS_GET_TICKS | SYS_GET_MEMORY_INFO | SYS_GET_CPU_BRAND
-        | SYS_GET_CPU_ID | SYS_GET_CPU_COUNT
-        | SYS_SET_THREAD_AFFINITY | SYS_GET_THREAD_AFFINITY
-            => ExplicitlyUnrestricted,
+        SYS_GET_TICKS
+        | SYS_GET_MEMORY_INFO
+        | SYS_GET_CPU_BRAND
+        | SYS_GET_CPU_ID
+        | SYS_GET_CPU_COUNT
+        | SYS_SET_THREAD_AFFINITY
+        | SYS_GET_THREAD_AFFINITY => ExplicitlyUnrestricted,
 
         // Debug log — no cap required (process names its own output).
         SYS_DEBUG_LOG => ExplicitlyUnrestricted,
@@ -325,10 +346,8 @@ pub(super) fn validate_io_port_access(
     }
 
     // Check 2: Device capability that contains this port (for VirtIO Legacy I/O BARs)
-    let has_device_cap = crate::thread::validate_thread_capability_by_type(
-        caller,
-        required_perm,
-        |resource| {
+    let has_device_cap =
+        crate::thread::validate_thread_capability_by_type(caller, required_perm, |resource| {
             if let crate::cap::ResourceType::Device { bdf } = resource {
                 let bus = (bdf >> 8) as u8;
                 let dev = ((bdf >> 3) & 0x1f) as u8;
@@ -336,15 +355,17 @@ pub(super) fn validate_io_port_access(
                 // Check if any BAR of this device is an I/O BAR and contains the requested port
                 for i in 0..6 {
                     if let Some(bar) = crate::drivers::pci::get_bar_info(bus, dev, func, i) {
-                        if !bar.is_mmio && port >= bar.base as u16 && (port as u64) < bar.base + bar.size {
+                        if !bar.is_mmio
+                            && port >= bar.base as u16
+                            && (port as u64) < bar.base + bar.size
+                        {
                             return true;
                         }
                     }
                 }
             }
             false
-        }
-    );
+        });
 
     if !has_device_cap {
         log_warn!(
@@ -472,9 +493,9 @@ pub(super) fn resolve_cap_create_resource(
             }
             Ok(crate::cap::ResourceType::Thread(tid))
         }
-        2 => {
-            Ok(crate::cap::ResourceType::IpcPort { port_id: resource_id })
-        }
+        2 => Ok(crate::cap::ResourceType::IpcPort {
+            port_id: resource_id,
+        }),
         3 => {
             // IRQ capabilities are not mintable from userspace. They are issued
             // by the kernel to drivers through dedicated paths; allowing
@@ -584,14 +605,16 @@ pub(super) fn enforce_vma_memory_operation_allowed(
 
 pub(super) fn current_fd_owner_context() -> Result<super::FdOwnerContext, super::FdContextError> {
     let tid = crate::sched::current_thread().ok_or(super::FdContextError::NoCurrentThread)?;
-    let process_id = crate::thread::get_thread_process_id(tid).ok_or(super::FdContextError::NoCurrentProcess)?;
-    let address_space_pml4 =
-        crate::thread::get_thread_address_space(tid).ok_or(super::FdContextError::CorruptedState)?;
+    let process_id =
+        crate::thread::get_thread_process_id(tid).ok_or(super::FdContextError::NoCurrentProcess)?;
+    let address_space_pml4 = crate::thread::get_thread_address_space(tid)
+        .ok_or(super::FdContextError::CorruptedState)?;
     if address_space_pml4 == 0 {
         return Err(super::FdContextError::CorruptedState);
     }
 
-    let process = crate::process::get_process(process_id).ok_or(super::FdContextError::CorruptedState)?;
+    let process =
+        crate::process::get_process(process_id).ok_or(super::FdContextError::CorruptedState)?;
     if process.pml4_phys == 0 {
         return Err(super::FdContextError::CorruptedState);
     }
@@ -619,7 +642,8 @@ pub(super) fn validate_fd_process_alignment(
     }
 
     let process_id = fd_owner_process(fd)?;
-    let process = crate::process::get_process(process_id).ok_or(super::FdContextError::CorruptedState)?;
+    let process =
+        crate::process::get_process(process_id).ok_or(super::FdContextError::CorruptedState)?;
     if process.pml4_phys == 0 {
         return Err(super::FdContextError::CorruptedState);
     }
@@ -660,9 +684,8 @@ pub(super) fn validate_fd_ownership_with_owner(
 /// the smoke gate's forbidden markers).
 pub(super) fn run_security_policy_selftests() {
     use super::{
-        SYS_IPC_CREATE_PORT_WITH_ID, SYS_IPC_PORT_OWNER, SYS_IPC_RECV_ENVELOPE,
-        SYS_PROCESS_ALIVE, SYS_READ_KLOG, SYS_SERVICE_NAME_ALLOWED, SYS_SPAWN_FROM_PATH,
-        SYS_SPAWN_PROCESS,
+        SYS_IPC_CREATE_PORT_WITH_ID, SYS_IPC_PORT_OWNER, SYS_IPC_RECV_ENVELOPE, SYS_PROCESS_ALIVE,
+        SYS_READ_KLOG, SYS_SERVICE_NAME_ALLOWED, SYS_SPAWN_FROM_PATH, SYS_SPAWN_PROCESS,
     };
 
     // Authenticated-IPC support syscalls stay classified (never fail-closed).
@@ -711,12 +734,12 @@ pub(super) fn run_security_policy_selftests() {
 
 #[cfg(test)]
 mod tests {
-    use super::{syscall_policy, CapRequirement, SysPolicy};
-    use super::super::{SYS_READ_KLOG, SYS_SPAWN_FROM_PATH, SYS_SPAWN_PROCESS};
     use super::super::{
-        SYS_IPC_CREATE_PORT_WITH_ID, SYS_IPC_PORT_OWNER, SYS_IPC_RECV_ENVELOPE,
-        SYS_PROCESS_ALIVE, SYS_SERVICE_NAME_ALLOWED,
+        SYS_IPC_CREATE_PORT_WITH_ID, SYS_IPC_PORT_OWNER, SYS_IPC_RECV_ENVELOPE, SYS_PROCESS_ALIVE,
+        SYS_SERVICE_NAME_ALLOWED,
     };
+    use super::super::{SYS_READ_KLOG, SYS_SPAWN_FROM_PATH, SYS_SPAWN_PROCESS};
+    use super::{syscall_policy, CapRequirement, SysPolicy};
 
     /// The authenticated-IPC support syscalls must be classified (never
     /// fail-closed/denied). Reserved-port enforcement happens inside the
@@ -776,7 +799,11 @@ mod tests {
         assert!(super::super::is_system_service_path("/drivers/fsd.atxf"));
         assert!(super::super::is_system_service_path("/bin/init.atxf"));
         assert!(super::super::is_system_service_path("/sbin/netd.atxf"));
-        assert!(!super::super::is_system_service_path("/apps/user/fileman.atxf"));
-        assert!(!super::super::is_system_service_path("/apps/system/terminal.atxf"));
+        assert!(!super::super::is_system_service_path(
+            "/apps/user/fileman.atxf"
+        ));
+        assert!(!super::super::is_system_service_path(
+            "/apps/system/terminal.atxf"
+        ));
     }
 }

@@ -1,4 +1,4 @@
-use crate::error::{EINVAL, ENOMEM, SyscallError, SyscallResult};
+use crate::error::{SyscallError, SyscallResult, EINVAL, ENOMEM};
 use crate::raw::{numbers::*, syscall2, syscall3, syscall4};
 use atom_abi::{is_syscall_error, validate_user_mmap_range, UserVirtAddr, USER_PAGE_SIZE};
 

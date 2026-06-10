@@ -85,9 +85,9 @@
 
 #![allow(dead_code)]
 
-use spin::Mutex;
-use crate::{log_info, log_warn, log_error};
 use crate::mm::vm;
+use crate::{log_error, log_info, log_warn};
+use spin::Mutex;
 
 // ============================================================================
 // Error Type
@@ -124,16 +124,16 @@ const VBE_DISPI_PORT_INDEX: u16 = 0x01CE;
 const VBE_DISPI_PORT_DATA: u16 = 0x01CF;
 
 // VBE DISPI register indices
-const VBE_DISPI_INDEX_ID:          u16 = 0x00;
-const VBE_DISPI_INDEX_XRES:        u16 = 0x01;
-const VBE_DISPI_INDEX_YRES:        u16 = 0x02;
-const VBE_DISPI_INDEX_BPP:         u16 = 0x03;
-const VBE_DISPI_INDEX_ENABLE:      u16 = 0x04;
-const VBE_DISPI_INDEX_BANK:        u16 = 0x05;
-const VBE_DISPI_INDEX_VIRT_WIDTH:  u16 = 0x06;
+const VBE_DISPI_INDEX_ID: u16 = 0x00;
+const VBE_DISPI_INDEX_XRES: u16 = 0x01;
+const VBE_DISPI_INDEX_YRES: u16 = 0x02;
+const VBE_DISPI_INDEX_BPP: u16 = 0x03;
+const VBE_DISPI_INDEX_ENABLE: u16 = 0x04;
+const VBE_DISPI_INDEX_BANK: u16 = 0x05;
+const VBE_DISPI_INDEX_VIRT_WIDTH: u16 = 0x06;
 const VBE_DISPI_INDEX_VIRT_HEIGHT: u16 = 0x07;
-const VBE_DISPI_INDEX_X_OFFSET:    u16 = 0x08;
-const VBE_DISPI_INDEX_Y_OFFSET:    u16 = 0x09;
+const VBE_DISPI_INDEX_X_OFFSET: u16 = 0x08;
+const VBE_DISPI_INDEX_Y_OFFSET: u16 = 0x09;
 
 // VBE DISPI supported version IDs.
 // 0xB0C0 is the first version. 0xB0C5 introduced GETCAPS and virtual framebuffer.
@@ -145,12 +145,12 @@ const VBE_DISPI_ID4: u16 = 0xB0C4;
 const VBE_DISPI_ID5: u16 = 0xB0C5; // Minimum required version
 
 // ENABLE register flag bits
-const VBE_DISPI_DISABLED:  u16 = 0x00;
-const VBE_DISPI_ENABLED:   u16 = 0x01;
-const VBE_DISPI_GETCAPS:   u16 = 0x02; // When set, read XRES/YRES returns maximums
-const VBE_DISPI_8BIT_DAC:  u16 = 0x20;
-const VBE_DISPI_LFB_ENABLED:  u16 = 0x40;
-const VBE_DISPI_NOCLEARMEM:   u16 = 0x80;
+const VBE_DISPI_DISABLED: u16 = 0x00;
+const VBE_DISPI_ENABLED: u16 = 0x01;
+const VBE_DISPI_GETCAPS: u16 = 0x02; // When set, read XRES/YRES returns maximums
+const VBE_DISPI_8BIT_DAC: u16 = 0x20;
+const VBE_DISPI_LFB_ENABLED: u16 = 0x40;
+const VBE_DISPI_NOCLEARMEM: u16 = 0x80;
 
 // Supported BPP values. We only advertise 32-bit for simplicity and compositing
 // compatibility. 24-bit has unaligned pitch issues; 16-bit requires color conversion.
@@ -182,9 +182,9 @@ const PCI_MEM_BAR_ADDR_MASK: u32 = 0xFFFF_FFF0;
 /// Memory BAR type field: bits [2:1]
 ///   00 = 32-bit BAR
 ///   10 = 64-bit BAR (address spans BAR0 + BAR1)
-const PCI_MEM_BAR_TYPE_MASK:  u32 = 0x06;
-const PCI_MEM_BAR_TYPE_32:    u32 = 0x00;
-const PCI_MEM_BAR_TYPE_64:    u32 = 0x04;
+const PCI_MEM_BAR_TYPE_MASK: u32 = 0x06;
+const PCI_MEM_BAR_TYPE_32: u32 = 0x00;
+const PCI_MEM_BAR_TYPE_64: u32 = 0x04;
 
 /// Bit 0 of a BAR: 0 = memory bar, 1 = I/O bar
 const PCI_BAR_IO_BIT: u32 = 0x01;
@@ -193,25 +193,29 @@ const PCI_BAR_IO_BIT: u32 = 0x01;
 // Supported Video Modes
 // ============================================================================
 
-
 /// Represents a single display mode.
 /// All modes use 32 BPP (BGRA 8-8-8-8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct VideoMode {
     /// Horizontal resolution in pixels (must be divisible by 8 for BGA)
-    pub width:  u16,
+    pub width: u16,
     /// Vertical resolution in pixels
     pub height: u16,
     /// Bits per pixel (always 32 for now)
-    pub bpp:    u8,
+    pub bpp: u8,
     /// Refresh rate hint (informational, BGA does not control refresh)
     pub refresh_rate: u8,
 }
 
 impl VideoMode {
     pub const fn new(width: u16, height: u16) -> Self {
-        Self { width, height, bpp: 32, refresh_rate: 60 }
+        Self {
+            width,
+            height,
+            bpp: 32,
+            refresh_rate: 60,
+        }
     }
 
     /// Bytes per pixel (bpp / 8)
@@ -242,8 +246,8 @@ impl VideoMode {
 ///   2. BGA supports any resolution up to the maximum (it's a virtual device).
 ///   3. Listing standard modes improves UX in the display settings UI.
 const SUPPORTED_MODES: [VideoMode; 12] = [
-    VideoMode::new(640,  480),
-    VideoMode::new(800,  600),
+    VideoMode::new(640, 480),
+    VideoMode::new(800, 600),
     VideoMode::new(1024, 600),
     VideoMode::new(1024, 768),
     VideoMode::new(1152, 864),
@@ -265,43 +269,43 @@ const SUPPORTED_MODES: [VideoMode; 12] = [
 #[derive(Debug, Clone, Copy)]
 pub struct VbeModeInfo {
     /// Mode attributes: bit 7 = LFB available, bit 0 = mode supported
-    pub mode_attributes:       u16,
-    pub win_a_attributes:      u8,
-    pub win_b_attributes:      u8,
-    pub win_granularity:        u16,
-    pub win_size:               u16,
-    pub win_a_segment:          u16,
-    pub win_b_segment:          u16,
-    pub win_func_ptr:           u32,
-    pub bytes_per_scan_line:    u16,
+    pub mode_attributes: u16,
+    pub win_a_attributes: u8,
+    pub win_b_attributes: u8,
+    pub win_granularity: u16,
+    pub win_size: u16,
+    pub win_a_segment: u16,
+    pub win_b_segment: u16,
+    pub win_func_ptr: u32,
+    pub bytes_per_scan_line: u16,
     // OEM extensions (VBE 1.2+)
-    pub x_resolution:           u16,
-    pub y_resolution:           u16,
-    pub x_char_size:            u8,
-    pub y_char_size:            u8,
-    pub number_of_planes:       u8,
-    pub bits_per_pixel:         u8,
-    pub number_of_banks:        u8,
+    pub x_resolution: u16,
+    pub y_resolution: u16,
+    pub x_char_size: u8,
+    pub y_char_size: u8,
+    pub number_of_planes: u8,
+    pub bits_per_pixel: u8,
+    pub number_of_banks: u8,
     /// Memory model: 4 = packed pixel, 6 = direct colour
-    pub memory_model:           u8,
-    pub bank_size:              u8,
-    pub number_of_image_pages:  u8,
-    pub reserved1:              u8,
+    pub memory_model: u8,
+    pub bank_size: u8,
+    pub number_of_image_pages: u8,
+    pub reserved1: u8,
     // Direct colour fields
-    pub red_mask_size:          u8,
-    pub red_field_position:     u8,
-    pub green_mask_size:        u8,
-    pub green_field_position:   u8,
-    pub blue_mask_size:         u8,
-    pub blue_field_position:    u8,
-    pub rsvd_mask_size:         u8,
-    pub rsvd_field_position:    u8,
+    pub red_mask_size: u8,
+    pub red_field_position: u8,
+    pub green_mask_size: u8,
+    pub green_field_position: u8,
+    pub blue_mask_size: u8,
+    pub blue_field_position: u8,
+    pub rsvd_mask_size: u8,
+    pub rsvd_field_position: u8,
     pub direct_color_mode_info: u8,
     // VBE 2.0+ extensions
-    pub phys_base_ptr:          u32,  // Physical address of LFB
-    pub off_screen_mem_offset:  u32,
-    pub off_screen_mem_size:    u16,
-    pub reserved2:              [u8; 206],
+    pub phys_base_ptr: u32, // Physical address of LFB
+    pub off_screen_mem_offset: u32,
+    pub off_screen_mem_size: u16,
+    pub reserved2: [u8; 206],
 }
 
 impl VbeModeInfo {
@@ -321,14 +325,18 @@ impl VbeModeInfo {
         info.number_of_planes = 1;
         info.bits_per_pixel = mode.bpp;
         info.number_of_banks = 1;
-        info.memory_model = 6;     // Direct colour
+        info.memory_model = 6; // Direct colour
         info.number_of_image_pages = 0;
         info.reserved1 = 1;
         // 32-bit BGRA colour fields
-        info.blue_mask_size      = 8; info.blue_field_position  = 0;
-        info.green_mask_size     = 8; info.green_field_position = 8;
-        info.red_mask_size       = 8; info.red_field_position   = 16;
-        info.rsvd_mask_size      = 8; info.rsvd_field_position  = 24;
+        info.blue_mask_size = 8;
+        info.blue_field_position = 0;
+        info.green_mask_size = 8;
+        info.green_field_position = 8;
+        info.red_mask_size = 8;
+        info.red_field_position = 16;
+        info.rsvd_mask_size = 8;
+        info.rsvd_field_position = 24;
         info.direct_color_mode_info = 0;
         info.phys_base_ptr = lfb_phys;
 
@@ -343,27 +351,32 @@ impl VbeModeInfo {
 /// Kernel-side state record for the BGA device.
 struct BgaState {
     /// True if BGA hardware was detected and a valid version confirmed.
-    available:      bool,
+    available: bool,
     /// The hardware version register value (e.g., 0xB0C5).
-    version:        u16,
+    version: u16,
     /// Physical address of the Linear Framebuffer (from PCI BAR0).
     /// Zero if BGA is not available.
-    lfb_phys:       usize,
+    lfb_phys: usize,
     /// Maximum framebuffer size in bytes (from PCI BAR0 sizing).
-    lfb_size:       usize,
+    lfb_size: usize,
     /// Currently active video mode.
-    current_mode:   VideoMode,
+    current_mode: VideoMode,
     /// True if a mode has been set via set_video_mode().
-    mode_active:    bool,
+    mode_active: bool,
 }
 
 static BGA_STATE: Mutex<BgaState> = Mutex::new(BgaState {
-    available:    false,
-    version:      0,
-    lfb_phys:     0,
-    lfb_size:     0,
-    current_mode: VideoMode { width: 0, height: 0, bpp: 32, refresh_rate: 60 },
-    mode_active:  false,
+    available: false,
+    version: 0,
+    lfb_phys: 0,
+    lfb_size: 0,
+    current_mode: VideoMode {
+        width: 0,
+        height: 0,
+        bpp: 32,
+        refresh_rate: 60,
+    },
+    mode_active: false,
 });
 
 const LOG_ORIGIN: &str = "bga";
@@ -408,7 +421,7 @@ unsafe fn read_register(index: u16) -> u16 {
 #[inline]
 fn pci_config_addr(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     0x8000_0000u32
-        | ((bus  as u32) << 16)
+        | ((bus as u32) << 16)
         | ((slot as u32) << 11)
         | ((func as u32) << 8)
         | ((offset as u32) & 0xFC)
@@ -481,7 +494,11 @@ fn pci_read_bar0_addr(bus: u8, slot: u8, func: u8) -> Option<usize> {
     let bar0 = unsafe { pci_config_read32(bus, slot, func, PCI_BAR0_OFFSET) };
 
     if bar0 == 0 || bar0 == 0xFFFF_FFFF {
-        log_warn!(LOG_ORIGIN, "BGA BAR0 is zero or unset (0x{:X}) – firmware may not have assigned it", bar0);
+        log_warn!(
+            LOG_ORIGIN,
+            "BGA BAR0 is zero or unset (0x{:X}) – firmware may not have assigned it",
+            bar0
+        );
         return None;
     }
 
@@ -501,25 +518,34 @@ fn pci_read_bar0_addr(bus: u8, slot: u8, func: u8) -> Option<usize> {
         PCI_MEM_BAR_TYPE_64 => {
             // 64-bit memory bar: base address spans BAR0 (lower 32 bits) and BAR1 (upper 32 bits)
             let bar0_lo = (bar0 & PCI_MEM_BAR_ADDR_MASK) as u64;
-            let bar1    = unsafe {
-                pci_config_read32(bus, slot, func, PCI_BAR0_OFFSET + 4) as u64
-            };
+            let bar1 = unsafe { pci_config_read32(bus, slot, func, PCI_BAR0_OFFSET + 4) as u64 };
             let addr64 = bar0_lo | (bar1 << 32);
             // Verify the address fits in the kernel's addressable space
             if addr64 > usize::MAX as u64 {
-                log_error!(LOG_ORIGIN, "BGA BAR0 64-bit address 0x{:X} exceeds addressable range", addr64);
+                log_error!(
+                    LOG_ORIGIN,
+                    "BGA BAR0 64-bit address 0x{:X} exceeds addressable range",
+                    addr64
+                );
                 return None;
             }
             addr64 as usize
         }
         _ => {
-            log_error!(LOG_ORIGIN, "BGA BAR0 has reserved type field 0x{:X}", bar_type);
+            log_error!(
+                LOG_ORIGIN,
+                "BGA BAR0 has reserved type field 0x{:X}",
+                bar_type
+            );
             return None;
         }
     };
 
     if phys_addr == 0 {
-        log_warn!(LOG_ORIGIN, "BGA BAR0 physical address is 0; firmware did not assign it");
+        log_warn!(
+            LOG_ORIGIN,
+            "BGA BAR0 physical address is 0; firmware did not assign it"
+        );
         return None;
     }
 
@@ -598,7 +624,13 @@ pub fn init() -> bool {
     // Step 2: Locate BGA on the PCI bus
     let pci_location = match pci_find_device(BGA_PCI_VENDOR_ID, BGA_PCI_DEVICE_ID) {
         Some(loc) => {
-            log_info!(LOG_ORIGIN, "BGA PCI device found at bus={} slot={} func={}", loc.0, loc.1, loc.2);
+            log_info!(
+                LOG_ORIGIN,
+                "BGA PCI device found at bus={} slot={} func={}",
+                loc.0,
+                loc.1,
+                loc.2
+            );
             loc
         }
         None => {
@@ -637,11 +669,11 @@ pub fn init() -> bool {
 
     // Step 6: Update driver state
     let mut state = BGA_STATE.lock();
-    state.available    = true;
-    state.version      = version;
-    state.lfb_phys     = lfb_phys;
-    state.lfb_size     = lfb_size;
-    state.mode_active  = false;
+    state.available = true;
+    state.version = version;
+    state.lfb_phys = lfb_phys;
+    state.lfb_size = lfb_size;
+    state.mode_active = false;
 
     log_info!(
         LOG_ORIGIN,
@@ -713,7 +745,10 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
     log_info!(
         LOG_ORIGIN,
         "Setting video mode: {}x{}x{} (clear={})",
-        width, height, bpp, clear
+        width,
+        height,
+        bpp,
+        clear
     );
 
     // Mode-setting sequence per VBE DISPI specification:
@@ -727,7 +762,7 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
         write_register(VBE_DISPI_INDEX_BPP, bpp as u16);
 
         // 3. Virtual framebuffer = physical (no scrolling for now)
-        write_register(VBE_DISPI_INDEX_VIRT_WIDTH,  width);
+        write_register(VBE_DISPI_INDEX_VIRT_WIDTH, width);
         write_register(VBE_DISPI_INDEX_VIRT_HEIGHT, height);
 
         // 4. Reset scroll offsets
@@ -735,7 +770,8 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
         write_register(VBE_DISPI_INDEX_Y_OFFSET, 0);
 
         // 5. Enable VBE with LFB; optionally skip VRAM clear for performance
-        let enable_flags = VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED
+        let enable_flags = VBE_DISPI_ENABLED
+            | VBE_DISPI_LFB_ENABLED
             | if clear { 0 } else { VBE_DISPI_NOCLEARMEM };
         write_register(VBE_DISPI_INDEX_ENABLE, enable_flags);
     }
@@ -748,19 +784,29 @@ pub fn set_video_mode(width: u16, height: u16, bpp: u8, clear: bool) -> Result<(
         log_error!(
             LOG_ORIGIN,
             "Mode verification failed: requested {}x{} but got {}x{}",
-            width, height, actual_xres, actual_yres
+            width,
+            height,
+            actual_xres,
+            actual_yres
         );
         return Err(BgaError::HardwareRejected);
     }
 
     // 7. Update state
-    state.current_mode = VideoMode { width, height, bpp, refresh_rate: 60 };
+    state.current_mode = VideoMode {
+        width,
+        height,
+        bpp,
+        refresh_rate: 60,
+    };
     state.mode_active = true;
 
     log_info!(
         LOG_ORIGIN,
         "Mode set successfully: {}x{}x{}, LFB=0x{:X}, pitch={}B",
-        width, height, bpp,
+        width,
+        height,
+        bpp,
         state.lfb_phys,
         width as u32 * (bpp as u32 / 8)
     );
@@ -834,14 +880,21 @@ pub fn mode_count() -> usize {
 ///
 /// This function is analogous to what INT 0x10/AX=0x4F01 would iterate through
 /// in a real BIOS VBE implementation.
-pub fn find_best_mode(target_width: u16, target_height: u16, target_bpp: u8) -> Option<&'static VideoMode> {
+pub fn find_best_mode(
+    target_width: u16,
+    target_height: u16,
+    target_bpp: u8,
+) -> Option<&'static VideoMode> {
     // Only 32 BPP is currently supported
     if target_bpp != 32 {
         return None;
     }
 
     // Exact match first
-    if let Some(m) = SUPPORTED_MODES.iter().find(|m| m.width == target_width && m.height == target_height) {
+    if let Some(m) = SUPPORTED_MODES
+        .iter()
+        .find(|m| m.width == target_width && m.height == target_height)
+    {
         return Some(m);
     }
 
@@ -902,19 +955,19 @@ pub fn get_current_mode() -> Option<VideoMode> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KernelVideoInfo {
     /// Physical address of the Linear Framebuffer
-    pub lfb_phys:         u64,
+    pub lfb_phys: u64,
     /// Horizontal resolution in pixels
-    pub width:            u32,
+    pub width: u32,
     /// Vertical resolution in pixels
-    pub height:           u32,
+    pub height: u32,
     /// Bytes per scanline (pitch)
-    pub pitch:            u32,
+    pub pitch: u32,
     /// Bytes per pixel
-    pub bytes_per_pixel:  u32,
+    pub bytes_per_pixel: u32,
     /// BGA driver available (1) or not (0)
-    pub bga_available:    u32,
+    pub bga_available: u32,
     /// Mode is active (1) or not (0)
-    pub mode_active:      u32,
+    pub mode_active: u32,
 }
 
 impl KernelVideoInfo {
@@ -925,13 +978,13 @@ impl KernelVideoInfo {
         }
         let m = &state.current_mode;
         Self {
-            lfb_phys:        state.lfb_phys as u64,
-            width:           m.width as u32,
-            height:          m.height as u32,
-            pitch:           m.pitch(),
+            lfb_phys: state.lfb_phys as u64,
+            width: m.width as u32,
+            height: m.height as u32,
+            pitch: m.pitch(),
             bytes_per_pixel: m.bytes_per_pixel(),
-            bga_available:   1,
-            mode_active:     if state.mode_active { 1 } else { 0 },
+            bga_available: 1,
+            mode_active: if state.mode_active { 1 } else { 0 },
         }
     }
 }

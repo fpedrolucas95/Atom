@@ -10,8 +10,8 @@ use core::ptr;
 use spin::Once;
 
 use crate::boot::{
-    BootInfo, BootMethod, CpuArchitecture, CpuInfo, ExecutableImage, FramebufferInfo, MemoryMap,
-    PixelFormat, EfiMemoryDescriptor, EfiPixelBitmask, DriverList, DriverImage, MAX_DRIVER_NAME_LEN,
+    BootInfo, BootMethod, CpuArchitecture, CpuInfo, DriverImage, DriverList, EfiMemoryDescriptor,
+    EfiPixelBitmask, ExecutableImage, FramebufferInfo, MemoryMap, PixelFormat, MAX_DRIVER_NAME_LEN,
 };
 
 extern "C" {
@@ -31,20 +31,18 @@ type EfiGetMemoryMap = extern "win64" fn(
     descriptor_version: *mut u32,
 ) -> EfiStatus;
 
-type EfiAllocatePool = extern "win64" fn(
-    pool_type: u32,
-    size: usize,
-    buffer: *mut *mut c_void,
-) -> EfiStatus;
+type EfiAllocatePool =
+    extern "win64" fn(pool_type: u32, size: usize, buffer: *mut *mut c_void) -> EfiStatus;
 
 type EfiFreePool = extern "win64" fn(buffer: *mut c_void) -> EfiStatus;
 
-type EfiExitBootServices =
-    extern "win64" fn(image_handle: EfiHandle, map_key: usize) -> EfiStatus;
+type EfiExitBootServices = extern "win64" fn(image_handle: EfiHandle, map_key: usize) -> EfiStatus;
 
-type EfiWaitForEvent =
-    extern "win64" fn(number_of_events: usize, events: *mut *mut c_void, index: *mut usize)
-        -> EfiStatus;
+type EfiWaitForEvent = extern "win64" fn(
+    number_of_events: usize,
+    events: *mut *mut c_void,
+    index: *mut usize,
+) -> EfiStatus;
 
 type EfiStall = extern "win64" fn(microseconds: usize) -> EfiStatus;
 
@@ -409,7 +407,6 @@ fn find_rsdp(system_table: &EfiSystemTable) -> u64 {
     0
 }
 
-
 fn setup_framebuffer(bs: &mut EfiBootServices) -> Option<FramebufferInfo> {
     let mut gop_ptr: *mut c_void = ptr::null_mut();
     let status = (bs.locate_protocol)(&GOP_GUID, ptr::null_mut(), &mut gop_ptr);
@@ -474,17 +471,10 @@ fn str_to_utf16(s: &str, buf: &mut [u16]) -> usize {
 }
 
 /// Load init.atxf from the boot volume
-fn load_init_payload(
-    image: EfiHandle,
-    bs: &mut EfiBootServices,
-) -> Option<ExecutableImage> {
+fn load_init_payload(image: EfiHandle, bs: &mut EfiBootServices) -> Option<ExecutableImage> {
     // Get Loaded Image Protocol to find our device handle
     let mut loaded_image_ptr: *mut c_void = ptr::null_mut();
-    let status = (bs.handle_protocol)(
-        image,
-        &LOADED_IMAGE_GUID,
-        &mut loaded_image_ptr,
-    );
+    let status = (bs.handle_protocol)(image, &LOADED_IMAGE_GUID, &mut loaded_image_ptr);
 
     if status != EFI_SUCCESS || loaded_image_ptr.is_null() {
         return None;
@@ -499,11 +489,7 @@ fn load_init_payload(
 
     // Get Simple File System Protocol from device handle
     let mut fs_ptr: *mut c_void = ptr::null_mut();
-    let status = (bs.handle_protocol)(
-        device_handle,
-        &SIMPLE_FILE_SYSTEM_GUID,
-        &mut fs_ptr,
-    );
+    let status = (bs.handle_protocol)(device_handle, &SIMPLE_FILE_SYSTEM_GUID, &mut fs_ptr);
 
     if status != EFI_SUCCESS || fs_ptr.is_null() {
         return None;
@@ -532,13 +518,7 @@ fn load_init_payload(
 
     for path in paths.iter() {
         str_to_utf16(path, &mut path_buf);
-        let status = (root_ref.open)(
-            root,
-            &mut file,
-            path_buf.as_ptr(),
-            EFI_FILE_MODE_READ,
-            0,
-        );
+        let status = (root_ref.open)(root, &mut file, path_buf.as_ptr(), EFI_FILE_MODE_READ, 0);
 
         if status == EFI_SUCCESS && !file.is_null() {
             break;
@@ -570,9 +550,7 @@ fn load_init_payload(
     }
 
     // File size is at offset 8 in EFI_FILE_INFO
-    let file_size = unsafe {
-        *(info_buf.as_ptr().add(8) as *const u64) as usize
-    };
+    let file_size = unsafe { *(info_buf.as_ptr().add(8) as *const u64) as usize };
 
     if file_size == 0 || file_size > 16 * 1024 * 1024 {
         // Sanity check: max 16 MB
@@ -639,7 +617,9 @@ fn load_driver_file(
         idx += 1;
     }
     for &c in filename.iter() {
-        if c == 0 { break; }
+        if c == 0 {
+            break;
+        }
         if idx >= path_buf.len() - 1 {
             // Combined path is too long to fit — skip rather than silently truncate.
             return None;
@@ -652,13 +632,7 @@ fn load_driver_file(
     // Open the file
     let mut file: *mut EfiFileProtocol = ptr::null_mut();
     let root_ref = unsafe { &mut *root };
-    let status = (root_ref.open)(
-        root,
-        &mut file,
-        path_buf.as_ptr(),
-        EFI_FILE_MODE_READ,
-        0,
-    );
+    let status = (root_ref.open)(root, &mut file, path_buf.as_ptr(), EFI_FILE_MODE_READ, 0);
 
     if status != EFI_SUCCESS || file.is_null() {
         return None;
@@ -682,9 +656,7 @@ fn load_driver_file(
     }
 
     // File size is at offset 8 in EFI_FILE_INFO
-    let file_size = unsafe {
-        *(info_buf.as_ptr().add(8) as *const u64) as usize
-    };
+    let file_size = unsafe { *(info_buf.as_ptr().add(8) as *const u64) as usize };
 
     if file_size == 0 || file_size > 16 * 1024 * 1024 {
         let _ = (file_ref.close)(file);
@@ -714,8 +686,12 @@ fn load_driver_file(
     // Extract driver name from filename (remove .atxf extension)
     let mut name = [0u8; MAX_DRIVER_NAME_LEN];
     for (idx, &c) in filename.iter().enumerate() {
-        if c == 0 || c == b'.' as u16 { break; }
-        if idx >= MAX_DRIVER_NAME_LEN - 1 { break; }
+        if c == 0 || c == b'.' as u16 {
+            break;
+        }
+        if idx >= MAX_DRIVER_NAME_LEN - 1 {
+            break;
+        }
         name[idx] = c as u8;
     }
 
@@ -804,21 +780,26 @@ fn load_atxf_from_dir(
         for (i, slot) in filename.iter_mut().enumerate().take(63) {
             let c = unsafe { *filename_ptr.add(i) };
             *slot = c;
-            if c == 0 { break; }
+            if c == 0 {
+                break;
+            }
         }
 
         // Accept only .atxf files
         let mut len = 0usize;
         for (i, &c) in filename.iter().enumerate() {
-            if c == 0 { len = i; break; }
+            if c == 0 {
+                len = i;
+                break;
+            }
         }
         let is_atxf = len > 5 && {
             let e = len - 5;
-            filename[e]   == '.' as u16
-            && (filename[e+1] == 'a' as u16 || filename[e+1] == 'A' as u16)
-            && (filename[e+2] == 't' as u16 || filename[e+2] == 'T' as u16)
-            && (filename[e+3] == 'x' as u16 || filename[e+3] == 'X' as u16)
-            && (filename[e+4] == 'f' as u16 || filename[e+4] == 'F' as u16)
+            filename[e] == '.' as u16
+                && (filename[e + 1] == 'a' as u16 || filename[e + 1] == 'A' as u16)
+                && (filename[e + 2] == 't' as u16 || filename[e + 2] == 'T' as u16)
+                && (filename[e + 3] == 'x' as u16 || filename[e + 3] == 'X' as u16)
+                && (filename[e + 4] == 'f' as u16 || filename[e + 4] == 'F' as u16)
         };
 
         if !is_atxf {
@@ -849,8 +830,8 @@ fn load_atxf_from_dir(
 /// and `load_atxf_from_dir` / `load_driver_file` (which read them back).
 const OS_ATXF_DIRS: &[(&str, &str)] = &[
     ("\\system\\services", "\\system\\services\\"),
-    ("\\apps\\system",     "\\apps\\system\\"),
-    ("\\apps\\user",       "\\apps\\user\\"),
+    ("\\apps\\system", "\\apps\\system\\"),
+    ("\\apps\\user", "\\apps\\user\\"),
 ];
 
 /// Load all ATXF executables from the OS partition into the driver registry.
@@ -860,19 +841,12 @@ const OS_ATXF_DIRS: &[(&str, &str)] = &[
 /// sequence.  The EFI partition (`\EFI\BOOT\`) is intentionally excluded:
 /// `init.atxf` is loaded separately by `load_init_payload()` and is never
 /// exposed to userspace.
-fn load_drivers(
-    image: EfiHandle,
-    bs: &mut EfiBootServices,
-) -> DriverList {
+fn load_drivers(image: EfiHandle, bs: &mut EfiBootServices) -> DriverList {
     let mut driver_list = DriverList::empty();
 
     // Obtain the root volume handle via the Loaded Image Protocol
     let mut loaded_image_ptr: *mut c_void = ptr::null_mut();
-    let status = (bs.handle_protocol)(
-        image,
-        &LOADED_IMAGE_GUID,
-        &mut loaded_image_ptr,
-    );
+    let status = (bs.handle_protocol)(image, &LOADED_IMAGE_GUID, &mut loaded_image_ptr);
 
     if status != EFI_SUCCESS || loaded_image_ptr.is_null() {
         return driver_list;
@@ -886,11 +860,7 @@ fn load_drivers(
     }
 
     let mut fs_ptr: *mut c_void = ptr::null_mut();
-    let status = (bs.handle_protocol)(
-        device_handle,
-        &SIMPLE_FILE_SYSTEM_GUID,
-        &mut fs_ptr,
-    );
+    let status = (bs.handle_protocol)(device_handle, &SIMPLE_FILE_SYSTEM_GUID, &mut fs_ptr);
 
     if status != EFI_SUCCESS || fs_ptr.is_null() {
         return driver_list;
@@ -936,8 +906,7 @@ pub extern "win64" fn efi_main(image: EfiHandle, system_table: *mut c_void) -> E
     let framebuffer_info = setup_framebuffer(bs);
 
     // Load the init payload (init.atxf) from the boot volume
-    let init_payload = load_init_payload(image, bs)
-        .unwrap_or_else(ExecutableImage::empty);
+    let init_payload = load_init_payload(image, bs).unwrap_or_else(ExecutableImage::empty);
 
     // Load drivers from \drivers\ directory at boot time
     // These are pre-loaded so they can be spawned by userspace via spawn_process()

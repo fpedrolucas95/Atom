@@ -50,9 +50,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+use crate::log_warn;
 use crate::process::ProcessId;
 use crate::thread::ThreadId;
-use crate::log_warn;
 
 const LOG_ORIGIN: &str = "cap";
 
@@ -145,11 +145,7 @@ pub struct AuditLogEntry {
 }
 
 impl AuditLogEntry {
-    fn new(
-        event_type: AuditEventType,
-        thread_id: ThreadId,
-        cap_handle: CapHandle,
-    ) -> Self {
+    fn new(event_type: AuditEventType, thread_id: ThreadId, cap_handle: CapHandle) -> Self {
         Self {
             timestamp: crate::interrupts::get_ticks(),
             event_type,
@@ -160,21 +156,13 @@ impl AuditLogEntry {
         }
     }
 
-    fn new_derive(
-        thread_id: ThreadId,
-        child_handle: CapHandle,
-        parent_handle: CapHandle,
-    ) -> Self {
+    fn new_derive(thread_id: ThreadId, child_handle: CapHandle, parent_handle: CapHandle) -> Self {
         let mut entry = Self::new(AuditEventType::Derive, thread_id, child_handle);
         entry.parent_handle = Some(parent_handle);
         entry
     }
 
-    fn new_transfer(
-        thread_id: ThreadId,
-        cap_handle: CapHandle,
-        target_thread: ThreadId,
-    ) -> Self {
+    fn new_transfer(thread_id: ThreadId, cap_handle: CapHandle, target_thread: ThreadId) -> Self {
         let mut entry = Self::new(AuditEventType::Transfer, thread_id, cap_handle);
         entry.target_thread = Some(target_thread);
         entry
@@ -217,7 +205,7 @@ pub enum ResourceType {
     InputDevice {
         device_type: InputDeviceType,
     },
-        /// Filesystem namespace root — grants access to a mounted filesystem tree.
+    /// Filesystem namespace root — grants access to a mounted filesystem tree.
     /// READ = read files/dirs; WRITE = create/modify; GRANT = sub-delegation.
     FsNamespace {
         namespace_id: u64,
@@ -508,7 +496,7 @@ impl CapabilityTable {
     pub fn contains(&self, handle: CapHandle) -> bool {
         self.capabilities.contains_key(&handle)
     }
-    
+
     pub fn validate(
         &self,
         handle: CapHandle,
@@ -664,7 +652,7 @@ impl CapabilityManager {
 
         Ok(handle)
     }
-    
+
     pub fn revoke(
         &self,
         handle: CapHandle,
@@ -703,29 +691,53 @@ impl CapabilityManager {
                 continue;
             };
 
-            if crate::process::remove_process_capability(removed_capability.owner, current).is_none() {
-                report.failed.push((current, RevokeError::ProcessMutationFailed));
+            if crate::process::remove_process_capability(removed_capability.owner, current)
+                .is_none()
+            {
+                report
+                    .failed
+                    .push((current, RevokeError::ProcessMutationFailed));
             }
 
-            if crate::thread::remove_process_capability_mirror(removed_capability.owner, current).is_none() {
-                report.failed.push((current, RevokeError::ThreadMirrorMutationFailed));
+            if crate::thread::remove_process_capability_mirror(removed_capability.owner, current)
+                .is_none()
+            {
+                report
+                    .failed
+                    .push((current, RevokeError::ThreadMirrorMutationFailed));
             }
 
             if let Some(parent_handle) = removed_capability.parent {
-                let parent_owner = snapshot
-                    .get(&parent_handle)
-                    .map(|parent| parent.owner);
+                let parent_owner = snapshot.get(&parent_handle).map(|parent| parent.owner);
                 let Some(parent_owner) = parent_owner else {
-                    report.failed.push((current, RevokeError::ParentLinkUpdateFailed));
+                    report
+                        .failed
+                        .push((current, RevokeError::ParentLinkUpdateFailed));
                     continue;
                 };
 
-                if crate::process::remove_process_capability_child(parent_owner, parent_handle, current).is_err() {
-                    report.failed.push((current, RevokeError::ParentLinkUpdateFailed));
+                if crate::process::remove_process_capability_child(
+                    parent_owner,
+                    parent_handle,
+                    current,
+                )
+                .is_err()
+                {
+                    report
+                        .failed
+                        .push((current, RevokeError::ParentLinkUpdateFailed));
                 }
 
-                if crate::thread::remove_process_capability_child_mirror(parent_owner, parent_handle, current).is_err() {
-                    report.failed.push((current, RevokeError::ParentLinkUpdateFailed));
+                if crate::thread::remove_process_capability_child_mirror(
+                    parent_owner,
+                    parent_handle,
+                    current,
+                )
+                .is_err()
+                {
+                    report
+                        .failed
+                        .push((current, RevokeError::ParentLinkUpdateFailed));
                 }
             }
 
@@ -796,13 +808,13 @@ impl CapabilityManager {
             });
         }
     }
-    
+
     pub fn query_parent(&self, handle: CapHandle) -> Result<Option<CapHandle>, CapError> {
         let caps = self.global_caps.lock();
         let cap = caps.get(&handle).ok_or(CapError::NotFound)?;
         Ok(cap.parent)
     }
-    
+
     pub fn query_children(&self, handle: CapHandle) -> Result<Vec<CapHandle>, CapError> {
         let caps = self.global_caps.lock();
         let cap = caps.get(&handle).ok_or(CapError::NotFound)?;
@@ -961,7 +973,10 @@ pub fn create_root_capability(
     Ok(cap)
 }
 
-pub fn revoke_capability(handle: CapHandle, revoker: ThreadId) -> Result<RevokeReport, RevokeError> {
+pub fn revoke_capability(
+    handle: CapHandle,
+    revoker: ThreadId,
+) -> Result<RevokeReport, RevokeError> {
     let revoker_process = required_process_id(revoker).map_err(|_| RevokeError::NotFound)?;
     CAPABILITY_MANAGER.revoke(handle, revoker_process, revoker)
 }
@@ -1012,11 +1027,7 @@ pub fn register_revocation_callback(
 
 /// Rollback a failed capability transfer by restoring the capability to the source process.
 /// This function ensures atomicity by undoing all changes made during a transfer attempt.
-fn rollback_transfer(
-    cap_handle: CapHandle,
-    source_process: ProcessId,
-    original_cap: Capability,
-) {
+fn rollback_transfer(cap_handle: CapHandle, source_process: ProcessId, original_cap: Capability) {
     log_debug!(
         LOG_ORIGIN,
         "Rolling back capability transfer for {} to process {}",
@@ -1036,7 +1047,9 @@ fn rollback_transfer(
     }
 
     // Restore capability mirrors to source process threads
-    if let Err(err) = crate::thread::mirror_process_capability_to_threads(source_process, original_cap) {
+    if let Err(err) =
+        crate::thread::mirror_process_capability_to_threads(source_process, original_cap)
+    {
         log_debug!(
             LOG_ORIGIN,
             "Failed to restore capability {} mirrors to source process {} threads during rollback: {:?}",
@@ -1056,8 +1069,8 @@ pub fn transfer_capability(
     let target_process = required_process_id(target_thread)?;
 
     // Step 1: Validate capability exists and permissions
-    let cap = crate::process::get_process_capability(source_process, cap_handle)
-        .ok_or_else(|| {
+    let cap =
+        crate::process::get_process_capability(source_process, cap_handle).ok_or_else(|| {
             log_debug!(
                 LOG_ORIGIN,
                 "Transfer failed: capability {} not found in source process {}",
@@ -1141,7 +1154,9 @@ pub fn transfer_capability(
     transferred_cap.owner = target_process;
 
     // Step 5: Add capability to target process
-    if let Err(err) = crate::process::add_process_capability(target_process, transferred_cap.clone()) {
+    if let Err(err) =
+        crate::process::add_process_capability(target_process, transferred_cap.clone())
+    {
         log_debug!(
             LOG_ORIGIN,
             "Transfer failed: could not add capability {} to target process {}: {:?}",
@@ -1154,7 +1169,9 @@ pub fn transfer_capability(
     }
 
     // Step 6: Mirror capability to target process threads
-    if let Err(err) = crate::thread::mirror_process_capability_to_threads(target_process, transferred_cap.clone()) {
+    if let Err(err) =
+        crate::thread::mirror_process_capability_to_threads(target_process, transferred_cap.clone())
+    {
         log_debug!(
             LOG_ORIGIN,
             "Transfer failed: could not mirror capability {} to target process {} threads: {:?}",
@@ -1235,7 +1252,9 @@ pub fn derive_capability(
     caps.insert(child_handle, child.clone());
     drop(caps);
 
-    if let Err(err) = crate::process::append_process_capability_child(owner_process, parent_handle, child_handle) {
+    if let Err(err) =
+        crate::process::append_process_capability_child(owner_process, parent_handle, child_handle)
+    {
         let mut caps = CAPABILITY_MANAGER.global_caps.lock();
         caps.remove(&child_handle);
         if let Some(parent) = caps.get_mut(&parent_handle) {
@@ -1244,14 +1263,22 @@ pub fn derive_capability(
         return Err(err);
     }
 
-    if let Err(err) = crate::thread::append_process_capability_child_mirror(owner_process, parent_handle, child_handle) {
+    if let Err(err) = crate::thread::append_process_capability_child_mirror(
+        owner_process,
+        parent_handle,
+        child_handle,
+    ) {
         let mut caps = CAPABILITY_MANAGER.global_caps.lock();
         caps.remove(&child_handle);
         if let Some(parent) = caps.get_mut(&parent_handle) {
             parent.children.retain(|existing| *existing != child_handle);
         }
         drop(caps);
-        let _ = crate::process::remove_process_capability_child(owner_process, parent_handle, child_handle);
+        let _ = crate::process::remove_process_capability_child(
+            owner_process,
+            parent_handle,
+            child_handle,
+        );
         return Err(err);
     }
 
@@ -1262,12 +1289,22 @@ pub fn derive_capability(
             parent.children.retain(|existing| *existing != child_handle);
         }
         drop(caps);
-        let _ = crate::process::remove_process_capability_child(owner_process, parent_handle, child_handle);
-        let _ = crate::thread::remove_process_capability_child_mirror(owner_process, parent_handle, child_handle);
+        let _ = crate::process::remove_process_capability_child(
+            owner_process,
+            parent_handle,
+            child_handle,
+        );
+        let _ = crate::thread::remove_process_capability_child_mirror(
+            owner_process,
+            parent_handle,
+            child_handle,
+        );
         return Err(err);
     }
 
-    if let Err(err) = crate::thread::mirror_process_capability_to_threads(new_owner_process, child.clone()) {
+    if let Err(err) =
+        crate::thread::mirror_process_capability_to_threads(new_owner_process, child.clone())
+    {
         let _ = crate::process::remove_process_capability(new_owner_process, child_handle);
         let mut caps = CAPABILITY_MANAGER.global_caps.lock();
         caps.remove(&child_handle);
@@ -1275,8 +1312,16 @@ pub fn derive_capability(
             parent.children.retain(|existing| *existing != child_handle);
         }
         drop(caps);
-        let _ = crate::process::remove_process_capability_child(owner_process, parent_handle, child_handle);
-        let _ = crate::thread::remove_process_capability_child_mirror(owner_process, parent_handle, child_handle);
+        let _ = crate::process::remove_process_capability_child(
+            owner_process,
+            parent_handle,
+            child_handle,
+        );
+        let _ = crate::thread::remove_process_capability_child_mirror(
+            owner_process,
+            parent_handle,
+            child_handle,
+        );
         return Err(err);
     }
 
@@ -1397,7 +1442,9 @@ pub fn revoke_all_thread_capabilities(thread_id: ThreadId) -> Vec<RevokeReport> 
         };
 
         if crate::thread::remove_thread_capability(thread_id, handle).is_none() {
-            report.failed.push((handle, RevokeError::ThreadMirrorMutationFailed));
+            report
+                .failed
+                .push((handle, RevokeError::ThreadMirrorMutationFailed));
         }
 
         CAPABILITY_MANAGER.log_audit(AuditLogEntry::new(
@@ -1405,7 +1452,8 @@ pub fn revoke_all_thread_capabilities(thread_id: ThreadId) -> Vec<RevokeReport> 
             thread_id,
             handle,
         ));
-        CAPABILITY_MANAGER.execute_revocation_callbacks(&[(removed_capability.resource, handle)], &mut report);
+        CAPABILITY_MANAGER
+            .execute_revocation_callbacks(&[(removed_capability.resource, handle)], &mut report);
         report.revoked.push(handle);
         report.finalize_status();
         reports.push(report);
@@ -1624,7 +1672,9 @@ mod tests {
         assert!(!is_spawn_authority(&ResourceType::InputDevice {
             device_type: InputDeviceType::Keyboard
         }));
-        assert!(!is_spawn_authority(&ResourceType::Thread(ThreadId::from_raw(1))));
+        assert!(!is_spawn_authority(&ResourceType::Thread(
+            ThreadId::from_raw(1)
+        )));
     }
 
     #[test]
@@ -1745,7 +1795,10 @@ mod tests {
 
         assert_eq!(report.status, RevokeStatus::Complete);
         assert_eq!(report.callbacks_executed(), report.revoked.len());
-        assert!(report.callback_results.iter().all(|entry| entry.result.is_ok()));
+        assert!(report
+            .callback_results
+            .iter()
+            .all(|entry| entry.result.is_ok()));
 
         cleanup_fixture(fixture);
     }
@@ -1764,7 +1817,10 @@ mod tests {
         assert_eq!(report.status, RevokeStatus::Complete);
         assert!(report.failed.is_empty());
         assert_eq!(report.callback_failures(), report.revoked.len());
-        assert!(report.callback_results.iter().all(|entry| entry.result.is_err()));
+        assert!(report
+            .callback_results
+            .iter()
+            .all(|entry| entry.result.is_err()));
 
         cleanup_fixture(fixture);
     }
@@ -1783,7 +1839,10 @@ mod tests {
 
         assert_eq!(report.status, RevokeStatus::Complete);
         assert_eq!(report.callbacks_executed(), report.revoked.len() * 2);
-        assert!(report.callback_results.iter().all(|entry| entry.result.is_ok()));
+        assert!(report
+            .callback_results
+            .iter()
+            .all(|entry| entry.result.is_ok()));
 
         let expected_trace = report
             .revoked
@@ -1821,7 +1880,10 @@ mod tests {
         let first_report = revoke_capability(first_root.handle, fixture.tid)
             .expect("first revoke should succeed with reentrant callback");
         assert_eq!(first_report.status, RevokeStatus::Complete);
-        assert_eq!(first_report.callbacks_executed(), first_report.revoked.len());
+        assert_eq!(
+            first_report.callbacks_executed(),
+            first_report.revoked.len()
+        );
 
         CALLBACK_TRACE.lock().clear();
 
@@ -1829,7 +1891,10 @@ mod tests {
         let second_report = revoke_capability(second_root.handle, fixture.tid)
             .expect("second revoke should include late callback");
         assert_eq!(second_report.status, RevokeStatus::Complete);
-        assert_eq!(second_report.callbacks_executed(), second_report.revoked.len() * 2);
+        assert_eq!(
+            second_report.callbacks_executed(),
+            second_report.revoked.len() * 2
+        );
 
         let trace = CALLBACK_TRACE.lock().clone();
         assert!(trace.iter().any(|(name, _)| *name == "reentrant"));

@@ -7,13 +7,25 @@
 // Re-export every ABI constant so existing `crate::error::EINVAL` paths
 // keep compiling without change.
 pub use atom_abi::{
-    ESUCCESS, EINVAL, ENOSYS, ENOMEM, EPERM, EBUSY,
-    EMSGSIZE, ETIMEDOUT, EWOULDBLOCK, EDEADLK, ENOTFOUND,
-    SYSCALL_ERROR_THRESHOLD, USER_VA_LIMIT,
     is_syscall_error,
-    // Filesystem / IO error codes — used by spawn_from_path and similar wrappers.
-    ENOENT, ENOTSUP, EIO,
+    EBUSY,
+    EDEADLK,
+    EINVAL,
+    EIO,
+    EMSGSIZE,
     ENODEV,
+    // Filesystem / IO error codes — used by spawn_from_path and similar wrappers.
+    ENOENT,
+    ENOMEM,
+    ENOSYS,
+    ENOTFOUND,
+    ENOTSUP,
+    EPERM,
+    ESUCCESS,
+    ETIMEDOUT,
+    EWOULDBLOCK,
+    SYSCALL_ERROR_THRESHOLD,
+    USER_VA_LIMIT,
 };
 
 /// Syscall error codes (must match kernel/src/syscall/mod.rs)

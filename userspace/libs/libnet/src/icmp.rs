@@ -34,7 +34,7 @@ pub fn net_icmp_echo(
     let copy_len = payload.len().min(64);
     msg.payload[..copy_len].copy_from_slice(&payload[..copy_len]);
 
-    if let Err(_) = send_message(netd_port, MessageType::NetIcmpEchoRequest, &msg.to_bytes()) {
+    if send_message(netd_port, MessageType::NetIcmpEchoRequest, &msg.to_bytes()).is_err() {
         let _ = atom_syscall::ipc::close_port(reply_port);
         return Err(NetError::IpcError);
     }

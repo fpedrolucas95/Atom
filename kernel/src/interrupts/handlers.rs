@@ -22,8 +22,8 @@
 // null-function-pointer-call detector reachable and useful.
 
 use crate::arch::{gdt, halt};
-use crate::ipc;
 use crate::input;
+use crate::ipc;
 use crate::mm;
 use crate::sched;
 #[allow(unused_imports)]
@@ -50,7 +50,11 @@ struct FaultSlot {
 }
 
 impl FaultSlot {
-    const EMPTY: Self = Self { pid_raw: 0, page_addr: 0, count: 0 };
+    const EMPTY: Self = Self {
+        pid_raw: 0,
+        page_addr: 0,
+        count: 0,
+    };
 }
 
 static FAULT_LOOP_TABLE: spin::Mutex<[FaultSlot; FAULT_LOOP_SLOTS]> =
@@ -65,7 +69,11 @@ fn record_fault_and_check_loop(pid: crate::process::ProcessId, page_addr: usize)
         slot.count = slot.count.saturating_add(1);
         slot.count >= FAULT_LOOP_THRESHOLD
     } else {
-        *slot = FaultSlot { pid_raw: pid.raw(), page_addr, count: 1 };
+        *slot = FaultSlot {
+            pid_raw: pid.raw(),
+            page_addr,
+            count: 1,
+        };
         false
     }
 }
@@ -263,9 +271,8 @@ pub extern "C" fn rust_exception_handler(frame: *const InterruptFrame) {
     dump_exception_header(frame, vector, error_code, from_userspace);
     dump_core_registers(frame);
 
-    match vector {
-        13 => diagnose_general_protection_fault(frame, error_code, from_userspace),
-        _ => {}
+    if vector == 13 {
+        diagnose_general_protection_fault(frame, error_code, from_userspace)
     }
 
     if from_userspace {
@@ -551,19 +558,11 @@ fn diagnose_null_function_pointer_call(
     bits: PageFaultBits,
     from_userspace: bool,
 ) {
-    let null_call_not_present = cr2 == 0
-        && frame.rip == 0
-        && bits.ifetch
-        && bits.user
-        && !bits.present
-        && from_userspace;
+    let null_call_not_present =
+        cr2 == 0 && frame.rip == 0 && bits.ifetch && bits.user && !bits.present && from_userspace;
 
-    let null_call_present = cr2 == 0
-        && frame.rip == 0
-        && bits.ifetch
-        && bits.user
-        && bits.present
-        && from_userspace;
+    let null_call_present =
+        cr2 == 0 && frame.rip == 0 && bits.ifetch && bits.user && bits.present && from_userspace;
 
     if !(null_call_not_present || null_call_present) {
         return;
@@ -621,10 +620,7 @@ fn diagnose_null_function_pointer_call(
 
     try_dump_user_return_address(frame.rsp, cr3_pml4);
 
-    log_panic!(
-        EXCEPTION_LOG_ORIGIN,
-        "=== END NULL CALL DIAGNOSIS ==="
-    );
+    log_panic!(EXCEPTION_LOG_ORIGIN, "=== END NULL CALL DIAGNOSIS ===");
 }
 
 fn try_dump_user_return_address(user_rsp: u64, pml4_phys: u64) {
@@ -696,7 +692,11 @@ fn try_dump_user_return_address(user_rsp: u64, pml4_phys: u64) {
     let remaining = 0x1000 - rsp_offset;
     let words = core::cmp::min(remaining / core::mem::size_of::<u64>(), 8);
     if words > 0 {
-        log_panic!(EXCEPTION_LOG_ORIGIN, "User stack dump (top {} words):", words);
+        log_panic!(
+            EXCEPTION_LOG_ORIGIN,
+            "User stack dump (top {} words):",
+            words
+        );
         for i in 0..words {
             let word_phys = phys_base + rsp_offset + i * core::mem::size_of::<u64>();
             let word_virt = mm::vm::phys_to_virt_ptr(word_phys);
@@ -706,7 +706,11 @@ fn try_dump_user_return_address(user_rsp: u64, pml4_phys: u64) {
                 "  [RSP+{:#04X}] = {:#018X}{}",
                 i * 8,
                 word,
-                if i == 0 { "  <-- return address (CALL site)" } else { "" }
+                if i == 0 {
+                    "  <-- return address (CALL site)"
+                } else {
+                    ""
+                }
             );
         }
     }

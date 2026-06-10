@@ -42,7 +42,9 @@ struct PolicyState {
 
 impl PolicyState {
     const fn new() -> Self {
-        Self { page_fault_port: None }
+        Self {
+            page_fault_port: None,
+        }
     }
 }
 
@@ -100,7 +102,9 @@ impl MemoryPolicyManager {
     ) -> Result<(), MemoryPolicyError> {
         let port = {
             let state = self.state.lock();
-            state.page_fault_port.ok_or(MemoryPolicyError::NotRegistered)?
+            state
+                .page_fault_port
+                .ok_or(MemoryPolicyError::NotRegistered)?
         };
 
         let mut payload = Vec::with_capacity(32);
