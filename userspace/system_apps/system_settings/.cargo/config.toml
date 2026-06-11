@@ -1,0 +1,21 @@
+# Build for bare-metal userspace (Ring 3)
+[build]
+target = "x86_64-unknown-none"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+# Use custom linker script to place code at 0x400000
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-T../../userspace.ld",
+    "-C", "relocation-model=pic",
+    "-C", "code-model=small",
+    "-C", "panic=abort",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=-Bstatic",
+    "-C", "link-arg=--no-dynamic-linker",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=-z", "-C", "link-arg=norelro"
+]

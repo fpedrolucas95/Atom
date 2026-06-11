@@ -18,7 +18,13 @@ use libipc::protocol::send_message_async;
 /// Internal state for a drawing surface
 pub(crate) struct SurfaceInner {
     pub window_id: WindowId,
+    /// Private back buffer that all drawing operations target. Decoupling the
+    /// draw target from the compositor's region is what makes animation tear
+    /// free: the compositor only ever sees a finished frame (see `present`).
     pub shared: SharedSurface,
+    /// The compositor-owned region the window is actually displayed from. A
+    /// completed frame is copied here in one shot on `present`.
+    pub front: SharedSurface,
     pub wm_port: PortId,
     pub dirty: bool,
     pub scale_factor: u32,
@@ -36,12 +42,19 @@ impl Surface {
         resp: WmCreateWindowResponse,
         wm_port: PortId,
     ) -> Result<Self, atom_syscall::SyscallError> {
-        let shared = SharedSurface::from_region(resp.region_id, resp.width, resp.height)?;
+        let front = SharedSurface::from_region(resp.region_id, resp.width, resp.height)?;
+        // Private, app-owned back buffer with the same geometry. Apps draw here
+        // across many (potentially slow) operations; only `present` publishes a
+        // finished frame to `front`, so the compositor can never snapshot a
+        // half-drawn surface (which is what makes direct-to-surface animations
+        // flicker).
+        let shared = SharedSurface::create(resp.width, resp.height)?;
 
         Ok(Self {
             inner: Rc::new(RefCell::new(SurfaceInner {
                 window_id: resp.window_id,
                 shared,
+                front,
                 wm_port,
                 dirty: false,
                 scale_factor: 1000, // 1.0 default
@@ -385,10 +398,30 @@ impl Surface {
         inner.dirty = true;
     }
 
-    /// Present the surface (signal compositor to display)
+    /// Present the surface (signal compositor to display).
+    ///
+    /// Publishes the finished frame by copying the private back buffer into the
+    /// compositor's region in a single pass, then signals the commit. Because
+    /// the copy is the only time `front` is written — and it happens while the
+    /// app is between draws — the compositor never reads a partially drawn
+    /// frame, eliminating the flicker seen when animating directly on the
+    /// shared surface.
     pub fn present(&mut self) {
         let mut inner = self.inner.borrow_mut();
         if inner.dirty {
+            // Back and front are created with identical geometry (stride ==
+            // width, 4 bytes/pixel), so the pixel data is contiguous and can be
+            // published with one copy.
+            if let (Some(src), Some(dst)) = (inner.shared.address(), inner.front.address()) {
+                let count = (inner.shared.stride() * inner.shared.height()) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src as usize as *const u32,
+                        dst as usize as *mut u32,
+                        count,
+                    );
+                }
+            }
             let msg = WmCommitFrameMsg {
                 window_id: inner.window_id,
             };

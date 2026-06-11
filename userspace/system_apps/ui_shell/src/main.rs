@@ -18,7 +18,7 @@ use atom_syscall::graphics::{
 };
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
-use atom_syscall::thread::{exit, yield_now};
+use atom_syscall::thread::{exit, get_ticks, yield_now};
 use atom_syscall::debug::log;
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 use atom_syscall::fs;
@@ -387,6 +387,22 @@ const PANEL_HEIGHT: u32 = atom_theme::shell::TOP_BAR_HEIGHT;
 const DOCK_HEIGHT: u32 = atom_theme::shell::DOCK_HEIGHT;
 const CLOSE_GRACE_TICKS: u32 = 200;
 
+/// Maximum number of independent damage rectangles tracked per frame before
+/// they are collapsed into a single bounding box. Keeping damage as a list of
+/// disjoint rects (instead of one union) is what stops a continuously-animating
+/// window in one screen corner from forcing a full-screen recomposite — and a
+/// re-blit of every other open window — on every frame. The cap bounds the
+/// per-frame intersection work when damage is genuinely scattered.
+const MAX_DIRTY_RECTS: usize = 16;
+
+/// Minimum number of scheduler ticks between composites (frame pacing). The
+/// compositor is single-threaded, so without a cap a client presenting in a
+/// tight loop — or several animating windows — drives it to recomposite
+/// back-to-back and pegs its CPU core. At the 100Hz scheduler tick (10ms),
+/// 2 ticks ≈ 50fps, the closest cap at or below ~60fps the tick granularity
+/// allows. Damage accumulates between slots and drains in a single composite.
+const MIN_FRAME_TICKS: u64 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -721,7 +737,7 @@ fn window_title_for(executable: &str) -> &str {
     match executable {
         "fileman" => "File Manager",
         "terminal" => "Terminal",
-        "display_settings" => "Display Settings",
+        "system_settings" => "System Settings",
         "tinygl_demo" => "TinyGL Gears",
         other => other,
     }
@@ -1364,7 +1380,8 @@ struct Compositor {
     pending_windows: Vec<PendingWindow>,
     pending_close: Vec<PendingClose>,
     dirty: bool,
-    dirty_rect: Option<Rect>,
+    dirty_rects: Vec<Rect>,
+    last_composite_tick: u64,
     mouse_left_down: bool,
     mouse_right_down: bool,
     drag_op: DragOperation,
@@ -1433,7 +1450,8 @@ impl Compositor {
             pending_windows: Vec::new(),
             pending_close: Vec::new(),
             dirty: true,
-            dirty_rect: None,
+            dirty_rects: Vec::new(),
+            last_composite_tick: 0,
             mouse_left_down: false,
             mouse_right_down: false,
             drag_op: DragOperation::None,
@@ -1498,7 +1516,7 @@ impl Compositor {
     fn build_dock_apps() -> Vec<DockApp> {
         let candidates: [(&str, &str, Color); 4] = [
             ("fileman", "Files", atom_theme::colors::ATOM_COLOR_ACCENT_GLOW),
-            ("display_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
+            ("system_settings", "Settings", atom_theme::colors::ATOM_COLOR_ACCENT),
             ("tinygl_demo", "TinyGL", atom_theme::colors::ATOM_COLOR_SUCCESS),
             ("terminal", "Terminal", atom_theme::colors::ATOM_GRADIENT_PRIMARY_END),
         ];
@@ -1560,11 +1578,21 @@ impl Compositor {
 
             self.reap_pending_closes();
             self.flush_deferred_desktop_work();
-            self.flush_pending_snapshots();
 
             if self.dirty {
-                self.draw_all();
-                self.dirty = false;
+                // Frame pacing: only composite once per MIN_FRAME_TICKS. A
+                // present flood still wakes us (to accumulate damage), but the
+                // expensive snapshot+composite work is bounded to the frame
+                // rate instead of running back-to-back at 100% CPU. Snapshots
+                // are taken here, coalesced with the draw, since a pending
+                // snapshot always implies dirty.
+                let now = get_ticks();
+                if now.wrapping_sub(self.last_composite_tick) >= MIN_FRAME_TICKS {
+                    self.flush_pending_snapshots();
+                    self.draw_all();
+                    self.dirty = false;
+                    self.last_composite_tick = now;
+                }
             }
 
             let _ = wait_any(&ports, 10);
@@ -2483,10 +2511,9 @@ impl Compositor {
     }
 
     /// Mark a window's full on-screen footprint (frame + drop shadow) dirty so
-    /// the next `draw_all` actually repaints it. The redraw is otherwise bounded
-    /// by whatever stale `dirty_rect` the last cursor move left behind, which is
-    /// why a freshly presented or freshly raised window could stay invisible
-    /// until unrelated damage happened to cross it.
+    /// the next `draw_all` actually repaints it. Without an explicit footprint,
+    /// a freshly presented or freshly raised window could stay invisible until
+    /// unrelated damage happened to cross it.
     fn mark_window_dirty(&mut self, window_id: WindowId) {
         if let Some(w) = self.wm.get_window(window_id) {
             let rect = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
@@ -2528,12 +2555,13 @@ impl Compositor {
     }
 
     /// Mark the entire screen dirty so the next `draw_all` repaints everything.
-    /// Setting `dirty = true` alone is NOT enough for a full redraw: `draw_all`
-    /// honours any pending `dirty_rect`, so a stale cursor-sized rect would
-    /// silently clip the intended full repaint down to a few pixels (black
-    /// screen / trails that only heal where the mouse happens to move).
+    /// Clears any accumulated damage rects first: a stale cursor-sized rect left
+    /// in the list would otherwise clip the intended full repaint down to a few
+    /// pixels (black screen / trails that only heal where the mouse moves).
     fn mark_dirty_all(&mut self) {
-        self.dirty_rect = Some(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+        self.dirty_rects.clear();
+        self.dirty_rects
+            .push(Rect::new(0, 0, self.fb.width(), self.fb.height()));
         self.dirty = true;
     }
 
@@ -2549,10 +2577,31 @@ impl Compositor {
         }
         let clamped = Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32);
 
-        if let Some(existing) = self.dirty_rect {
-            self.dirty_rect = Some(existing.union(&clamped));
+        // Coalesce only with rects we already overlap. A window that presents
+        // the same footprint every frame (an animation) keeps merging into its
+        // own existing entry, so the list stays tiny and disjoint instead of
+        // unioning unrelated corners of the screen into one near-full-screen
+        // box. Non-overlapping damage stays a separate region and is composited
+        // independently in `draw_all`.
+        for existing in self.dirty_rects.iter_mut() {
+            if existing.intersects(&clamped) {
+                *existing = existing.union(&clamped);
+                self.dirty = true;
+                return;
+            }
+        }
+
+        if self.dirty_rects.len() >= MAX_DIRTY_RECTS {
+            // Too much scattered damage to track individually: fall back to a
+            // single bounding box (the previous behaviour) to bound per-frame
+            // bookkeeping. Correctness is preserved; only locality is lost.
+            let mut acc = clamped;
+            for existing in self.dirty_rects.drain(..) {
+                acc = acc.union(&existing);
+            }
+            self.dirty_rects.push(acc);
         } else {
-            self.dirty_rect = Some(clamped);
+            self.dirty_rects.push(clamped);
         }
         self.dirty = true;
     }
@@ -2618,10 +2667,10 @@ impl Compositor {
 
         self.wallpaper_cache_valid = false;
 
-        // The fresh backbuffer is uninitialised and any pending dirty_rect is in
-        // the old resolution's coordinates — repaint the whole new screen, or it
+        // The fresh backbuffer is uninitialised and any pending damage is in the
+        // old resolution's coordinates — repaint the whole new screen, or it
         // stays black except where later damage (e.g. the cursor) happens to land.
-        self.dirty_rect = None;
+        self.dirty_rects.clear();
         self.mark_dirty_all();
         true
     }
@@ -2685,13 +2734,13 @@ impl Compositor {
     }
 
     fn open_display_settings_wallpaper_tab(&mut self) {
-        let port = match libipc::protocol::lookup_service("display_settings") {
+        let port = match libipc::protocol::lookup_service("system_settings") {
             Ok(port) => port,
             Err(_) => {
                 self.spawn_display_settings();
                 let mut found = None;
                 for _ in 0..80 {
-                    if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+                    if let Ok(port) = libipc::protocol::lookup_service("system_settings") {
                         found = Some(port);
                         break;
                     }
@@ -2708,7 +2757,7 @@ impl Compositor {
             .wm
             .windows
             .iter()
-            .find(|w| w.title == "Display Settings")
+            .find(|w| w.title == "System Settings")
             .map(|w| w.id)
         {
             self.wm.focus_window(id);
@@ -2716,8 +2765,8 @@ impl Compositor {
         }
 
         let msg = OpenInTabMsg {
-            target_app: String::from("display_settings"),
-            tab_name: String::from("Wallpaper"),
+            target_app: String::from("system_settings"),
+            tab_name: String::from("Desktop Background"),
         };
         let payload = msg.to_bytes();
         let header = MessageHeader::new(MessageType::OpenInTab, payload.len() as u32);
@@ -2729,7 +2778,7 @@ impl Compositor {
     }
 
     fn send_wallpaper_applied(&mut self) {
-        if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+        if let Ok(port) = libipc::protocol::lookup_service("system_settings") {
             let msg = WallpaperAppliedMsg {};
             let header =
                 MessageHeader::new(MessageType::WallpaperApplied, WallpaperAppliedMsg::SIZE as u32);
@@ -2741,7 +2790,7 @@ impl Compositor {
     }
 
     fn send_wallpaper_failed(&mut self, error: &str) {
-        if let Ok(port) = libipc::protocol::lookup_service("display_settings") {
+        if let Ok(port) = libipc::protocol::lookup_service("system_settings") {
             let msg = WallpaperFailedMsg { error_message: String::from(error) };
             let payload = msg.to_bytes();
             let header = MessageHeader::new(MessageType::WallpaperFailed, payload.len() as u32);
@@ -3258,7 +3307,7 @@ impl Compositor {
         match name {
             "terminal" => return self.spawn_terminal(),
             "fileman" => return self.spawn_fileman(),
-            "display_settings" => return self.spawn_display_settings(),
+            "system_settings" => return self.spawn_display_settings(),
             _ => {}
         }
 
@@ -3315,18 +3364,53 @@ impl Compositor {
     }
 
     fn spawn_display_settings(&mut self) {
-        if !self.request_app_launch("/apps/system/display_settings.atxf") {
+        if !self.request_app_launch("/apps/system/system_settings.atxf") {
             return;
         }
-        self.spawn_hosted_window("Display Settings", 200, 100, 20, 480, 420);
+        self.spawn_hosted_window("System Settings", 160, 80, 20, 700, 520);
     }
 
     fn draw_all(&mut self) {
-        let draw_rect = self
-            .dirty_rect
-            .take()
-            .unwrap_or(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+        let rects = core::mem::take(&mut self.dirty_rects);
+        let rects = if rects.is_empty() {
+            // `dirty` was set without an explicit rect: repaint everything.
+            [Rect::new(0, 0, self.fb.width(), self.fb.height())].to_vec()
+        } else {
+            rects
+        };
 
+        // Composite every damaged region into the backbuffer. Each region only
+        // touches the wallpaper, icons and windows that actually intersect it,
+        // so a small animating window no longer drags the whole window stack
+        // into every frame.
+        for rect in &rects {
+            self.composite_region(*rect);
+        }
+
+        // Overlays that always sit on top, drawn once after all regions so they
+        // are never clipped away by a region that excludes them.
+        if self.context_menu.visible {
+            self.draw_context_menu();
+        }
+        self.draw_cursor();
+
+        // Publish each damaged region to the visible framebuffer.
+        for rect in &rects {
+            self.backbuffer_fb.blit_rect(
+                &self.fb,
+                rect.x as u32,
+                rect.y as u32,
+                rect.w,
+                rect.h,
+            );
+        }
+    }
+
+    /// Composite a single damage rectangle into the backbuffer: wallpaper (or
+    /// background), desktop icons, windows, the top panel and the dock — each
+    /// clipped to `draw_rect`. Overlays (context menu, cursor) and the blit to
+    /// the visible framebuffer are handled once by `draw_all`.
+    fn composite_region(&mut self, draw_rect: Rect) {
         if self.wallpaper_cache_valid && !self.wallpaper_cache_ptr.is_null() {
             let sw = self.fb.width();
             let stride = self.backbuffer_fb.stride();
@@ -3389,20 +3473,6 @@ impl Compositor {
                 self.draw_dock();
             }
         }
-
-        if self.context_menu.visible {
-            self.draw_context_menu();
-        }
-
-        self.draw_cursor();
-
-        self.backbuffer_fb.blit_rect(
-            &self.fb,
-            draw_rect.x as u32,
-            draw_rect.y as u32,
-            draw_rect.w,
-            draw_rect.h,
-        );
     }
 
     fn draw_panel(&self) {

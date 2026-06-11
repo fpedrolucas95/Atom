@@ -23,7 +23,7 @@ mod fs;
 use fs::{Dir, DirEntry};
 
 use atom_syscall::graphics::{Color, SharedSurface};
-use atom_syscall::ipc::{create_port, try_recv, send, PortId};
+use atom_syscall::ipc::{create_port, try_recv, send, wait_any, PortId};
 use atom_syscall::thread::{exit, yield_now, get_ticks};
 use atom_syscall::debug::log;
 
@@ -824,6 +824,12 @@ fn main() -> ! {
                 }
             }
         }
-        yield_now();
+        // Block until input arrives (or a short timeout) instead of busy-spinning
+        // with yield_now(). A pure yield loop keeps this thread perpetually
+        // runnable, burning a full scheduler quantum every pass and starving the
+        // compositor — which is what drags the cursor down to ~10 fps once the
+        // file manager is open. wait_any() parks the thread so an idle window
+        // costs no CPU; the 16 ms ceiling keeps input feeling responsive.
+        let _ = wait_any(&[local_port], 16);
     }
 }

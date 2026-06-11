@@ -129,7 +129,8 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
             MessageType::FsRename  => self.handle_fs_rename(payload),
             MessageType::FsReaddir => self.handle_fs_readdir(payload),
             MessageType::FsTruncate => self.handle_fs_truncate(payload),
-            MessageType::FsFsync  => self.handle_fs_fsync(payload),
+            MessageType::FsFsync   => self.handle_fs_fsync(payload),
+            MessageType::FsStatvfs => self.handle_fs_statvfs(payload),
             _ => {
                 atom_syscall::debug::log("fsd: unsupported msg_type, returning ENOTSUP");
                 Self::make_reply(ENOTSUP, 0)
@@ -984,6 +985,32 @@ impl<'a, 'b> FsdIpcHandler<'a, 'b> {
                 Err(_) => Self::make_reply(EIO, 0),
             },
             Err(_) => Self::make_reply(EIO, 0),
+        }
+    }
+
+    // ── Statvfs ───────────────────────────────────────────────────────────
+    //
+    // Request: [path_len(4) | path_bytes]  (path is accepted but ignored —
+    //          there is one mount point "/" and the backend always reports it)
+    // Reply:   [error(8) | statvfs_buf(72)]
+
+    fn handle_fs_statvfs(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < 4 {
+            return Self::make_reply(EINVAL, 0);
+        }
+        // Parse but otherwise ignore the path (single-mount system).
+        let path_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if payload.len() < 4 + path_len {
+            return Self::make_reply(EINVAL, 0);
+        }
+        match self.backend.statvfs() {
+            Some(buf) => {
+                let mut resp = Vec::with_capacity(8 + 72);
+                resp.extend_from_slice(&ESUCCESS.to_le_bytes());
+                resp.extend_from_slice(&buf);
+                resp
+            }
+            None => Self::make_reply(ENOTSUP, 0),
         }
     }
 }

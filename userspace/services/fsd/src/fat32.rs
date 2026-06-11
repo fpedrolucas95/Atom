@@ -198,6 +198,7 @@ struct FsInfo {
     total_sectors: u32,
     total_clusters: u32,
     partition_start: u64,
+    fs_info_sector: u32,  // absolute LBA of the FAT32 FSInfo sector
 }
 
 #[derive(Clone, Copy)]
@@ -293,6 +294,8 @@ fn init_partition(start_sector: u64) -> bool {
     let data_sectors = total_sectors.saturating_sub(reserved_sectors + num_fats * fat_size);
     let total_clusters = data_sectors / sectors_per_cluster;
 
+    let fs_info_sector = start_sector as u32 + u16::from_le(bpb.fs_info) as u32;
+
     unsafe {
         FS_INFO = Some(FsInfo {
             bytes_per_sector,
@@ -306,6 +309,7 @@ fn init_partition(start_sector: u64) -> bool {
             total_sectors,
             total_clusters,
             partition_start: start_sector,
+            fs_info_sector,
         });
     }
 
@@ -1415,4 +1419,58 @@ pub fn read_file_range(
     }
 
     Ok(copied)
+}
+
+// ── Filesystem statistics (statvfs) ──────────────────────────────────────────
+
+/// Read the FAT32 FSInfo sector and return the cached free-cluster count.
+/// Returns None if the FSInfo is absent or marks the count as unknown (0xFFFFFFFF).
+fn read_fsinfo_free_count(info: &FsInfo) -> Option<u32> {
+    let sector = ahci::read_sectors(info.fs_info_sector as u64, 1)?;
+    if sector.len() < 512 { return None; }
+    let lead  = u32::from_le_bytes([sector[0],   sector[1],   sector[2],   sector[3]]);
+    let struc = u32::from_le_bytes([sector[484], sector[485], sector[486], sector[487]]);
+    if lead != 0x4161_5252 || struc != 0x6141_7272 { return None; }
+    let free = u32::from_le_bytes([sector[488], sector[489], sector[490], sector[491]]);
+    if free == 0xFFFF_FFFF { None } else { Some(free) }
+}
+
+/// Scan the entire FAT to count free clusters (slow fallback for corrupted FSInfo).
+fn count_free_clusters_scan(info: &FsInfo) -> u32 {
+    let mut free = 0u32;
+    for cluster in 2u32..(2 + info.total_clusters) {
+        if let Some(entry) = read_fat_entry(cluster) {
+            if entry == FAT_FREE { free += 1; }
+        }
+    }
+    free
+}
+
+/// Return a 72-byte FsStatvfsBuf (wire format, little-endian) for the mounted FAT32.
+/// - bsize:  sector size (bytes)
+/// - frsize: cluster size (bytes) — the unit used by `blocks`, `bfree`, `bavail`
+/// - blocks: total data clusters
+/// - bfree/bavail: free clusters (FAT32 has no root reservation)
+/// - namemax: 255 (FAT32 LFN)
+pub fn statvfs_buf() -> Option<[u8; 72]> {
+    let info = fs_info()?;
+    let free = read_fsinfo_free_count(info)
+        .unwrap_or_else(|| count_free_clusters_scan(info));
+
+    let bsize:   u64 = info.bytes_per_sector as u64;
+    let frsize:  u64 = (info.bytes_per_sector * info.sectors_per_cluster) as u64;
+    let blocks:  u64 = info.total_clusters as u64;
+    let bfree:   u64 = free as u64;
+    let namemax: u32 = 255;
+
+    let mut buf = [0u8; 72];
+    buf[0..8].copy_from_slice(&bsize.to_le_bytes());
+    buf[8..16].copy_from_slice(&frsize.to_le_bytes());
+    buf[16..24].copy_from_slice(&blocks.to_le_bytes());
+    buf[24..32].copy_from_slice(&bfree.to_le_bytes());
+    buf[32..40].copy_from_slice(&bfree.to_le_bytes()); // bavail == bfree on FAT32
+    // files / ffree / favail: FAT32 has no inode table — leave as 0
+    buf[64..68].copy_from_slice(&namemax.to_le_bytes());
+    // flags = 0 (read-write)
+    Some(buf)
 }

@@ -21,6 +21,8 @@ pub trait FsBackend {
     fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FsError>;
     fn sync_fs(&self) -> Result<(), FsError>;
     fn flush_block_cache(&self) -> Result<(), FsError>;
+    /// Return a 72-byte FsStatvfsBuf in wire format, or None if unsupported.
+    fn statvfs(&self) -> Option<[u8; 72]>;
 }
 
 fn encode_stat(path: &str, stat_buf: &mut [u8; 80], size: u64, is_dir: bool) {
@@ -198,5 +200,9 @@ impl FsBackend for UserspaceFatBackend {
             Some(true) => Ok(()),
             _ => Err(FsError::Io),
         }
+    }
+
+    fn statvfs(&self) -> Option<[u8; 72]> {
+        crate::fat32::statvfs_buf()
     }
 }
