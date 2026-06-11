@@ -32,7 +32,7 @@ $OVMF_PATH  = "$REPO_PATH\ovmf\OVMF.fd"
 $HOST_TRIPLE = (rustc -vV | Select-String "host: ") -replace "host:\s+", ""
 
 # Apenas as pastas dos drivers (não precisamos mais do nome do binário aqui)
-$SYSTEM_APPS_DIRS = @("keyboard", "mouse", "display", "display_settings", "terminal", "ui_shell", "demo_rects", "demo_text")
+$SYSTEM_APPS_DIRS = @("keyboard", "mouse", "display", "system_settings", "terminal", "ui_shell", "demo_rects", "demo_text")
 
 # Services (incluindo init = PID 1)
 $USERSPACE_SERVICES = @(
@@ -40,7 +40,10 @@ $USERSPACE_SERVICES = @(
     "namesvc",
     "service_manager",
     "fsd",
-    "app_launcher"
+    "app_launcher",
+    "netd",
+    "nic_driver",
+    "timesync"
 )
 
 # Userspace applications
@@ -48,7 +51,6 @@ $USERSPACE_APPS = @(
     "fileman",
     "fs_test",
     "hello_atxf",
-    "timesync",
     "browser"
 )
 

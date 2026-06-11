@@ -50,7 +50,8 @@ Atom is a microkernel OS where the kernel provides the minimum trusted computing
 
 - **Services:** init (PID 1), namesvc (service discovery), service_manager (declarative boot), fsd (filesystem daemon), app_launcher (privileged process creation), nic_driver (e1000 NIC), netd (TCP/IP stack: ARP, IPv4, ICMP, UDP, TCP, DNS)
 - **System applications:** display driver, keyboard driver, mouse driver, ui_shell (compositor + window manager), terminal emulator, display settings
-- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), hello_atxf, filesystem test suite, browser, timesync (HTTP GET, demonstrates the full networking stack), and security_smoke (adversarial CI self-test harness)
+- **Applications:** file manager (with double-click launching of .atxf executables), TinyGL gears demo, hello_c (C runtime demo), hello_atxf, filesystem test suite, browser, and security_smoke (adversarial CI self-test harness)
+- **Date and time service:** persistent internet synchronization with locale, time-zone, and 12/24-hour preferences
 
 ### Runtime and Libraries
 
@@ -180,7 +181,7 @@ atom/
 │   ├── services/                  # init, namesvc, service_manager, fsd, app_launcher,
 │   │                              #   nic_driver, netd
 │   └── apps/                      # fileman, tinygl_demo, hello_c, hello_atxf, fs_test,
-│                                  #   browser, timesync, security_smoke
+│                                  #   browser, security_smoke
 ├── tools/
 │   └── elf2atxf/                  # ELF → signed ATXF converter for user-space executables
 ├── keys/                          # ATXF signing keys / trust-root material

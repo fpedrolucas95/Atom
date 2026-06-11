@@ -327,6 +327,13 @@ impl TcpManager {
         let idx = self.find_socket_mut(src_ip, tcp_hdr.src_port, tcp_hdr.dst_port)?;
         let sock = &mut self.sockets[idx];
 
+        if tcp_hdr.flags & TCP_RST != 0 {
+            let socket_id = sock.id;
+            sock.state = TcpState::Closed;
+            sock.in_use = false;
+            return Some(TcpEvent::Closed(socket_id));
+        }
+
         match sock.state {
             TcpState::SynSent => {
                 // Expect SYN-ACK
@@ -353,13 +360,6 @@ impl TcpManager {
                         out_buf,
                     );
                     return Some(TcpEvent::Connected(socket_id));
-                }
-                // RST
-                if tcp_hdr.flags & TCP_RST != 0 {
-                    let socket_id = sock.id;
-                    sock.state = TcpState::Closed;
-                    sock.in_use = false;
-                    return Some(TcpEvent::Closed(socket_id));
                 }
             }
             TcpState::Established => {

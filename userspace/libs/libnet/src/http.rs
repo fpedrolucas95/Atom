@@ -7,6 +7,7 @@ pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
     pub location: Option<String>,
+    pub date: Option<String>,
 }
 
 fn copy_bytes(dst: &mut [u8], pos: &mut usize, src: &[u8]) {
@@ -30,7 +31,10 @@ pub fn http_get(
     let socket_id = net_socket(netd_port)?;
 
     // 3. Connect
-    net_connect(netd_port, socket_id, ip, port)?;
+    if let Err(error) = net_connect(netd_port, socket_id, ip, port) {
+        let _ = net_close(netd_port, socket_id);
+        return Err(error);
+    }
 
     // 4. Build HTTP/1.0 request using a fixed stack buffer
     let mut req_buf = [0u8; 512];
@@ -46,7 +50,10 @@ pub fn http_get(
     );
 
     // 5. Send request
-    net_send(netd_port, socket_id, &req_buf[..pos])?;
+    if let Err(error) = net_send(netd_port, socket_id, &req_buf[..pos]) {
+        let _ = net_close(netd_port, socket_id);
+        return Err(error);
+    }
 
     // 6. Receive response, accumulating into a Vec
     let mut response: Vec<u8> = Vec::new();
@@ -72,6 +79,7 @@ pub fn http_get(
 
     // 9. Extract a redirect target if present.
     let location = parse_location(&response);
+    let date = parse_header_string(&response, b"date:");
 
     // 10. Find header/body separator "\r\n\r\n" and normalize common HTTP encodings.
     let raw_body = split_body(&response);
@@ -85,6 +93,7 @@ pub fn http_get(
         status,
         body,
         location,
+        date,
     })
 }
 
@@ -228,6 +237,10 @@ fn parse_chunk_size(line: &[u8]) -> Option<usize> {
 }
 
 fn parse_location(response: &[u8]) -> Option<String> {
+    parse_header_string(response, b"location:")
+}
+
+fn parse_header_string(response: &[u8], name: &[u8]) -> Option<String> {
     let header_end = response.windows(4).position(|w| w == b"\r\n\r\n")?;
     let headers = &response[..header_end];
     let mut pos = 0usize;
@@ -240,8 +253,8 @@ fn parse_location(response: &[u8]) -> Option<String> {
             .unwrap_or(headers.len());
         let line = &headers[pos..line_end];
 
-        if starts_with_ignore_ascii_case(line, b"location:") {
-            let mut value = &line[b"location:".len()..];
+        if starts_with_ignore_ascii_case(line, name) {
+            let mut value = &line[name.len()..];
             while !value.is_empty() && (value[0] == b' ' || value[0] == b'\t') {
                 value = &value[1..];
             }

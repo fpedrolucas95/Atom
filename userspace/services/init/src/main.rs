@@ -259,6 +259,7 @@ fn boot_sequence() {
     let _netd_pid = spawn_service("netd");
     // Give the NIC driver time to detect hardware and notify netd.
     atom_syscall::thread::sleep_ms(200);
+    let _timesync_pid = spawn_service("timesync");
     log("[Phase 2] Network services spawned");
 
     // -----------------------------------------------------------------------

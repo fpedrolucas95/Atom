@@ -117,13 +117,13 @@ USERSPACE_SERVICES=(
     "app_launcher"
     "netd"
     "nic_driver"
+    "timesync"
 )
 
 USERSPACE_APPS=(
     "fileman"
     "fs_test"
     "hello_atxf"
-    "timesync"
     "browser"
     "security_smoke"
 )
@@ -731,6 +731,8 @@ if ls efi/apps/system/*.atxf 1>/dev/null 2>&1; then
 fi
 
 # ---- User apps → /apps/user/ ----
+rm -f efi/apps/user/timesync.atxf
+mdel -i "$DISK_IMG" ::/apps/user/timesync.atxf 2>/dev/null || true
 if ls efi/apps/user/*.atxf 1>/dev/null 2>&1; then
     mcopy -i $DISK_IMG -o efi/apps/user/*.atxf ::/apps/user/
 fi

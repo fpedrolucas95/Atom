@@ -604,6 +604,7 @@ fn init_default_services() {
         "terminal",
         "nic_driver",
         "netd",
+        "timesync",
     ];
 
     for name in known_services {
