@@ -3379,23 +3379,40 @@ impl Compositor {
             rects
         };
 
-        // Composite every damaged region into the backbuffer. Each region only
-        // touches the wallpaper, icons and windows that actually intersect it,
-        // so a small animating window no longer drags the whole window stack
-        // into every frame.
+        // Footprints of the always-on-top overlays, so each region can stamp
+        // them before it is published.
+        let menu_rect = if self.context_menu.visible {
+            Some(self.context_menu_rect())
+        } else {
+            None
+        };
+        // Cursor glyph is 11x17 with a 1px drop shadow; pad to 13x19.
+        let cursor_rect = Rect::new(self.cursor.x, self.cursor.y, 13, 19);
+
+        // Composite and publish each damaged region one at a time. The drawing
+        // primitives are NOT clipped to the region, so compositing a window
+        // over-paints its whole footprint into the backbuffer — including any
+        // area belonging to another damage rect. If every region were
+        // composited first and blitted afterwards, a later region's over-draw
+        // would clobber an earlier region's backbuffer pixels (wallpaper not
+        // restored, windows above it not redrawn) and that corruption would be
+        // published, making windows pop up where they are not. Publishing each
+        // region immediately after compositing it pushes the correct pixels to
+        // the visible framebuffer before any later region can touch them.
         for rect in &rects {
             self.composite_region(*rect);
-        }
 
-        // Overlays that always sit on top, drawn once after all regions so they
-        // are never clipped away by a region that excludes them.
-        if self.context_menu.visible {
-            self.draw_context_menu();
-        }
-        self.draw_cursor();
+            // Stamp the overlays that overlap this region on top, so they are
+            // never clipped away by a region that excludes them.
+            if let Some(menu_rect) = menu_rect {
+                if menu_rect.intersects(rect) {
+                    self.draw_context_menu();
+                }
+            }
+            if cursor_rect.intersects(rect) {
+                self.draw_cursor();
+            }
 
-        // Publish each damaged region to the visible framebuffer.
-        for rect in &rects {
             self.backbuffer_fb.blit_rect(
                 &self.fb,
                 rect.x as u32,
@@ -3407,9 +3424,11 @@ impl Compositor {
     }
 
     /// Composite a single damage rectangle into the backbuffer: wallpaper (or
-    /// background), desktop icons, windows, the top panel and the dock — each
-    /// clipped to `draw_rect`. Overlays (context menu, cursor) and the blit to
-    /// the visible framebuffer are handled once by `draw_all`.
+    /// background), desktop icons, windows, the top panel and the dock. Only the
+    /// wallpaper copy is clipped to `draw_rect`; the windows/panel/dock draw
+    /// their full footprint, so `draw_all` composites and blits one region at a
+    /// time to keep that over-draw from corrupting other regions. Overlays
+    /// (context menu, cursor) are stamped per region by `draw_all`.
     fn composite_region(&mut self, draw_rect: Rect) {
         if self.wallpaper_cache_valid && !self.wallpaper_cache_ptr.is_null() {
             let sw = self.fb.width();
