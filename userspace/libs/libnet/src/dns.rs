@@ -86,7 +86,11 @@ pub fn net_resolve(netd_port: PortId, hostname: &str) -> Result<IpAddr, NetError
     let mut buf = [0u8; 64];
     let mut result = Err(NetError::Timeout);
 
-    for _ in 0..100000u32 {
+    // DNS may take a couple of seconds while ARP and the first query settle.
+    // Counting scheduler yields made this timeout CPU-speed dependent and
+    // caused the reply port to close before otherwise valid responses arrived.
+    let deadline = atom_syscall::thread::get_ticks().saturating_add(500);
+    while atom_syscall::thread::get_ticks() < deadline {
         if let Ok(Some((_header, len))) = try_recv_message(reply_port, &mut buf) {
             let payload = get_payload(&buf, len);
             if let Some(reply) = NetResolveReplyMsg::from_bytes(payload) {

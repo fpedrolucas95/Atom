@@ -50,7 +50,8 @@ Atom é um SO microkernel onde o kernel fornece a base de computação confiáve
 
 - **Serviços:** init (PID 1), namesvc (descoberta de serviços), service_manager (boot declarativo), fsd (daemon de sistema de arquivos), app_launcher (criação privilegiada de processos), nic_driver (NIC e1000), netd (stack TCP/IP: ARP, IPv4, ICMP, UDP, TCP, DNS)
 - **Aplicações de sistema:** driver de display, driver de teclado, driver de mouse, ui_shell (compositor + gerenciador de janelas), emulador de terminal, configurações de display
-- **Aplicações:** gerenciador de arquivos (com lançamento por duplo clique de executáveis .atxf), demo TinyGL gears, hello_c (demo do runtime C), hello_atxf, suite de testes do sistema de arquivos, browser, timesync (HTTP GET, demonstra a stack de rede completa) e security_smoke (harness de auto-teste adversarial de CI)
+- **Aplicações:** gerenciador de arquivos (com lançamento por duplo clique de executáveis .atxf), demo TinyGL gears, hello_c (demo do runtime C), hello_atxf, suite de testes do sistema de arquivos, browser e security_smoke (harness de auto-teste adversarial de CI)
+- **Serviço de data e hora:** sincronização persistente pela internet com preferências de localidade, fuso horário e formato 12/24 horas
 
 ### Runtime e Bibliotecas
 
@@ -179,7 +180,7 @@ atom/
 │   ├── services/                  # init, namesvc, service_manager, fsd, app_launcher,
 │   │                              #   nic_driver, netd
 │   └── apps/                      # fileman, tinygl_demo, hello_c, hello_atxf, fs_test,
-│                                  #   browser, timesync, security_smoke
+│                                  #   browser, security_smoke
 ├── tools/
 │   └── elf2atxf/                  # Conversor ELF → ATXF assinado para executáveis do userspace
 ├── keys/                          # Chaves de assinatura ATXF / material da raiz de confiança

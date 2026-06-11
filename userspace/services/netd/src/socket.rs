@@ -284,6 +284,11 @@ impl SocketManager {
         tcp: &mut TcpManager,
     ) -> Option<(u64, NetRecvReplyMsg)> {
         let msg = NetRecvMsg::from_bytes(payload)?;
+        for pending in self.pending_recvs.iter_mut() {
+            if pending.in_use && atom_syscall::ipc::port_owner(pending.reply_port) == 0 {
+                pending.in_use = false;
+            }
+        }
         let mut buf = [0u8; 1024];
         let max = msg.max_len as usize;
         let result = tcp.recv_data(msg.socket_id, &mut buf[..max.min(1024)]);

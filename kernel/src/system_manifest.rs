@@ -128,6 +128,7 @@ pub const SID_NIC_DRIVER: ServiceId = ServiceId(6);
 pub const SID_NETD: ServiceId = ServiceId(7);
 pub const SID_UI_SHELL: ServiceId = ServiceId(8);
 pub const SID_DISPLAY: ServiceId = ServiceId(9);
+pub const SID_TIMESYNC: ServiceId = ServiceId(10);
 
 // Permission shorthands.
 const SPAWN_PERM: CapPermissions = CapPermissions::EXECUTE;
@@ -205,6 +206,7 @@ const DISPLAY_CAPS: &[InitialCapability] = &[identity(SID_DISPLAY)];
 // Environment-grant profiles.
 const NO_ENV: &[EnvGrant] = &[];
 const UI_SHELL_ENV: &[EnvGrant] = &[EnvGrant::FramebufferMap];
+const DISPLAY_ENV: &[EnvGrant] = &[EnvGrant::FramebufferMap];
 const NIC_DRIVER_ENV: &[EnvGrant] = &[EnvGrant::NetworkDevices];
 
 // Alias allowlists.
@@ -225,6 +227,7 @@ const INIT_CHILDREN: &[ServiceId] = &[
     SID_FSD,
     SID_NIC_DRIVER,
     SID_NETD,
+    SID_TIMESYNC,
     SID_UI_SHELL,
     SID_DISPLAY,
 ];
@@ -236,6 +239,7 @@ const SERVICE_MANAGER_CHILDREN: &[ServiceId] = &[
     SID_NETD,
     SID_UI_SHELL,
     SID_DISPLAY,
+    SID_TIMESYNC,
 ];
 const NO_CHILDREN: &[ServiceId] = &[];
 
@@ -327,6 +331,18 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
+        service_id: SID_TIMESYNC,
+        canonical_name: "timesync",
+        canonical_image: "/drivers/timesync.atxf",
+        image_hash: None,
+        spawn_kind: SpawnKind::SystemService,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
+        initial_capabilities: &[identity(SID_TIMESYNC)],
+        environment_grants: NO_ENV,
+        allowed_children: NO_CHILDREN,
+    },
+    SystemServiceManifestEntry {
         service_id: SID_UI_SHELL,
         canonical_name: "ui_shell",
         canonical_image: "/drivers/ui_shell.atxf",
@@ -347,7 +363,7 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         aliases: NO_ALIASES,
         reserved_ports: NO_PORTS,
         initial_capabilities: DISPLAY_CAPS,
-        environment_grants: NO_ENV,
+        environment_grants: DISPLAY_ENV,
         allowed_children: NO_CHILDREN,
     },
 ];

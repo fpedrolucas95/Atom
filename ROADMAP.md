@@ -127,7 +127,7 @@ O foco do roadmap deixa de ser “construir o básico” e passa a ser:
 - [x] `map_mmio`
 - [x] `nic_driver` (e1000)
 - [x] `netd` com ARP, IPv4, ICMP, UDP, TCP e DNS em QEMU user-net
-- [x] Casos funcionais de rede em user space (`ping`, HTTP GET via `timesync`)
+- [x] Casos funcionais de rede em user space (`ping`, HTTP GET e serviço `timesync`)
 
 ---
 

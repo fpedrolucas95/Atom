@@ -16,7 +16,7 @@ use atom_syscall::graphics::{
     shared_region_create, shared_region_map, shared_region_unmap, shared_region_destroy,
     get_framebuffer,
 };
-use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
+use atom_syscall::ipc::{create_port, send, try_recv, recv_envelope, wait_any, IpcEnvelope, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{exit, get_ticks, yield_now};
 use atom_syscall::debug::log;
@@ -28,7 +28,8 @@ use libipc::messages::{
     MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg,
     AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent,
     MouseButtonEvent, MouseButton, MouseScrollEvent, OpenInTabMsg, ApplyWallpaperMsg,
-    WallpaperAppliedMsg, WallpaperFailedMsg, AppLaunchRequestMsg,
+    WallpaperAppliedMsg, WallpaperFailedMsg, AppLaunchRequestMsg, AppLaunchReplyMsg,
+    TimeGetStateMsg, TimeStateReplyMsg, launch_status,
 };
 use libipc::protocol::send_message_async;
 use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
@@ -345,11 +346,8 @@ mod theme {
 
     pub const DESKTOP_BG: Color = ds::ATOM_COLOR_BG;
 
-    pub const PANEL_BG: Color = ds::ATOM_COLOR_BG;
-    pub const PANEL_BG_ACCENT: Color = ds::ATOM_COLOR_SURFACE;
     pub const PANEL_TEXT: Color = ds::ATOM_COLOR_TEXT_PRIMARY;
     pub const PANEL_TEXT_DIM: Color = ds::ATOM_COLOR_TEXT_SECONDARY;
-    pub const PANEL_BORDER: Color = ds::ATOM_COLOR_BORDER;
 
     pub const ACCENT: Color = ds::ATOM_COLOR_ACCENT;
 
@@ -383,7 +381,6 @@ const WINDOW_HEADER_HEIGHT: u32 = atom_theme::shell::WINDOW_TITLE_HEIGHT;
 const WINDOW_BORDER_WIDTH: u32 = 1;
 const WINDOW_MIN_WIDTH: u32 = 150;
 const WINDOW_MIN_HEIGHT: u32 = 100;
-const PANEL_HEIGHT: u32 = atom_theme::shell::TOP_BAR_HEIGHT;
 const DOCK_HEIGHT: u32 = atom_theme::shell::DOCK_HEIGHT;
 const CLOSE_GRACE_TICKS: u32 = 200;
 
@@ -743,6 +740,48 @@ fn window_title_for(executable: &str) -> &str {
     }
 }
 
+/// Pick a stable tile colour and one-letter glyph for a window's taskbar
+/// button. Known apps reuse the colour of their pinned launcher; any other
+/// window derives its glyph from the title's first letter and a colour chosen
+/// deterministically from the title, so the same window always looks the same.
+fn taskbar_glyph_for(title: &str) -> (Color, String) {
+    use atom_theme::colors as c;
+
+    let known = match title {
+        "File Manager" => Some(c::ATOM_COLOR_ACCENT_GLOW),
+        "Terminal" => Some(c::ATOM_GRADIENT_PRIMARY_END),
+        "System Settings" => Some(c::ATOM_COLOR_ACCENT),
+        "TinyGL Gears" => Some(c::ATOM_COLOR_SUCCESS),
+        _ => None,
+    };
+
+    let color = known.unwrap_or_else(|| {
+        const PALETTE: [Color; 6] = [
+            c::ATOM_COLOR_ACCENT,
+            c::ATOM_COLOR_ACCENT_GLOW,
+            c::ATOM_COLOR_SUCCESS,
+            c::ATOM_GRADIENT_PRIMARY_END,
+            c::ATOM_COLOR_WARNING,
+            c::ATOM_COLOR_ERROR,
+        ];
+        // FNV-1a over the title keeps the colour stable per window title.
+        let mut h: u32 = 0x811c_9dc5;
+        for b in title.bytes() {
+            h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+        }
+        PALETTE[(h as usize) % PALETTE.len()]
+    });
+
+    let initial = title
+        .chars()
+        .find(|ch| ch.is_ascii_alphanumeric())
+        .unwrap_or('?')
+        .to_ascii_uppercase();
+    let mut mono = String::new();
+    mono.push(initial);
+    (color, mono)
+}
+
 struct WindowManager {
     windows: Vec<Window>,
     next_id: WindowId,
@@ -943,6 +982,12 @@ impl CursorState {
 
 struct PendingWindow {
     window_id: WindowId,
+    /// PID of the process launched for this window, learned from the
+    /// `AppLaunchReply`. `0` until the reply arrives. The app's registration is
+    /// matched to its window by this PID (authenticated by the kernel via the
+    /// IPC envelope) rather than by arrival order, so a slow- or out-of-order
+    /// registering app no longer binds to the wrong window.
+    pid: u64,
 }
 
 struct PendingClose {
@@ -962,6 +1007,27 @@ struct DockApp {
     executable: String,
     color: Color,
     monogram: String,
+}
+
+/// What activating a taskbar button does.
+enum TaskKind {
+    /// A pinned app with no open window — launch it.
+    Launch { executable: String },
+    /// An open window — raise/restore it, or minimise it if already focused.
+    Window {
+        window_id: WindowId,
+        minimized: bool,
+        focused: bool,
+    },
+}
+
+/// One button on the bottom taskbar. The bar shows a launcher for every pinned
+/// app that has no open window, plus a button for every open window (minimised
+/// ones included), so any window can always be restored from here.
+struct TaskItem {
+    color: Color,
+    monogram: String,
+    kind: TaskKind,
 }
 
 struct ContextMenu {
@@ -1326,6 +1392,50 @@ fn format_u32(n: u32) -> String {
     result
 }
 
+fn format_taskbar_clock(
+    state: Option<TimeStateReplyMsg>,
+    now_tick: u64,
+) -> ([u8; 8], usize) {
+    let mut out = [0u8; 8];
+    let Some(state) = state.filter(|state| state.synced) else {
+        out[..5].copy_from_slice(b"--:--");
+        return (out, 5);
+    };
+
+    let seconds = state.local_unix_seconds(now_tick).rem_euclid(86_400);
+    let mut hour = (seconds / 3_600) as u8;
+    let minute = ((seconds % 3_600) / 60) as u8;
+    if state.format_24h {
+        out[0] = b'0' + hour / 10;
+        out[1] = b'0' + hour % 10;
+        out[2] = b':';
+        out[3] = b'0' + minute / 10;
+        out[4] = b'0' + minute % 10;
+        (out, 5)
+    } else {
+        let pm = hour >= 12;
+        hour %= 12;
+        if hour == 0 {
+            hour = 12;
+        }
+        let mut pos = 0;
+        if hour >= 10 {
+            out[pos] = b'0' + hour / 10;
+            pos += 1;
+        }
+        out[pos] = b'0' + hour % 10;
+        pos += 1;
+        out[pos] = b':';
+        pos += 1;
+        out[pos] = b'0' + minute / 10;
+        out[pos + 1] = b'0' + minute % 10;
+        out[pos + 2] = b' ';
+        out[pos + 3] = if pm { b'P' } else { b'A' };
+        out[pos + 4] = b'M';
+        (out, pos + 5)
+    }
+}
+
 fn parse_u32(s: &str) -> Option<u32> {
     if s.is_empty() {
         return None;
@@ -1405,6 +1515,10 @@ struct Compositor {
     wallpaper_recompute_pending: bool,
     config_save_pending: bool,
     image_cache: libimage::ImageCache,
+    time_service_port: Option<PortId>,
+    clock_state: Option<TimeStateReplyMsg>,
+    last_clock_query_tick: u64,
+    last_clock_minute: i64,
 }
 
 impl Compositor {
@@ -1484,6 +1598,10 @@ impl Compositor {
             wallpaper_recompute_pending: false,
             config_save_pending: false,
             image_cache: libimage::ImageCache::with_capacity(1),
+            time_service_port: None,
+            clock_state: None,
+            last_clock_query_tick: 0,
+            last_clock_minute: -1,
         }
     }
 
@@ -1493,21 +1611,21 @@ impl Compositor {
             label: String::from("Files"),
             executable: String::from("fileman"),
             x: 28,
-            y: PANEL_HEIGHT as i32 + 28,
+            y: 28,
             color: atom_theme::colors::ATOM_COLOR_ACCENT_GLOW,
         });
         icons.push(DesktopIcon {
             label: String::from("Rectangles"),
             executable: String::from("demo_rects"),
             x: 28,
-            y: PANEL_HEIGHT as i32 + 120,
+            y: 120,
             color: atom_theme::colors::ATOM_COLOR_ACCENT,
         });
         icons.push(DesktopIcon {
             label: String::from("Text"),
             executable: String::from("demo_text"),
             x: 28,
-            y: PANEL_HEIGHT as i32 + 212,
+            y: 212,
             color: atom_theme::colors::ATOM_COLOR_SUCCESS,
         });
         icons
@@ -1556,12 +1674,20 @@ impl Compositor {
         // drawing (frozen screen while the system stays alive).
         const MAX_MSGS_PER_PASS: usize = 64;
 
+        let mut envelope = IpcEnvelope::default();
+
         loop {
             let ports = [self.register_port, self.event_port];
 
             for _ in 0..MAX_MSGS_PER_PASS {
-                match try_recv(self.register_port, &mut reg_buffer) {
-                    Ok(Some(len)) => self.handle_register_message(&reg_buffer[..len]),
+                // Receive with the envelope so app registrations can be bound to
+                // their window by the kernel-authenticated sender PID instead of
+                // by arrival order.
+                match recv_envelope(self.register_port, &mut envelope, &mut reg_buffer) {
+                    Ok(Some(len)) => {
+                        let sender_pid = envelope.sender_process;
+                        self.handle_register_message(&reg_buffer[..len], sender_pid);
+                    }
                     _ => break,
                 }
             }
@@ -1578,6 +1704,7 @@ impl Compositor {
 
             self.reap_pending_closes();
             self.flush_deferred_desktop_work();
+            self.refresh_clock();
 
             if self.dirty {
                 // Frame pacing: only composite once per MIN_FRAME_TICKS. A
@@ -1795,7 +1922,7 @@ impl Compositor {
         self.dirty = true;
     }
 
-    fn handle_register_message(&mut self, data: &[u8]) {
+    fn handle_register_message(&mut self, data: &[u8], sender_pid: u64) {
         if data.len() < MessageHeader::SIZE {
             return;
         }
@@ -1805,7 +1932,7 @@ impl Compositor {
         };
 
         match header.msg_type {
-            MessageType::AppRegister => self.handle_app_registration(data),
+            MessageType::AppRegister => self.handle_app_registration(data, sender_pid),
             MessageType::WmRequest => self.handle_wm_request(&data[MessageHeader::SIZE..]),
             MessageType::WmCommitFrame => {
                 if let Some(msg) =
@@ -1826,7 +1953,7 @@ impl Compositor {
         }
     }
 
-    fn handle_app_registration(&mut self, data: &[u8]) {
+    fn handle_app_registration(&mut self, data: &[u8], sender_pid: u64) {
         if data.len() < MessageHeader::SIZE {
             return;
         }
@@ -1848,8 +1975,21 @@ impl Compositor {
             None => return,
         };
 
-        if !self.pending_windows.is_empty() {
-            let pending = self.pending_windows.remove(0);
+        // Bind the registering app to the window launched for its PID. The PID
+        // comes from the kernel-authenticated IPC envelope, so it cannot be
+        // forged and does not depend on registrations arriving in launch order
+        // — the bug where File Manager (slow to register) had its content land
+        // in a later app's window. Fall back to the oldest pending window only
+        // when no PID match exists yet (e.g. the launch reply has not been
+        // processed), preserving correct behaviour for a lone in-flight launch.
+        let index = self
+            .pending_windows
+            .iter()
+            .position(|p| p.pid != 0 && p.pid == sender_pid)
+            .unwrap_or(0);
+
+        if index < self.pending_windows.len() {
+            let pending = self.pending_windows.remove(index);
 
             let result = if let Some(window) = self.wm.get_window_mut(pending.window_id) {
                 window.event_port = Some(reg_msg.app_port);
@@ -1870,6 +2010,29 @@ impl Compositor {
                     None,
                 );
             }
+        }
+    }
+
+    /// Process an `AppLaunchReply` from the app launcher. Replies arrive in
+    /// launch order from the (sequential) launcher, so each maps to the oldest
+    /// pending window that has not yet learned its PID.
+    ///
+    /// On success the reply's PID is stamped onto that window, so the app's
+    /// later registration can be matched to it by authenticated sender PID. On
+    /// failure the placeholder window is dropped: the app will never register,
+    /// and leaving its entry in the queue is exactly what used to shift every
+    /// subsequent app's content into the wrong window.
+    fn handle_launch_reply(&mut self, reply: &AppLaunchReplyMsg) {
+        let index = match self.pending_windows.iter().position(|p| p.pid == 0) {
+            Some(i) => i,
+            None => return,
+        };
+
+        if reply.status == launch_status::LAUNCH_OK && reply.pid != 0 {
+            self.pending_windows[index].pid = reply.pid;
+        } else {
+            let window_id = self.pending_windows.remove(index).window_id;
+            self.handle_close_window(window_id);
         }
     }
 
@@ -1932,6 +2095,14 @@ impl Compositor {
                     }
                 }
             }
+            MessageType::AppLaunchReply => {
+                if data.len() >= MessageHeader::SIZE + AppLaunchReplyMsg::SIZE {
+                    if let Some(reply) = AppLaunchReplyMsg::from_bytes(&data[MessageHeader::SIZE..])
+                    {
+                        self.handle_launch_reply(&reply);
+                    }
+                }
+            }
             MessageType::VideoModeChanged => {
                 self.handle_video_mode_changed();
             }
@@ -1940,6 +2111,15 @@ impl Compositor {
                     self.handle_apply_wallpaper_msg(&msg);
                 } else {
                     self.send_wallpaper_failed("Invalid wallpaper request");
+                }
+            }
+            MessageType::TimeStateReply => {
+                if let Some(state) =
+                    TimeStateReplyMsg::from_bytes(&data[MessageHeader::SIZE..])
+                {
+                    self.clock_state = Some(state);
+                    self.last_clock_minute = -1;
+                    self.mark_taskbar_dirty();
                 }
             }
             MessageType::SurfacePresent => {
@@ -2023,6 +2203,7 @@ impl Compositor {
                     self.wm.windows.push(window);
                     self.wm.focus_window(id);
                     self.mark_window_dirty(id);
+                    self.mark_taskbar_dirty();
 
                     let header = MessageHeader::new(
                         MessageType::WmResponse,
@@ -2150,13 +2331,6 @@ impl Compositor {
             self.mark_dirty_rect(menu_rect);
         }
 
-        // The top bar and the dock are always rendered on top of every window,
-        // so they must also win hit-testing — otherwise a window sitting behind
-        // them would silently swallow the click.  Consume any click that lands
-        // on this chrome before consulting the window stack.
-        if self.is_on_panel(y) {
-            return;
-        }
         if self.is_on_dock(x, y) {
             if let Some(icon_index) = self.dock_icon_at(x, y) {
                 self.handle_dock_click(icon_index);
@@ -2174,6 +2348,8 @@ impl Compositor {
                     self.mark_window_dirty(p);
                 }
                 self.mark_window_dirty(id);
+                // The taskbar's focus highlight tracks the active window.
+                self.mark_taskbar_dirty();
             }
 
             self.captured_window = Some(id);
@@ -2208,6 +2384,7 @@ impl Compositor {
                         let rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         self.wm.minimize_window(id);
                         self.mark_dirty_rect(rect);
+                        self.mark_taskbar_dirty();
                         self.dirty = true;
                         return;
                     }
@@ -2303,7 +2480,7 @@ impl Compositor {
                         let min_visible = 80i32;
                         let max_x = (screen_w - min_visible).max(0);
                         let nx = (start_win_x + dx).clamp(0, max_x);
-                        let ny = (start_win_y + dy).max(PANEL_HEIGHT as i32);
+                        let ny = (start_win_y + dy).max(0);
                         let new = Rect::new(nx - 4, ny - 4, w.width + 8, w.height + 12);
                         (old, new, nx, ny)
                     } else {
@@ -2403,9 +2580,6 @@ impl Compositor {
         if self.wm.window_at(x, y).is_some() {
             return;
         }
-        if self.is_on_panel(y) {
-            return;
-        }
         if self.is_on_dock(x, y) {
             return;
         }
@@ -2475,6 +2649,9 @@ impl Compositor {
         if let Some(r) = rect {
             self.mark_dirty_rect(r);
         }
+        // The closing window drops out of the taskbar (and a pinned launcher may
+        // take its place) — repaint the bar.
+        self.mark_taskbar_dirty();
 
         if self.wm.focused_id == Some(id) {
             // The window is no longer visible (set above), so refocus_topmost
@@ -2506,6 +2683,7 @@ impl Compositor {
         self.pending_close
             .retain(|pc| current.wrapping_sub(pc.deadline_tick) >= 0x8000_0000);
         if reaped {
+            self.mark_taskbar_dirty();
             self.dirty = true;
         }
     }
@@ -2708,10 +2886,6 @@ impl Compositor {
         self.dirty = true;
     }
 
-    fn is_on_panel(&self, y: i32) -> bool {
-        y >= 0 && y < PANEL_HEIGHT as i32
-    }
-
     fn is_on_dock(&self, x: i32, y: i32) -> bool {
         if let Some((dock_x, dock_y, dock_w, dock_h, _, _, _, _)) = self.dock_layout() {
             x >= dock_x
@@ -2727,9 +2901,9 @@ impl Compositor {
         let sw = self.fb.width();
         let sh = self.fb.height();
         let x = 0;
-        let y = PANEL_HEIGHT as i32;
+        let y = 0;
         let w = sw;
-        let h = sh.saturating_sub(PANEL_HEIGHT + DOCK_HEIGHT + 24);
+        let h = sh.saturating_sub(DOCK_HEIGHT + 12);
         (x, y, w, h)
     }
 
@@ -2762,6 +2936,7 @@ impl Compositor {
         {
             self.wm.focus_window(id);
             self.mark_window_dirty(id);
+            self.mark_taskbar_dirty();
         }
 
         let msg = OpenInTabMsg {
@@ -2882,20 +3057,40 @@ impl Compositor {
         if !validate_wallpaper_path(path) {
             return Err("Invalid wallpaper path");
         }
-        let data = fs::read_file(path).map_err(|_| "Image file not found")?;
-        if data.len() > 16 * 1024 * 1024 {
-            return Err("Image file too large");
-        }
         let img = if let Some(sidecar_path) = wallpaper_png_sidecar_path(path) {
-            if let Ok(sidecar_data) = fs::read_file(&sidecar_path) {
-                PngDecoder::decode(&sidecar_data).or_else(|_| JpgDecoder::decode(&data))
-            } else {
-                JpgDecoder::decode(&data)
+            match fs::read_file(&sidecar_path) {
+                Ok(sidecar_data) => {
+                    if sidecar_data.len() > 16 * 1024 * 1024 {
+                        return Err("Image file too large");
+                    }
+                    match PngDecoder::decode(&sidecar_data) {
+                        Ok(image) => image,
+                        Err(_) => {
+                            drop(sidecar_data);
+                            let data =
+                                fs::read_file(path).map_err(|_| "Image file not found")?;
+                            if data.len() > 16 * 1024 * 1024 {
+                                return Err("Image file too large");
+                            }
+                            JpgDecoder::decode(&data).map_err(|_| "Failed to decode image")?
+                        }
+                    }
+                }
+                Err(_) => {
+                    let data = fs::read_file(path).map_err(|_| "Image file not found")?;
+                    if data.len() > 16 * 1024 * 1024 {
+                        return Err("Image file too large");
+                    }
+                    JpgDecoder::decode(&data).map_err(|_| "Failed to decode image")?
+                }
             }
         } else {
-            JpgDecoder::decode(&data)
-        }
-        .map_err(|_| "Failed to decode image")?;
+            let data = fs::read_file(path).map_err(|_| "Image file not found")?;
+            if data.len() > 16 * 1024 * 1024 {
+                return Err("Image file too large");
+            }
+            JpgDecoder::decode(&data).map_err(|_| "Failed to decode image")?
+        };
         if img.width == 0 || img.height == 0 || img.width > 4096 || img.height > 4096 {
             return Err("Image dimensions unsupported");
         }
@@ -2987,52 +3182,43 @@ impl Compositor {
             };
 
             if let Some(path) = image_path {
-                let scratch_size = 24 * 1024 * 1024;
-                let scratch_region =
-                    shared_region_create(scratch_size).expect("Failed to create scratch heap");
-                let scratch_start = shared_region_map(
-                    scratch_region,
-                    0,
-                    SharedMemFlags::READ_WRITE,
-                )
-                .expect("Failed to map scratch heap");
-
-                ALLOCATOR.push_scratch(scratch_start as usize, scratch_size);
-
-                let result = self.load_and_decode_image(&path).and_then(|wallpaper| {
-                    let scaled = self.scale_wallpaper(&wallpaper, self.current_scaling_mode);
-
-                    let sw = self.fb.width();
-                    let sh = self.fb.height();
-                    let size = (sw * sh * 4) as usize;
-
-                    if self.wallpaper_cache_region.is_some() {
-                        let _ = shared_region_unmap(self.wallpaper_cache_region.unwrap());
-                        let _ = shared_region_destroy(self.wallpaper_cache_region.unwrap());
+                const WALLPAPER_SCRATCH_SIZE: usize = 48 * 1024 * 1024;
+                let result = match shared_region_create(WALLPAPER_SCRATCH_SIZE) {
+                    Ok(scratch_region) => {
+                        match shared_region_map(
+                            scratch_region,
+                            0,
+                            SharedMemFlags::READ_WRITE,
+                        ) {
+                            Ok(scratch_start) => {
+                                ALLOCATOR.push_scratch(
+                                    scratch_start as usize,
+                                    WALLPAPER_SCRATCH_SIZE,
+                                );
+                                let result = self.load_and_decode_image(&path).and_then(
+                                    |wallpaper| self.cache_scaled_wallpaper(&wallpaper),
+                                );
+                                ALLOCATOR.pop_scratch();
+                                let _ = shared_region_unmap(scratch_region);
+                                let _ = shared_region_destroy(scratch_region);
+                                result
+                            }
+                            Err(_) => {
+                                let _ = shared_region_destroy(scratch_region);
+                                Err("Failed to map wallpaper scratch memory")
+                            }
+                        }
                     }
+                    Err(_) => Err("Failed to create wallpaper scratch memory"),
+                };
 
-                    let region = shared_region_create(size)
-                        .expect("Failed to create wallpaper cache region");
-                    let ptr = shared_region_map(region, 0, SharedMemFlags::READ_WRITE)
-                        .expect("Failed to map wallpaper cache")
-                        as *mut u8;
-
-                    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
-                    scaled.blit_to(buf, sw, 0, 0);
-
-                    self.wallpaper_cache_region = Some(region);
-                    self.wallpaper_cache_ptr = ptr;
-                    self.wallpaper_cache_valid = true;
-                    Ok(())
-                });
-
-                if result.is_err() {
-                    self.revert_to_fallback_wallpaper();
+                match result {
+                    Ok(()) => log("ui_shell: wallpaper cache updated"),
+                    Err(_) => {
+                        log("ui_shell: wallpaper update failed; using fallback");
+                        self.revert_to_fallback_wallpaper();
+                    }
                 }
-
-                ALLOCATOR.pop_scratch();
-                let _ = shared_region_unmap(scratch_region);
-                let _ = shared_region_destroy(scratch_region);
             } else {
                 self.wallpaper_cache_valid = false;
             }
@@ -3046,15 +3232,49 @@ impl Compositor {
         }
     }
 
-    fn fill_image(width: u32, height: u32, color: Color) -> DecodedImage {
-        let mut pixels = alloc::vec![0u8; (width * height * 4) as usize];
+    fn cache_scaled_wallpaper(&mut self, wallpaper: &DecodedImage) -> Result<(), &'static str> {
+        let sw = self.fb.width();
+        let sh = self.fb.height();
+        let size = (sw as usize)
+            .checked_mul(sh as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("Wallpaper cache size overflow")?;
+        let region =
+            shared_region_create(size).map_err(|_| "Failed to create wallpaper cache")?;
+        let ptr = match shared_region_map(region, 0, SharedMemFlags::READ_WRITE) {
+            Ok(ptr) => ptr as *mut u8,
+            Err(_) => {
+                let _ = shared_region_destroy(region);
+                return Err("Failed to map wallpaper cache");
+            }
+        };
+
+        let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
+        self.scale_wallpaper_into(
+            buf,
+            sw,
+            sh,
+            wallpaper,
+            self.current_scaling_mode,
+        );
+
+        if let Some(old_region) = self.wallpaper_cache_region {
+            let _ = shared_region_unmap(old_region);
+            let _ = shared_region_destroy(old_region);
+        }
+        self.wallpaper_cache_region = Some(region);
+        self.wallpaper_cache_ptr = ptr;
+        self.wallpaper_cache_valid = true;
+        Ok(())
+    }
+
+    fn fill_rgba(pixels: &mut [u8], color: Color) {
         for chunk in pixels.chunks_exact_mut(4) {
             chunk[0] = color.r;
             chunk[1] = color.g;
             chunk[2] = color.b;
             chunk[3] = 255;
         }
-        DecodedImage::new(width, height, pixels)
     }
 
     fn sample_bilinear(img: &DecodedImage, src_x_fp: i32, src_y_fp: i32) -> Option<(u8, u8, u8, u8)> {
@@ -3100,7 +3320,9 @@ impl Compositor {
     }
 
     fn blit_scaled(
-        dest: &mut DecodedImage,
+        dest: &mut [u8],
+        dest_width: u32,
+        dest_height: u32,
         img: &DecodedImage,
         dst_x: i32,
         dst_y: i32,
@@ -3118,24 +3340,23 @@ impl Compositor {
                 let src_y_fp = src_y as i64 - (1 << 15);
                 let dx = dst_x + x as i32;
                 let dy = dst_y + y as i32;
-                if dx < 0 || dy < 0 || dx >= dest.width as i32 || dy >= dest.height as i32 {
+                if dx < 0 || dy < 0 || dx >= dest_width as i32 || dy >= dest_height as i32 {
                     continue;
                 }
                 if let Some((r, g, b, a)) =
                     Self::sample_bilinear(img, src_x_fp as i32, src_y_fp as i32)
                 {
-                    let off = (((dy as u32) * dest.width + dx as u32) * 4) as usize;
-                    dest.pixels[off] = r;
-                    dest.pixels[off + 1] = g;
-                    dest.pixels[off + 2] = b;
-                    dest.pixels[off + 3] = a;
+                    let off = (((dy as u32) * dest_width + dx as u32) * 4) as usize;
+                    dest[off] = r;
+                    dest[off + 1] = g;
+                    dest[off + 2] = b;
+                    dest[off + 3] = a;
                 }
             }
         }
     }
 
-    fn scale_fill(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
-        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+    fn scale_fill(&self, dest: &mut [u8], img: &DecodedImage, sw: u32, sh: u32) {
         let scale_w = (sw as u64 * 1024) / img.width as u64;
         let scale_h = (sh as u64 * 1024) / img.height as u64;
         let scale = scale_w.max(scale_h).max(1);
@@ -3143,12 +3364,10 @@ impl Compositor {
         let target_h = ((img.height as u64 * scale) / 1024) as u32;
         let dx = (sw as i32 - target_w as i32) / 2;
         let dy = (sh as i32 - target_h as i32) / 2;
-        Self::blit_scaled(&mut out, img, dx, dy, target_w.max(1), target_h.max(1));
-        out
+        Self::blit_scaled(dest, sw, sh, img, dx, dy, target_w.max(1), target_h.max(1));
     }
 
-    fn scale_fit(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
-        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+    fn scale_fit(&self, dest: &mut [u8], img: &DecodedImage, sw: u32, sh: u32) {
         let scale_w = (sw as u64 * 1024) / img.width as u64;
         let scale_h = (sh as u64 * 1024) / img.height as u64;
         let scale = scale_w.min(scale_h).max(1);
@@ -3156,120 +3375,228 @@ impl Compositor {
         let target_h = ((img.height as u64 * scale) / 1024) as u32;
         let dx = (sw as i32 - target_w as i32) / 2;
         let dy = (sh as i32 - target_h as i32) / 2;
-        Self::blit_scaled(&mut out, img, dx, dy, target_w.max(1), target_h.max(1));
-        out
+        Self::blit_scaled(dest, sw, sh, img, dx, dy, target_w.max(1), target_h.max(1));
     }
 
-    fn scale_stretch(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
-        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
-        Self::blit_scaled(&mut out, img, 0, 0, sw, sh);
-        out
+    fn scale_stretch(&self, dest: &mut [u8], img: &DecodedImage, sw: u32, sh: u32) {
+        Self::blit_scaled(dest, sw, sh, img, 0, 0, sw, sh);
     }
 
-    fn scale_center(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
-        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+    fn scale_center(&self, dest: &mut [u8], img: &DecodedImage, sw: u32, sh: u32) {
         let dx = (sw as i32 - img.width as i32) / 2;
         let dy = (sh as i32 - img.height as i32) / 2;
-        Self::blit_scaled(&mut out, img, dx, dy, img.width, img.height);
-        out
+        Self::blit_scaled(dest, sw, sh, img, dx, dy, img.width, img.height);
     }
 
-    fn scale_tile(&self, img: &DecodedImage, sw: u32, sh: u32) -> DecodedImage {
-        let mut out = Self::fill_image(sw, sh, self.desktop_bg);
+    fn scale_tile(&self, dest: &mut [u8], img: &DecodedImage, sw: u32, sh: u32) {
         for y in 0..sh {
             for x in 0..sw {
                 if let Some((r, g, b, a)) = img.get_pixel(x % img.width, y % img.height) {
                     let off = ((y * sw + x) * 4) as usize;
-                    out.pixels[off] = r;
-                    out.pixels[off + 1] = g;
-                    out.pixels[off + 2] = b;
-                    out.pixels[off + 3] = a;
+                    dest[off] = r;
+                    dest[off + 1] = g;
+                    dest[off + 2] = b;
+                    dest[off + 3] = a;
                 }
             }
         }
-        out
     }
 
-    fn scale_wallpaper(&self, img: &DecodedImage, mode: ScalingMode) -> DecodedImage {
-        let sw = self.fb.width();
-        let sh = self.fb.height();
+    fn scale_wallpaper_into(
+        &self,
+        dest: &mut [u8],
+        sw: u32,
+        sh: u32,
+        img: &DecodedImage,
+        mode: ScalingMode,
+    ) {
+        Self::fill_rgba(dest, self.desktop_bg);
         match mode {
-            ScalingMode::Fill => self.scale_fill(img, sw, sh),
-            ScalingMode::Fit => self.scale_fit(img, sw, sh),
-            ScalingMode::Stretch => self.scale_stretch(img, sw, sh),
-            ScalingMode::Center => self.scale_center(img, sw, sh),
-            ScalingMode::Tile => self.scale_tile(img, sw, sh),
+            ScalingMode::Fill => self.scale_fill(dest, img, sw, sh),
+            ScalingMode::Fit => self.scale_fit(dest, img, sw, sh),
+            ScalingMode::Stretch => self.scale_stretch(dest, img, sw, sh),
+            ScalingMode::Center => self.scale_center(dest, img, sw, sh),
+            ScalingMode::Tile => self.scale_tile(dest, img, sw, sh),
+        }
+    }
+
+    /// Build the current taskbar buttons. Each pinned app keeps a stable slot,
+    /// shown as its open window when running or as a launcher otherwise; every
+    /// other open window (minimised ones included — the whole point, so they can
+    /// always be restored) is appended after, ordered by id for a stable place.
+    fn taskbar_items(&self) -> Vec<TaskItem> {
+        let mut items = Vec::new();
+        let mut shown: Vec<WindowId> = Vec::new();
+
+        let window_item = |w: &Window, color: Color, monogram: String| TaskItem {
+            color,
+            monogram,
+            kind: TaskKind::Window {
+                window_id: w.id,
+                minimized: w.state == WindowState::Minimized,
+                focused: w.focused,
+            },
+        };
+
+        for app in &self.dock_apps {
+            let title = window_title_for(&app.executable);
+            if let Some(w) = self.wm.windows.iter().find(|w| w.visible && w.title == title) {
+                shown.push(w.id);
+                items.push(window_item(w, app.color, app.monogram.clone()));
+            } else {
+                items.push(TaskItem {
+                    color: app.color,
+                    monogram: app.monogram.clone(),
+                    kind: TaskKind::Launch {
+                        executable: app.executable.clone(),
+                    },
+                });
+            }
+        }
+
+        let mut win_ids: Vec<WindowId> = self
+            .wm
+            .windows
+            .iter()
+            .filter(|w| w.visible && !shown.contains(&w.id))
+            .map(|w| w.id)
+            .collect();
+        win_ids.sort_unstable();
+        for id in win_ids {
+            if let Some(w) = self.wm.windows.iter().find(|w| w.id == id) {
+                let (color, monogram) = taskbar_glyph_for(&w.title);
+                items.push(window_item(w, color, monogram));
+            }
+        }
+
+        items
+    }
+
+    /// Mark the taskbar strip dirty so it repaints after the open-window set,
+    /// focus or minimise state changes.
+    fn mark_taskbar_dirty(&mut self) {
+        if let Some((dx, dy, dw, dh, _, _, _, _)) = self.dock_layout() {
+            self.mark_dirty_rect(Rect::new(dx, dy, dw, dh));
+        }
+    }
+
+    fn refresh_clock(&mut self) {
+        let now = get_ticks();
+        let query_interval = if self.time_service_port.is_some() {
+            500
+        } else {
+            3_000
+        };
+        if now.wrapping_sub(self.last_clock_query_tick) >= query_interval
+            || (self.time_service_port.is_none() && self.last_clock_query_tick == 0)
+        {
+            self.last_clock_query_tick = now;
+            if self.time_service_port.is_none() {
+                self.time_service_port = libipc::protocol::lookup_service("timesync").ok();
+            }
+            if let Some(port) = self.time_service_port {
+                let request = TimeGetStateMsg {
+                    reply_port: self.event_port,
+                };
+                if send_message_async(port, MessageType::TimeGetState, &request.to_bytes()).is_err()
+                {
+                    self.time_service_port = None;
+                }
+            }
+        }
+
+        let minute = self
+            .clock_state
+            .filter(|state| state.synced)
+            .map(|state| state.local_unix_seconds(now).div_euclid(60))
+            .unwrap_or(-1);
+        if minute != self.last_clock_minute {
+            self.last_clock_minute = minute;
+            self.mark_taskbar_dirty();
         }
     }
 
     fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {
-        let (_, _, _, _, start_x, icon_y, icon_size, spacing) = self.dock_layout()?;
-        if y < icon_y || y >= icon_y + icon_size {
+        let (_, bar_y, _, bar_h, start_x, _, item_size, spacing) = self.dock_layout()?;
+        if y < bar_y || y >= bar_y + bar_h as i32 {
             return None;
         }
-        for i in 0..self.dock_apps.len() {
-            let ix = start_x + (i as i32 * (icon_size + spacing));
-            if x >= ix && x < ix + icon_size {
+        let count = self.taskbar_items().len();
+        for i in 0..count {
+            let ix = start_x + (i as i32 * (item_size + spacing));
+            if x >= ix && x < ix + item_size {
                 return Some(i);
             }
         }
         None
     }
 
-    fn handle_dock_click(&mut self, icon_index: usize) {
-        if icon_index >= self.dock_apps.len() {
-            return;
-        }
-        let executable = self.dock_apps[icon_index].executable.clone();
-        let title = window_title_for(&executable);
+    fn handle_dock_click(&mut self, index: usize) {
+        let items = self.taskbar_items();
+        let kind = match items.get(index) {
+            Some(item) => &item.kind,
+            None => return,
+        };
 
-        // If the app is already running, raise (and un-minimise) it instead of
-        // launching a second copy. Minimized windows keep `visible == true`, so
-        // they are matched here and restored by `focus_window`.
-        if let Some(id) = self
-            .wm
-            .windows
-            .iter()
-            .find(|w| w.visible && w.title == title)
-            .map(|w| w.id)
-        {
-            let prev = self.wm.focused_id;
-            self.wm.focus_window(id);
-            // Repaint the raised window's footprint (and the one that just lost
-            // focus) — focus_window only reorders/un-minimises, so the restored
-            // window would otherwise stay hidden until unrelated damage.
-            if let Some(p) = prev {
-                if p != id {
-                    self.mark_window_dirty(p);
-                }
+        match kind {
+            TaskKind::Launch { executable } => {
+                let exe = executable.clone();
+                self.spawn_app(&exe);
             }
-            self.mark_window_dirty(id);
-            return;
+            TaskKind::Window {
+                window_id,
+                minimized,
+                focused,
+            } => {
+                let id = *window_id;
+                if *focused && !*minimized {
+                    // Already the active window: a click on its taskbar button
+                    // minimises it, matching the Windows/Linux toggle.
+                    let rect = self
+                        .wm
+                        .get_window(id)
+                        .map(|w| Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25));
+                    self.wm.minimize_window(id);
+                    if let Some(r) = rect {
+                        self.mark_dirty_rect(r);
+                    }
+                } else {
+                    // Raise and un-minimise the window (focus_window does both).
+                    let prev = self.wm.focused_id;
+                    self.wm.focus_window(id);
+                    if let Some(p) = prev {
+                        if p != id {
+                            self.mark_window_dirty(p);
+                        }
+                    }
+                    self.mark_window_dirty(id);
+                }
+                self.mark_taskbar_dirty();
+                self.dirty = true;
+            }
         }
-
-        self.spawn_app(&executable);
     }
 
+    /// Full-width bottom taskbar. Returns
+    /// `(bar_x, bar_y, bar_w, bar_h, first_item_x, item_y, item_size, spacing)`.
+    /// Always present, so it never disappears when no apps are open.
     fn dock_layout(&self) -> Option<(i32, i32, u32, u32, i32, i32, i32, i32)> {
-        let count = self.dock_apps.len();
-        if count == 0 {
+        let width = self.fb.width();
+        let height = self.fb.height();
+        if width == 0 || height <= DOCK_HEIGHT {
             return None;
         }
 
-        let width = self.fb.width();
-        let height = self.fb.height();
-        let icon_size = atom_theme::shell::DOCK_ITEM_SIZE as i32; 
-        let spacing = atom_theme::spacing::XL as i32; 
-        let side_padding = atom_theme::spacing::XXXL as i32;
+        let item_size = atom_theme::shell::DOCK_ITEM_SIZE as i32;
+        let spacing = atom_theme::spacing::SM as i32;
+        let side_padding = atom_theme::spacing::MD as i32;
 
-        let total_icons_width = count as i32 * icon_size + (count as i32 - 1) * spacing;
-        let dock_width = (total_icons_width + side_padding * 2).max(140) as u32;
-        let dock_x = (width / 2).saturating_sub(dock_width / 2) as i32;
-        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12) as i32;
-        let start_x = dock_x + ((dock_width as i32 - total_icons_width) / 2);
-        let icon_y = dock_y + (DOCK_HEIGHT as i32 - icon_size) / 2;
+        let bar_x = 0;
+        let bar_y = height.saturating_sub(DOCK_HEIGHT) as i32;
+        let start_x = bar_x + side_padding;
+        let item_y = bar_y + (DOCK_HEIGHT as i32 - item_size) / 2;
 
-        Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
+        Some((bar_x, bar_y, width, DOCK_HEIGHT, start_x, item_y, item_size, spacing))
     }
 
     /// Ask the `app_launcher` service to start an application by path.
@@ -3345,8 +3672,10 @@ impl Compositor {
             Some(id) => id,
             None => return,
         };
-        self.pending_windows.push(PendingWindow { window_id });
+        self.pending_windows.push(PendingWindow { window_id, pid: 0 });
         self.mark_window_dirty(window_id);
+        // A new window means a new taskbar button — repaint the bar.
+        self.mark_taskbar_dirty();
     }
 
     fn spawn_fileman(&mut self) {
@@ -3379,23 +3708,40 @@ impl Compositor {
             rects
         };
 
-        // Composite every damaged region into the backbuffer. Each region only
-        // touches the wallpaper, icons and windows that actually intersect it,
-        // so a small animating window no longer drags the whole window stack
-        // into every frame.
+        // Footprints of the always-on-top overlays, so each region can stamp
+        // them before it is published.
+        let menu_rect = if self.context_menu.visible {
+            Some(self.context_menu_rect())
+        } else {
+            None
+        };
+        // Cursor glyph is 11x17 with a 1px drop shadow; pad to 13x19.
+        let cursor_rect = Rect::new(self.cursor.x, self.cursor.y, 13, 19);
+
+        // Composite and publish each damaged region one at a time. The drawing
+        // primitives are NOT clipped to the region, so compositing a window
+        // over-paints its whole footprint into the backbuffer — including any
+        // area belonging to another damage rect. If every region were
+        // composited first and blitted afterwards, a later region's over-draw
+        // would clobber an earlier region's backbuffer pixels (wallpaper not
+        // restored, windows above it not redrawn) and that corruption would be
+        // published, making windows pop up where they are not. Publishing each
+        // region immediately after compositing it pushes the correct pixels to
+        // the visible framebuffer before any later region can touch them.
         for rect in &rects {
             self.composite_region(*rect);
-        }
 
-        // Overlays that always sit on top, drawn once after all regions so they
-        // are never clipped away by a region that excludes them.
-        if self.context_menu.visible {
-            self.draw_context_menu();
-        }
-        self.draw_cursor();
+            // Stamp the overlays that overlap this region on top, so they are
+            // never clipped away by a region that excludes them.
+            if let Some(menu_rect) = menu_rect {
+                if menu_rect.intersects(rect) {
+                    self.draw_context_menu();
+                }
+            }
+            if cursor_rect.intersects(rect) {
+                self.draw_cursor();
+            }
 
-        // Publish each damaged region to the visible framebuffer.
-        for rect in &rects {
             self.backbuffer_fb.blit_rect(
                 &self.fb,
                 rect.x as u32,
@@ -3407,9 +3753,11 @@ impl Compositor {
     }
 
     /// Composite a single damage rectangle into the backbuffer: wallpaper (or
-    /// background), desktop icons, windows, the top panel and the dock — each
-    /// clipped to `draw_rect`. Overlays (context menu, cursor) and the blit to
-    /// the visible framebuffer are handled once by `draw_all`.
+    /// background), desktop icons, windows, and the taskbar. Only the wallpaper
+    /// copy is clipped to `draw_rect`; windows and the taskbar draw their full
+    /// footprint, so `draw_all` composites and blits one region at a
+    /// time to keep that over-draw from corrupting other regions. Overlays
+    /// (context menu, cursor) are stamped per region by `draw_all`.
     fn composite_region(&mut self, draw_rect: Rect) {
         if self.wallpaper_cache_valid && !self.wallpaper_cache_ptr.is_null() {
             let sw = self.fb.width();
@@ -3460,66 +3808,12 @@ impl Compositor {
             }
         }
 
-        // The top bar is drawn after the windows so it always stays on top —
-        // windows can no longer paint over it.
-        let panel_rect = Rect::new(0, 0, self.fb.width(), PANEL_HEIGHT);
-        if panel_rect.intersects(&draw_rect) {
-            self.draw_panel();
-        }
-
         if let Some((dx, dy, dw, dh, _, _, _, _)) = self.dock_layout() {
             let dock_rect = Rect::new(dx, dy, dw, dh);
             if dock_rect.intersects(&draw_rect) {
                 self.draw_dock();
             }
         }
-    }
-
-    fn draw_panel(&self) {
-        let width = self.backbuffer_fb.width();
-
-        self.backbuffer_fb.fill_rect(0, 0, width, PANEL_HEIGHT, theme::PANEL_BG);
-        self.backbuffer_fb.fill_rect(0, 0, width, 1, theme::PANEL_BG_ACCENT);
-        self.backbuffer_fb
-            .fill_rect(0, PANEL_HEIGHT - 1, width, 1, theme::PANEL_BORDER);
-
-        let brand_y = (PANEL_HEIGHT - 8) / 2;
-        self.backbuffer_fb.fill_rect_rounded_aa(
-            atom_theme::spacing::MD as u32,
-            brand_y - 1,
-            10,
-            10,
-            atom_theme::radius::XS as u32,
-            theme::ACCENT,
-        );
-        self.backbuffer_fb.draw_string(
-            atom_theme::spacing::MD as u32 + 14,
-            brand_y,
-            "Atom",
-            theme::PANEL_TEXT,
-            theme::PANEL_BG,
-        );
-
-        if let Some(focused_id) = self.wm.focused_id {
-            if let Some(w) = self.wm.get_window(focused_id) {
-                let title_len = w.title.len() as u32 * 8;
-                let title_x = (width / 2).saturating_sub(title_len / 2);
-                self.backbuffer_fb
-                    .draw_string(title_x, brand_y, &w.title, theme::PANEL_TEXT_DIM, theme::PANEL_BG);
-            }
-        }
-
-        let clock_x = width.saturating_sub(96);
-        self.backbuffer_fb.fill_rect_rounded_aa(
-            clock_x - atom_theme::spacing::LG as u32,
-            brand_y,
-            8,
-            8,
-            atom_theme::radius::XS as u32,
-            theme::BTN_MAXIMIZE,
-        );
-        self.backbuffer_fb
-            .draw_string(clock_x, brand_y, "12:00 PM", theme::PANEL_TEXT, theme::PANEL_BG);
     }
 
     fn draw_desktop_icon(&self, icon: &DesktopIcon) {
@@ -3772,43 +4066,61 @@ impl Compositor {
     }
 
     fn draw_dock(&self) {
-        let (dock_x_i32, dock_y_i32, dock_width, dock_height, start_x_i32, icon_y_i32, icon_size_i32, spacing_i32) =
+        let (bar_x_i32, bar_y_i32, bar_w, bar_h, start_x_i32, item_y_i32, item_size_i32, spacing_i32) =
             match self.dock_layout() {
                 Some(v) => v,
                 None => return,
             };
 
-        let dock_x = dock_x_i32 as u32;
-        let dock_y = dock_y_i32 as u32;
+        let bar_x = bar_x_i32 as u32;
+        let bar_y = bar_y_i32 as u32;
         let start_x = start_x_i32 as u32;
-        let icon_y = icon_y_i32 as u32;
-        let icon_size = icon_size_i32 as u32;
+        let item_y = item_y_i32 as u32;
+        let item_size = item_size_i32 as u32;
         let spacing = spacing_i32 as u32;
 
-        let dock_r = atom_theme::radius::LG as u32; 
-        self.backbuffer_fb
-            .fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, dock_r, theme::SHADOW, 80);
-
-        self.backbuffer_fb
-            .fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BG);
-        self.backbuffer_fb
-            .draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BORDER);
-        self.backbuffer_fb
-            .fill_rect(dock_x + dock_r, dock_y, dock_width - dock_r * 2, 1, theme::DOCK_BORDER);
+        // Full-width bar flush with the bottom edge (Windows/Linux taskbar),
+        // with a thin top border separating it from the desktop.
+        self.backbuffer_fb.fill_rect(bar_x, bar_y, bar_w, bar_h, theme::DOCK_BG);
+        self.backbuffer_fb.fill_rect(bar_x, bar_y, bar_w, 1, theme::DOCK_BORDER);
 
         let tile_r = atom_theme::shell::DOCK_ITEM_RADIUS as u32;
-        for (i, app) in self.dock_apps.iter().enumerate() {
-            let ix = start_x + (i as u32 * (icon_size + spacing));
+        let items = self.taskbar_items();
+        for (i, item) in items.iter().enumerate() {
+            let ix = start_x + (i as u32 * (item_size + spacing));
 
-            // Rounded, colour-filled app tile — reads like a real app icon and
-            // gives each entry a clear, aligned click target.
-            self.backbuffer_fb
-                .fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, tile_r, app.color);
+            let (minimized, focused, is_window) = match item.kind {
+                TaskKind::Window { minimized, focused, .. } => (minimized, focused, true),
+                TaskKind::Launch { .. } => (false, false, false),
+            };
+
+            // Subtle highlight panel behind the active window's tile.
+            if focused {
+                self.backbuffer_fb.fill_rect_rounded_alpha(
+                    ix.saturating_sub(4),
+                    item_y.saturating_sub(3),
+                    item_size + 8,
+                    item_size + 6,
+                    tile_r + 2,
+                    theme::DOCK_BORDER,
+                    150,
+                );
+            }
+
+            // The app tile. Minimised windows are dimmed so they read as hidden
+            // but still clearly restorable.
+            if minimized {
+                self.backbuffer_fb
+                    .fill_rect_rounded_alpha(ix, item_y, item_size, item_size, tile_r, item.color, 120);
+            } else {
+                self.backbuffer_fb
+                    .fill_rect_rounded_aa(ix, item_y, item_size, item_size, tile_r, item.color);
+            }
 
             // Pick a glyph colour that stays legible on the tile's fill.
-            let lum = (app.color.r as u32 * 299
-                + app.color.g as u32 * 587
-                + app.color.b as u32 * 114)
+            let lum = (item.color.r as u32 * 299
+                + item.color.g as u32 * 587
+                + item.color.b as u32 * 114)
                 / 1000;
             let glyph = if lum > 150 {
                 atom_theme::colors::ATOM_COLOR_BG
@@ -3816,25 +4128,46 @@ impl Compositor {
                 Color::WHITE
             };
 
-            let label_len = app.monogram.len() as u32 * 8;
-            let lx = ix + (icon_size - label_len) / 2;
-            let ly = icon_y + (icon_size - 8) / 2;
+            let label_len = item.monogram.len() as u32 * 8;
+            let lx = ix + (item_size - label_len) / 2;
+            let ly = item_y + (item_size - 8) / 2;
             self.backbuffer_fb
-                .draw_string(lx, ly, &app.monogram, glyph, app.color);
+                .draw_string(lx, ly, &item.monogram, glyph, item.color);
 
-            let running_title = window_title_for(&app.executable);
-            if self
-                .wm
-                .windows
-                .iter()
-                .any(|w| w.visible && w.title == running_title)
-            {
-                let dot_x = ix + icon_size / 2 - 2;
-                let dot_y = icon_y + icon_size + 3;
-                self.backbuffer_fb
-                    .fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
+            // Running indicator under window tiles: a wide accent underline for
+            // the focused window, a small dot for the others. Launchers (apps
+            // that are not running) get nothing.
+            if is_window {
+                let ind_y = item_y + item_size + 3;
+                if focused {
+                    self.backbuffer_fb
+                        .fill_rect_rounded_aa(ix, ind_y, item_size, 3, 1, theme::ACCENT);
+                } else {
+                    let dot_x = ix + item_size / 2 - 2;
+                    self.backbuffer_fb
+                        .fill_rect_rounded_aa(dot_x, ind_y, 4, 4, 2, theme::ACCENT);
+                }
             }
         }
+
+        // Internet-synchronized clock, right-aligned and vertically centered
+        // in the taskbar. The shell advances the last service sample with the
+        // monotonic kernel tick, so drawing the clock never requires network IO.
+        let (clock_buf, clock_len) = format_taskbar_clock(self.clock_state, get_ticks());
+        let clock = core::str::from_utf8(&clock_buf[..clock_len]).unwrap_or("--:--");
+        let clock_w = clock_len as u32 * 8;
+        let clock_x = bar_w.saturating_sub(atom_theme::spacing::LG as u32 + clock_w);
+        let clock_y = bar_y + (bar_h.saturating_sub(8)) / 2;
+        let separator_x = clock_x.saturating_sub(atom_theme::spacing::LG as u32);
+        self.backbuffer_fb.fill_rect(
+            separator_x,
+            bar_y + atom_theme::spacing::MD as u32,
+            1,
+            bar_h.saturating_sub(atom_theme::spacing::MD as u32 * 2),
+            theme::DOCK_BORDER,
+        );
+        self.backbuffer_fb
+            .draw_string(clock_x, clock_y, clock, theme::PANEL_TEXT, theme::DOCK_BG);
     }
 
     fn draw_context_menu(&self) {

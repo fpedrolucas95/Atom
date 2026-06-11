@@ -9,6 +9,7 @@
 //   SYSTEM SETTINGS
 //     Network             – connection status + IP/DNS info + DNS preset buttons
 //     Display Resolution  – scrollable video-mode list
+//     Date and Time       – internet sync, locale, time zone, and clock format
 //     About System        – OS / hardware / network summary
 //
 // Performance notes
@@ -48,6 +49,7 @@ use libipc::messages::{
     WallpaperAppliedMsg, WallpaperFailedMsg,
     ScalingMode, ApplyWallpaperMsg, WallpaperSourceType,
     NetGetConfigMsg, NetGetConfigReplyMsg, NetConfigureMsg,
+    TimeGetStateMsg, TimeSetConfigMsg, TimeStateReplyMsg, TIME_LOCALES, TIME_ZONES,
 };
 use libipc::protocol::{get_payload, send_message};
 
@@ -113,10 +115,6 @@ mod theme {
     pub const BTN_PRIMARY:  Color = Color::new(0x4C, 0x8D, 0xFF);
     pub const BTN_GHOST:    Color = Color::new(0x1E, 0x26, 0x3C);
     pub const BTN_TEXT:     Color = Color::new(0xFF, 0xFF, 0xFF);
-    pub const INFO_KEY:     Color = Color::new(0x70, 0x80, 0xA8);
-    pub const INFO_VAL:     Color = Color::new(0xD4, 0xDC, 0xF0);
-    pub const NET_OK:       Color = Color::new(0x22, 0xC5, 0x5E);
-    pub const NET_FAIL:     Color = Color::new(0xF5, 0x9E, 0x0B);
     pub const CARD_BG:      Color = Color::new(0x10, 0x15, 0x20);
 }
 
@@ -164,12 +162,6 @@ const BTN_H:  u32 = 28;
 const BTN_W:  u32 = 90;
 const RBTN_W: u32 = 128;
 
-// Info card key column — wide enough for "Architecture" (12 × 8 px = 96 px) + gap
-const INFO_KW: u32 = 112;
-
-// About page icon size
-const ICON_R: u32 = 28;  // outer icon radius
-
 // Refresh interval: 500 ticks ≈ 5 s (get_ticks returns centiseconds)
 const REFRESH_TICKS: u64 = 500;
 
@@ -179,7 +171,7 @@ const DEF_H: u16 = 768;
 // ── Data types ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Page { DesktopBg, Network, DisplayRes, AboutSys }
+enum Page { DesktopBg, Network, DisplayRes, DateTime, AboutSys }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WpMode { Color, Image }
@@ -434,6 +426,9 @@ struct App {
     // Network + About data
     net:          NetState,
     sinfo:        SysInfo,
+    time:         Option<TimeStateReplyMsg>,
+    time_port:    Option<PortId>,
+    last_time_lookup: u64,
     last_refresh: u64,   // last get_ticks() value when data was refreshed
     deferred_done: bool, // slow init completed
 }
@@ -450,6 +445,7 @@ impl App {
             modes, mcnt, sel, scroll: 0, sbdrag: false, sboff: 0,
             wp: WpState::new(), wpscr: 0,
             net: NetState::new(), sinfo: SysInfo::empty(),
+            time: None, time_port: None, last_time_lookup: 0,
             last_refresh: 0, deferred_done: false,
         };
         a.clamp_scroll();
@@ -462,6 +458,7 @@ impl App {
         self.sinfo.collect_static();
         self.sinfo.refresh_uptime();
         self.net.refresh();
+        self.request_time_state();
         self.wp.discover();
         self.last_refresh = get_ticks();
         self.deferred_done = true;
@@ -484,6 +481,9 @@ impl App {
                 self.net.refresh();
                 self.dirty = true;
             }
+            Page::DateTime => {
+                self.request_time_state();
+            }
             _ => {}
         }
         self.last_refresh = now;
@@ -497,15 +497,16 @@ impl App {
 
     // ── Sidebar hit-test ──────────────────────────────────────────────────────
 
-    fn nav_items(&self) -> [(Page, u32); 4] {
+    fn nav_items(&self) -> [(Page, u32); 5] {
         let cat  = CH + 10;
         let igap = 4;
         let y0 = SB_PAD + cat;                        // Desktop Bg
         let y1 = y0 + ITEM_H + igap + 14 + cat;       // Network
         let y2 = y1 + ITEM_H + igap;                  // Display Res
-        let y3 = y2 + ITEM_H + igap;                  // About Sys
+        let y3 = y2 + ITEM_H + igap;                  // Date and Time
+        let y4 = y3 + ITEM_H + igap;                  // About Sys
         [(Page::DesktopBg, y0), (Page::Network, y1),
-         (Page::DisplayRes, y2), (Page::AboutSys, y3)]
+         (Page::DisplayRes, y2), (Page::DateTime, y3), (Page::AboutSys, y4)]
     }
 
     fn nav_hit(&self, mx: i32, my: i32) -> Option<Page> {
@@ -518,15 +519,15 @@ impl App {
 
     // ── Desktop Background layout helpers ─────────────────────────────────────
 
-    fn wp_toggle_y(&self) -> u32 { PTITLE_H + 8 }
-    fn wp_body_y(&self)   -> u32 { self.wp_toggle_y() + MTOG_H + 12 }
+    fn wp_toggle_y(&self) -> u32 { PTITLE_H + 20 }
+    fn wp_body_y(&self)   -> u32 { self.wp_toggle_y() + MTOG_H + 16 }
 
     fn wp_swatch_row_y(&self, row: u32) -> u32 {
         self.wp_body_y() + SEC_LBL_H + row * (CSZ + CGAP)
     }
     fn swatch_rect(&self, i: usize) -> (u32, u32) {
         let col = (i % 4) as u32; let row = (i / 4) as u32;
-        (self.cx() + PAD + col * (CSZ + CGAP), self.wp_swatch_row_y(row))
+        (self.cx() + PAD + 10 + col * (CSZ + CGAP), self.wp_swatch_row_y(row))
     }
 
     fn wp_scale_y(&self)      -> u32 { self.wp_body_y() }
@@ -536,11 +537,11 @@ impl App {
         self.wp_tiles_label_y() + SEC_LBL_H + row * (TH + TG)
     }
     fn sbtn_rect(&self, i: usize) -> (u32, u32) {
-        (self.cx() + PAD + i as u32 * (SBTN_W + SBTN_G), self.wp_sbtn_y())
+        (self.cx() + PAD + 10 + i as u32 * (SBTN_W + SBTN_G), self.wp_sbtn_y())
     }
     fn tile_rect(&self, vis: usize) -> (u32, u32) {
         let col = (vis % TCOLS) as u32; let row = (vis / TCOLS) as u32;
-        (self.cx() + PAD + col * (TW + TG), self.wp_tile_row_y(row))
+        (self.cx() + PAD + 10 + col * (TW + TG), self.wp_tile_row_y(row))
     }
 
     // ── Resolution page helpers ───────────────────────────────────────────────
@@ -549,7 +550,7 @@ impl App {
     fn res_geom(&self) -> (u32, u32, u32, u32) {
         let top = self.res_list_top();
         let h   = VIS_ROWS as u32 * ROW_H;
-        let w   = self.cw().saturating_sub(PAD * 2 + SBW + 4);
+        let w   = self.cw().saturating_sub(PAD * 2 + SBW + 14);
         let sbx = self.cx() + self.cw().saturating_sub(PAD + SBW);
         (top, h, w, sbx)
     }
@@ -591,6 +592,73 @@ impl App {
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
+
+    fn request_time_state(&mut self) {
+        if self.time_port.is_none() {
+            let now = get_ticks();
+            if self.last_time_lookup != 0
+                && now.wrapping_sub(self.last_time_lookup) < 3_000
+            {
+                return;
+            }
+            self.last_time_lookup = now;
+            self.time_port = libipc::protocol::lookup_service("timesync").ok();
+        }
+        let Some(port) = self.time_port else {
+            return;
+        };
+        let request = TimeGetStateMsg {
+            reply_port: self.lport,
+        };
+        if send_message(port, MessageType::TimeGetState, &request.to_bytes()).is_err() {
+            self.time_port = None;
+            self.last_time_lookup = get_ticks();
+        }
+    }
+
+    fn update_time_config(&mut self, automatic: bool, format_24h: bool, locale_id: u8,
+                          timezone_id: u8) {
+        let Some(port) = self.time_port.or_else(|| {
+            let found = libipc::protocol::lookup_service("timesync").ok();
+            self.time_port = found;
+            found
+        }) else {
+            self.status.set(StatusKind::Warn, b"Date and time service unavailable.");
+            self.dirty = true;
+            return;
+        };
+        let request = TimeSetConfigMsg {
+            reply_port: self.lport,
+            automatic,
+            format_24h,
+            locale_id,
+            timezone_id,
+        };
+        if send_message(port, MessageType::TimeSetConfig, &request.to_bytes()).is_ok() {
+            self.status.set(StatusKind::Ok, b"Date and time preferences saved.");
+        } else {
+            self.time_port = None;
+            self.status.set(StatusKind::Warn, b"Failed to update date and time.");
+        }
+        self.dirty = true;
+    }
+
+    fn sync_time_now(&mut self) {
+        let Some(port) = self.time_port else {
+            self.request_time_state();
+            return;
+        };
+        let request = TimeGetStateMsg {
+            reply_port: self.lport,
+        };
+        if send_message(port, MessageType::TimeSyncNow, &request.to_bytes()).is_ok() {
+            self.status.set(StatusKind::Ok, b"Synchronizing with the internet...");
+        } else {
+            self.time_port = None;
+            self.status.set(StatusKind::Warn, b"Could not start synchronization.");
+        }
+        self.dirty = true;
+    }
 
     fn apply_resolution(&mut self) {
         if self.mcnt == 0 { return; }
@@ -693,7 +761,8 @@ impl App {
         self.draw_cat_label(s, cat2_y, "SYSTEM SETTINGS");
         self.draw_nav_item(s, items[1].1, "Network",            items[1].0 == self.page);
         self.draw_nav_item(s, items[2].1, "Display Resolution", items[2].0 == self.page);
-        self.draw_nav_item(s, items[3].1, "About System",       items[3].0 == self.page);
+        self.draw_nav_item(s, items[3].1, "Date and Time",      items[3].0 == self.page);
+        self.draw_nav_item(s, items[4].1, "About System",       items[4].0 == self.page);
     }
 
     fn draw_cat_label(&self, s: &SharedSurface, y: u32, label: &str) {
@@ -719,6 +788,7 @@ impl App {
             Page::DesktopBg  => self.draw_desktop_bg(s),
             Page::Network    => self.draw_network(s),
             Page::DisplayRes => self.draw_display_res(s),
+            Page::DateTime   => self.draw_date_time(s),
             Page::AboutSys   => self.draw_about(s),
         }
     }
@@ -733,8 +803,14 @@ impl App {
         s.fill_rect(cx + PAD, PTITLE_H - 2, lw, 2, theme::ACCENT_DIM);
     }
 
-    fn draw_sec_label(&self, s: &SharedSurface, y: u32, label: &str) {
-        s.draw_string(self.cx() + PAD, y + (SEC_LBL_H - CH) / 2, label, theme::TEXT_SEC, theme::BG);
+    fn draw_card_label(&self, s: &SharedSurface, y: u32, label: &str) {
+        s.draw_string(
+            self.cx() + PAD + 10,
+            y + (SEC_LBL_H - CH) / 2,
+            label,
+            theme::TEXT_SEC,
+            theme::CARD_BG,
+        );
     }
 
     // Draw a filled card background with a subtle border.
@@ -749,7 +825,7 @@ impl App {
 
     fn draw_wp_toggle(&self, s: &SharedSurface) {
         let y  = self.wp_toggle_y();
-        let x0 = self.cx() + PAD;
+        let x0 = self.cx() + PAD + 10;
         let tw = MTOG_W * 2 + MTOG_G + 4;
         s.fill_rect_rounded_aa(x0, y, tw, MTOG_H, MTOG_H / 2, theme::SURFACE);
         s.draw_rect_rounded_aa(x0, y, tw, MTOG_H, MTOG_H / 2, theme::BORDER);
@@ -770,6 +846,7 @@ impl App {
 
     fn draw_desktop_bg(&self, s: &SharedSurface) {
         self.draw_page_title(s, "Desktop Background");
+        self.draw_card(s, PTITLE_H + 10, MTOG_H + 20);
         self.draw_wp_toggle(s);
         match self.wp.mode {
             WpMode::Color => self.draw_wp_color_section(s),
@@ -783,7 +860,10 @@ impl App {
     }
 
     fn draw_wp_color_section(&self, s: &SharedSurface) {
-        self.draw_sec_label(s, self.wp_body_y(), "Background Color");
+        let card_y = self.wp_body_y();
+        let card_h = SEC_LBL_H + 4 * (CSZ + CGAP) + 4;
+        self.draw_card(s, card_y, card_h);
+        self.draw_card_label(s, card_y, "Background Color");
         for i in 0..16 {
             let (sx, sy) = self.swatch_rect(i);
             let c = self.wp.swatches[i];
@@ -801,14 +881,15 @@ impl App {
         let row_labels = ["Dark", "Deep", "Mid", "Light"];
         for (r, lbl) in row_labels.iter().enumerate() {
             let ry = self.wp_swatch_row_y(r as u32) + (CSZ - CH) / 2;
-            let lx = self.cx() + PAD + 4 * (CSZ + CGAP) + 10;
-            s.draw_string(lx, ry, lbl, theme::TEXT_MUTED, theme::BG);
+            let lx = self.cx() + PAD + 10 + 4 * (CSZ + CGAP) + 10;
+            s.draw_string(lx, ry, lbl, theme::TEXT_MUTED, theme::CARD_BG);
         }
     }
 
     fn draw_wp_image_section(&self, s: &SharedSurface) {
-        let cx = self.cx();
-        self.draw_sec_label(s, self.wp_scale_y(), "Image Scaling");
+        let scale_card_y = self.wp_scale_y();
+        self.draw_card(s, scale_card_y, SEC_LBL_H + SBTN_H + 10);
+        self.draw_card_label(s, scale_card_y, "Image Scaling");
         let modes = [ScalingMode::Fill, ScalingMode::Fit, ScalingMode::Stretch,
                      ScalingMode::Center, ScalingMode::Tile];
         for (i, mode) in modes.iter().enumerate() {
@@ -822,7 +903,10 @@ impl App {
             let lx = bx + (SBTN_W.saturating_sub(lbl.len() as u32 * CW)) / 2;
             s.draw_string(lx, by + (SBTN_H - CH) / 2, lbl, theme::TEXT, bg);
         }
-        self.draw_sec_label(s, self.wp_tiles_label_y(), "Wallpaper Images");
+        let tiles_card_y = self.wp_tiles_label_y();
+        let tiles_card_h = SEC_LBL_H + 2 * (TH + TG) + 2;
+        self.draw_card(s, tiles_card_y, tiles_card_h);
+        self.draw_card_label(s, tiles_card_y, "Wallpaper Images");
         let start = self.wpscr;
         let vis   = 2 * TCOLS;
         let end   = (start + vis).min(self.wp.images.len());
@@ -858,85 +942,57 @@ impl App {
             s.draw_string(tx+4, ty+TH-CH-2, lbl, theme::TEXT_SEC, bg);
         }
         if self.wp.loading {
-            s.draw_string(cx + PAD, self.wp_tiles_label_y() + SEC_LBL_H + 4,
-                          "Loading...", theme::TEXT_MUTED, theme::BG);
+            s.draw_string(self.cx() + PAD + 10, self.wp_tiles_label_y() + SEC_LBL_H + 4,
+                          "Loading...", theme::TEXT_MUTED, theme::CARD_BG);
         } else if self.wp.images.is_empty() {
-            s.draw_string(cx + PAD, self.wp_tiles_label_y() + SEC_LBL_H + 4,
-                          "No images in /system/wallpapers/", theme::TEXT_MUTED, theme::BG);
+            s.draw_string(self.cx() + PAD + 10, self.wp_tiles_label_y() + SEC_LBL_H + 4,
+                          "No images in /system/wallpapers/", theme::TEXT_MUTED, theme::CARD_BG);
         }
     }
 
     // ── Network page ──────────────────────────────────────────────────────────
     //
-    // Layout:
-    //   Page title
-    //   Status indicator (dot + "Connected" / "No connection")
-    //   Card 1 – Connection: IP / Subnet Mask / Gateway
-    //   Card 2 – DNS: current server + preset buttons [Auto] [8.8.8.8] [1.1.1.1]
-    //   Card 3 – Hardware: Interface / Type / MAC / Link
-    //   [Refresh] button (bottom-right)
+    // Uses the same stacked cards and right-aligned values as Date and Time.
     //
     // net_dns_btn_geom() centralises the DNS button positions so draw and click
     // share exactly the same geometry.
 
     fn net_dns_btn_geom(&self) -> (u32, u32, u32, u32, u32) {
-        let st_y    = PTITLE_H + 10;
-        let row     = CH + 10;
-        let card1_h = 4 + row * 3 + 4;   // 3 rows: IP, Mask, GW
-        let card2_y = st_y + CH + 16 + card1_h + 12;
-        let dns_kv_y = card2_y + 6;
-        let btn_y    = dns_kv_y + row + 8;
+        let row_h    = 36;
+        let card1_y  = PTITLE_H + 10;
+        let card2_y  = card1_y + row_h * 4 + 12;
+        let btn_y    = card2_y + row_h + 6;
         let kx       = self.cx() + PAD + 10;
         (kx, btn_y, 90, 24, 8) // (kx, btn_y, btn_w, btn_h, btn_gap)
     }
 
     fn draw_network(&self, s: &SharedSurface) {
-        let cx = self.cx();
-
         self.draw_page_title(s, "Network");
-
-        // ── Status indicator ─────────────────────────────────────────────────
-        let st_y  = PTITLE_H + 10;
-        let dot_x = cx + PAD;
-        let dot_col = if self.net.connected { theme::NET_OK } else { theme::NET_FAIL };
-        s.fill_rect_rounded_aa(dot_x, st_y, 8, 8, 4, dot_col);
-        let st_lbl = if self.net.connected { "Connected" } else { "No connection" };
-        s.draw_string(dot_x + 12, st_y, st_lbl, theme::TEXT, theme::BG);
-
-        if !self.deferred_done {
-            s.draw_string(cx + PAD, st_y + CH + 8, "Loading...", theme::TEXT_MUTED, theme::BG);
-            return;
-        }
-
-        let row = CH + 10;
-        let kx  = cx + PAD + 10;
-        let vx  = kx + INFO_KW + 8;
-
-        let kv = |s: &SharedSurface, y: u32, k: &str, v: &str| {
-            s.draw_string(kx, y, k, theme::INFO_KEY,  theme::CARD_BG);
-            s.draw_string(vx, y, v, theme::INFO_VAL, theme::CARD_BG);
-        };
+        let row_h = 36u32;
 
         // ── Card 1 – Connection ──────────────────────────────────────────────
-        let card1_y = st_y + CH + 16;
-        let card1_h = 4 + row * 3 + 4;
+        let card1_y = PTITLE_H + 10;
+        let card1_h = row_h * 4;
         self.draw_card(s, card1_y, card1_h);
-        let mut ry = card1_y + 6;
-        kv(s, ry, "IP Address",  self.net.ip_str());  ry += row;
-        kv(s, ry, "Subnet Mask", self.net.nm_str());  ry += row;
-        kv(s, ry, "Gateway",     self.net.gw_str());
+        self.draw_time_row(
+            s, card1_y, row_h, "Connection",
+            if !self.deferred_done { "Loading..." } else if self.net.connected { "Connected" } else { "No connection" },
+            false,
+        );
+        self.draw_time_row(s, card1_y + row_h, row_h, "IP Address", self.net.ip_str(), false);
+        self.draw_time_row(s, card1_y + row_h * 2, row_h, "Subnet Mask", self.net.nm_str(), false);
+        self.draw_time_row(s, card1_y + row_h * 3, row_h, "Gateway", self.net.gw_str(), false);
 
         // ── Card 2 – DNS ─────────────────────────────────────────────────────
         let card2_y = card1_y + card1_h + 12;
         let (_, dns_btn_y, dns_btn_w, dns_btn_h, dns_btn_g) = self.net_dns_btn_geom();
-        let card2_h = 4 + row + 8 + dns_btn_h + 4;
+        let card2_h = row_h * 2;
         self.draw_card(s, card2_y, card2_h);
-
-        let dns_kv_y = card2_y + 6;
-        kv(s, dns_kv_y, "DNS Server", self.net.dns_str());
+        self.draw_time_row(s, card2_y, row_h, "DNS Server", self.net.dns_str(), false);
 
         let presets    = ["Auto", "8.8.8.8", "1.1.1.1"];
         let preset_dns = [self.net.auto_dns, 0x0808_0808u32, 0x0101_0101u32];
+        let kx = self.cx() + PAD + 10;
         for (i, lbl) in presets.iter().enumerate() {
             let bx = kx + i as u32 * (dns_btn_w + dns_btn_g);
             let active = preset_dns[i] == self.net.dns_raw && self.net.dns_raw != 0;
@@ -950,13 +1006,16 @@ impl App {
 
         // ── Card 3 – Hardware ────────────────────────────────────────────────
         let card3_y = card2_y + card2_h + 12;
-        let card3_h = 4 + row * 4 + 4;
+        let card3_h = row_h * 4;
         self.draw_card(s, card3_y, card3_h);
-        ry = card3_y + 6;
-        kv(s, ry, "Interface", "eth0");                                                 ry += row;
-        kv(s, ry, "Type",      "Ethernet");                                             ry += row;
-        kv(s, ry, "MAC",       self.net.mac_str());                                     ry += row;
-        kv(s, ry, "Link",      if self.net.connected { "Up" } else { "Down" });
+        self.draw_time_row(s, card3_y, row_h, "Interface", "eth0", false);
+        self.draw_time_row(s, card3_y + row_h, row_h, "Type", "Ethernet", false);
+        self.draw_time_row(s, card3_y + row_h * 2, row_h, "MAC", self.net.mac_str(), false);
+        self.draw_time_row(
+            s, card3_y + row_h * 3, row_h, "Link",
+            if self.net.connected { "Up" } else { "Down" },
+            false,
+        );
 
         // ── Refresh button ────────────────────────────────────────────────────
         let (ax, ay) = self.apply_btn();
@@ -972,10 +1031,9 @@ impl App {
     fn draw_display_res(&self, s: &SharedSurface) {
         let cx = self.cx();
         self.draw_page_title(s, "Display Resolution");
-        let sub_y = PTITLE_H + (SEC_LBL_H - CH) / 2;
-        s.draw_string(cx + PAD, sub_y, "Available Resolutions", theme::TEXT_MUTED, theme::BG);
 
         let (ltop, lh, lw, sbx) = self.res_geom();
+        self.draw_card(s, PTITLE_H + 10, lh + 30);
         for i in 0..VIS_ROWS {
             let idx = self.scroll + i;
             if idx >= self.mcnt { break; }
@@ -985,17 +1043,17 @@ impl App {
             let (rbg, fg, dim) = if active {
                 (theme::SEL_BG, theme::TEXT, theme::ACCENT)
             } else {
-                (theme::BG, theme::TEXT_SEC, theme::TEXT_MUTED)
+                (theme::CARD_BG, theme::TEXT_SEC, theme::TEXT_MUTED)
             };
-            s.fill_rect(cx + PAD, ry, lw, ROW_H - 1, rbg);
-            if active { s.fill_rect(cx + PAD, ry, 3, ROW_H-1, theme::ACCENT); }
+            s.fill_rect(cx + PAD + 10, ry, lw, ROW_H - 1, rbg);
+            if active { s.fill_rect(cx + PAD + 10, ry, 3, ROW_H-1, theme::ACCENT); }
             let mut lb = [0u8; 24];
             let label = fmt_res(&mut lb, m.w, m.h);
-            s.draw_string(cx + PAD + 8, ry+(ROW_H-CH)/2, label, fg, rbg);
+            s.draw_string(cx + PAD + 18, ry+(ROW_H-CH)/2, label, fg, rbg);
             let bpp = "32bpp";
-            let bx = cx + PAD + lw - bpp.len() as u32 * CW - 6;
+            let bx = cx + PAD + 10 + lw - bpp.len() as u32 * CW - 6;
             s.draw_string(bx, ry+(ROW_H-CH)/2, bpp, dim, rbg);
-            if !active { s.fill_rect(cx + PAD + 8, ry+ROW_H-1, lw-16, 1, theme::DIVIDER); }
+            if !active { s.fill_rect(cx + PAD + 18, ry+ROW_H-1, lw-16, 1, theme::DIVIDER); }
         }
         s.fill_rect(sbx, ltop, SBW, lh, theme::SB_TRACK);
         let (ty, th, _) = self.sb_geom();
@@ -1006,7 +1064,7 @@ impl App {
             let m = self.modes[self.sel];
             let mut ib = [0u8; 44];
             let info = fmt_info(&mut ib, m.w, m.h);
-            s.draw_string(cx + PAD, ltop+lh+6, info, theme::TEXT_MUTED, theme::BG);
+            s.draw_string(cx + PAD + 10, ltop+lh+6, info, theme::TEXT_MUTED, theme::CARD_BG);
         }
         let (ax, ay) = self.apply_btn();
         let (rx, ry) = self.restore_btn();
@@ -1019,74 +1077,118 @@ impl App {
         s.draw_string(rx+(RBTN_W-rl.len() as u32*CW)/2, ry+(BTN_H-CH)/2, rl, theme::BTN_TEXT, theme::BTN_GHOST);
     }
 
+    // ── Date and Time page ───────────────────────────────────────────────────
+
+    fn draw_date_time(&self, s: &SharedSurface) {
+        self.draw_page_title(s, "Date and Time");
+        let cx = self.cx();
+        let row_h = 36u32;
+        let card1_y = PTITLE_H + 10;
+        let card2_y = card1_y + row_h * 2 + 12;
+        let card3_y = card2_y + row_h * 2 + 12;
+
+        self.draw_card(s, card1_y, row_h * 2);
+        self.draw_card(s, card2_y, row_h * 2);
+        self.draw_card(s, card3_y, row_h);
+
+        let state = self.time;
+        let automatic = state.map(|v| v.automatic).unwrap_or(true);
+        let format_24h = state.map(|v| v.format_24h).unwrap_or(true);
+        let locale_id = state.map(|v| v.locale_id as usize).unwrap_or(1);
+        let timezone_id = state.map(|v| v.timezone_id as usize).unwrap_or(1);
+
+        self.draw_time_row(s, card1_y, row_h, "Automatic Date & Time", "", false);
+        self.draw_switch(s, card1_y + (row_h - 20) / 2, automatic);
+
+        let mut date_buf = [0u8; 40];
+        let date_value = match state {
+            Some(value) if value.synced => {
+                format_date_time(&mut date_buf, value, get_ticks())
+            }
+            Some(value) if value.syncing => "Synchronizing...",
+            Some(value) if value.last_error != 0 => "Internet unavailable",
+            _ => "Waiting for internet",
+        };
+        self.draw_time_row(s, card1_y + row_h, row_h, "Date & Time", date_value, true);
+
+        self.draw_time_row(
+            s,
+            card2_y,
+            row_h,
+            "Locale",
+            TIME_LOCALES.get(locale_id).copied().unwrap_or("pt-BR"),
+            true,
+        );
+        self.draw_time_row(
+            s,
+            card2_y + row_h,
+            row_h,
+            "Time Zone",
+            TIME_ZONES.get(timezone_id).copied().unwrap_or("America/Sao_Paulo"),
+            true,
+        );
+
+        self.draw_time_row(
+            s,
+            card3_y,
+            row_h,
+            "Time Format",
+            if format_24h { "24-hour" } else { "12-hour" },
+            true,
+        );
+
+        let help_y = card3_y + row_h + 16;
+        let help = if automatic {
+            "Time is synchronized from the internet every 6 hours."
+        } else {
+            "Automatic sync is off. The last synchronized time keeps running."
+        };
+        s.draw_string(cx + PAD, help_y, help, theme::TEXT_MUTED, theme::BG);
+    }
+
+    fn draw_time_row(&self, s: &SharedSurface, y: u32, h: u32, label: &str,
+                     value: &str, chevron: bool) {
+        let x = self.cx() + PAD + 10;
+        let right = self.cx() + self.cw() - PAD - 10;
+        let ty = y + (h - CH) / 2;
+        s.draw_string(x, ty, label, theme::TEXT, theme::CARD_BG);
+        let arrow_w = if chevron { 16 } else { 0 };
+        let value_w = value.len() as u32 * CW;
+        let value_x = right.saturating_sub(value_w + arrow_w);
+        s.draw_string(value_x, ty, value, theme::TEXT_SEC, theme::CARD_BG);
+        if chevron {
+            s.draw_string(right - 8, ty, ">", theme::TEXT_MUTED, theme::CARD_BG);
+        }
+        s.fill_rect(x, y + h - 1, right.saturating_sub(x), 1, theme::DIVIDER);
+    }
+
+    fn draw_switch(&self, s: &SharedSurface, y: u32, enabled: bool) {
+        let w = 38u32;
+        let h = 20u32;
+        let x = self.cx() + self.cw() - PAD - 10 - w;
+        let bg = if enabled { theme::ACCENT } else { theme::BTN_GHOST };
+        s.fill_rect_rounded_aa(x, y, w, h, h / 2, bg);
+        s.draw_rect_rounded_aa(x, y, w, h, h / 2, theme::BORDER);
+        let knob_x = if enabled { x + w - 17 } else { x + 3 };
+        s.fill_rect_rounded_aa(knob_x, y + 3, 14, 14, 7, theme::BTN_TEXT);
+    }
+
     // ── About System page ─────────────────────────────────────────────────────
     //
-    // Visual structure (inspired by macOS "About This Mac"):
-    //
-    //   [  icon – concentric ring logo  ]
-    //   Atom OS                          (prominent)
-    //   Version 0.2.0  ·  Beryllium      (subtitle)
-    //   ─────────────────────────────────
-    //   Card 1 – System
-    //     OS / Kernel / Architecture
-    //   Card 2 – Hardware
-    //     Processor / Cores / Memory
-    //   Card 3 – Runtime
-    //     Uptime / IP Address
+    // System, hardware, and runtime information use the same row-card pattern.
 
     fn draw_about(&self, s: &SharedSurface) {
-        let cx = self.cx();
-        let cw = self.cw();
-
         self.draw_page_title(s, "About System");
-
-        // ── Logo icon (concentric rings) ──────────────────────────────────────
-        let icon_cx = cx + cw / 2;
-        let icon_y  = PTITLE_H + 10;
-        let ic = icon_cx; let iy = icon_y + ICON_R;
-        s.draw_rect_rounded_aa(ic.saturating_sub(ICON_R), iy.saturating_sub(ICON_R),
-                               ICON_R*2, ICON_R*2, ICON_R, theme::ACCENT_DIM);
-        let mr = ICON_R * 2 / 3;
-        s.draw_rect_rounded_aa(ic.saturating_sub(mr), iy.saturating_sub(mr),
-                               mr*2, mr*2, mr, theme::ACCENT_DIM);
-        let nr = ICON_R / 4;
-        s.fill_rect_rounded_aa(ic.saturating_sub(nr), iy.saturating_sub(nr),
-                               nr*2, nr*2, nr, theme::ACCENT);
-
-        // ── OS name ───────────────────────────────────────────────────────────
-        let name_y = icon_y + ICON_R * 2 + 12;
-        let name = "Atom OS";
-        let nx = cx + (cw.saturating_sub(name.len() as u32 * CW)) / 2;
-        s.draw_string(nx + 1, name_y, name, theme::TEXT, theme::BG);
-        s.draw_string(nx,     name_y, name, theme::TEXT, theme::BG);
-        let sub = "v0.2.0  Beryllium";
-        let sx = cx + (cw.saturating_sub(sub.len() as u32 * CW)) / 2;
-        s.draw_string(sx, name_y + CH + 6, sub, theme::TEXT_SEC, theme::BG);
-
-        let div_y = name_y + CH * 2 + 18;
-        s.fill_rect(cx + PAD, div_y, cw.saturating_sub(PAD*2), 1, theme::DIVIDER);
-
-        // ── Info cards ────────────────────────────────────────────────────────
-        // INFO_KW ensures the key column is wide enough for "Architecture"
-        // (12 chars × 8 px = 96 px) with a comfortable gap before the value.
-        let row  = CH + 8;
-        let kx   = cx + PAD + 10;
-        let vx   = kx + INFO_KW + 8;
-        let max_c = (cw.saturating_sub(PAD * 2 + 10 + INFO_KW + 8 + PAD) / CW) as usize;
-        let mut y = div_y + 10;
-
-        let kv = |s: &SharedSurface, y: u32, k: &str, v: &str| {
-            s.draw_string(kx, y, k, theme::INFO_KEY,  theme::CARD_BG);
-            s.draw_string(vx, y, v, theme::INFO_VAL, theme::CARD_BG);
-        };
+        let row_h = 36u32;
+        let mut y = PTITLE_H + 10;
+        let max_c = (self.cw().saturating_sub(PAD * 2 + 140) / CW) as usize;
 
         // Card 1 – System
-        self.draw_card(s, y, 4 + row * 3 + 2);
-        let mut ry = y + 6;
-        kv(s, ry, "OS",           "Atom OS 0.2.0"); ry += row;
-        kv(s, ry, "Kernel",       "0.2.0-smp");     ry += row;
-        kv(s, ry, "Architecture", "x86_64");
-        y += 4 + row * 3 + 2 + 8;
+        self.draw_card(s, y, row_h * 3);
+        self.draw_time_row(s, y, row_h, "Operating System", "Atom OS 0.2.0", false);
+        self.draw_time_row(s, y + row_h, row_h, "Kernel", "0.2.0-smp", false);
+        self.draw_time_row(s, y + row_h * 2, row_h, "Architecture", "x86_64", false);
+        y += row_h * 3 + 12;
 
         // Card 2 – Hardware
         let cpu_raw = self.sinfo.cpu();
@@ -1094,20 +1196,18 @@ impl App {
         let mut cb = [0u8;  8]; let cl = fmt_u64(&mut cb, self.sinfo.cores);
         let mut mb = [0u8; 48]; let ml = fmt_mem(&mut mb, self.sinfo.mem_used, self.sinfo.mem_total);
         let mut sb = [0u8; 48]; let sl = fmt_storage(&mut sb, self.sinfo.storage_used, self.sinfo.storage_total);
-        self.draw_card(s, y, 4 + row * 4 + 2);
-        ry = y + 6;
-        kv(s, ry, "Processor", cpu);                                                         ry += row;
-        kv(s, ry, "CPU Cores", core::str::from_utf8(&cb[..cl]).unwrap_or("?"));              ry += row;
-        kv(s, ry, "Memory",    core::str::from_utf8(&mb[..ml]).unwrap_or("?"));              ry += row;
-        kv(s, ry, "Storage",   core::str::from_utf8(&sb[..sl]).unwrap_or("?"));
-        y += 4 + row * 4 + 2 + 8;
+        self.draw_card(s, y, row_h * 4);
+        self.draw_time_row(s, y, row_h, "Processor", cpu, false);
+        self.draw_time_row(s, y + row_h, row_h, "CPU Cores", core::str::from_utf8(&cb[..cl]).unwrap_or("?"), false);
+        self.draw_time_row(s, y + row_h * 2, row_h, "Memory", core::str::from_utf8(&mb[..ml]).unwrap_or("?"), false);
+        self.draw_time_row(s, y + row_h * 3, row_h, "Storage", core::str::from_utf8(&sb[..sl]).unwrap_or("?"), false);
+        y += row_h * 4 + 12;
 
         // Card 3 – Runtime
         let ip = if self.net.connected { self.net.ip_str() } else { "unavailable" };
-        self.draw_card(s, y, 4 + row * 2 + 2);
-        ry = y + 6;
-        kv(s, ry, "Uptime",     self.sinfo.uptime()); ry += row;
-        kv(s, ry, "IP Address", ip);
+        self.draw_card(s, y, row_h * 2);
+        self.draw_time_row(s, y, row_h, "Uptime", self.sinfo.uptime(), false);
+        self.draw_time_row(s, y + row_h, row_h, "IP Address", ip, false);
     }
 
     // ── Status bar ────────────────────────────────────────────────────────────
@@ -1126,6 +1226,7 @@ impl App {
                 Page::DesktopBg  => "Select color or image, then Apply",
                 Page::Network    => "Network configuration  |  Click a DNS preset to switch",
                 Page::DisplayRes => "Select resolution, then Apply  |  R to restore default",
+                Page::DateTime   => "Internet time service and regional clock preferences",
                 Page::AboutSys   => "Atom OS System Information",
             };
             s.draw_string(base_x, ty, hint, theme::TEXT_MUTED, theme::HDR_BG);
@@ -1166,6 +1267,7 @@ impl App {
             Page::DesktopBg  => self.on_wp_click(mx, my),
             Page::Network    => self.on_net_click(mx, my),
             Page::DisplayRes => self.on_res_click(mx, my),
+            Page::DateTime   => self.on_date_time_click(mx, my),
             Page::AboutSys   => {}
         }
     }
@@ -1175,7 +1277,7 @@ impl App {
         if in_rect(mx, my, ax, ay, BTN_W, BTN_H) { self.apply_wallpaper(); return; }
 
         let ty = self.wp_toggle_y();
-        let x0 = self.cx() + PAD;
+        let x0 = self.cx() + PAD + 10;
         if in_rect(mx, my, x0 + 2, ty, MTOG_W, MTOG_H) {
             self.wp.mode = WpMode::Color; self.dirty = true; return;
         }
@@ -1265,10 +1367,59 @@ impl App {
             }
             self.dirty = true; return;
         }
-        if in_rect(mx, my, cx + PAD, ltop, lw, lh) {
+        if in_rect(mx, my, cx + PAD + 10, ltop, lw, lh) {
             let row = ((my - ltop as i32) / ROW_H as i32) as usize;
             let idx = self.scroll + row;
             if idx < self.mcnt { self.sel = idx; self.clamp_scroll(); self.dirty = true; }
+        }
+    }
+
+    fn on_date_time_click(&mut self, mx: i32, my: i32) {
+        let x = self.cx() + PAD;
+        let w = self.cw().saturating_sub(PAD * 2);
+        if mx < x as i32 || mx >= (x + w) as i32 {
+            return;
+        }
+
+        let row_h = 36u32;
+        let card1_y = PTITLE_H + 10;
+        let card2_y = card1_y + row_h * 2 + 12;
+        let card3_y = card2_y + row_h * 2 + 12;
+        let Some(state) = self.time else {
+            self.request_time_state();
+            return;
+        };
+
+        if in_rect(mx, my, x, card1_y, w, row_h) {
+            self.update_time_config(
+                !state.automatic,
+                state.format_24h,
+                state.locale_id,
+                state.timezone_id,
+            );
+        } else if in_rect(mx, my, x, card1_y + row_h, w, row_h) {
+            self.sync_time_now();
+        } else if in_rect(mx, my, x, card2_y, w, row_h) {
+            self.update_time_config(
+                state.automatic,
+                state.format_24h,
+                (state.locale_id as usize + 1).rem_euclid(TIME_LOCALES.len()) as u8,
+                state.timezone_id,
+            );
+        } else if in_rect(mx, my, x, card2_y + row_h, w, row_h) {
+            self.update_time_config(
+                state.automatic,
+                state.format_24h,
+                state.locale_id,
+                (state.timezone_id as usize + 1).rem_euclid(TIME_ZONES.len()) as u8,
+            );
+        } else if in_rect(mx, my, x, card3_y, w, row_h) {
+            self.update_time_config(
+                state.automatic,
+                !state.format_24h,
+                state.locale_id,
+                state.timezone_id,
+            );
         }
     }
 
@@ -1337,6 +1488,7 @@ impl App {
                         "Desktop Background"|"Wallpaper"     => Page::DesktopBg,
                         "Network"                            => Page::Network,
                         "Display Resolution"|"Resolution"    => Page::DisplayRes,
+                        "Date and Time"|"DateTime"            => Page::DateTime,
                         "About System"                       => Page::AboutSys,
                         _ => return,
                     };
@@ -1354,6 +1506,12 @@ impl App {
                     let mut e = String::from("Error: ");
                     e.push_str(&m.error_message);
                     self.status.set(StatusKind::Warn, e.as_bytes());
+                    self.dirty = true;
+                }
+            }
+            MessageType::TimeStateReply => {
+                if let Some(state) = TimeStateReplyMsg::from_bytes(pay) {
+                    self.time = Some(state);
                     self.dirty = true;
                 }
             }
@@ -1434,6 +1592,85 @@ fn fmt_uptime(buf: &mut [u8; 32]) -> usize {
     if ss<10 { buf[p]=b'0'; p+=1; }
     p += fmt_u64(&mut buf[p..], ss); buf[p]=b's'; p+=1;
     p
+}
+
+fn format_date_time<'a>(
+    buf: &'a mut [u8; 40],
+    state: TimeStateReplyMsg,
+    now_tick: u64,
+) -> &'a str {
+    let local = state.local_unix_seconds(now_tick);
+    let days = local.div_euclid(86_400);
+    let seconds = local.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let mut p = 0usize;
+
+    match state.locale_id {
+        0 => {
+            p += fmt_u64(&mut buf[p..], month as u64);
+            buf[p] = b'/'; p += 1;
+            p += fmt_u64(&mut buf[p..], day as u64);
+            buf[p] = b'/'; p += 1;
+            p += fmt_u64(&mut buf[p..], year as u64);
+        }
+        5 => {
+            p += fmt_u64(&mut buf[p..], year as u64);
+            buf[p] = b'/'; p += 1;
+            if month < 10 { buf[p] = b'0'; p += 1; }
+            p += fmt_u64(&mut buf[p..], month as u64);
+            buf[p] = b'/'; p += 1;
+            if day < 10 { buf[p] = b'0'; p += 1; }
+            p += fmt_u64(&mut buf[p..], day as u64);
+        }
+        _ => {
+            if day < 10 { buf[p] = b'0'; p += 1; }
+            p += fmt_u64(&mut buf[p..], day as u64);
+            buf[p] = b'/'; p += 1;
+            if month < 10 { buf[p] = b'0'; p += 1; }
+            p += fmt_u64(&mut buf[p..], month as u64);
+            buf[p] = b'/'; p += 1;
+            p += fmt_u64(&mut buf[p..], year as u64);
+        }
+    }
+
+    buf[p] = b','; p += 1;
+    buf[p] = b' '; p += 1;
+    let mut hour = (seconds / 3_600) as u8;
+    let minute = ((seconds % 3_600) / 60) as u8;
+    if state.format_24h {
+        if hour < 10 { buf[p] = b'0'; p += 1; }
+        p += fmt_u64(&mut buf[p..], hour as u64);
+        buf[p] = b':'; p += 1;
+        if minute < 10 { buf[p] = b'0'; p += 1; }
+        p += fmt_u64(&mut buf[p..], minute as u64);
+    } else {
+        let pm = hour >= 12;
+        hour %= 12;
+        if hour == 0 { hour = 12; }
+        p += fmt_u64(&mut buf[p..], hour as u64);
+        buf[p] = b':'; p += 1;
+        if minute < 10 { buf[p] = b'0'; p += 1; }
+        p += fmt_u64(&mut buf[p..], minute as u64);
+        buf[p] = b' '; p += 1;
+        buf[p] = if pm { b'P' } else { b'A' }; p += 1;
+        buf[p] = b'M'; p += 1;
+    }
+
+    core::str::from_utf8(&buf[..p]).unwrap_or("-")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
 
 fn fmt_ipv4(buf: &mut [u8; 20], ip: u32) -> usize {

@@ -1,0 +1,21 @@
+[package]
+name = "timesync"
+version = "0.2.0"
+edition = "2021"
+description = "Atom OS internet-backed date and time service"
+
+[workspace]
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+libnet = { path = "../../libs/libnet" }
+
+[[bin]]
+name = "timesync"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

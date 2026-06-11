@@ -97,40 +97,12 @@ mod allocator {
 
 const MAX_SERVICES: usize = 64;
 const MAX_NAME_LEN: usize = 32;
-const MAX_PENDING_LOOKUPS: usize = 32;
 
 /// Reserved well-known port for namesvc itself.
 const NAMESVC_PORT: u64 = 1;
 
 fn log(msg: &str) {
     atom_syscall::debug::log(msg);
-}
-
-/// Represents a lookup request that arrived before the service was registered
-#[derive(Clone)]
-struct PendingLookup {
-    name: [u8; MAX_NAME_LEN],
-    name_len: usize,
-    reply_port: u64,
-    active: bool,
-}
-
-impl PendingLookup {
-    const fn empty() -> Self {
-        Self {
-            name: [0; MAX_NAME_LEN],
-            name_len: 0,
-            reply_port: 0,
-            active: false,
-        }
-    }
-
-    fn matches_name(&self, name: &str) -> bool {
-        if !self.active || name.len() != self.name_len {
-            return false;
-        }
-        &self.name[..self.name_len] == name.as_bytes()
-    }
 }
 
 #[derive(Clone)]
@@ -270,57 +242,6 @@ impl NameRegistry {
 
 static mut REGISTRY: NameRegistry = NameRegistry::new();
 
-/// Queue of pending lookup requests (waiting for services to register)
-struct PendingQueue {
-    lookups: [PendingLookup; MAX_PENDING_LOOKUPS],
-}
-
-impl PendingQueue {
-    const fn new() -> Self {
-        const EMPTY: PendingLookup = PendingLookup::empty();
-        Self {
-            lookups: [EMPTY; MAX_PENDING_LOOKUPS],
-        }
-    }
-
-    /// Add a pending lookup request
-    fn add(&mut self, name: &str, reply_port: u64) -> Result<(), &'static str> {
-        if name.len() > MAX_NAME_LEN {
-            return Err("name too long");
-        }
-
-        for lookup in self.lookups.iter_mut() {
-            if !lookup.active {
-                lookup.name[..name.len()].copy_from_slice(name.as_bytes());
-                lookup.name_len = name.len();
-                lookup.reply_port = reply_port;
-                lookup.active = true;
-                return Ok(());
-            }
-        }
-
-        Err("pending queue full")
-    }
-
-    /// Get all pending lookups for a service name and mark them inactive
-    fn get_and_clear(&mut self, name: &str) -> [Option<u64>; MAX_PENDING_LOOKUPS] {
-        let mut results = [None; MAX_PENDING_LOOKUPS];
-        let mut idx = 0;
-
-        for lookup in self.lookups.iter_mut() {
-            if lookup.active && lookup.matches_name(name) {
-                results[idx] = Some(lookup.reply_port);
-                idx += 1;
-                lookup.active = false;
-            }
-        }
-
-        results
-    }
-}
-
-static mut PENDING_QUEUE: PendingQueue = PendingQueue::new();
-
 // ============================================================================
 // Main Service Loop
 // ============================================================================
@@ -398,14 +319,6 @@ fn handle_register(env: &IpcEnvelope, name: &str, port: u64) {
         }
     }
 
-    // Resolve any pending lookups now that the name is available.
-    let pending = unsafe { PENDING_QUEUE.get_and_clear(name) };
-    for reply_port_opt in pending.iter() {
-        if let Some(reply_port) = reply_port_opt {
-            let resp = NsResponseMsg { port };
-            let _ = send_message(*reply_port, MessageType::NsResponse, &resp.to_bytes());
-        }
-    }
 }
 
 /// Authenticate and apply an unregister request.
@@ -449,10 +362,12 @@ fn handle_request(env: &IpcEnvelope, header: MessageHeader, payload: &[u8]) {
                 if let Some(found_port) = unsafe { REGISTRY.lookup(name) } {
                     let resp = NsResponseMsg { port: found_port };
                     let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
-                } else if unsafe { PENDING_QUEUE.add(name, msg.reply_port) }.is_err() {
+                } else {
+                    // Missing services are reported immediately. Keeping the
+                    // caller's temporary reply port queued after its timeout
+                    // leaked entries and eventually stalled service discovery.
                     let resp = NsResponseMsg { port: 0 };
                     let _ = send_message(msg.reply_port, MessageType::NsResponse, &resp.to_bytes());
-                    log("namesvc: pending queue full, returning error");
                 }
             }
         }

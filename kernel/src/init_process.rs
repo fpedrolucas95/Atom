@@ -144,7 +144,7 @@ pub fn launch_init(boot_info: &BootInfo) -> Result<InitProcess, InitError> {
     log_info!(LOG_ORIGIN, "Init process ready for execution");
     log_info!(LOG_ORIGIN, "Init will spawn: namesvc, service_manager,");
     log_info!(LOG_ORIGIN, "  fsd, app_launcher, ui_shell, display,");
-    log_info!(LOG_ORIGIN, "  nic_driver, netd, terminal");
+    log_info!(LOG_ORIGIN, "  nic_driver, netd, timesync, terminal");
     log_info!(LOG_ORIGIN, "===========================================");
 
     Ok(init)

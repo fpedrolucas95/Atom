@@ -536,6 +536,16 @@ pub enum MessageType {
     NetGetConfig = 1424,
     /// netd -> app: network config reply
     NetGetConfigReply = 1425,
+
+    // Date and Time Service (1500-1599)
+    /// Client -> timesync: request the current clock and configuration state
+    TimeGetState = 1500,
+    /// timesync -> client: current clock and configuration state
+    TimeStateReply = 1501,
+    /// Client -> timesync: update locale, time zone, format, or automatic sync
+    TimeSetConfig = 1502,
+    /// Client -> timesync: request an immediate internet synchronization
+    TimeSyncNow = 1503,
 }
 
 impl MessageType {
@@ -682,6 +692,10 @@ impl MessageType {
             1423 => Some(Self::NetIcmpEchoReply),
             1424 => Some(Self::NetGetConfig),
             1425 => Some(Self::NetGetConfigReply),
+            1500 => Some(Self::TimeGetState),
+            1501 => Some(Self::TimeStateReply),
+            1502 => Some(Self::TimeSetConfig),
+            1503 => Some(Self::TimeSyncNow),
             _ => None,
         }
     }
@@ -812,6 +826,160 @@ impl NetGetConfigReplyMsg {
             mac,
             _pad: [bytes[22], bytes[23]],
         })
+    }
+}
+
+// ============================================================================
+// Date and Time Service Messages
+// ============================================================================
+
+pub const TIME_LOCALES: [&str; 6] = ["en-US", "pt-BR", "es-ES", "fr-FR", "de-DE", "ja-JP"];
+
+pub const TIME_ZONES: [&str; 9] = [
+    "UTC",
+    "America/Sao_Paulo",
+    "America/New_York",
+    "America/Los_Angeles",
+    "Europe/London",
+    "Europe/Paris",
+    "Asia/Tokyo",
+    "Asia/Kolkata",
+    "Australia/Sydney",
+];
+
+/// Client -> timesync: request the current time-service state.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TimeGetStateMsg {
+    pub reply_port: u64,
+}
+
+impl TimeGetStateMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.reply_port.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+        })
+    }
+}
+
+/// Client -> timesync: replace the user-visible date/time preferences.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TimeSetConfigMsg {
+    pub reply_port: u64,
+    pub automatic: bool,
+    pub format_24h: bool,
+    pub locale_id: u8,
+    pub timezone_id: u8,
+}
+
+impl TimeSetConfigMsg {
+    pub const SIZE: usize = 12;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8] = self.automatic as u8;
+        bytes[9] = self.format_24h as u8;
+        bytes[10] = self.locale_id;
+        bytes[11] = self.timezone_id;
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        let locale_id = bytes[10];
+        let timezone_id = bytes[11];
+        if locale_id as usize >= TIME_LOCALES.len() || timezone_id as usize >= TIME_ZONES.len() {
+            return None;
+        }
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            automatic: bytes[8] != 0,
+            format_24h: bytes[9] != 0,
+            locale_id,
+            timezone_id,
+        })
+    }
+}
+
+/// timesync -> client: synchronized UTC epoch plus display preferences.
+///
+/// Clients advance `unix_seconds` from `reference_tick` using the 100 Hz
+/// monotonic kernel clock. `utc_offset_minutes` is the current offset returned
+/// by the internet time source, including daylight-saving time where relevant.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TimeStateReplyMsg {
+    pub unix_seconds: u64,
+    pub reference_tick: u64,
+    pub utc_offset_minutes: i32,
+    pub automatic: bool,
+    pub format_24h: bool,
+    pub synced: bool,
+    pub syncing: bool,
+    pub locale_id: u8,
+    pub timezone_id: u8,
+    pub last_error: u8,
+}
+
+impl TimeStateReplyMsg {
+    pub const SIZE: usize = 32;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.unix_seconds.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.reference_tick.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.utc_offset_minutes.to_le_bytes());
+        bytes[20] = self.automatic as u8;
+        bytes[21] = self.format_24h as u8;
+        bytes[22] = self.synced as u8;
+        bytes[23] = self.syncing as u8;
+        bytes[24] = self.locale_id;
+        bytes[25] = self.timezone_id;
+        bytes[26] = self.last_error;
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        let locale_id = bytes[24];
+        let timezone_id = bytes[25];
+        if locale_id as usize >= TIME_LOCALES.len() || timezone_id as usize >= TIME_ZONES.len() {
+            return None;
+        }
+        Some(Self {
+            unix_seconds: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            reference_tick: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+            utc_offset_minutes: i32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            automatic: bytes[20] != 0,
+            format_24h: bytes[21] != 0,
+            synced: bytes[22] != 0,
+            syncing: bytes[23] != 0,
+            locale_id,
+            timezone_id,
+            last_error: bytes[26],
+        })
+    }
+
+    pub fn local_unix_seconds(&self, now_tick: u64) -> i64 {
+        let elapsed = now_tick.wrapping_sub(self.reference_tick) / 100;
+        self.unix_seconds
+            .saturating_add(elapsed)
+            .saturating_add_signed(self.utc_offset_minutes as i64 * 60) as i64
     }
 }
 
@@ -2154,7 +2322,11 @@ impl OpenInTabMsg {
             core::str::from_utf8(&bytes[tab_len_offset + 4..tab_len_offset + 4 + tab_len])
                 .ok()?
                 .trim();
-        if tab_name != "Wallpaper" && tab_name != "Resolution" {
+        if tab_name != "Wallpaper"
+            && tab_name != "Resolution"
+            && tab_name != "Date and Time"
+            && tab_name != "DateTime"
+        {
             return None;
         }
 
@@ -3027,5 +3199,41 @@ mod tests {
     fn wallpaper_failed_rejects_empty_message() {
         let bytes = 0u32.to_le_bytes();
         assert!(WallpaperFailedMsg::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn time_state_roundtrip() {
+        let state = TimeStateReplyMsg {
+            unix_seconds: 1_765_000_000,
+            reference_tick: 12_345,
+            utc_offset_minutes: -180,
+            automatic: true,
+            format_24h: true,
+            synced: true,
+            syncing: false,
+            locale_id: 1,
+            timezone_id: 1,
+            last_error: 0,
+        };
+        let decoded = TimeStateReplyMsg::from_bytes(&state.to_bytes()).unwrap();
+        assert_eq!(decoded.unix_seconds, state.unix_seconds);
+        assert_eq!(decoded.utc_offset_minutes, -180);
+        assert!(decoded.synced);
+        assert_eq!(decoded.locale_id, 1);
+        assert_eq!(decoded.timezone_id, 1);
+    }
+
+    #[test]
+    fn time_config_rejects_unknown_timezone() {
+        let mut bytes = TimeSetConfigMsg {
+            reply_port: 7,
+            automatic: true,
+            format_24h: false,
+            locale_id: 0,
+            timezone_id: 0,
+        }
+        .to_bytes();
+        bytes[11] = TIME_ZONES.len() as u8;
+        assert!(TimeSetConfigMsg::from_bytes(&bytes).is_none());
     }
 }

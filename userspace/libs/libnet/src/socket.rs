@@ -177,7 +177,9 @@ pub fn net_recv(
 
     let mut result = Err(NetError::Timeout);
 
-    for _ in 0..50000u32 {
+    let deadline = atom_syscall::thread::get_ticks()
+        .saturating_add((effective_timeout as u64 + 9) / 10);
+    while atom_syscall::thread::get_ticks() < deadline {
         if let Ok(Some((_header, len))) = try_recv_message(reply_port, &mut recv_buf) {
             let payload = get_payload(&recv_buf, len);
             if let Some(reply) = NetRecvReplyMsg::from_bytes(payload) {
