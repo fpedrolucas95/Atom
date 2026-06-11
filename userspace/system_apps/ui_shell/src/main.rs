@@ -744,6 +744,48 @@ fn window_title_for(executable: &str) -> &str {
     }
 }
 
+/// Pick a stable tile colour and one-letter glyph for a window's taskbar
+/// button. Known apps reuse the colour of their pinned launcher; any other
+/// window derives its glyph from the title's first letter and a colour chosen
+/// deterministically from the title, so the same window always looks the same.
+fn taskbar_glyph_for(title: &str) -> (Color, String) {
+    use atom_theme::colors as c;
+
+    let known = match title {
+        "File Manager" => Some(c::ATOM_COLOR_ACCENT_GLOW),
+        "Terminal" => Some(c::ATOM_GRADIENT_PRIMARY_END),
+        "System Settings" => Some(c::ATOM_COLOR_ACCENT),
+        "TinyGL Gears" => Some(c::ATOM_COLOR_SUCCESS),
+        _ => None,
+    };
+
+    let color = known.unwrap_or_else(|| {
+        const PALETTE: [Color; 6] = [
+            c::ATOM_COLOR_ACCENT,
+            c::ATOM_COLOR_ACCENT_GLOW,
+            c::ATOM_COLOR_SUCCESS,
+            c::ATOM_GRADIENT_PRIMARY_END,
+            c::ATOM_COLOR_WARNING,
+            c::ATOM_COLOR_ERROR,
+        ];
+        // FNV-1a over the title keeps the colour stable per window title.
+        let mut h: u32 = 0x811c_9dc5;
+        for b in title.bytes() {
+            h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+        }
+        PALETTE[(h as usize) % PALETTE.len()]
+    });
+
+    let initial = title
+        .chars()
+        .find(|ch| ch.is_ascii_alphanumeric())
+        .unwrap_or('?')
+        .to_ascii_uppercase();
+    let mut mono = String::new();
+    mono.push(initial);
+    (color, mono)
+}
+
 struct WindowManager {
     windows: Vec<Window>,
     next_id: WindowId,
@@ -969,6 +1011,27 @@ struct DockApp {
     executable: String,
     color: Color,
     monogram: String,
+}
+
+/// What activating a taskbar button does.
+enum TaskKind {
+    /// A pinned app with no open window — launch it.
+    Launch { executable: String },
+    /// An open window — raise/restore it, or minimise it if already focused.
+    Window {
+        window_id: WindowId,
+        minimized: bool,
+        focused: bool,
+    },
+}
+
+/// One button on the bottom taskbar. The bar shows a launcher for every pinned
+/// app that has no open window, plus a button for every open window (minimised
+/// ones included), so any window can always be restored from here.
+struct TaskItem {
+    color: Color,
+    monogram: String,
+    kind: TaskKind,
 }
 
 struct ContextMenu {
@@ -2082,6 +2145,7 @@ impl Compositor {
                     self.wm.windows.push(window);
                     self.wm.focus_window(id);
                     self.mark_window_dirty(id);
+                    self.mark_taskbar_dirty();
 
                     let header = MessageHeader::new(
                         MessageType::WmResponse,
@@ -2233,6 +2297,8 @@ impl Compositor {
                     self.mark_window_dirty(p);
                 }
                 self.mark_window_dirty(id);
+                // The taskbar's focus highlight tracks the active window.
+                self.mark_taskbar_dirty();
             }
 
             self.captured_window = Some(id);
@@ -2267,6 +2333,7 @@ impl Compositor {
                         let rect = Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25);
                         self.wm.minimize_window(id);
                         self.mark_dirty_rect(rect);
+                        self.mark_taskbar_dirty();
                         self.dirty = true;
                         return;
                     }
@@ -2534,6 +2601,9 @@ impl Compositor {
         if let Some(r) = rect {
             self.mark_dirty_rect(r);
         }
+        // The closing window drops out of the taskbar (and a pinned launcher may
+        // take its place) — repaint the bar.
+        self.mark_taskbar_dirty();
 
         if self.wm.focused_id == Some(id) {
             // The window is no longer visible (set above), so refocus_topmost
@@ -2565,6 +2635,7 @@ impl Compositor {
         self.pending_close
             .retain(|pc| current.wrapping_sub(pc.deadline_tick) >= 0x8000_0000);
         if reaped {
+            self.mark_taskbar_dirty();
             self.dirty = true;
         }
     }
@@ -2821,6 +2892,7 @@ impl Compositor {
         {
             self.wm.focus_window(id);
             self.mark_window_dirty(id);
+            self.mark_taskbar_dirty();
         }
 
         let msg = OpenInTabMsg {
@@ -3261,74 +3333,147 @@ impl Compositor {
         }
     }
 
+    /// Build the current taskbar buttons. Each pinned app keeps a stable slot,
+    /// shown as its open window when running or as a launcher otherwise; every
+    /// other open window (minimised ones included — the whole point, so they can
+    /// always be restored) is appended after, ordered by id for a stable place.
+    fn taskbar_items(&self) -> Vec<TaskItem> {
+        let mut items = Vec::new();
+        let mut shown: Vec<WindowId> = Vec::new();
+
+        let window_item = |w: &Window, color: Color, monogram: String| TaskItem {
+            color,
+            monogram,
+            kind: TaskKind::Window {
+                window_id: w.id,
+                minimized: w.state == WindowState::Minimized,
+                focused: w.focused,
+            },
+        };
+
+        for app in &self.dock_apps {
+            let title = window_title_for(&app.executable);
+            if let Some(w) = self.wm.windows.iter().find(|w| w.visible && w.title == title) {
+                shown.push(w.id);
+                items.push(window_item(w, app.color, app.monogram.clone()));
+            } else {
+                items.push(TaskItem {
+                    color: app.color,
+                    monogram: app.monogram.clone(),
+                    kind: TaskKind::Launch {
+                        executable: app.executable.clone(),
+                    },
+                });
+            }
+        }
+
+        let mut win_ids: Vec<WindowId> = self
+            .wm
+            .windows
+            .iter()
+            .filter(|w| w.visible && !shown.contains(&w.id))
+            .map(|w| w.id)
+            .collect();
+        win_ids.sort_unstable();
+        for id in win_ids {
+            if let Some(w) = self.wm.windows.iter().find(|w| w.id == id) {
+                let (color, monogram) = taskbar_glyph_for(&w.title);
+                items.push(window_item(w, color, monogram));
+            }
+        }
+
+        items
+    }
+
+    /// Mark the taskbar strip dirty so it repaints after the open-window set,
+    /// focus or minimise state changes.
+    fn mark_taskbar_dirty(&mut self) {
+        if let Some((dx, dy, dw, dh, _, _, _, _)) = self.dock_layout() {
+            self.mark_dirty_rect(Rect::new(dx, dy, dw, dh));
+        }
+    }
+
     fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {
-        let (_, _, _, _, start_x, icon_y, icon_size, spacing) = self.dock_layout()?;
-        if y < icon_y || y >= icon_y + icon_size {
+        let (_, bar_y, _, bar_h, start_x, _, item_size, spacing) = self.dock_layout()?;
+        if y < bar_y || y >= bar_y + bar_h as i32 {
             return None;
         }
-        for i in 0..self.dock_apps.len() {
-            let ix = start_x + (i as i32 * (icon_size + spacing));
-            if x >= ix && x < ix + icon_size {
+        let count = self.taskbar_items().len();
+        for i in 0..count {
+            let ix = start_x + (i as i32 * (item_size + spacing));
+            if x >= ix && x < ix + item_size {
                 return Some(i);
             }
         }
         None
     }
 
-    fn handle_dock_click(&mut self, icon_index: usize) {
-        if icon_index >= self.dock_apps.len() {
-            return;
-        }
-        let executable = self.dock_apps[icon_index].executable.clone();
-        let title = window_title_for(&executable);
+    fn handle_dock_click(&mut self, index: usize) {
+        let items = self.taskbar_items();
+        let kind = match items.get(index) {
+            Some(item) => &item.kind,
+            None => return,
+        };
 
-        // If the app is already running, raise (and un-minimise) it instead of
-        // launching a second copy. Minimized windows keep `visible == true`, so
-        // they are matched here and restored by `focus_window`.
-        if let Some(id) = self
-            .wm
-            .windows
-            .iter()
-            .find(|w| w.visible && w.title == title)
-            .map(|w| w.id)
-        {
-            let prev = self.wm.focused_id;
-            self.wm.focus_window(id);
-            // Repaint the raised window's footprint (and the one that just lost
-            // focus) — focus_window only reorders/un-minimises, so the restored
-            // window would otherwise stay hidden until unrelated damage.
-            if let Some(p) = prev {
-                if p != id {
-                    self.mark_window_dirty(p);
-                }
+        match kind {
+            TaskKind::Launch { executable } => {
+                let exe = executable.clone();
+                self.spawn_app(&exe);
             }
-            self.mark_window_dirty(id);
-            return;
+            TaskKind::Window {
+                window_id,
+                minimized,
+                focused,
+            } => {
+                let id = *window_id;
+                if *focused && !*minimized {
+                    // Already the active window: a click on its taskbar button
+                    // minimises it, matching the Windows/Linux toggle.
+                    let rect = self
+                        .wm
+                        .get_window(id)
+                        .map(|w| Rect::new(w.x - 10, w.y - 10, w.width + 20, w.height + 25));
+                    self.wm.minimize_window(id);
+                    if let Some(r) = rect {
+                        self.mark_dirty_rect(r);
+                    }
+                } else {
+                    // Raise and un-minimise the window (focus_window does both).
+                    let prev = self.wm.focused_id;
+                    self.wm.focus_window(id);
+                    if let Some(p) = prev {
+                        if p != id {
+                            self.mark_window_dirty(p);
+                        }
+                    }
+                    self.mark_window_dirty(id);
+                }
+                self.mark_taskbar_dirty();
+                self.dirty = true;
+            }
         }
-
-        self.spawn_app(&executable);
     }
 
+    /// Full-width bottom taskbar. Returns
+    /// `(bar_x, bar_y, bar_w, bar_h, first_item_x, item_y, item_size, spacing)`.
+    /// Always present, so it never disappears when no apps are open.
     fn dock_layout(&self) -> Option<(i32, i32, u32, u32, i32, i32, i32, i32)> {
-        let count = self.dock_apps.len();
-        if count == 0 {
+        let width = self.fb.width();
+        let height = self.fb.height();
+        if width == 0 || height <= DOCK_HEIGHT {
             return None;
         }
 
-        let width = self.fb.width();
-        let height = self.fb.height();
-        let icon_size = atom_theme::shell::DOCK_ITEM_SIZE as i32; 
-        let spacing = atom_theme::spacing::XL as i32; 
-        let side_padding = atom_theme::spacing::XXXL as i32;
+        let item_size = atom_theme::shell::DOCK_ITEM_SIZE as i32;
+        let spacing = atom_theme::spacing::SM as i32;
+        let side_padding = atom_theme::spacing::MD as i32;
 
-        let total_icons_width = count as i32 * icon_size + (count as i32 - 1) * spacing;
-        let dock_width = (total_icons_width + side_padding * 2).max(140) as u32;
-        let dock_x = (width / 2).saturating_sub(dock_width / 2) as i32;
-        let dock_y = height.saturating_sub(DOCK_HEIGHT + 12) as i32;
-        let start_x = dock_x + ((dock_width as i32 - total_icons_width) / 2);
-        let icon_y = dock_y + (DOCK_HEIGHT as i32 - icon_size) / 2;
+        let bar_x = 0;
+        let bar_y = height.saturating_sub(DOCK_HEIGHT) as i32;
+        let start_x = bar_x + side_padding;
+        let item_y = bar_y + (DOCK_HEIGHT as i32 - item_size) / 2;
 
-        Some((dock_x, dock_y, dock_width, DOCK_HEIGHT, start_x, icon_y, icon_size, spacing))
+        Some((bar_x, bar_y, width, DOCK_HEIGHT, start_x, item_y, item_size, spacing))
     }
 
     /// Ask the `app_launcher` service to start an application by path.
@@ -3406,6 +3551,8 @@ impl Compositor {
         };
         self.pending_windows.push(PendingWindow { window_id, pid: 0 });
         self.mark_window_dirty(window_id);
+        // A new window means a new taskbar button — repaint the bar.
+        self.mark_taskbar_dirty();
     }
 
     fn spawn_fileman(&mut self) {
@@ -3850,43 +3997,61 @@ impl Compositor {
     }
 
     fn draw_dock(&self) {
-        let (dock_x_i32, dock_y_i32, dock_width, dock_height, start_x_i32, icon_y_i32, icon_size_i32, spacing_i32) =
+        let (bar_x_i32, bar_y_i32, bar_w, bar_h, start_x_i32, item_y_i32, item_size_i32, spacing_i32) =
             match self.dock_layout() {
                 Some(v) => v,
                 None => return,
             };
 
-        let dock_x = dock_x_i32 as u32;
-        let dock_y = dock_y_i32 as u32;
+        let bar_x = bar_x_i32 as u32;
+        let bar_y = bar_y_i32 as u32;
         let start_x = start_x_i32 as u32;
-        let icon_y = icon_y_i32 as u32;
-        let icon_size = icon_size_i32 as u32;
+        let item_y = item_y_i32 as u32;
+        let item_size = item_size_i32 as u32;
         let spacing = spacing_i32 as u32;
 
-        let dock_r = atom_theme::radius::LG as u32; 
-        self.backbuffer_fb
-            .fill_rect_rounded_alpha(dock_x + 2, dock_y + 3, dock_width, dock_height, dock_r, theme::SHADOW, 80);
-
-        self.backbuffer_fb
-            .fill_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BG);
-        self.backbuffer_fb
-            .draw_rect_rounded_aa(dock_x, dock_y, dock_width, dock_height, dock_r, theme::DOCK_BORDER);
-        self.backbuffer_fb
-            .fill_rect(dock_x + dock_r, dock_y, dock_width - dock_r * 2, 1, theme::DOCK_BORDER);
+        // Full-width bar flush with the bottom edge (Windows/Linux taskbar),
+        // with a thin top border separating it from the desktop.
+        self.backbuffer_fb.fill_rect(bar_x, bar_y, bar_w, bar_h, theme::DOCK_BG);
+        self.backbuffer_fb.fill_rect(bar_x, bar_y, bar_w, 1, theme::DOCK_BORDER);
 
         let tile_r = atom_theme::shell::DOCK_ITEM_RADIUS as u32;
-        for (i, app) in self.dock_apps.iter().enumerate() {
-            let ix = start_x + (i as u32 * (icon_size + spacing));
+        let items = self.taskbar_items();
+        for (i, item) in items.iter().enumerate() {
+            let ix = start_x + (i as u32 * (item_size + spacing));
 
-            // Rounded, colour-filled app tile — reads like a real app icon and
-            // gives each entry a clear, aligned click target.
-            self.backbuffer_fb
-                .fill_rect_rounded_aa(ix, icon_y, icon_size, icon_size, tile_r, app.color);
+            let (minimized, focused, is_window) = match item.kind {
+                TaskKind::Window { minimized, focused, .. } => (minimized, focused, true),
+                TaskKind::Launch { .. } => (false, false, false),
+            };
+
+            // Subtle highlight panel behind the active window's tile.
+            if focused {
+                self.backbuffer_fb.fill_rect_rounded_alpha(
+                    ix.saturating_sub(4),
+                    item_y.saturating_sub(3),
+                    item_size + 8,
+                    item_size + 6,
+                    tile_r + 2,
+                    theme::DOCK_BORDER,
+                    150,
+                );
+            }
+
+            // The app tile. Minimised windows are dimmed so they read as hidden
+            // but still clearly restorable.
+            if minimized {
+                self.backbuffer_fb
+                    .fill_rect_rounded_alpha(ix, item_y, item_size, item_size, tile_r, item.color, 120);
+            } else {
+                self.backbuffer_fb
+                    .fill_rect_rounded_aa(ix, item_y, item_size, item_size, tile_r, item.color);
+            }
 
             // Pick a glyph colour that stays legible on the tile's fill.
-            let lum = (app.color.r as u32 * 299
-                + app.color.g as u32 * 587
-                + app.color.b as u32 * 114)
+            let lum = (item.color.r as u32 * 299
+                + item.color.g as u32 * 587
+                + item.color.b as u32 * 114)
                 / 1000;
             let glyph = if lum > 150 {
                 atom_theme::colors::ATOM_COLOR_BG
@@ -3894,23 +4059,25 @@ impl Compositor {
                 Color::WHITE
             };
 
-            let label_len = app.monogram.len() as u32 * 8;
-            let lx = ix + (icon_size - label_len) / 2;
-            let ly = icon_y + (icon_size - 8) / 2;
+            let label_len = item.monogram.len() as u32 * 8;
+            let lx = ix + (item_size - label_len) / 2;
+            let ly = item_y + (item_size - 8) / 2;
             self.backbuffer_fb
-                .draw_string(lx, ly, &app.monogram, glyph, app.color);
+                .draw_string(lx, ly, &item.monogram, glyph, item.color);
 
-            let running_title = window_title_for(&app.executable);
-            if self
-                .wm
-                .windows
-                .iter()
-                .any(|w| w.visible && w.title == running_title)
-            {
-                let dot_x = ix + icon_size / 2 - 2;
-                let dot_y = icon_y + icon_size + 3;
-                self.backbuffer_fb
-                    .fill_rect_rounded_aa(dot_x, dot_y, 4, 4, 2, theme::ACCENT);
+            // Running indicator under window tiles: a wide accent underline for
+            // the focused window, a small dot for the others. Launchers (apps
+            // that are not running) get nothing.
+            if is_window {
+                let ind_y = item_y + item_size + 3;
+                if focused {
+                    self.backbuffer_fb
+                        .fill_rect_rounded_aa(ix, ind_y, item_size, 3, 1, theme::ACCENT);
+                } else {
+                    let dot_x = ix + item_size / 2 - 2;
+                    self.backbuffer_fb
+                        .fill_rect_rounded_aa(dot_x, ind_y, 4, 4, 2, theme::ACCENT);
+                }
             }
         }
     }
