@@ -387,6 +387,14 @@ const PANEL_HEIGHT: u32 = atom_theme::shell::TOP_BAR_HEIGHT;
 const DOCK_HEIGHT: u32 = atom_theme::shell::DOCK_HEIGHT;
 const CLOSE_GRACE_TICKS: u32 = 200;
 
+/// Maximum number of independent damage rectangles tracked per frame before
+/// they are collapsed into a single bounding box. Keeping damage as a list of
+/// disjoint rects (instead of one union) is what stops a continuously-animating
+/// window in one screen corner from forcing a full-screen recomposite — and a
+/// re-blit of every other open window — on every frame. The cap bounds the
+/// per-frame intersection work when damage is genuinely scattered.
+const MAX_DIRTY_RECTS: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -1364,7 +1372,7 @@ struct Compositor {
     pending_windows: Vec<PendingWindow>,
     pending_close: Vec<PendingClose>,
     dirty: bool,
-    dirty_rect: Option<Rect>,
+    dirty_rects: Vec<Rect>,
     mouse_left_down: bool,
     mouse_right_down: bool,
     drag_op: DragOperation,
@@ -1433,7 +1441,7 @@ impl Compositor {
             pending_windows: Vec::new(),
             pending_close: Vec::new(),
             dirty: true,
-            dirty_rect: None,
+            dirty_rects: Vec::new(),
             mouse_left_down: false,
             mouse_right_down: false,
             drag_op: DragOperation::None,
@@ -2483,10 +2491,9 @@ impl Compositor {
     }
 
     /// Mark a window's full on-screen footprint (frame + drop shadow) dirty so
-    /// the next `draw_all` actually repaints it. The redraw is otherwise bounded
-    /// by whatever stale `dirty_rect` the last cursor move left behind, which is
-    /// why a freshly presented or freshly raised window could stay invisible
-    /// until unrelated damage happened to cross it.
+    /// the next `draw_all` actually repaints it. Without an explicit footprint,
+    /// a freshly presented or freshly raised window could stay invisible until
+    /// unrelated damage happened to cross it.
     fn mark_window_dirty(&mut self, window_id: WindowId) {
         if let Some(w) = self.wm.get_window(window_id) {
             let rect = Rect::new(w.x - 4, w.y - 4, w.width + 8, w.height + 12);
@@ -2528,12 +2535,13 @@ impl Compositor {
     }
 
     /// Mark the entire screen dirty so the next `draw_all` repaints everything.
-    /// Setting `dirty = true` alone is NOT enough for a full redraw: `draw_all`
-    /// honours any pending `dirty_rect`, so a stale cursor-sized rect would
-    /// silently clip the intended full repaint down to a few pixels (black
-    /// screen / trails that only heal where the mouse happens to move).
+    /// Clears any accumulated damage rects first: a stale cursor-sized rect left
+    /// in the list would otherwise clip the intended full repaint down to a few
+    /// pixels (black screen / trails that only heal where the mouse moves).
     fn mark_dirty_all(&mut self) {
-        self.dirty_rect = Some(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+        self.dirty_rects.clear();
+        self.dirty_rects
+            .push(Rect::new(0, 0, self.fb.width(), self.fb.height()));
         self.dirty = true;
     }
 
@@ -2549,10 +2557,31 @@ impl Compositor {
         }
         let clamped = Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32);
 
-        if let Some(existing) = self.dirty_rect {
-            self.dirty_rect = Some(existing.union(&clamped));
+        // Coalesce only with rects we already overlap. A window that presents
+        // the same footprint every frame (an animation) keeps merging into its
+        // own existing entry, so the list stays tiny and disjoint instead of
+        // unioning unrelated corners of the screen into one near-full-screen
+        // box. Non-overlapping damage stays a separate region and is composited
+        // independently in `draw_all`.
+        for existing in self.dirty_rects.iter_mut() {
+            if existing.intersects(&clamped) {
+                *existing = existing.union(&clamped);
+                self.dirty = true;
+                return;
+            }
+        }
+
+        if self.dirty_rects.len() >= MAX_DIRTY_RECTS {
+            // Too much scattered damage to track individually: fall back to a
+            // single bounding box (the previous behaviour) to bound per-frame
+            // bookkeeping. Correctness is preserved; only locality is lost.
+            let mut acc = clamped;
+            for existing in self.dirty_rects.drain(..) {
+                acc = acc.union(&existing);
+            }
+            self.dirty_rects.push(acc);
         } else {
-            self.dirty_rect = Some(clamped);
+            self.dirty_rects.push(clamped);
         }
         self.dirty = true;
     }
@@ -2618,10 +2647,10 @@ impl Compositor {
 
         self.wallpaper_cache_valid = false;
 
-        // The fresh backbuffer is uninitialised and any pending dirty_rect is in
-        // the old resolution's coordinates — repaint the whole new screen, or it
+        // The fresh backbuffer is uninitialised and any pending damage is in the
+        // old resolution's coordinates — repaint the whole new screen, or it
         // stays black except where later damage (e.g. the cursor) happens to land.
-        self.dirty_rect = None;
+        self.dirty_rects.clear();
         self.mark_dirty_all();
         true
     }
@@ -3322,11 +3351,46 @@ impl Compositor {
     }
 
     fn draw_all(&mut self) {
-        let draw_rect = self
-            .dirty_rect
-            .take()
-            .unwrap_or(Rect::new(0, 0, self.fb.width(), self.fb.height()));
+        let rects = core::mem::take(&mut self.dirty_rects);
+        let rects = if rects.is_empty() {
+            // `dirty` was set without an explicit rect: repaint everything.
+            [Rect::new(0, 0, self.fb.width(), self.fb.height())].to_vec()
+        } else {
+            rects
+        };
 
+        // Composite every damaged region into the backbuffer. Each region only
+        // touches the wallpaper, icons and windows that actually intersect it,
+        // so a small animating window no longer drags the whole window stack
+        // into every frame.
+        for rect in &rects {
+            self.composite_region(*rect);
+        }
+
+        // Overlays that always sit on top, drawn once after all regions so they
+        // are never clipped away by a region that excludes them.
+        if self.context_menu.visible {
+            self.draw_context_menu();
+        }
+        self.draw_cursor();
+
+        // Publish each damaged region to the visible framebuffer.
+        for rect in &rects {
+            self.backbuffer_fb.blit_rect(
+                &self.fb,
+                rect.x as u32,
+                rect.y as u32,
+                rect.w,
+                rect.h,
+            );
+        }
+    }
+
+    /// Composite a single damage rectangle into the backbuffer: wallpaper (or
+    /// background), desktop icons, windows, the top panel and the dock — each
+    /// clipped to `draw_rect`. Overlays (context menu, cursor) and the blit to
+    /// the visible framebuffer are handled once by `draw_all`.
+    fn composite_region(&mut self, draw_rect: Rect) {
         if self.wallpaper_cache_valid && !self.wallpaper_cache_ptr.is_null() {
             let sw = self.fb.width();
             let stride = self.backbuffer_fb.stride();
@@ -3389,20 +3453,6 @@ impl Compositor {
                 self.draw_dock();
             }
         }
-
-        if self.context_menu.visible {
-            self.draw_context_menu();
-        }
-
-        self.draw_cursor();
-
-        self.backbuffer_fb.blit_rect(
-            &self.fb,
-            draw_rect.x as u32,
-            draw_rect.y as u32,
-            draw_rect.w,
-            draw_rect.h,
-        );
     }
 
     fn draw_panel(&self) {
