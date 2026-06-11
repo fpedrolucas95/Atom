@@ -18,7 +18,7 @@ use atom_syscall::graphics::{
 };
 use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
 use atom_syscall::interrupts::register_irq_handler;
-use atom_syscall::thread::{exit, yield_now};
+use atom_syscall::thread::{exit, get_ticks, yield_now};
 use atom_syscall::debug::log;
 use atom_syscall::input::{MouseDriver, keyboard_poll, scancode_to_ascii, scancodes};
 use atom_syscall::fs;
@@ -394,6 +394,14 @@ const CLOSE_GRACE_TICKS: u32 = 200;
 /// re-blit of every other open window — on every frame. The cap bounds the
 /// per-frame intersection work when damage is genuinely scattered.
 const MAX_DIRTY_RECTS: usize = 16;
+
+/// Minimum number of scheduler ticks between composites (frame pacing). The
+/// compositor is single-threaded, so without a cap a client presenting in a
+/// tight loop — or several animating windows — drives it to recomposite
+/// back-to-back and pegs its CPU core. At the 100Hz scheduler tick (10ms),
+/// 2 ticks ≈ 50fps, the closest cap at or below ~60fps the tick granularity
+/// allows. Damage accumulates between slots and drains in a single composite.
+const MIN_FRAME_TICKS: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -1373,6 +1381,7 @@ struct Compositor {
     pending_close: Vec<PendingClose>,
     dirty: bool,
     dirty_rects: Vec<Rect>,
+    last_composite_tick: u64,
     mouse_left_down: bool,
     mouse_right_down: bool,
     drag_op: DragOperation,
@@ -1442,6 +1451,7 @@ impl Compositor {
             pending_close: Vec::new(),
             dirty: true,
             dirty_rects: Vec::new(),
+            last_composite_tick: 0,
             mouse_left_down: false,
             mouse_right_down: false,
             drag_op: DragOperation::None,
@@ -1568,11 +1578,21 @@ impl Compositor {
 
             self.reap_pending_closes();
             self.flush_deferred_desktop_work();
-            self.flush_pending_snapshots();
 
             if self.dirty {
-                self.draw_all();
-                self.dirty = false;
+                // Frame pacing: only composite once per MIN_FRAME_TICKS. A
+                // present flood still wakes us (to accumulate damage), but the
+                // expensive snapshot+composite work is bounded to the frame
+                // rate instead of running back-to-back at 100% CPU. Snapshots
+                // are taken here, coalesced with the draw, since a pending
+                // snapshot always implies dirty.
+                let now = get_ticks();
+                if now.wrapping_sub(self.last_composite_tick) >= MIN_FRAME_TICKS {
+                    self.flush_pending_snapshots();
+                    self.draw_all();
+                    self.dirty = false;
+                    self.last_composite_tick = now;
+                }
             }
 
             let _ = wait_any(&ports, 10);

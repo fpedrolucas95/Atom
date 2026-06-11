@@ -300,19 +300,33 @@ pub extern "C" fn idle_thread_entry() -> ! {
 }
 
 extern "C" fn smp_smoke_thread_entry() -> ! {
+    // Heartbeat period in timer ticks (~1s at the 100Hz scheduler tick). The
+    // thread exists only to prove the scheduler keeps each CPU live under SMP,
+    // so it must sleep between beats: a yield-only loop never blocks, leaving
+    // the thread permanently Ready, which pins its core at 100% and starves
+    // real work — the opposite of what a health check should demonstrate.
+    const HEARTBEAT_TICKS: u64 = 100;
     let mut iter: u64 = 0;
     loop {
-        if (iter & 0x3FF) == 0 {
-            log_info!(
-                LOG_SMP,
-                "smoke thread tid={:?} running on cpu={} iter={}",
-                sched::current_thread(),
-                smp::current_cpu_id(),
-                iter
-            );
-        }
+        log_info!(
+            LOG_SMP,
+            "smoke thread tid={:?} running on cpu={} iter={}",
+            sched::current_thread(),
+            smp::current_cpu_id(),
+            iter
+        );
         iter = iter.wrapping_add(1);
-        sched::yield_current();
+
+        // Park on the sleep queue until the next beat. The timer interrupt
+        // expires us via wake_sleeping_threads(), so the CPU is free to run
+        // other threads (or halt) in the meantime.
+        if let Some(tid) = sched::current_thread() {
+            let wake_tick = interrupts::get_ticks() + HEARTBEAT_TICKS;
+            sched::sleep_thread(tid, wake_tick);
+            sched::drive_cooperative_tick();
+        } else {
+            sched::yield_current();
+        }
     }
 }
 

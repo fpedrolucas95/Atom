@@ -261,12 +261,21 @@ impl Application {
 
     /// Wait for the next event (blocking)
     pub fn wait_event(&mut self) -> Event {
+        // Idle re-poll cadence. Long enough that a parked app costs ~no CPU,
+        // short enough to stay responsive to state not tied to an incoming
+        // message.
+        const WAIT_EVENT_TIMEOUT_MS: u64 = 100;
         loop {
             let event = self.poll_event();
             if !matches!(event, Event::None) {
                 return event;
             }
-            atom_syscall::thread::yield_now();
+            // Park on the event port instead of spinning on yield_now(): a
+            // yield-only wait keeps the thread permanently Ready, so the
+            // scheduler never lets its CPU halt and the core sits at 100%
+            // while the app is "idle". wait_any blocks until a message lands
+            // (or the timeout elapses), so an idle app consumes no CPU.
+            self.wait_for_event(WAIT_EVENT_TIMEOUT_MS);
         }
     }
 
