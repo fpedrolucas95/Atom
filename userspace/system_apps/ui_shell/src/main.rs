@@ -16,7 +16,7 @@ use atom_syscall::graphics::{
     shared_region_create, shared_region_map, shared_region_unmap, shared_region_destroy,
     get_framebuffer,
 };
-use atom_syscall::ipc::{create_port, send, try_recv, wait_any, PortId};
+use atom_syscall::ipc::{create_port, send, try_recv, recv_envelope, wait_any, IpcEnvelope, PortId};
 use atom_syscall::interrupts::register_irq_handler;
 use atom_syscall::thread::{exit, get_ticks, yield_now};
 use atom_syscall::debug::log;
@@ -28,7 +28,8 @@ use libipc::messages::{
     MessageType, MessageHeader, WindowId, SurfaceAssignMsg, TerminateRequestMsg,
     AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent,
     MouseButtonEvent, MouseButton, MouseScrollEvent, OpenInTabMsg, ApplyWallpaperMsg,
-    WallpaperAppliedMsg, WallpaperFailedMsg, AppLaunchRequestMsg,
+    WallpaperAppliedMsg, WallpaperFailedMsg, AppLaunchRequestMsg, AppLaunchReplyMsg,
+    launch_status,
 };
 use libipc::protocol::send_message_async;
 use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
@@ -943,6 +944,12 @@ impl CursorState {
 
 struct PendingWindow {
     window_id: WindowId,
+    /// PID of the process launched for this window, learned from the
+    /// `AppLaunchReply`. `0` until the reply arrives. The app's registration is
+    /// matched to its window by this PID (authenticated by the kernel via the
+    /// IPC envelope) rather than by arrival order, so a slow- or out-of-order
+    /// registering app no longer binds to the wrong window.
+    pid: u64,
 }
 
 struct PendingClose {
@@ -1556,12 +1563,20 @@ impl Compositor {
         // drawing (frozen screen while the system stays alive).
         const MAX_MSGS_PER_PASS: usize = 64;
 
+        let mut envelope = IpcEnvelope::default();
+
         loop {
             let ports = [self.register_port, self.event_port];
 
             for _ in 0..MAX_MSGS_PER_PASS {
-                match try_recv(self.register_port, &mut reg_buffer) {
-                    Ok(Some(len)) => self.handle_register_message(&reg_buffer[..len]),
+                // Receive with the envelope so app registrations can be bound to
+                // their window by the kernel-authenticated sender PID instead of
+                // by arrival order.
+                match recv_envelope(self.register_port, &mut envelope, &mut reg_buffer) {
+                    Ok(Some(len)) => {
+                        let sender_pid = envelope.sender_process;
+                        self.handle_register_message(&reg_buffer[..len], sender_pid);
+                    }
                     _ => break,
                 }
             }
@@ -1795,7 +1810,7 @@ impl Compositor {
         self.dirty = true;
     }
 
-    fn handle_register_message(&mut self, data: &[u8]) {
+    fn handle_register_message(&mut self, data: &[u8], sender_pid: u64) {
         if data.len() < MessageHeader::SIZE {
             return;
         }
@@ -1805,7 +1820,7 @@ impl Compositor {
         };
 
         match header.msg_type {
-            MessageType::AppRegister => self.handle_app_registration(data),
+            MessageType::AppRegister => self.handle_app_registration(data, sender_pid),
             MessageType::WmRequest => self.handle_wm_request(&data[MessageHeader::SIZE..]),
             MessageType::WmCommitFrame => {
                 if let Some(msg) =
@@ -1826,7 +1841,7 @@ impl Compositor {
         }
     }
 
-    fn handle_app_registration(&mut self, data: &[u8]) {
+    fn handle_app_registration(&mut self, data: &[u8], sender_pid: u64) {
         if data.len() < MessageHeader::SIZE {
             return;
         }
@@ -1848,8 +1863,21 @@ impl Compositor {
             None => return,
         };
 
-        if !self.pending_windows.is_empty() {
-            let pending = self.pending_windows.remove(0);
+        // Bind the registering app to the window launched for its PID. The PID
+        // comes from the kernel-authenticated IPC envelope, so it cannot be
+        // forged and does not depend on registrations arriving in launch order
+        // — the bug where File Manager (slow to register) had its content land
+        // in a later app's window. Fall back to the oldest pending window only
+        // when no PID match exists yet (e.g. the launch reply has not been
+        // processed), preserving correct behaviour for a lone in-flight launch.
+        let index = self
+            .pending_windows
+            .iter()
+            .position(|p| p.pid != 0 && p.pid == sender_pid)
+            .unwrap_or(0);
+
+        if index < self.pending_windows.len() {
+            let pending = self.pending_windows.remove(index);
 
             let result = if let Some(window) = self.wm.get_window_mut(pending.window_id) {
                 window.event_port = Some(reg_msg.app_port);
@@ -1870,6 +1898,29 @@ impl Compositor {
                     None,
                 );
             }
+        }
+    }
+
+    /// Process an `AppLaunchReply` from the app launcher. Replies arrive in
+    /// launch order from the (sequential) launcher, so each maps to the oldest
+    /// pending window that has not yet learned its PID.
+    ///
+    /// On success the reply's PID is stamped onto that window, so the app's
+    /// later registration can be matched to it by authenticated sender PID. On
+    /// failure the placeholder window is dropped: the app will never register,
+    /// and leaving its entry in the queue is exactly what used to shift every
+    /// subsequent app's content into the wrong window.
+    fn handle_launch_reply(&mut self, reply: &AppLaunchReplyMsg) {
+        let index = match self.pending_windows.iter().position(|p| p.pid == 0) {
+            Some(i) => i,
+            None => return,
+        };
+
+        if reply.status == launch_status::LAUNCH_OK && reply.pid != 0 {
+            self.pending_windows[index].pid = reply.pid;
+        } else {
+            let window_id = self.pending_windows.remove(index).window_id;
+            self.handle_close_window(window_id);
         }
     }
 
@@ -1929,6 +1980,14 @@ impl Compositor {
                 if let Some(event) = MouseButtonEvent::from_bytes(&data[payload_start..]) {
                     if event.button == MouseButton::Left {
                         self.mouse_left_down = false;
+                    }
+                }
+            }
+            MessageType::AppLaunchReply => {
+                if data.len() >= MessageHeader::SIZE + AppLaunchReplyMsg::SIZE {
+                    if let Some(reply) = AppLaunchReplyMsg::from_bytes(&data[MessageHeader::SIZE..])
+                    {
+                        self.handle_launch_reply(&reply);
                     }
                 }
             }
@@ -3345,7 +3404,7 @@ impl Compositor {
             Some(id) => id,
             None => return,
         };
-        self.pending_windows.push(PendingWindow { window_id });
+        self.pending_windows.push(PendingWindow { window_id, pid: 0 });
         self.mark_window_dirty(window_id);
     }
 
