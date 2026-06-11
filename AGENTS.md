@@ -1,5 +1,17 @@
 # Agent Memory — Atom
 
+## Browser engine (userspace/apps/browser)
+
+- Pipeline: `tokenizer.rs` (HTML5 tokenizer) → `domtree.rs` (tree construction,
+  arena DOM) → `css.rs` + `style.rs` (selector matching, cascade, inheritance)
+  → `html.rs` (flattener: styled DOM → `dom.rs` flat blocks) → `render.rs`.
+- `entities.rs` holds named/numeric character references (ASCII transliteration
+  — the bitmap font is ASCII-only).
+- Host-side regression tests: `cd tools/browser_tests && cargo test`
+  (stub libgui/libimage; overrides the repo's UEFI cargo target).
+- DOM depth is capped (`domtree::MAX_DEPTH`) because the flattener recurses on
+  tree depth and user stacks are 512 KiB; keep recursion bounded.
+
 ## Build and run
 
 - Linux/macOS build+run: `./build.sh --run`

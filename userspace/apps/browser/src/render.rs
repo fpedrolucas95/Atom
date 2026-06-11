@@ -10,7 +10,20 @@ use libgui::color::Color;
 use libgui::surface::Surface;
 
 use crate::dom::{Align, Hit, Inline, InputKind, InputMeta, Run, TextKind};
-use crate::text::truncate_for_width;
+
+/// Truncate `text` with an ellipsis so it fits within `width` pixels.
+pub fn truncate_for_width(text: &str, width: u32) -> String {
+    let max_chars = (width / CHAR_W) as usize;
+    if text.chars().count() <= max_chars {
+        return String::from(text);
+    }
+    if max_chars <= 3 {
+        return String::from("...");
+    }
+    let mut out: String = text.chars().take(max_chars - 3).collect();
+    out.push_str("...");
+    out
+}
 
 // ── Glyph / layout metrics ──────────────────────────────────────────────────
 pub const CHAR_W: u32 = 8;
@@ -81,6 +94,7 @@ struct Painted {
     color: Color,
     bold: bool,
     underline: bool,
+    strike: bool,
 }
 
 fn paint_for(run: &Run, default: Color) -> Painted {
@@ -95,6 +109,7 @@ fn paint_for(run: &Run, default: Color) -> Painted {
         color,
         bold: run.style.bold,
         underline: run.style.underline || run.link.is_some(),
+        strike: run.style.strike,
     }
 }
 
@@ -137,9 +152,12 @@ fn draw_word(s: &mut Surface, x: u32, y: u32, word: &str, p: &Painted, bg: Color
         // Bitmap font has no bold face; overstrike one pixel to fake weight.
         s.draw_string(x + 1, y, word, p.color, bg);
     }
+    let wpx = word.chars().count() as u32 * CHAR_W;
     if p.underline {
-        let wpx = word.chars().count() as u32 * CHAR_W;
         s.draw_hline(x, y + CHAR_H, wpx, p.color);
+    }
+    if p.strike {
+        s.draw_hline(x, y + CHAR_H / 2, wpx, p.color);
     }
 }
 
@@ -339,6 +357,7 @@ pub fn draw_text_block(
 
         let mut x = match align {
             Align::Center => line_x + eff_w.saturating_sub(line_w) / 2,
+            Align::Right => line_x + eff_w.saturating_sub(line_w),
             Align::Left => line_x,
         };
         let line_visible = clip.visible(y, line_h as i32);
@@ -455,6 +474,7 @@ pub fn draw_image_block(
     y += 8;
     let centered = |w: u32| match align {
         Align::Center => x0 + max_w.saturating_sub(w) / 2,
+        Align::Right => x0 + max_w.saturating_sub(w),
         Align::Left => x0,
     };
     match img {

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use libgui::color::Color;
 
 /// Block-level kind, which drives spacing, weight, and default colour.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextKind {
     H1,
     H2,
@@ -19,7 +19,7 @@ pub enum TextKind {
 }
 
 /// Interactive input kind.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputKind {
     Text,
     Search,
@@ -29,10 +29,11 @@ pub enum InputKind {
 }
 
 /// Horizontal alignment of a block's content.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Align {
     Left,
     Center,
+    Right,
 }
 
 /// Inline rendering attributes applied to a [`Run`]. Resolved at parse time
@@ -43,6 +44,7 @@ pub struct RunStyle {
     pub bold: bool,
     pub mono: bool,
     pub underline: bool,
+    pub strike: bool,
 }
 
 /// A contiguous run of inline text sharing one style and optional hyperlink

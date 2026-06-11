@@ -14,8 +14,8 @@ use crate::content::{ABOUT_HOME, ABOUT_HTML, ABOUT_LOADING};
 use crate::dom::{Block, Document, Hit, InputKind};
 use crate::html::parse_html;
 use crate::net::{decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
-use crate::render::{self, Clip, FormCtx};
-use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case, truncate_for_width};
+use crate::render::{self, truncate_for_width, Clip, FormCtx};
+use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case};
 use crate::url::{normalize_http_url, resolve_url};
 
 /// Maximum images fetched from the network per page load, bounding how long a

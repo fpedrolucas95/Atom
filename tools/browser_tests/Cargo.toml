@@ -1,0 +1,13 @@
+# Host-side regression tests for the browser's HTML5/CSS engine.
+# Standalone workspace: built with the host toolchain, not the OS target.
+[workspace]
+
+[package]
+name = "browser_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libgui = { path = "stubs/libgui" }
+libimage = { path = "stubs/libimage" }

@@ -1,0 +1,6 @@
+# Override the repository-level UEFI target: these tests run on the host.
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+[unstable]
+build-std = ["std", "panic_unwind"]

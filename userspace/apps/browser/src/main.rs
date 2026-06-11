@@ -2,19 +2,21 @@
 //!
 //! The browser targets three goals:
 //!
-//! * **HTML5 / CSS compatibility** — a forgiving parser covering headings,
-//!   flow content, ordered/unordered lists, blockquotes, preformatted text,
-//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls
-//!   (text/search inputs, buttons, and `<select>` drop-downs flowing alongside
-//!   text), centered content (`<center>` / `align`), inline formatting
-//!   (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …), HTML entities (named and
-//!   numeric), and a practical CSS subset for `color`, `font-weight`,
-//!   `text-decoration`, and `display` via inline `style="..."` and `<style>`
-//!   blocks.
-//! * **Low resource use** — a lazily-`mmap`ed bump heap, zero-allocation tag
-//!   tokenisation, redraw only when state changes, and bounded network fetches.
-//! * **Clean structure** — the monolith is split into focused modules
-//!   (allocator, text, url, net, css, dom, html, render, browser) with single
+//! * **HTML5 / CSS compatibility** — a real engine pipeline: a spec-shaped
+//!   HTML5 tokenizer (tags, attributes, comments, CDATA, RCDATA/RAWTEXT/
+//!   PLAINTEXT/script-data content models, full character-reference rules),
+//!   tree construction with implied end tags, scope-aware closing, and
+//!   formatting-element reconstruction (tag-soup recovery), then a CSS engine
+//!   with selectors (compound, combinators, attributes, structural
+//!   pseudo-classes), specificity + `!important` cascade, inheritance,
+//!   `@media` evaluation, and presentational-attribute support. The styled
+//!   DOM is flattened into renderer blocks: headings, flow content, nested
+//!   lists, tables (one row per line), blockquotes, preformatted text, rules,
+//!   images (PNG/JPEG/GIF over HTTP or `data:`), and inline form controls.
+//! * **Low resource use** — a lazily-`mmap`ed bump heap, redraw only when
+//!   state changes, and bounded network fetches.
+//! * **Clean structure** — focused modules (allocator, text, entities,
+//!   tokenizer, domtree, css, style, dom, html, render, browser) with single
 //!   responsibilities and shared primitives (DRY).
 //!
 //! Mouse: click links to navigate, click the address bar / Go button, click
@@ -31,10 +33,14 @@ mod browser;
 mod content;
 mod css;
 mod dom;
+mod domtree;
+mod entities;
 mod html;
 mod net;
 mod render;
+mod style;
 mod text;
+mod tokenizer;
 mod url;
 
 use alloc::format;

@@ -1,13 +1,12 @@
 //! Text utilities: case-insensitive ASCII matching, percent/base64 codecs,
-//! HTML entity resolution, and a zero-allocation small-string for tag names.
+//! and a zero-allocation small-string for tag names.
 //!
 //! Centralising these keeps the parser, URL, and network layers DRY — every
-//! module shares one implementation of each primitive.
+//! module shares one implementation of each primitive. HTML entity handling
+//! lives in [`crate::entities`].
 
 use alloc::string::String;
 use alloc::vec::Vec;
-
-use crate::render::CHAR_W;
 
 // ────────────────────────────────────────────────────────────────────────────
 // ASCII helpers (no allocation, case-insensitive)
@@ -41,10 +40,10 @@ const SMALL_STR_CAP: usize = 16;
 
 /// A fixed-capacity ASCII-lowercased string kept entirely on the stack.
 ///
-/// Tag and attribute names are short and parsed on every byte of markup, so
-/// avoiding a heap allocation per token is a measurable parse-time win (focus:
-/// low CPU). Names longer than the capacity are truncated — they never match a
-/// known HTML tag anyway.
+/// Tag names are short and parsed on every token of markup, so avoiding a heap
+/// allocation per token is a measurable parse-time win (focus: low CPU).
+/// Names longer than the capacity are truncated — they never match a known
+/// HTML tag anyway.
 #[derive(Clone, Copy)]
 pub struct SmallStr {
     buf: [u8; SMALL_STR_CAP],
@@ -66,14 +65,6 @@ impl SmallStr {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Compare against an already-lowercase literal.
-    pub fn eq(&self, other: &str) -> bool {
-        self.as_str() == other
-    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -168,172 +159,8 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// HTML entities (named + numeric), resolved to the renderer's ASCII font
-// ────────────────────────────────────────────────────────────────────────────
-
-/// Resolve a named entity (without `&`/`;`) to its ASCII rendering.
-///
-/// The bitmap font is ASCII-only, so typographic characters are mapped to the
-/// closest ASCII equivalent (e.g. `&mdash;` → `--`) rather than emitting raw
-/// UTF-8 the renderer cannot draw.
-pub fn named_entity(name: &[u8]) -> Option<&'static str> {
-    let s = match name {
-        b"amp" => "&",
-        b"lt" => "<",
-        b"gt" => ">",
-        b"quot" => "\"",
-        b"apos" => "'",
-        b"nbsp" => " ",
-        b"copy" => "(c)",
-        b"reg" => "(R)",
-        b"trade" => "(TM)",
-        b"hellip" => "...",
-        b"mdash" => "--",
-        b"ndash" => "-",
-        b"minus" => "-",
-        b"middot" | b"bull" => "*",
-        b"lsquo" | b"rsquo" | b"sbquo" => "'",
-        b"ldquo" | b"rdquo" | b"bdquo" => "\"",
-        b"laquo" => "<<",
-        b"raquo" => ">>",
-        b"times" => "x",
-        b"divide" => "/",
-        b"deg" => "deg",
-        b"plusmn" => "+/-",
-        b"frac12" => "1/2",
-        b"frac14" => "1/4",
-        b"frac34" => "3/4",
-        b"cent" => "c",
-        b"pound" => "GBP",
-        b"euro" => "EUR",
-        b"yen" => "JPY",
-        b"sect" => "S",
-        b"para" => "P",
-        b"dagger" => "+",
-        b"larr" => "<-",
-        b"rarr" => "->",
-        b"harr" => "<->",
-        b"uarr" => "^",
-        b"darr" => "v",
-        b"check" => "v",
-        b"emsp" | b"ensp" | b"thinsp" => " ",
-        _ => return None,
-    };
-    Some(s)
-}
-
-/// Decode all entities in a string eagerly (used for attribute values, where
-/// streaming whitespace collapsing is not required).
-pub fn decode_entities(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'&' {
-            if let Some(semi) = bytes[i + 1..].iter().take(12).position(|&b| b == b';') {
-                let entity = &bytes[i + 1..i + 1 + semi];
-                if let Some(rep) = resolve_entity(entity) {
-                    out.push_str(rep);
-                    i += semi + 2;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-/// Resolve an entity body (between `&` and `;`) to its ASCII rendering,
-/// handling both named and numeric (`#123` / `#x1F`) forms. Returns an owned
-/// `String` because numeric forms may map to multi-byte ASCII.
-pub fn resolve_entity(entity: &[u8]) -> Option<&'static str> {
-    if let Some(rest) = entity.strip_prefix(b"#") {
-        let cp = if let Some(hex) = rest.strip_prefix(b"x").or_else(|| rest.strip_prefix(b"X")) {
-            parse_radix(hex, 16)?
-        } else {
-            parse_radix(rest, 10)?
-        };
-        return Some(codepoint_to_ascii(cp));
-    }
-    named_entity(entity)
-}
-
-fn parse_radix(digits: &[u8], radix: u32) -> Option<u32> {
-    if digits.is_empty() {
-        return None;
-    }
-    let mut value: u32 = 0;
-    for &b in digits {
-        let d = (b as char).to_digit(radix)?;
-        value = value.checked_mul(radix)?.checked_add(d)?;
-    }
-    Some(value)
-}
-
-/// Map a Unicode codepoint to an ASCII rendering. ASCII passes through; common
-/// punctuation is approximated; anything else becomes `?`.
-pub fn codepoint_to_ascii(cp: u32) -> &'static str {
-    if cp < 0x80 {
-        // Single ASCII byte: return a 1-char static slice via a lookup table.
-        return ASCII_TABLE[cp as usize];
-    }
-    match cp {
-        0x00A0 => " ",
-        0x2013 => "-",
-        0x2014 => "--",
-        0x2018 | 0x2019 => "'",
-        0x201C | 0x201D => "\"",
-        0x2026 => "...",
-        0x2022 => "*",
-        0x00A9 => "(c)",
-        0x00AE => "(R)",
-        0x2122 => "(TM)",
-        0x00D7 => "x",
-        0x2192 => "->",
-        0x2190 => "<-",
-        _ => "?",
-    }
-}
-
-/// Static one-byte string slices for every ASCII codepoint, so
-/// [`codepoint_to_ascii`] can return `&'static str` without allocating.
-static ASCII_TABLE: [&str; 128] = build_ascii_table();
-
-const fn build_ascii_table() -> [&'static str; 128] {
-    // Each entry is a distinct 1-byte static string literal.
-    const T: [&str; 128] = [
-        "\u{0}", "\u{1}", "\u{2}", "\u{3}", "\u{4}", "\u{5}", "\u{6}", "\u{7}", "\u{8}", "\t",
-        "\n", "\u{b}", "\u{c}", "\r", "\u{e}", "\u{f}", "\u{10}", "\u{11}", "\u{12}", "\u{13}",
-        "\u{14}", "\u{15}", "\u{16}", "\u{17}", "\u{18}", "\u{19}", "\u{1a}", "\u{1b}", "\u{1c}",
-        "\u{1d}", "\u{1e}", "\u{1f}", " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+",
-        ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=",
-        ">", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
-        "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_", "`", "a",
-        "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s",
-        "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~", "\u{7f}",
-    ];
-    T
-}
-
-// ────────────────────────────────────────────────────────────────────────────
 // Display helpers
 // ────────────────────────────────────────────────────────────────────────────
-
-/// Truncate `text` with an ellipsis so it fits within `width` pixels.
-pub fn truncate_for_width(text: &str, width: u32) -> String {
-    let max_chars = (width / CHAR_W) as usize;
-    if text.chars().count() <= max_chars {
-        return String::from(text);
-    }
-    if max_chars <= 3 {
-        return String::from("...");
-    }
-    let mut out: String = text.chars().take(max_chars - 3).collect();
-    out.push_str("...");
-    out
-}
 
 /// Escape text for safe interpolation into the browser's own error pages.
 pub fn escape_text(input: &str) -> String {

@@ -1,0 +1,181 @@
+//! Computed styles: cascade resolution and inheritance over the DOM tree.
+//!
+//! For each element, declaration layers apply in the CSS cascade order:
+//! user-agent defaults → presentational attributes (`bgcolor`, `align`,
+//! `color`, `face`, `hidden`, body `text`) → stylesheet rules (specificity +
+//! source order) → inline `style` → stylesheet `!important` → inline
+//! `!important`. Inheritable properties (color, font, decoration, alignment,
+//! transform, visibility) flow from the parent's computed style.
+
+use libgui::color::Color;
+
+use crate::css::{self, Decls, Stylesheet, TextTransform};
+use crate::dom::Align;
+use crate::domtree::{Dom, Element};
+
+/// Fully resolved style for one element.
+#[derive(Clone, Copy)]
+pub struct Computed {
+    /// `None` means "use the renderer's default for the block kind".
+    pub color: Option<Color>,
+    /// This element's own background (not inherited; the renderer only paints
+    /// the page background, taken from `html`/`body`).
+    pub background: Option<Color>,
+    pub bold: bool,
+    pub italic: bool,
+    pub mono: bool,
+    pub underline: bool,
+    pub strike: bool,
+    /// `visibility`; a hidden ancestor can be overridden back to visible.
+    pub visible: bool,
+    pub align: Option<Align>,
+    pub transform: Option<TextTransform>,
+}
+
+impl Default for Computed {
+    fn default() -> Self {
+        Self {
+            color: None,
+            background: None,
+            bold: false,
+            italic: false,
+            mono: false,
+            underline: false,
+            strike: false,
+            visible: true,
+            align: None,
+            transform: None,
+        }
+    }
+}
+
+/// Resolve the computed style of element `el`. Returns the style and whether
+/// the element is `display: none` (subtree pruned by the caller).
+pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (Computed, bool) {
+    // Inherited properties start from the parent.
+    let mut out = Computed {
+        background: None,
+        ..*parent
+    };
+    let Some(element) = dom.element(el) else {
+        return (out, false);
+    };
+
+    let mut acc = ua_defaults(element.tag());
+    presentational_hints(element, &mut acc);
+
+    if !sheet.is_empty() {
+        let mut normal = Decls::default();
+        let mut important = Decls::default();
+        sheet.match_element(dom, el, &mut normal, &mut important);
+        acc.overlay(&normal);
+        if let Some(style) = element.attr("style") {
+            let (inline_normal, inline_important) = css::parse_declarations(style);
+            acc.overlay(&inline_normal);
+            acc.overlay(&important);
+            acc.overlay(&inline_important);
+        } else {
+            acc.overlay(&important);
+        }
+    } else if let Some(style) = element.attr("style") {
+        let (inline_normal, inline_important) = css::parse_declarations(style);
+        acc.overlay(&inline_normal);
+        acc.overlay(&inline_important);
+    }
+
+    apply(&mut out, &acc);
+    (out, acc.display_none)
+}
+
+fn apply(out: &mut Computed, d: &Decls) {
+    if let Some(c) = d.color {
+        out.color = Some(c);
+    }
+    if let Some(c) = d.background {
+        out.background = Some(c);
+    }
+    if let Some(v) = d.bold {
+        out.bold = v;
+    }
+    if let Some(v) = d.italic {
+        out.italic = v;
+    }
+    if let Some(v) = d.mono {
+        out.mono = v;
+    }
+    if let Some(v) = d.underline {
+        out.underline = v;
+    }
+    if let Some(v) = d.strike {
+        out.strike = v;
+    }
+    if let Some(v) = d.visible {
+        out.visible = v;
+    }
+    if let Some(a) = d.align {
+        out.align = Some(a);
+    }
+    if let Some(t) = d.transform {
+        out.transform = t;
+    }
+}
+
+/// Default rendering for HTML elements (the user-agent stylesheet).
+fn ua_defaults(tag: &str) -> Decls {
+    let mut d = Decls::default();
+    match tag {
+        "b" | "strong" | "mark" | "th" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            d.bold = Some(true)
+        }
+        "i" | "em" | "var" | "cite" | "dfn" | "address" => d.italic = Some(true),
+        "code" | "tt" | "kbd" | "samp" | "pre" | "xmp" | "listing" | "plaintext" => {
+            d.mono = Some(true)
+        }
+        "u" | "ins" => d.underline = Some(true),
+        "s" | "strike" | "del" => d.strike = Some(true),
+        "center" => d.align = Some(Align::Center),
+        "caption" => d.align = Some(Align::Center),
+        _ => {}
+    }
+    if tag == "th" {
+        d.align = Some(Align::Center);
+    }
+    if tag == "var" {
+        d.mono = Some(true);
+    }
+    d
+}
+
+/// Legacy presentational attributes, applied below author CSS in the cascade.
+fn presentational_hints(el: &Element, d: &mut Decls) {
+    if el.attr("hidden").is_some() {
+        d.display_none = true;
+    }
+    if let Some(c) = el.attr("color").and_then(css::parse_color) {
+        d.color = Some(c);
+    }
+    if let Some(c) = el.attr("bgcolor").and_then(css::parse_color) {
+        d.background = Some(c);
+    }
+    if el.tag() == "body" {
+        if let Some(c) = el.attr("text").and_then(css::parse_color) {
+            d.color = Some(c);
+        }
+    }
+    if let Some(face) = el.attr("face") {
+        if ["mono", "courier", "consolas"]
+            .iter()
+            .any(|m| face.to_ascii_lowercase().contains(m))
+        {
+            d.mono = Some(true);
+        }
+    }
+    if let Some(align) = el.attr("align") {
+        d.align = match align.to_ascii_lowercase().as_str() {
+            "center" | "middle" => Some(Align::Center),
+            "right" => Some(Align::Right),
+            "left" => Some(Align::Left),
+            _ => d.align,
+        };
+    }
+}

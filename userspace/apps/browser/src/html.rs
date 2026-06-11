@@ -1,741 +1,338 @@
-//! A forgiving, single-pass HTML5 tokenizer and block builder.
+//! Document assembly: DOM tree + computed styles → renderer blocks.
 //!
-//! The parser produces the flat [`Document`] the renderer consumes. It supports
-//! a practical subset of HTML5: document metadata (`<title>`), headings,
-//! paragraphs and the common flow containers, ordered/unordered lists,
-//! blockquotes, preformatted text, rules, images, form controls, and a range of
-//! inline formatting elements (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …).
-//! Inline and block styling is resolved here — from element defaults, inline
-//! `style="..."` attributes, and a [`Stylesheet`] gathered from `<style>`
-//! blocks — so the renderer stays a dumb, fast painter.
+//! `parse_html` runs the full pipeline: the HTML5 tokenizer and tree builder
+//! ([`crate::tokenizer`], [`crate::domtree`]) produce a DOM, every `<style>`
+//! element feeds the [`Stylesheet`], and this module's flattener walks the
+//! tree resolving each element's computed style ([`crate::style`]) while
+//! emitting the flat [`Document`] the renderer consumes.
+//!
+//! The flattener implements the block model: headings, paragraphs and flow
+//! containers, nested ordered/unordered lists (`type`, `start`, `value`,
+//! roman/alpha numbering), definition lists, blockquotes, preformatted text,
+//! tables linearised one row per line with `|` separators, rules, images,
+//! links, and form controls (`input`, `select`, `textarea`, `button`).
+//! Whitespace collapses per CSS rules; `text-transform`, visibility, and
+//! `display: none` pruning are applied here so the renderer stays a dumb
+//! painter.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libgui::color::Color;
 
-use crate::css::{self, Stylesheet};
+use crate::css::{Stylesheet, TextTransform};
 use crate::dom::{Align, Block, Document, Inline, InputKind, InputMeta, Run, RunStyle, TextKind};
-use crate::text::{
-    decode_entities, eq_ignore_ascii_case, find_ignore_ascii_case, resolve_entity, SmallStr,
-};
+use crate::domtree::{build_dom, Dom, Element, NodeData, DOCUMENT};
+use crate::style::{self, Computed};
 
 /// Parse a full HTML document into the renderer's model.
 pub fn parse_html(html: &str) -> Document {
-    let sheet = extract_stylesheet(html);
-    let mut parser = HtmlParser::new(html, &sheet);
-    parser.parse();
-    Document {
-        title: parser.title,
-        background: parser.background,
-        blocks: parser.blocks,
-        links: parser.links,
-        inputs: parser.inputs,
-    }
-}
-
-/// Pre-pass: collect every `<style>` block into a single stylesheet so rules in
-/// `<head>` apply to the body that follows them.
-fn extract_stylesheet(html: &str) -> Stylesheet {
-    let bytes = html.as_bytes();
+    let dom = build_dom(html);
     let mut sheet = Stylesheet::new();
-    let mut pos = 0;
-    while let Some(rel) = find_ignore_ascii_case(&bytes[pos..], b"<style") {
-        let tag_open = pos + rel;
-        let Some(gt) = bytes[tag_open..].iter().position(|&b| b == b'>') else {
-            break;
-        };
-        let content_start = tag_open + gt + 1;
-        let Some(close_rel) = find_ignore_ascii_case(&bytes[content_start..], b"</style") else {
-            break;
-        };
-        let content_end = content_start + close_rel;
-        if let Ok(css) = core::str::from_utf8(&bytes[content_start..content_end]) {
-            sheet.parse_into(css);
-        }
-        pos = content_end;
-    }
-    sheet
+    collect_styles(&dom, DOCUMENT, &mut sheet);
+
+    let mut f = Flattener::new(&dom, &sheet);
+    f.walk_node(DOCUMENT, &Computed::default(), None);
+    f.finish()
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Attribute parsing (single pass per tag)
-// ────────────────────────────────────────────────────────────────────────────
-
-/// Find one attribute by name, scanning the tag's attribute bytes lazily.
-///
-/// This is deliberately on-demand rather than parsing every attribute up front:
-/// large real-world pages have thousands of elements, and eagerly allocating a
-/// list (plus a decoded `String` per attribute) for every tag floods the bump
-/// heap and pegs the CPU. We allocate only the single value we actually need.
-fn find_attr(attrs: &[u8], name: &[u8]) -> Option<String> {
-    let mut i = 0;
-    while i < attrs.len() {
-        skip_ws(attrs, &mut i);
-        let name_start = i;
-        while i < attrs.len()
-            && (attrs[i].is_ascii_alphanumeric()
-                || attrs[i] == b'-'
-                || attrs[i] == b'_'
-                || attrs[i] == b':')
-        {
-            i += 1;
-        }
-        let attr_name = &attrs[name_start..i];
-        skip_ws(attrs, &mut i);
-
-        if i < attrs.len() && attrs[i] == b'=' {
-            i += 1;
-            skip_ws(attrs, &mut i);
-            let raw = read_attr_value(attrs, &mut i);
-            if eq_ignore_ascii_case(attr_name, name) {
-                return Some(decode_entities(core::str::from_utf8(raw).unwrap_or("")));
-            }
-        } else if eq_ignore_ascii_case(attr_name, name) {
-            // Boolean attribute present without a value (e.g. `selected`).
-            return Some(String::new());
-        } else if attr_name.is_empty() {
-            i += 1; // skip a stray byte (e.g. `/` in self-closing tags)
-        }
+/// Gather every `<style>` element's text into the stylesheet, in tree order,
+/// so rules in `<head>` apply to the whole body.
+fn collect_styles(dom: &Dom, id: usize, sheet: &mut Stylesheet) {
+    if dom.tag(id) == "style" {
+        let mut css = String::new();
+        dom.text_content(id, &mut css);
+        sheet.parse_into(&css);
+        return;
     }
-    None
-}
-
-/// Read (without decoding) a quoted or unquoted attribute value slice.
-fn read_attr_value<'a>(attrs: &'a [u8], i: &mut usize) -> &'a [u8] {
-    if *i >= attrs.len() {
-        return &[];
-    }
-    if attrs[*i] == b'\'' || attrs[*i] == b'"' {
-        let quote = attrs[*i];
-        *i += 1;
-        let start = *i;
-        while *i < attrs.len() && attrs[*i] != quote {
-            *i += 1;
-        }
-        let v = &attrs[start..*i];
-        if *i < attrs.len() {
-            *i += 1;
-        }
-        v
-    } else {
-        let start = *i;
-        while *i < attrs.len() && !attrs[*i].is_ascii_whitespace() {
-            *i += 1;
-        }
-        &attrs[start..*i]
+    for &c in &dom.nodes[id].children {
+        collect_styles(dom, c, sheet);
     }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Inline style stack
+// Tag → block classification
 // ────────────────────────────────────────────────────────────────────────────
 
-/// One styled element on the open-element stack, recording exactly which global
-/// effects it applied so they can be undone precisely when it closes.
+/// Block kind for elements that start a new flow block.
+fn block_kind(tag: &str) -> Option<TextKind> {
+    Some(match tag {
+        "h1" => TextKind::H1,
+        "h2" => TextKind::H2,
+        "h3" | "h4" | "h5" | "h6" => TextKind::H3,
+        "p" | "div" | "section" | "article" | "main" | "header" | "footer" | "center" | "nav"
+        | "aside" | "figure" | "figcaption" | "address" | "fieldset" | "legend" | "details"
+        | "summary" | "dialog" | "hgroup" | "search" | "caption" | "dt" | "dl" | "marquee" => {
+            TextKind::Paragraph
+        }
+        "blockquote" => TextKind::Quote,
+        "pre" | "xmp" | "listing" | "plaintext" => TextKind::Pre,
+        _ => return None,
+    })
+}
+
+/// Subtrees that never produce visible content.
+fn skip_subtree(tag: &str) -> bool {
+    matches!(
+        tag,
+        "script" | "style" | "template" | "svg" | "math" | "iframe" | "object" | "embed"
+            | "applet" | "datalist" | "colgroup" | "map" | "noembed" | "noframes"
+    )
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// List numbering
+// ────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Copy)]
-struct Frame {
-    tag: SmallStr,
-    bold: bool,
-    mono: bool,
-    underline: bool,
-    color: bool,
-    hidden: bool,
-    center: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Skip {
-    None,
-    Script,
-    Style,
-}
-
-struct HtmlParser<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-    sheet: &'a Stylesheet,
-
-    blocks: Vec<Block>,
-    items: Vec<Inline>,
-    cur: String,
-    cur_kind: TextKind,
-    cur_marker: Option<String>,
-    cur_align: Option<Align>,
-
-    links: Vec<String>,
-    cur_link: Option<usize>,
-    inputs: Vec<InputMeta>,
-    form_action: String,
-    list_stack: Vec<ListCtx>,
-
-    // `<select>` accumulation: option text is captured, not rendered as body.
-    select_idx: Option<usize>,
-    opt_text: String,
-    opt_selected: bool,
-    opt_chosen: Option<String>,
-    opt_first: Option<String>,
-
-    // Inline style accumulation.
-    frames: Vec<Frame>,
-    bold_depth: u32,
-    mono_depth: u32,
-    underline_depth: u32,
-    hidden_depth: u32,
-    center_depth: u32,
-    color_stack: Vec<Color>,
-    background: Option<Color>,
-
-    title: String,
-    in_title: bool,
-    in_pre: bool,
-    skip: Skip,
-    last_was_space: bool,
+enum Numbering {
+    Decimal,
+    AlphaLower,
+    AlphaUpper,
+    RomanLower,
+    RomanUpper,
 }
 
 struct ListCtx {
     ordered: bool,
-    counter: u32,
+    counter: i32,
+    numbering: Numbering,
 }
 
-impl<'a> HtmlParser<'a> {
-    fn new(html: &'a str, sheet: &'a Stylesheet) -> Self {
+fn format_alpha(mut n: u32) -> String {
+    let mut s = String::new();
+    while n > 0 {
+        n -= 1;
+        s.insert(0, (b'a' + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    s
+}
+
+fn format_roman(n: u32) -> String {
+    if n == 0 || n > 3999 {
+        return alloc::format!("{}", n);
+    }
+    const TABLE: &[(u32, &str)] = &[
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+        (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+    ];
+    let mut s = String::new();
+    let mut rest = n;
+    for &(v, sym) in TABLE {
+        while rest >= v {
+            s.push_str(sym);
+            rest -= v;
+        }
+    }
+    s
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Flattener
+// ────────────────────────────────────────────────────────────────────────────
+
+struct Flattener<'a> {
+    dom: &'a Dom,
+    sheet: &'a Stylesheet,
+
+    blocks: Vec<Block>,
+    items: Vec<Inline>,
+    cur_kind: TextKind,
+    cur_align: Option<Align>,
+    cur_marker: Option<String>,
+    last_was_space: bool,
+
+    links: Vec<String>,
+    inputs: Vec<InputMeta>,
+    form_action: String,
+    list_stack: Vec<ListCtx>,
+    pre_depth: u32,
+    quote_depth: u32,
+
+    title: String,
+    background: Option<Color>,
+}
+
+impl<'a> Flattener<'a> {
+    fn new(dom: &'a Dom, sheet: &'a Stylesheet) -> Self {
         Self {
-            bytes: html.as_bytes(),
-            pos: 0,
+            dom,
             sheet,
             blocks: Vec::new(),
             items: Vec::new(),
-            cur: String::new(),
             cur_kind: TextKind::Paragraph,
-            cur_marker: None,
             cur_align: None,
+            cur_marker: None,
+            last_was_space: true,
             links: Vec::new(),
-            cur_link: None,
             inputs: Vec::new(),
             form_action: String::new(),
             list_stack: Vec::new(),
-            select_idx: None,
-            opt_text: String::new(),
-            opt_selected: false,
-            opt_chosen: None,
-            opt_first: None,
-            frames: Vec::new(),
-            bold_depth: 0,
-            mono_depth: 0,
-            underline_depth: 0,
-            hidden_depth: 0,
-            center_depth: 0,
-            color_stack: Vec::new(),
-            background: None,
+            pre_depth: 0,
+            quote_depth: 0,
             title: String::new(),
-            in_title: false,
-            in_pre: false,
-            skip: Skip::None,
-            last_was_space: true,
+            background: None,
         }
     }
 
-    fn parse(&mut self) {
-        while self.pos < self.bytes.len() {
-            if self.skip != Skip::None {
-                self.skip_element();
-                continue;
-            }
-            match self.bytes[self.pos] {
-                b'<' => self.parse_tag(),
-                b'&' => self.parse_entity(),
-                b => {
-                    self.pos += 1;
-                    self.push_char(b as char);
-                }
-            }
-        }
+    fn finish(mut self) -> Document {
         self.flush_block();
         if self.blocks.is_empty() {
-            self.push_text_block(TextKind::Paragraph, "(empty document)");
+            self.blocks.push(Block::Text {
+                kind: TextKind::Paragraph,
+                items: alloc::vec![Inline::Run(Run {
+                    text: String::from("(empty document)"),
+                    link: None,
+                    style: RunStyle::default(),
+                })],
+                align: Align::Left,
+                marker: None,
+            });
+        }
+        Document {
+            title: self.title,
+            background: self.background,
+            blocks: self.blocks,
+            links: self.links,
+            inputs: self.inputs,
         }
     }
 
-    // ── Tag dispatch ────────────────────────────────────────────────────────
+    // ── Tree walk ───────────────────────────────────────────────────────────
 
-    fn parse_tag(&mut self) {
-        let start = self.pos + 1;
-        let Some(end) = self.bytes[start..].iter().position(|&b| b == b'>') else {
-            self.pos = self.bytes.len();
-            return;
-        };
-        let tag_bytes = &self.bytes[start..start + end];
-        self.pos = start + end + 1;
-
-        if tag_bytes.starts_with(b"!--") || tag_bytes.starts_with(b"!") || tag_bytes.starts_with(b"?")
-        {
-            return; // comments, <!doctype>, processing instructions
-        }
-
-        let mut idx = 0;
-        skip_ws(tag_bytes, &mut idx);
-        let closing = tag_bytes.get(idx) == Some(&b'/');
-        if closing {
-            idx += 1;
-        }
-        skip_ws(tag_bytes, &mut idx);
-        let name_start = idx;
-        while idx < tag_bytes.len()
-            && (tag_bytes[idx].is_ascii_alphanumeric() || tag_bytes[idx] == b'-')
-        {
-            idx += 1;
-        }
-        let name = SmallStr::lower(&tag_bytes[name_start..idx]);
-        if name.is_empty() {
-            return;
-        }
-
-        if closing {
-            self.close_tag(name.as_str());
-        } else {
-            let attrs = &tag_bytes[idx..];
-            self.open_tag(name, attrs);
+    fn walk_children(&mut self, id: usize, cs: &Computed, link: Option<usize>) {
+        let dom = self.dom;
+        for &c in &dom.nodes[id].children {
+            self.walk_node(c, cs, link);
         }
     }
 
-    fn open_tag(&mut self, name: SmallStr, attrs: &[u8]) {
-        let tag = name.as_str();
-        if tag == "html" || tag == "body" {
-            self.capture_document_background(tag, attrs);
+    fn walk_node(&mut self, id: usize, parent: &Computed, link: Option<usize>) {
+        let dom = self.dom;
+        match &dom.nodes[id].data {
+            NodeData::Document => self.walk_children(id, parent, link),
+            NodeData::Text(t) => self.emit_text(t, parent, link),
+            NodeData::Element(el) => self.walk_element(id, el, parent, link),
         }
+    }
+
+    fn walk_element(&mut self, id: usize, el: &'a Element, parent: &Computed, link: Option<usize>) {
+        let tag = el.tag();
+        if skip_subtree(tag) {
+            return;
+        }
+        if tag == "title" {
+            if self.title.is_empty() {
+                let mut t = String::new();
+                self.dom.text_content(id, &mut t);
+                self.title = collapse_ws(&t);
+            }
+            return;
+        }
+
+        let (cs, display_none) = style::compute(self.dom, id, self.sheet, parent);
+        if display_none {
+            return;
+        }
+
+        if (tag == "html" || tag == "body") && cs.background.is_some() {
+            self.background = cs.background;
+        }
+
         match tag {
-            "script" => {
-                self.skip = Skip::Script;
-                return;
-            }
-            "style" => {
-                self.skip = Skip::Style;
-                return;
-            }
-            "title" => {
-                self.flush_block();
-                self.in_title = true;
-                self.cur.clear();
-                self.last_was_space = true;
-                return;
-            }
-            "br" => {
-                self.flush_block();
-                return;
-            }
+            "br" => self.line_break(),
             "hr" => {
                 self.flush_block();
-                if self.hidden_depth == 0 {
+                if cs.visible {
                     self.blocks.push(Block::Rule);
                 }
-                return;
             }
-            "img" => {
-                self.emit_image(attrs);
-                return;
-            }
-            "input" => {
-                self.emit_input(attrs);
-                return;
-            }
-            "select" => {
-                self.open_select(attrs);
-                return;
-            }
-            "option" => {
-                self.begin_option(attrs);
-                return;
-            }
-            "ul" | "ol" => {
-                self.flush_block();
-                self.list_stack.push(ListCtx {
-                    ordered: tag == "ol",
-                    counter: 0,
+            "img" => self.emit_image(el, &cs),
+            "input" => self.emit_input(el, &cs),
+            "select" => self.emit_select(id, el, &cs),
+            "textarea" => self.emit_textarea(id, el, &cs),
+            "button" => self.emit_button(id, el, &cs),
+            "a" => {
+                let new_link = el.attr("href").map(|href| {
+                    self.links.push(String::from(href));
+                    self.links.len() - 1
                 });
+                self.walk_children(id, &cs, new_link.or(link));
             }
+            "ul" | "ol" | "menu" | "dir" => self.walk_list(id, el, &cs, link),
+            "li" => self.walk_list_item(id, &cs, link),
+            "dd" => {
+                // Definition descriptions render as indented, markerless items.
+                let prev = self.begin_block(TextKind::ListItem);
+                self.walk_children(id, &cs, link);
+                self.end_block(prev);
+            }
+            "table" => self.walk_table(id, &cs, link),
             "form" => {
-                self.form_action = find_attr(attrs, b"action").unwrap_or_default();
+                let prev_action = core::mem::take(&mut self.form_action);
+                self.form_action = el.attr("action").unwrap_or("").to_string();
+                let prev = self.begin_block(TextKind::Paragraph);
+                self.walk_children(id, &cs, link);
+                self.end_block(prev);
+                self.form_action = prev_action;
             }
-            "a" => {
-                self.flush_run();
-                let href = find_attr(attrs, b"href").unwrap_or_default();
-                self.cur_link = Some(self.links.len());
-                self.links.push(href);
+            "blockquote" => {
+                self.quote_depth += 1;
+                let prev = self.begin_block(TextKind::Quote);
+                self.walk_children(id, &cs, link);
+                self.end_block(prev);
+                self.quote_depth -= 1;
             }
-            _ => {}
-        }
-
-        // Block elements: start a new block and remember any list marker.
-        if let Some(kind) = block_kind(tag) {
-            self.start_block(kind);
-            if kind == TextKind::ListItem {
-                self.cur_marker = Some(self.next_list_marker());
+            "pre" | "xmp" | "listing" | "plaintext" => {
+                self.pre_depth += 1;
+                let prev = self.begin_block(TextKind::Pre);
+                self.walk_children(id, &cs, link);
+                self.end_block(prev);
+                self.pre_depth -= 1;
             }
-            if kind == TextKind::Pre {
-                self.in_pre = true;
-            }
-        }
-
-        // Apply element + CSS + inline styling as an unwindable frame.
-        self.push_frame(name, attrs);
-    }
-
-    fn close_tag(&mut self, name: &str) {
-        self.pop_frame(name);
-        match name {
-            "title" => {
-                self.title = self.cur.trim().to_string();
-                self.cur.clear();
-                self.in_title = false;
-                self.last_was_space = true;
-            }
-            "ul" | "ol" => {
-                self.flush_block();
-                self.list_stack.pop();
-            }
-            "select" => self.close_select(),
-            "option" => self.commit_option(),
-            "form" => self.form_action.clear(),
-            "a" => {
-                self.flush_run();
-                self.cur_link = None;
-            }
-            "pre" => {
-                self.flush_block();
-                self.in_pre = false;
-                self.cur_kind = TextKind::Paragraph;
-            }
-            _ if block_kind(name).is_some() => {
-                self.flush_block();
-                self.cur_kind = TextKind::Paragraph;
-            }
-            _ => {}
-        }
-    }
-
-    // ── Styling frames ──────────────────────────────────────────────────────
-
-    fn capture_document_background(&mut self, tag: &str, attrs: &[u8]) {
-        let mut background = None;
-        if !self.sheet.is_empty() {
-            let classes = find_attr(attrs, b"class").unwrap_or_default();
-            background = self.sheet.style_for(tag, &classes).background;
-        }
-        if let Some(inline) = find_attr(attrs, b"style") {
-            let style = css::parse_inline(&inline);
-            if style.background.is_some() {
-                background = style.background;
-            }
-        }
-        if let Some(color) = find_attr(attrs, b"bgcolor")
-            .as_deref()
-            .and_then(css::parse_color)
-        {
-            background = Some(color);
-        }
-        if background.is_some() {
-            self.background = background;
-        }
-    }
-
-    fn push_frame(&mut self, name: SmallStr, attrs: &[u8]) {
-        let tag = name.as_str();
-        let (mut bold, mono, mut underline) = inline_defaults(tag);
-        let mut color: Option<Color> = None;
-        let mut hidden = false;
-
-        // Cascade: stylesheet rules (only when a sheet exists — avoids a class
-        // lookup and rule scan for every element on large unstyled pages), then
-        // the inline `style="..."` attribute, then a legacy `color` attribute.
-        if !self.sheet.is_empty() {
-            let classes = find_attr(attrs, b"class").unwrap_or_default();
-            let css_style = self.sheet.style_for(tag, &classes);
-            merge_css(&css_style, &mut bold, &mut underline, &mut color, &mut hidden);
-        }
-        if let Some(inline) = find_attr(attrs, b"style") {
-            let s = css::parse_inline(&inline);
-            merge_css(&s, &mut bold, &mut underline, &mut color, &mut hidden);
-        }
-        if let Some(c) = find_attr(attrs, b"color").as_deref().and_then(css::parse_color) {
-            color = Some(c);
-        }
-
-        // Centre alignment from `<center>` or an `align="center"` attribute.
-        let center = tag == "center"
-            || matches!(
-                find_attr(attrs, b"align").as_deref(),
-                Some("center") | Some("middle")
-            );
-
-        if !(bold || mono || underline || color.is_some() || hidden || center) {
-            return; // no effect — nothing to unwind later
-        }
-
-        self.flush_run();
-        if bold {
-            self.bold_depth += 1;
-        }
-        if mono {
-            self.mono_depth += 1;
-        }
-        if underline {
-            self.underline_depth += 1;
-        }
-        if hidden {
-            self.hidden_depth += 1;
-        }
-        if center {
-            self.center_depth += 1;
-        }
-        if let Some(c) = color {
-            self.color_stack.push(c);
-        }
-        self.frames.push(Frame {
-            tag: name,
-            bold,
-            mono,
-            underline,
-            color: color.is_some(),
-            hidden,
-            center,
-        });
-    }
-
-    fn pop_frame(&mut self, name: &str) {
-        let Some(pos) = self.frames.iter().rposition(|f| f.tag.eq(name)) else {
-            return;
-        };
-        self.flush_run();
-        let frame = self.frames.remove(pos);
-        if frame.bold {
-            self.bold_depth -= 1;
-        }
-        if frame.mono {
-            self.mono_depth -= 1;
-        }
-        if frame.underline {
-            self.underline_depth -= 1;
-        }
-        if frame.hidden {
-            self.hidden_depth -= 1;
-        }
-        if frame.center {
-            self.center_depth -= 1;
-        }
-        if frame.color {
-            self.color_stack.pop();
-        }
-    }
-
-    fn current_style(&self) -> RunStyle {
-        RunStyle {
-            color: self.color_stack.last().copied(),
-            bold: self.bold_depth > 0,
-            mono: self.mono_depth > 0,
-            underline: self.underline_depth > 0,
-        }
-    }
-
-    // ── Void elements ───────────────────────────────────────────────────────
-
-    fn emit_image(&mut self, attrs: &[u8]) {
-        self.flush_block();
-        if self.hidden_depth > 0 {
-            return;
-        }
-        self.blocks.push(Block::Image {
-            alt: find_attr(attrs, b"alt").unwrap_or_default(),
-            img: None,
-            error: None,
-            src: find_attr(attrs, b"src").unwrap_or_default(),
-            align: self.current_align(),
-        });
-    }
-
-    /// Emit a form control inline within the current flow block.
-    fn emit_input(&mut self, attrs: &[u8]) {
-        let kind = match find_attr(attrs, b"type").as_deref().unwrap_or("text") {
-            "submit" | "button" | "reset" => InputKind::Submit,
-            "search" => InputKind::Search,
-            "hidden" => return,
-            _ => InputKind::Text,
-        };
-        if self.hidden_depth > 0 {
-            return;
-        }
-        let placeholder = find_attr(attrs, b"placeholder")
-            .or_else(|| find_attr(attrs, b"value"))
-            .unwrap_or_default();
-        let size = find_attr(attrs, b"size").and_then(|s| s.trim().parse().ok());
-        self.push_control(InputMeta {
-            kind,
-            placeholder,
-            name: find_attr(attrs, b"name").unwrap_or_default(),
-            action: self.form_action.clone(),
-            size,
-            options: Vec::new(),
-        });
-    }
-
-    fn open_select(&mut self, attrs: &[u8]) {
-        if self.hidden_depth > 0 {
-            return;
-        }
-        self.opt_text.clear();
-        self.opt_selected = false;
-        self.opt_chosen = None;
-        self.opt_first = None;
-        let idx = self.inputs.len();
-        self.select_idx = Some(idx);
-        self.push_control(InputMeta {
-            kind: InputKind::Select,
-            placeholder: String::new(),
-            name: find_attr(attrs, b"name").unwrap_or_default(),
-            action: self.form_action.clone(),
-            size: None,
-            options: Vec::new(),
-        });
-    }
-
-    /// Finalise the option being captured, then start a new one.
-    fn begin_option(&mut self, attrs: &[u8]) {
-        self.commit_option();
-        self.opt_selected = find_attr(attrs, b"selected").is_some();
-    }
-
-    fn commit_option(&mut self) {
-        if self.select_idx.is_none() {
-            return;
-        }
-        let text = self.opt_text.trim();
-        if !text.is_empty() {
-            if let Some(idx) = self.select_idx {
-                if let Some(meta) = self.inputs.get_mut(idx) {
-                    meta.options.push(text.to_string());
+            _ => match block_kind(tag) {
+                Some(kind) => {
+                    // Paragraph-level blocks inside a blockquote keep the
+                    // quote presentation.
+                    let kind = if kind == TextKind::Paragraph && self.quote_depth > 0 {
+                        TextKind::Quote
+                    } else {
+                        kind
+                    };
+                    let prev = self.begin_block(kind);
+                    self.walk_children(id, &cs, link);
+                    self.end_block(prev);
                 }
-            }
-            if self.opt_first.is_none() {
-                self.opt_first = Some(text.to_string());
-            }
-            if self.opt_selected && self.opt_chosen.is_none() {
-                self.opt_chosen = Some(text.to_string());
-            }
-        }
-        self.opt_text.clear();
-        self.opt_selected = false;
-    }
-
-    fn close_select(&mut self) {
-        self.commit_option();
-        if let Some(idx) = self.select_idx.take() {
-            let label = self
-                .opt_chosen
-                .take()
-                .or_else(|| self.opt_first.take())
-                .unwrap_or_default();
-            if let Some(meta) = self.inputs.get_mut(idx) {
-                meta.placeholder = label;
-            }
+                None => self.walk_children(id, &cs, link), // inline element
+            },
         }
     }
 
-    /// Register an input's metadata and place it inline in the current block.
-    fn push_control(&mut self, meta: InputMeta) {
-        self.flush_run();
-        self.note_align();
-        let idx = self.inputs.len();
-        self.inputs.push(meta);
-        self.items.push(Inline::Control(idx));
+    // ── Block management ────────────────────────────────────────────────────
+
+    /// Flush any open block and switch to `kind`; returns the previous kind
+    /// for [`Self::end_block`] to restore.
+    fn begin_block(&mut self, kind: TextKind) -> TextKind {
+        self.flush_block();
+        let prev = self.cur_kind;
+        self.cur_kind = kind;
+        prev
     }
 
-    // ── Text accumulation ───────────────────────────────────────────────────
-
-    fn parse_entity(&mut self) {
-        let start = self.pos + 1;
-        let max_end = (start + 12).min(self.bytes.len());
-        for end in start..max_end {
-            if self.bytes[end] == b';' {
-                let entity = &self.bytes[start..end];
-                self.pos = end + 1;
-                let rep = resolve_entity(entity).unwrap_or(" ");
-                self.push_text(rep);
-                return;
-            }
-        }
-        self.pos += 1;
-        self.push_char('&');
+    fn end_block(&mut self, prev: TextKind) {
+        self.flush_block();
+        self.cur_kind = prev;
     }
 
-    fn push_text(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.push_char(ch);
-        }
-    }
-
-    fn push_char(&mut self, ch: char) {
-        if self.skip != Skip::None || self.hidden_depth > 0 {
-            return;
-        }
-        // Inside a <select>, text belongs to <option> labels, not the page body.
-        if self.select_idx.is_some() {
-            self.opt_text.push(ch);
-            return;
-        }
-        if self.in_title {
-            self.cur.push(ch);
-            return;
-        }
-        if self.in_pre {
-            if ch != '\r' {
-                self.cur.push(ch);
-            }
-            return;
-        }
-        if ch.is_whitespace() {
-            if !self.last_was_space && !self.cur.is_empty() {
-                self.cur.push(' ');
-                self.last_was_space = true;
-            }
-        } else {
-            self.cur.push(ch);
-            self.last_was_space = false;
-        }
-    }
-
-    // ── Block / run flushing ────────────────────────────────────────────────
-
-    fn start_block(&mut self, kind: TextKind) {
+    /// `<br>`: end the current line but stay in the same block kind.
+    fn line_break(&mut self) {
+        let kind = self.cur_kind;
         self.flush_block();
         self.cur_kind = kind;
-        self.last_was_space = true;
-    }
-
-    fn next_list_marker(&mut self) -> String {
-        match self.list_stack.last_mut() {
-            Some(ctx) if ctx.ordered => {
-                ctx.counter += 1;
-                alloc::format!("{}.", ctx.counter)
-            }
-            _ => String::from("*"),
-        }
-    }
-
-    fn flush_run(&mut self) {
-        if self.cur.is_empty() {
-            return;
-        }
-        self.note_align();
-        let text = core::mem::take(&mut self.cur);
-        self.items.push(Inline::Run(Run {
-            text,
-            link: self.cur_link,
-            style: self.current_style(),
-        }));
     }
 
     fn flush_block(&mut self) {
-        self.flush_run();
         let has_content = self.items.iter().any(|it| match it {
             Inline::Run(r) => r.text.chars().any(|c| !c.is_whitespace()),
             Inline::Control(_) => true,
@@ -752,112 +349,379 @@ impl<'a> HtmlParser<'a> {
             self.cur_marker = None;
         }
         self.cur_align = None;
-        self.cur_kind = TextKind::Paragraph;
         self.last_was_space = true;
     }
 
-    /// Record the current alignment the first time content lands in a block.
-    fn note_align(&mut self) {
+    /// Record the block's alignment the first time content lands in it.
+    fn note_align(&mut self, cs: &Computed) {
         if self.cur_align.is_none() {
-            self.cur_align = Some(self.current_align());
+            self.cur_align = Some(cs.align.unwrap_or(Align::Left));
         }
     }
 
-    fn current_align(&self) -> Align {
-        if self.center_depth > 0 {
-            Align::Center
-        } else {
-            Align::Left
+    // ── Lists ───────────────────────────────────────────────────────────────
+
+    fn walk_list(&mut self, id: usize, el: &Element, cs: &Computed, link: Option<usize>) {
+        self.flush_block();
+        let ordered = el.tag() == "ol";
+        let numbering = match el.attr("type") {
+            Some("a") => Numbering::AlphaLower,
+            Some("A") => Numbering::AlphaUpper,
+            Some("i") => Numbering::RomanLower,
+            Some("I") => Numbering::RomanUpper,
+            _ => Numbering::Decimal,
+        };
+        let start = el
+            .attr("start")
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(1);
+        self.list_stack.push(ListCtx {
+            ordered,
+            counter: start - 1,
+            numbering,
+        });
+        self.walk_children(id, cs, link);
+        self.list_stack.pop();
+        self.flush_block();
+    }
+
+    fn walk_list_item(&mut self, id: usize, cs: &Computed, link: Option<usize>) {
+        let marker = self.next_marker(id);
+        let prev = self.begin_block(TextKind::ListItem);
+        self.cur_marker = Some(marker);
+        self.walk_children(id, cs, link);
+        self.end_block(prev);
+    }
+
+    fn next_marker(&mut self, li: usize) -> String {
+        let depth = self.list_stack.len().saturating_sub(1).min(4);
+        let value = self
+            .dom
+            .element(li)
+            .and_then(|el| el.attr("value"))
+            .and_then(|v| v.trim().parse::<i32>().ok());
+        let mut marker = String::new();
+        for _ in 0..depth {
+            marker.push_str("  ");
+        }
+        match self.list_stack.last_mut() {
+            Some(ctx) if ctx.ordered => {
+                ctx.counter = value.unwrap_or(ctx.counter + 1);
+                let n = ctx.counter.max(0) as u32;
+                let body = match ctx.numbering {
+                    Numbering::Decimal => alloc::format!("{}", ctx.counter),
+                    Numbering::AlphaLower => format_alpha(n.max(1)),
+                    Numbering::AlphaUpper => format_alpha(n.max(1)).to_ascii_uppercase(),
+                    Numbering::RomanLower => format_roman(n.max(1)),
+                    Numbering::RomanUpper => format_roman(n.max(1)).to_ascii_uppercase(),
+                };
+                marker.push_str(&body);
+                marker.push('.');
+            }
+            _ => marker.push(match depth {
+                0 => '*',
+                1 => '-',
+                _ => '+',
+            }),
+        }
+        marker
+    }
+
+    // ── Tables ──────────────────────────────────────────────────────────────
+
+    /// Linearise a table: caption as its own block, then one block per row
+    /// with `|`-separated cells.
+    fn walk_table(&mut self, id: usize, cs: &Computed, link: Option<usize>) {
+        self.flush_block();
+        let dom = self.dom;
+        for &child in &dom.nodes[id].children {
+            match dom.tag(child) {
+                "caption" => {
+                    let (ccs, none) = style::compute(dom, child, self.sheet, cs);
+                    if !none {
+                        let prev = self.begin_block(TextKind::Paragraph);
+                        self.walk_children(child, &ccs, link);
+                        self.end_block(prev);
+                    }
+                }
+                "thead" | "tbody" | "tfoot" => {
+                    let (scs, none) = style::compute(dom, child, self.sheet, cs);
+                    if !none {
+                        for &row in &dom.nodes[child].children {
+                            if dom.tag(row) == "tr" {
+                                self.walk_row(row, &scs, link);
+                            }
+                        }
+                    }
+                }
+                "tr" => self.walk_row(child, cs, link),
+                _ => {}
+            }
+        }
+        self.flush_block();
+    }
+
+    fn walk_row(&mut self, row: usize, cs: &Computed, link: Option<usize>) {
+        let dom = self.dom;
+        let (rcs, none) = style::compute(dom, row, self.sheet, cs);
+        if none {
+            return;
+        }
+        let prev = self.begin_block(TextKind::Paragraph);
+        let mut first = true;
+        for &cell in &dom.nodes[row].children {
+            if !matches!(dom.tag(cell), "td" | "th") {
+                continue;
+            }
+            let (ccs, cnone) = style::compute(dom, cell, self.sheet, &rcs);
+            if cnone {
+                continue;
+            }
+            if !first {
+                self.items.push(Inline::Run(Run {
+                    text: String::from(" | "),
+                    link: None,
+                    style: RunStyle::default(),
+                }));
+                self.last_was_space = true;
+            }
+            first = false;
+            self.note_align(&rcs);
+            self.walk_children(cell, &ccs, link);
+        }
+        self.end_block(prev);
+    }
+
+    // ── Text ────────────────────────────────────────────────────────────────
+
+    fn run_style(cs: &Computed) -> RunStyle {
+        RunStyle {
+            color: cs.color,
+            bold: cs.bold,
+            mono: cs.mono,
+            underline: cs.underline,
+            strike: cs.strike,
         }
     }
 
-    fn push_text_block(&mut self, kind: TextKind, text: &str) {
-        self.blocks.push(Block::Text {
-            kind,
-            items: alloc::vec![Inline::Run(Run {
+    fn emit_text(&mut self, text: &str, cs: &Computed, link: Option<usize>) {
+        if !cs.visible {
+            return;
+        }
+        if self.pre_depth > 0 {
+            // Spec: the newline immediately after `<pre>` is dropped.
+            let text = if self.items.is_empty() {
+                text.strip_prefix('\n').unwrap_or(text)
+            } else {
+                text
+            };
+            if text.is_empty() {
+                return;
+            }
+            self.note_align(cs);
+            self.items.push(Inline::Run(Run {
                 text: String::from(text),
-                link: None,
-                style: RunStyle::default(),
-            })],
-            align: Align::Left,
-            marker: None,
+                link,
+                style: Self::run_style(cs),
+            }));
+            return;
+        }
+
+        let mut out = String::new();
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                if !self.last_was_space {
+                    out.push(' ');
+                    self.last_was_space = true;
+                }
+            } else {
+                let ch = match cs.transform {
+                    Some(TextTransform::Uppercase) => ch.to_ascii_uppercase(),
+                    Some(TextTransform::Lowercase) => ch.to_ascii_lowercase(),
+                    Some(TextTransform::Capitalize) if self.last_was_space => {
+                        ch.to_ascii_uppercase()
+                    }
+                    _ => ch,
+                };
+                out.push(ch);
+                self.last_was_space = false;
+            }
+        }
+        if out.is_empty() || out == " " && self.items.is_empty() {
+            return;
+        }
+        self.note_align(cs);
+        self.items.push(Inline::Run(Run {
+            text: out,
+            link,
+            style: Self::run_style(cs),
+        }));
+    }
+
+    // ── Replaced elements and form controls ────────────────────────────────
+
+    fn emit_image(&mut self, el: &Element, cs: &Computed) {
+        self.flush_block();
+        if !cs.visible {
+            return;
+        }
+        self.blocks.push(Block::Image {
+            alt: el.attr("alt").unwrap_or("").to_string(),
+            img: None,
+            error: None,
+            src: el.attr("src").unwrap_or("").to_string(),
+            align: cs.align.unwrap_or(Align::Left),
         });
     }
 
-    // ── Skipping raw-text elements (script/style) ───────────────────────────
-
-    fn skip_element(&mut self) {
-        let needle: &[u8] = match self.skip {
-            Skip::Script => b"</script",
-            Skip::Style => b"</style",
-            Skip::None => return,
+    fn emit_input(&mut self, el: &Element, cs: &Computed) {
+        let kind = match el.attr("type").unwrap_or("text") {
+            "submit" | "button" | "reset" => InputKind::Submit,
+            "search" => InputKind::Search,
+            "hidden" => return,
+            _ => InputKind::Text,
         };
-        match find_ignore_ascii_case(&self.bytes[self.pos..], needle) {
-            Some(rel) => {
-                self.pos += rel;
-                if let Some(gt) = self.bytes[self.pos..].iter().position(|&b| b == b'>') {
-                    self.pos += gt + 1;
-                } else {
-                    self.pos = self.bytes.len();
+        if !cs.visible {
+            return;
+        }
+        let placeholder = el
+            .attr("placeholder")
+            .or_else(|| el.attr("value"))
+            .unwrap_or("")
+            .to_string();
+        self.push_control(
+            cs,
+            InputMeta {
+                kind,
+                placeholder,
+                name: el.attr("name").unwrap_or("").to_string(),
+                action: self.form_action.clone(),
+                size: el.attr("size").and_then(|s| s.trim().parse().ok()),
+                options: Vec::new(),
+            },
+        );
+    }
+
+    fn emit_select(&mut self, id: usize, el: &Element, cs: &Computed) {
+        if !cs.visible {
+            return;
+        }
+        let mut options: Vec<String> = Vec::new();
+        let mut chosen: Option<usize> = None;
+        collect_options(self.dom, id, &mut options, &mut chosen);
+        let placeholder = chosen
+            .and_then(|i| options.get(i))
+            .or_else(|| options.first())
+            .cloned()
+            .unwrap_or_default();
+        self.push_control(
+            cs,
+            InputMeta {
+                kind: InputKind::Select,
+                placeholder,
+                name: el.attr("name").unwrap_or("").to_string(),
+                action: self.form_action.clone(),
+                size: None,
+                options,
+            },
+        );
+    }
+
+    fn emit_textarea(&mut self, id: usize, el: &Element, cs: &Computed) {
+        if !cs.visible {
+            return;
+        }
+        let mut content = String::new();
+        self.dom.text_content(id, &mut content);
+        let placeholder = match el.attr("placeholder") {
+            Some(p) if !p.is_empty() => String::from(p),
+            _ => collapse_ws(&content),
+        };
+        self.push_control(
+            cs,
+            InputMeta {
+                kind: InputKind::Text,
+                placeholder,
+                name: el.attr("name").unwrap_or("").to_string(),
+                action: self.form_action.clone(),
+                size: el.attr("cols").and_then(|s| s.trim().parse().ok()),
+                options: Vec::new(),
+            },
+        );
+    }
+
+    fn emit_button(&mut self, id: usize, el: &Element, cs: &Computed) {
+        if !cs.visible {
+            return;
+        }
+        if el.attr("type").is_some_and(|t| t == "hidden") {
+            return;
+        }
+        let mut label = String::new();
+        self.dom.text_content(id, &mut label);
+        self.push_control(
+            cs,
+            InputMeta {
+                kind: InputKind::Submit,
+                placeholder: collapse_ws(&label),
+                name: el.attr("name").unwrap_or("").to_string(),
+                action: self.form_action.clone(),
+                size: None,
+                options: Vec::new(),
+            },
+        );
+    }
+
+    fn push_control(&mut self, cs: &Computed, meta: InputMeta) {
+        self.note_align(cs);
+        let idx = self.inputs.len();
+        self.inputs.push(meta);
+        self.items.push(Inline::Control(idx));
+        self.last_was_space = true;
+    }
+}
+
+/// Collect `<option>` labels under a `<select>`; `chosen` is the first option
+/// carrying the `selected` attribute.
+fn collect_options(dom: &Dom, id: usize, out: &mut Vec<String>, chosen: &mut Option<usize>) {
+    for &c in &dom.nodes[id].children {
+        match dom.tag(c) {
+            "option" => {
+                let mut label = String::new();
+                dom.text_content(c, &mut label);
+                let label = collapse_ws(&label);
+                if !label.is_empty() {
+                    if chosen.is_none()
+                        && dom.element(c).is_some_and(|e| e.attr("selected").is_some())
+                    {
+                        *chosen = Some(out.len());
+                    }
+                    out.push(label);
                 }
             }
-            None => self.pos = self.bytes.len(),
+            "optgroup" => collect_options(dom, c, out, chosen),
+            _ => {}
         }
-        self.skip = Skip::None;
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Tag classification helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-/// Map a tag to its block kind, or `None` for inline / structural tags.
-fn block_kind(tag: &str) -> Option<TextKind> {
-    Some(match tag {
-        "h1" => TextKind::H1,
-        "h2" => TextKind::H2,
-        "h3" | "h4" | "h5" | "h6" => TextKind::H3,
-        "p" | "div" | "section" | "article" | "main" | "header" | "footer" | "center" | "nav"
-        | "aside" | "figure" | "figcaption" | "td" | "th" | "tr" | "caption" | "dd" | "dt"
-        | "dl" => TextKind::Paragraph,
-        "li" => TextKind::ListItem,
-        "blockquote" => TextKind::Quote,
-        "pre" => TextKind::Pre,
-        _ => return None,
-    })
-}
-
-/// Default inline effects (bold, mono, underline) for a formatting tag.
-fn inline_defaults(tag: &str) -> (bool, bool, bool) {
-    match tag {
-        "b" | "strong" | "mark" => (true, false, false),
-        "code" | "tt" | "kbd" | "samp" | "var" => (false, true, false),
-        "u" | "ins" => (false, false, true),
-        _ => (false, false, false),
+/// Collapse runs of whitespace to single spaces and trim the ends.
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut was_space = true;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !was_space {
+                out.push(' ');
+                was_space = true;
+            }
+        } else {
+            out.push(ch);
+            was_space = false;
+        }
     }
-}
-
-fn merge_css(
-    s: &css::Style,
-    bold: &mut bool,
-    underline: &mut bool,
-    color: &mut Option<Color>,
-    hidden: &mut bool,
-) {
-    if let Some(b) = s.bold {
-        *bold = b;
+    while out.ends_with(' ') {
+        out.pop();
     }
-    if let Some(u) = s.underline {
-        *underline = u;
-    }
-    if let Some(c) = s.color {
-        *color = Some(c);
-    }
-    *hidden |= s.hidden;
-}
-
-fn skip_ws(bytes: &[u8], idx: &mut usize) {
-    while *idx < bytes.len() && bytes[*idx].is_ascii_whitespace() {
-        *idx += 1;
-    }
+    out
 }
