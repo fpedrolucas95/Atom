@@ -10,9 +10,11 @@ use libgui::color::Color;
 use libgui::event::{KeyEvent, MouseButton, MouseEvent};
 use libgui::surface::Surface;
 
+use atom_syscall::debug::log;
+
 use crate::content::{ABOUT_HOME, ABOUT_HTML, ABOUT_LOADING};
 use crate::dom::{Block, Document, Hit, InputKind};
-use crate::html::{parse_html, parse_html_with_css};
+use crate::html::{parse_document, parse_html};
 use crate::net::{decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
 use crate::render::{self, truncate_for_width, Clip, FormCtx};
 use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case};
@@ -26,9 +28,14 @@ const MAX_IMAGE_DECODES: u32 = 12;
 /// Maximum external stylesheets (`<link rel=stylesheet>`) fetched per page,
 /// bounding network work the same way image fetches are bounded.
 const MAX_CSS_FETCHES: u32 = 4;
-/// Cap on a single external stylesheet's size, so one huge sheet can't blow
-/// the bump heap or stall parsing.
+/// Maximum external scripts (`<script src>`) fetched per page.
+const MAX_JS_FETCHES: u32 = 4;
+/// Cap on a single external resource's size (stylesheet or script), so one
+/// huge file can't blow the bump heap or stall parsing.
 const MAX_CSS_BYTES: usize = 512 * 1024;
+/// Whether page JavaScript runs. Load-time scripts only — there is no event
+/// loop yet, so handlers never fire after the page renders.
+const SCRIPTING_ENABLED: bool = true;
 
 pub struct Browser {
     url: String,
@@ -127,23 +134,34 @@ impl Browser {
 
         let html = self.resolve_page_source();
         // `resolve_page_source` has settled `self.url` to the final document
-        // URL, so relative `<link href>` resolve against it. Only http(s)
-        // sheets are fetched (about: pages carry their CSS inline).
+        // URL, so relative `<link href>` / `<script src>` resolve against it.
+        // Only http resources are fetched (about: pages are self-contained).
         let base = self.url.clone();
         let allow_net = normalize_http_url(&base).is_some();
-        let mut css_fetches = 0u32;
-        self.doc = parse_html_with_css(&html, |href| {
-            if !allow_net || css_fetches >= MAX_CSS_FETCHES {
+        let fetch_resource = |budget: &mut u32, max: u32, href: &str| -> Option<String> {
+            if !allow_net || *budget >= max {
                 return None;
             }
-            css_fetches += 1;
+            *budget += 1;
             let url = resolve_url(&base, href)?;
             let bytes = fetch_url_bytes(&url)?;
             if bytes.is_empty() || bytes.len() > MAX_CSS_BYTES {
                 return None;
             }
             Some(String::from_utf8_lossy(&bytes).into_owned())
-        });
+        };
+        let mut css_fetches = 0u32;
+        let mut js_fetches = 0u32;
+        let page = parse_document(
+            &html,
+            &mut |href| fetch_resource(&mut css_fetches, MAX_CSS_FETCHES, href),
+            &mut |src| fetch_resource(&mut js_fetches, MAX_JS_FETCHES, src),
+            SCRIPTING_ENABLED,
+        );
+        self.doc = page.doc;
+        for line in &page.console {
+            log(&format!("browser/js: {}", line));
+        }
         if self.doc.title.is_empty() {
             self.doc.title = String::from("Untitled");
         }

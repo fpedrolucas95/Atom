@@ -16,7 +16,12 @@
 //!   nested lists, tables (one row per line), blockquotes, preformatted text,
 //!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), and inline form
 //!   controls. The painter synthesises bold, italic, and font scaling the 8x8
-//!   bitmap font has no native faces for.
+//!   bitmap font has no native faces for. A hand-written JavaScript
+//!   interpreter (`js/`) runs page scripts after tree construction — DOM
+//!   mutation (`getElementById`, `querySelector`, `innerHTML`,
+//!   `document.write`, `createElement`, `style`), `console`, `Math`, `JSON`,
+//!   and the core language (closures, prototypes, try/catch, arrows) — under
+//!   a step budget so a runaway script can never hang the browser.
 //! * **Low resource use** — a lazily-`mmap`ed bump heap, redraw only when
 //!   state changes, and bounded network fetches.
 //! * **Clean structure** — focused modules (allocator, text, entities,
@@ -40,6 +45,7 @@ mod dom;
 mod domtree;
 mod entities;
 mod html;
+mod js;
 mod net;
 mod render;
 mod style;

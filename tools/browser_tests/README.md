@@ -18,7 +18,12 @@ with `x86_64-unknown-linux-gnu`; on a non-Linux host, pass your own triple:
 Coverage: tokenizer states (comments, CDATA, RCDATA/RAWTEXT, script-data
 escaping, character references incl. legacy semicolon-less forms), tree
 construction (implied end tags, scope-aware closing, formatting reconstruction
-and misnesting recovery, depth bounding), CSS (selectors, specificity,
-`!important`, combinators, structural pseudo-classes, `@media`, color
-formats), style computation (inheritance, presentational attributes), and the
-flattener (lists, tables, forms, whitespace, `pre`, visibility).
+and misnesting recovery, depth bounding, foster parenting), CSS (selectors,
+specificity, `!important`, combinators, structural pseudo-classes, `@media`,
+color formats, external `<link>` sheets, `font-size`), style computation
+(inheritance, presentational attributes), the flattener (lists, tables, forms,
+whitespace, `pre`, visibility), and the JavaScript engine (language core —
+closures, prototypes, exceptions, arrows, ASI, Math/JSON —, DOM bindings —
+`getElementById`, `querySelector`, `document.write`, `innerHTML`,
+`createElement`, `style` —, and the runaway-script bounds: step budget and
+call-depth aborts that keep the page rendering).

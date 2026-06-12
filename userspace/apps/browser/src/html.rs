@@ -25,26 +25,56 @@ use crate::dom::{Align, Block, Document, Inline, InputKind, InputMeta, Run, RunS
 use crate::domtree::{build_dom, Dom, Element, NodeData, DOCUMENT};
 use crate::style::{self, Computed};
 
-/// Parse a full HTML document into the renderer's model. External stylesheets
-/// (`<link rel=stylesheet>`) are not fetched — use [`parse_html_with_css`].
+/// A fully processed page: the renderer document plus anything page scripts
+/// wrote to the console (forwarded to the system log by the browser).
+pub struct PageOutput {
+    pub doc: Document,
+    pub console: Vec<String>,
+}
+
+/// Parse a full HTML document into the renderer's model, scripting disabled.
+/// External stylesheets are not fetched — use [`parse_document`].
 pub fn parse_html(html: &str) -> Document {
     parse_html_with_css(html, |_| None)
 }
 
-/// Parse HTML, resolving external stylesheets through `fetch_css`.
-///
-/// `fetch_css` receives a `<link rel="stylesheet">` `href` (as written in the
-/// document) and returns the stylesheet text, or `None` to skip it. Keeping
-/// the fetch behind a closure lets the network-aware caller resolve relative
-/// URLs and bound how many sheets are loaded, while this module stays pure.
+/// Parse HTML with external stylesheets but scripting disabled.
 pub fn parse_html_with_css(html: &str, mut fetch_css: impl FnMut(&str) -> Option<String>) -> Document {
-    let dom = build_dom(html);
-    let mut sheet = Stylesheet::new();
-    collect_styles(&dom, DOCUMENT, &mut sheet, &mut fetch_css);
+    parse_document(html, &mut fetch_css, &mut |_| None, false).doc
+}
 
-    let mut f = Flattener::new(&dom, &sheet);
+/// Run the full page pipeline: tree construction, then (when `scripting`)
+/// every `<script>` in document order against the live DOM, then stylesheet
+/// collection and flattening — so script-made DOM and style mutations are
+/// visible in the rendered output.
+///
+/// `fetch_css` / `fetch_js` receive `href`/`src` values as written in the
+/// document and return the resource text, or `None` to skip. Keeping fetches
+/// behind closures lets the network-aware caller resolve relative URLs and
+/// bound how much is loaded, while this module stays pure.
+pub fn parse_document(
+    html: &str,
+    fetch_css: &mut dyn FnMut(&str) -> Option<String>,
+    fetch_js: &mut dyn FnMut(&str) -> Option<String>,
+    scripting: bool,
+) -> PageOutput {
+    let mut dom = build_dom(html);
+    let mut console = Vec::new();
+    if scripting {
+        crate::js::run_page_scripts(&mut dom, fetch_js, &mut console);
+    }
+
+    // Styles are collected *after* scripts so injected `<style>`/`<link>`
+    // elements and mutated `style` attributes take effect.
+    let mut sheet = Stylesheet::new();
+    collect_styles(&dom, DOCUMENT, &mut sheet, fetch_css);
+
+    let mut f = Flattener::new(&dom, &sheet, scripting);
     f.walk_node(DOCUMENT, &Computed::default(), None);
-    f.finish()
+    PageOutput {
+        doc: f.finish(),
+        console,
+    }
 }
 
 /// Gather author CSS into the stylesheet in tree order, so rules in `<head>`
@@ -54,7 +84,7 @@ fn collect_styles(
     dom: &Dom,
     id: usize,
     sheet: &mut Stylesheet,
-    fetch_css: &mut impl FnMut(&str) -> Option<String>,
+    fetch_css: &mut dyn FnMut(&str) -> Option<String>,
 ) {
     match dom.tag(id) {
         "style" => {
@@ -188,13 +218,16 @@ struct Flattener<'a> {
 
     title: String,
     background: Option<Color>,
+    /// With scripting on, `<noscript>` content is inert and must not render.
+    scripting: bool,
 }
 
 impl<'a> Flattener<'a> {
-    fn new(dom: &'a Dom, sheet: &'a Stylesheet) -> Self {
+    fn new(dom: &'a Dom, sheet: &'a Stylesheet, scripting: bool) -> Self {
         Self {
             dom,
             sheet,
+            scripting,
             blocks: Vec::new(),
             items: Vec::new(),
             cur_kind: TextKind::Paragraph,
@@ -257,6 +290,9 @@ impl<'a> Flattener<'a> {
         let tag = el.tag();
         if skip_subtree(tag) {
             return;
+        }
+        if tag == "noscript" && self.scripting {
+            return; // scripting enabled: noscript fallback stays hidden
         }
         if tag == "title" {
             if self.title.is_empty() {

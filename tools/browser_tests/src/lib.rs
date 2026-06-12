@@ -22,6 +22,8 @@ pub mod css;
 pub mod style;
 #[path = "../../../userspace/apps/browser/src/html.rs"]
 pub mod html;
+#[path = "../../../userspace/apps/browser/src/js/mod.rs"]
+pub mod js;
 
 #[cfg(test)]
 mod tests {
@@ -815,6 +817,298 @@ mod tests {
         assert_eq!(find_run(&doc, "a").style.size, 2);
         assert_eq!(find_run(&doc, "b").style.size, 2);
         assert_eq!(find_run(&doc, "c").style.size, 2);
+    }
+
+    // ── JavaScript: language core ───────────────────────────────────────────
+
+    /// Run `src` as a page script and return the console output.
+    fn run_js(src: &str) -> Vec<String> {
+        let html = format!("<body><p>x</p><script>{src}</script></body>");
+        let page = crate::html::parse_document(&html, &mut |_| None, &mut |_| None, true);
+        page.console
+    }
+
+    /// Run a full page with scripting on, returning (doc, console).
+    fn run_page(html: &str) -> (Document, Vec<String>) {
+        let page = crate::html::parse_document(html, &mut |_| None, &mut |_| None, true);
+        (page.doc, page.console)
+    }
+
+    #[test]
+    fn js_expressions_and_coercion() {
+        let out = run_js(
+            "console.log(1 + 2 * 3, 'a' + 1, 10 / 4, 7 % 3, 2 ** 10);\
+             console.log('5' - 1, '5' + 1, 1 == '1', 1 === '1', null == undefined);\
+             console.log(typeof 1, typeof 'x', typeof {}, typeof undefined);",
+        );
+        assert_eq!(out[0], "7 a1 2.5 1 1024");
+        assert_eq!(out[1], "4 51 true false true");
+        assert_eq!(out[2], "number string object undefined");
+    }
+
+    #[test]
+    fn js_closures_and_recursion() {
+        let out = run_js(
+            "function counter() { var n = 0; return function() { return ++n; }; }\
+             var c = counter(); c(); c();\
+             function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2); }\
+             console.log(c(), fib(15));",
+        );
+        assert_eq!(out[0], "3 610");
+    }
+
+    #[test]
+    fn js_arrays_objects_strings() {
+        let out = run_js(
+            "var a = [3, 1, 2];\
+             console.log(a.map(function(x) { return x * 2; }).join('-'));\
+             console.log(a.filter(x => x > 1).length, a.indexOf(2));\
+             a.sort(function(x, y) { return x - y; });\
+             console.log(a.join(','));\
+             var o = {name: 'atom', os: true};\
+             console.log(o.name, o['os'], Object.keys(o).join('+'));\
+             console.log('Hello World'.toUpperCase().slice(0, 5), 'a,b,c'.split(',').length);",
+        );
+        assert_eq!(out[0], "6-2-4");
+        assert_eq!(out[1], "2 2");
+        assert_eq!(out[2], "1,2,3");
+        assert_eq!(out[3], "atom true name+os");
+        assert_eq!(out[4], "HELLO 3");
+    }
+
+    #[test]
+    fn js_control_flow() {
+        let out = run_js(
+            "var s = '';\
+             for (var i = 0; i < 5; i++) { if (i == 2) continue; s += i; }\
+             for (var k in {a: 1, b: 2}) s += k;\
+             for (var v of [9, 8]) s += v;\
+             var t = 0;\
+             switch (2) { case 1: t = 1; break; case 2: t = 2; case 3: t += 10; break; default: t = 99; }\
+             console.log(s, t);",
+        );
+        assert_eq!(out[0], "0134ab98 12");
+    }
+
+    #[test]
+    fn js_prototypes_and_new() {
+        let out = run_js(
+            "function Animal(name) { this.name = name; }\
+             Animal.prototype.speak = function() { return this.name + ' speaks'; };\
+             var dog = new Animal('Rex');\
+             console.log(dog.speak(), dog instanceof Animal, dog.hasOwnProperty('name'));",
+        );
+        assert_eq!(out[0], "Rex speaks true true");
+    }
+
+    #[test]
+    fn js_exceptions() {
+        let out = run_js(
+            "try { null.x; } catch (e) { console.log('caught', e.name); }\
+             try { throw new Error('boom'); } catch (e) { console.log(e.message); } finally { console.log('done'); }",
+        );
+        assert_eq!(out[0], "caught TypeError");
+        assert_eq!(out[1], "boom");
+        assert_eq!(out[2], "done");
+        // Uncaught errors are reported but don't kill the page.
+        let (doc, console) = run_page("<p>alive</p><script>throw new Error('x');</script>");
+        assert!(console.iter().any(|l| l.contains("Uncaught")));
+        assert!(all_text(&doc).contains("alive"));
+    }
+
+    #[test]
+    fn js_template_literals_and_arrows() {
+        let out = run_js(
+            "const add = (a, b = 10) => a + b;\
+             let who = 'world';\
+             console.log(`hi ${who}, ${add(1, 2)} and ${add(5)}`);",
+        );
+        assert_eq!(out[0], "hi world, 3 and 15");
+    }
+
+    #[test]
+    fn js_math_and_json() {
+        let out = run_js(
+            "console.log(Math.floor(2.7), Math.ceil(-2.1), Math.sqrt(144), Math.pow(3, 4), Math.max(1, 9, 4));\
+             console.log((3.14159).toFixed(2), parseInt('42px'), parseFloat('2.5em'), isNaN('abc' * 1));\
+             var o = JSON.parse('{\"a\": [1, 2], \"b\": \"x\"}');\
+             console.log(o.a[1], o.b, JSON.stringify({k: [true, null]}));",
+        );
+        assert_eq!(out[0], "2 -2 12 81 9");
+        assert_eq!(out[1], "3.14 42 2.5 true");
+        assert_eq!(out[2], "2 x {\"k\":[true,null]}");
+    }
+
+    #[test]
+    fn js_call_apply_bind() {
+        let out = run_js(
+            "function who() { return this.name; }\
+             var o = {name: 'atom'};\
+             console.log(who.call(o), who.apply(o, []), who.bind(o)());",
+        );
+        assert_eq!(out[0], "atom atom atom");
+    }
+
+    #[test]
+    fn js_infinite_loop_is_bounded() {
+        // Must terminate (budget abort), and the page must still render.
+        let (doc, console) = run_page("<p>safe</p><script>while (true) { var x = 1; }</script>");
+        assert!(console.iter().any(|l| l.contains("aborted")));
+        assert!(all_text(&doc).contains("safe"));
+    }
+
+    #[test]
+    fn js_deep_recursion_is_bounded() {
+        let (_, console) = run_page("<script>function f() { return f(); } f();</script>");
+        assert!(console.iter().any(|l| l.contains("aborted")));
+    }
+
+    #[test]
+    fn js_parse_error_does_not_kill_page() {
+        let (doc, console) = run_page("<p>ok</p><script>class X {}</script>");
+        assert!(console.iter().any(|l| l.contains("script error")));
+        assert!(all_text(&doc).contains("ok"));
+    }
+
+    // ── JavaScript: DOM bindings ────────────────────────────────────────────
+
+    #[test]
+    fn js_get_element_by_id_and_text_content() {
+        let (doc, _) = run_page(
+            "<p id=\"target\">before</p>\
+             <script>document.getElementById('target').textContent = 'after';</script>",
+        );
+        let t = all_text(&doc);
+        assert!(t.contains("after") && !t.contains("before"));
+    }
+
+    #[test]
+    fn js_document_write_inserts_at_script_position() {
+        let (doc, _) = run_page(
+            "<p>first</p><script>document.write('<b>written</b>');</script><p>last</p>",
+        );
+        assert_eq!(texts(&doc), ["first", "written", "last"]);
+        assert!(find_run(&doc, "written").style.bold);
+    }
+
+    #[test]
+    fn js_inner_html_set() {
+        let (doc, _) = run_page(
+            "<div id=\"box\">old</div>\
+             <script>document.getElementById('box').innerHTML = '<u>new</u> text';</script>",
+        );
+        let t = all_text(&doc);
+        assert!(t.contains("new text") && !t.contains("old"));
+        assert!(find_run(&doc, "new").style.underline);
+    }
+
+    #[test]
+    fn js_create_element_append_child() {
+        let (doc, _) = run_page(
+            "<div id=\"root\"></div>\
+             <script>\
+             var el = document.createElement('p');\
+             el.appendChild(document.createTextNode('made by script'));\
+             document.getElementById('root').appendChild(el);\
+             </script>",
+        );
+        assert!(all_text(&doc).contains("made by script"));
+    }
+
+    #[test]
+    fn js_style_mutation_changes_rendering() {
+        let (doc, _) = run_page(
+            "<p id=\"p\">painted</p>\
+             <script>\
+             var p = document.getElementById('p');\
+             p.style.color = '#ff0000';\
+             p.style.fontWeight = 'bold';\
+             </script>",
+        );
+        let r = find_run(&doc, "painted");
+        assert_eq!(r.style.color, Some(Color::rgb(255, 0, 0)));
+        assert!(r.style.bold);
+    }
+
+    #[test]
+    fn js_query_selector_and_class_list() {
+        let (doc, out) = run_page(
+            "<style>.lit{color:#00ff00}</style>\
+             <ul><li>a</li><li class=\"x\">b</li><li>c</li></ul>\
+             <script>\
+             console.log(document.querySelectorAll('li').length);\
+             console.log(document.querySelector('li.x').textContent);\
+             document.querySelector('li.x').classList.add('lit');\
+             </script>",
+        );
+        assert_eq!(out[0], "3");
+        assert_eq!(out[1], "b");
+        assert_eq!(find_run(&doc, "b").style.color, Some(Color::rgb(0, 255, 0)));
+    }
+
+    #[test]
+    fn js_document_title_set() {
+        let (doc, _) = run_page(
+            "<head><title>old</title></head><body><script>document.title = 'scripted';</script></body>",
+        );
+        assert_eq!(doc.title, "scripted");
+    }
+
+    #[test]
+    fn js_set_attribute_and_generic_props() {
+        let (doc, out) = run_page(
+            "<a id=\"l\" href=\"/page\">link</a>\
+             <script>\
+             var a = document.getElementById('l');\
+             console.log(a.href, a.tagName, a.getAttribute('href'));\
+             a.setAttribute('href', '/other');\
+             </script>",
+        );
+        assert_eq!(out[0], "/page A /page");
+        assert_eq!(doc.links[0], "/other");
+    }
+
+    #[test]
+    fn js_external_script_fetched() {
+        let mut requested = String::new();
+        let page = crate::html::parse_document(
+            "<script src=\"/app.js\"></script><p>body</p>",
+            &mut |_| None,
+            &mut |src| {
+                requested.push_str(src);
+                Some(String::from("console.log('external ran');"))
+            },
+            true,
+        );
+        assert_eq!(requested, "/app.js");
+        assert_eq!(page.console[0], "external ran");
+    }
+
+    #[test]
+    fn js_noscript_hidden_when_scripting_on() {
+        let html = "<noscript><p>no js</p></noscript><p>always</p>";
+        let (with_js, _) = run_page(html);
+        assert!(!all_text(&with_js).contains("no js"));
+        let without_js = parse_html(html);
+        assert!(all_text(&without_js).contains("no js"));
+    }
+
+    #[test]
+    fn js_scripts_share_global_scope_in_order() {
+        let (_, out) = run_page(
+            "<script>var shared = 'one';</script>\
+             <script>shared += ' two'; console.log(shared);</script>",
+        );
+        assert_eq!(out[0], "one two");
+    }
+
+    #[test]
+    fn js_asi_inserts_semicolons() {
+        let out = run_js("var a = 1\nvar b = 2\nconsole.log(a + b)\n");
+        assert_eq!(out[0], "3");
+        // Restricted production: `return\n value` returns undefined.
+        let out = run_js("function f() { return\n42 }\nconsole.log(f());");
+        assert_eq!(out[0], "undefined");
     }
 
     #[test]

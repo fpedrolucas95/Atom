@@ -91,6 +91,193 @@ impl Dom {
         }
     }
 
+    // ── Mutation (used by the JavaScript DOM bindings) ──────────────────────
+
+    /// Create an orphan element (no parent until [`Dom::attach`]).
+    pub fn create_element(&mut self, tag: &str, attrs: Attrs) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: usize::MAX,
+            children: Vec::new(),
+            data: NodeData::Element(Element {
+                tag: SmallStr::lower(tag.as_bytes()),
+                attrs,
+            }),
+        });
+        id
+    }
+
+    /// Create an orphan text node.
+    pub fn create_text(&mut self, text: &str) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: usize::MAX,
+            children: Vec::new(),
+            data: NodeData::Text(String::from(text)),
+        });
+        id
+    }
+
+    /// Remove `child` from its parent's child list (it stays in the arena).
+    pub fn detach(&mut self, child: usize) {
+        let parent = self.nodes[child].parent;
+        if parent != usize::MAX {
+            self.nodes[parent].children.retain(|&c| c != child);
+        }
+        self.nodes[child].parent = usize::MAX;
+    }
+
+    /// Attach `child` under `parent`, optionally before child index `before`.
+    /// Re-attaching detaches from the old parent first. Cycles are refused.
+    pub fn attach(&mut self, parent: usize, child: usize, before: Option<usize>) {
+        if parent == child || self.is_ancestor(child, parent) {
+            return;
+        }
+        self.detach(child);
+        self.nodes[child].parent = parent;
+        let children = &mut self.nodes[parent].children;
+        match before {
+            Some(i) if i <= children.len() => children.insert(i, child),
+            _ => children.push(child),
+        }
+    }
+
+    /// Whether `anc` is an ancestor of `node` (or the node itself).
+    pub fn is_ancestor(&self, anc: usize, mut node: usize) -> bool {
+        loop {
+            if node == anc {
+                return true;
+            }
+            let p = self.nodes[node].parent;
+            if p == usize::MAX {
+                return false;
+            }
+            node = p;
+        }
+    }
+
+    /// Detach every child of `parent`.
+    pub fn clear_children(&mut self, parent: usize) {
+        let children = core::mem::take(&mut self.nodes[parent].children);
+        for c in children {
+            self.nodes[c].parent = usize::MAX;
+        }
+    }
+
+    /// First element with `tag` in tree order, searched iteratively.
+    pub fn find_first(&self, tag: &str) -> Option<usize> {
+        let mut stack = alloc::vec![DOCUMENT];
+        while let Some(id) = stack.pop() {
+            if self.tag(id) == tag {
+                return Some(id);
+            }
+            for &c in self.nodes[id].children.iter().rev() {
+                stack.push(c);
+            }
+        }
+        None
+    }
+
+    pub fn set_attr(&mut self, id: usize, name: &str, value: &str) {
+        if let NodeData::Element(el) = &mut self.nodes[id].data {
+            let name = name.to_ascii_lowercase();
+            if let Some(slot) = el.attrs.iter_mut().find(|(n, _)| *n == name) {
+                slot.1 = String::from(value);
+            } else {
+                el.attrs.push((name, String::from(value)));
+            }
+        }
+    }
+
+    pub fn remove_attr(&mut self, id: usize, name: &str) {
+        if let NodeData::Element(el) = &mut self.nodes[id].data {
+            let name = name.to_ascii_lowercase();
+            el.attrs.retain(|(n, _)| *n != name);
+        }
+    }
+
+    /// Replace all children of `id` with a single text node.
+    pub fn set_text_content(&mut self, id: usize, text: &str) {
+        self.clear_children(id);
+        if let NodeData::Text(t) = &mut self.nodes[id].data {
+            *t = String::from(text);
+            return;
+        }
+        let t = self.create_text(text);
+        self.attach(id, t, None);
+    }
+
+    /// Deep-copy the subtree at `src` into a new orphan node.
+    pub fn deep_copy(&mut self, src: usize) -> usize {
+        let (data, children) = {
+            let n = &self.nodes[src];
+            let data = match &n.data {
+                NodeData::Document => NodeData::Document,
+                NodeData::Text(t) => NodeData::Text(t.clone()),
+                NodeData::Element(el) => NodeData::Element(Element {
+                    tag: el.tag,
+                    attrs: el.attrs.clone(),
+                }),
+            };
+            (data, n.children.clone())
+        };
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: usize::MAX,
+            children: Vec::new(),
+            data,
+        });
+        for c in children {
+            let cc = self.deep_copy(c);
+            self.nodes[cc].parent = id;
+            self.nodes[id].children.push(cc);
+        }
+        id
+    }
+
+    /// Parse `html` as a fragment and insert its body content under `parent`
+    /// starting at child index `index`. Returns how many nodes were inserted.
+    pub fn graft_fragment(&mut self, html: &str, parent: usize, index: usize) -> usize {
+        let frag = build_dom(html);
+        let Some(frag_body) = frag.find_first("body") else {
+            return 0;
+        };
+        let roots = frag.nodes[frag_body].children.clone();
+        let mut at = index.min(self.nodes[parent].children.len());
+        let mut count = 0;
+        for root in roots {
+            let copy = copy_across(self, &frag, root);
+            self.attach(parent, copy, Some(at));
+            at += 1;
+            count += 1;
+        }
+        count
+    }
+}
+
+/// Copy a subtree from `src` into `dst` (different arenas), returning the new
+/// orphan root id in `dst`. Depth is bounded by the builder's `MAX_DEPTH`.
+fn copy_across(dst: &mut Dom, src: &Dom, src_id: usize) -> usize {
+    let data = match &src.nodes[src_id].data {
+        NodeData::Document => NodeData::Document,
+        NodeData::Text(t) => NodeData::Text(t.clone()),
+        NodeData::Element(el) => NodeData::Element(Element {
+            tag: el.tag,
+            attrs: el.attrs.clone(),
+        }),
+    };
+    let id = dst.nodes.len();
+    dst.nodes.push(Node {
+        parent: usize::MAX,
+        children: Vec::new(),
+        data,
+    });
+    for &c in &src.nodes[src_id].children {
+        let cc = copy_across(dst, src, c);
+        dst.nodes[cc].parent = id;
+        dst.nodes[id].children.push(cc);
+    }
+    id
 }
 
 /// Parse an HTML document into a DOM tree.
