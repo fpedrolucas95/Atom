@@ -69,6 +69,9 @@ impl Default for RunStyle {
 pub struct Run {
     pub text: String,
     pub link: Option<usize>,
+    /// Clickable region (an index into [`Document::click_nodes`]) when an
+    /// enclosing element has a JavaScript click handler.
+    pub zone: Option<usize>,
     pub style: RunStyle,
 }
 
@@ -133,5 +136,12 @@ pub struct Document {
     pub background: Option<Color>,
     pub blocks: Vec<Block>,
     pub links: Vec<String>,
+    /// DOM node id behind each entry of `links` (for event dispatch).
+    pub link_nodes: Vec<usize>,
     pub inputs: Vec<InputMeta>,
+    /// DOM node id behind each entry of `inputs`.
+    pub input_nodes: Vec<usize>,
+    /// DOM node ids of elements with JavaScript click handlers, indexed by
+    /// [`Run::zone`].
+    pub click_nodes: Vec<usize>,
 }

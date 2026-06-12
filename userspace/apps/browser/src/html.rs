@@ -29,11 +29,24 @@ use crate::style::{self, Computed};
 /// wrote to the console (forwarded to the system log by the browser).
 pub struct PageOutput {
     pub doc: Document,
+    /// Read by the host test harness; the browser itself uses [`load_page`].
+    #[allow(dead_code)]
+    pub console: Vec<String>,
+}
+
+/// A live page: the DOM and script runtime stay around so later events
+/// (clicks) can run handlers and the page can be re-flattened.
+pub struct LoadedPage {
+    pub dom: Dom,
+    /// Present when scripting was enabled; holds the global scope and the
+    /// page's registered event handlers.
+    pub runtime: Option<crate::js::Runtime>,
+    pub doc: Document,
     pub console: Vec<String>,
 }
 
 /// Parse a full HTML document into the renderer's model, scripting disabled.
-/// External stylesheets are not fetched — use [`parse_document`].
+/// External stylesheets are not fetched — use [`load_page`].
 pub fn parse_html(html: &str) -> Document {
     parse_html_with_css(html, |_| None)
 }
@@ -43,38 +56,77 @@ pub fn parse_html_with_css(html: &str, mut fetch_css: impl FnMut(&str) -> Option
     parse_document(html, &mut fetch_css, &mut |_| None, false).doc
 }
 
-/// Run the full page pipeline: tree construction, then (when `scripting`)
-/// every `<script>` in document order against the live DOM, then stylesheet
-/// collection and flattening — so script-made DOM and style mutations are
-/// visible in the rendered output.
-///
-/// `fetch_css` / `fetch_js` receive `href`/`src` values as written in the
-/// document and return the resource text, or `None` to skip. Keeping fetches
-/// behind closures lets the network-aware caller resolve relative URLs and
-/// bound how much is loaded, while this module stays pure.
+/// One-shot pipeline (the live DOM/runtime are dropped). Used by tests and
+/// callers that don't dispatch events.
 pub fn parse_document(
     html: &str,
     fetch_css: &mut dyn FnMut(&str) -> Option<String>,
     fetch_js: &mut dyn FnMut(&str) -> Option<String>,
     scripting: bool,
 ) -> PageOutput {
+    let page = load_page(html, fetch_css, fetch_js, scripting);
+    PageOutput {
+        doc: page.doc,
+        console: page.console,
+    }
+}
+
+/// Run the full page pipeline: tree construction, then (when `scripting`)
+/// every `<script>` in document order against the live DOM plus the
+/// `DOMContentLoaded`/`load` events, then stylesheet collection and
+/// flattening — so script-made DOM and style mutations are visible in the
+/// rendered output. The returned [`LoadedPage`] keeps the DOM and runtime
+/// alive for event dispatch.
+///
+/// `fetch_css` / `fetch_js` receive `href`/`src` values as written in the
+/// document and return the resource text, or `None` to skip. Keeping fetches
+/// behind closures lets the network-aware caller resolve relative URLs and
+/// bound how much is loaded, while this module stays pure.
+pub fn load_page(
+    html: &str,
+    fetch_css: &mut dyn FnMut(&str) -> Option<String>,
+    fetch_js: &mut dyn FnMut(&str) -> Option<String>,
+    scripting: bool,
+) -> LoadedPage {
     let mut dom = build_dom(html);
     let mut console = Vec::new();
+    let mut runtime = None;
     if scripting {
-        crate::js::run_page_scripts(&mut dom, fetch_js, &mut console);
+        let mut rt = crate::js::Runtime::new();
+        rt.run_load_scripts(&mut dom, fetch_js, &mut console);
+        runtime = Some(rt);
     }
 
-    // Styles are collected *after* scripts so injected `<style>`/`<link>`
-    // elements and mutated `style` attributes take effect.
-    let mut sheet = Stylesheet::new();
-    collect_styles(&dom, DOCUMENT, &mut sheet, fetch_css);
-
-    let mut f = Flattener::new(&dom, &sheet, scripting);
-    f.walk_node(DOCUMENT, &Computed::default(), None);
-    PageOutput {
-        doc: f.finish(),
+    let clickable = runtime
+        .as_ref()
+        .map(|rt| rt.click_targets())
+        .unwrap_or_default();
+    let doc = flatten_dom(&dom, fetch_css, scripting, &clickable);
+    LoadedPage {
+        dom,
+        runtime,
+        doc,
         console,
     }
+}
+
+/// Styling + flattening over an existing DOM: collect author CSS (styles are
+/// gathered fresh each time so script-injected `<style>` and mutated `style`
+/// attributes take effect), then flatten to renderer blocks. `clickable`
+/// lists node ids with script click handlers (sorted), so their text gets
+/// clickable regions. Used both at load and to re-render after events.
+pub fn flatten_dom(
+    dom: &Dom,
+    fetch_css: &mut dyn FnMut(&str) -> Option<String>,
+    scripting: bool,
+    clickable: &[usize],
+) -> Document {
+    let mut sheet = Stylesheet::new();
+    collect_styles(dom, DOCUMENT, &mut sheet, fetch_css);
+
+    let mut f = Flattener::new(dom, &sheet, scripting, clickable);
+    f.walk_node(DOCUMENT, &Computed::default(), None, None);
+    f.finish()
 }
 
 /// Gather author CSS into the stylesheet in tree order, so rules in `<head>`
@@ -210,7 +262,10 @@ struct Flattener<'a> {
     last_was_space: bool,
 
     links: Vec<String>,
+    link_nodes: Vec<usize>,
     inputs: Vec<InputMeta>,
+    input_nodes: Vec<usize>,
+    click_nodes: Vec<usize>,
     form_action: String,
     list_stack: Vec<ListCtx>,
     pre_depth: u32,
@@ -220,14 +275,17 @@ struct Flattener<'a> {
     background: Option<Color>,
     /// With scripting on, `<noscript>` content is inert and must not render.
     scripting: bool,
+    /// Sorted node ids carrying script click handlers (from the JS runtime).
+    clickable: &'a [usize],
 }
 
 impl<'a> Flattener<'a> {
-    fn new(dom: &'a Dom, sheet: &'a Stylesheet, scripting: bool) -> Self {
+    fn new(dom: &'a Dom, sheet: &'a Stylesheet, scripting: bool, clickable: &'a [usize]) -> Self {
         Self {
             dom,
             sheet,
             scripting,
+            clickable,
             blocks: Vec::new(),
             items: Vec::new(),
             cur_kind: TextKind::Paragraph,
@@ -235,7 +293,10 @@ impl<'a> Flattener<'a> {
             cur_marker: None,
             last_was_space: true,
             links: Vec::new(),
+            link_nodes: Vec::new(),
             inputs: Vec::new(),
+            input_nodes: Vec::new(),
+            click_nodes: Vec::new(),
             form_action: String::new(),
             list_stack: Vec::new(),
             pre_depth: 0,
@@ -253,6 +314,7 @@ impl<'a> Flattener<'a> {
                 items: alloc::vec![Inline::Run(Run {
                     text: String::from("(empty document)"),
                     link: None,
+                    zone: None,
                     style: RunStyle::default(),
                 })],
                 align: Align::Left,
@@ -264,30 +326,54 @@ impl<'a> Flattener<'a> {
             background: self.background,
             blocks: self.blocks,
             links: self.links,
+            link_nodes: self.link_nodes,
             inputs: self.inputs,
+            input_nodes: self.input_nodes,
+            click_nodes: self.click_nodes,
         }
     }
 
     // ── Tree walk ───────────────────────────────────────────────────────────
 
-    fn walk_children(&mut self, id: usize, cs: &Computed, link: Option<usize>) {
+    fn walk_children(&mut self, id: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
         let dom = self.dom;
         for &c in &dom.nodes[id].children {
-            self.walk_node(c, cs, link);
+            self.walk_node(c, cs, link, zone);
         }
     }
 
-    fn walk_node(&mut self, id: usize, parent: &Computed, link: Option<usize>) {
+    fn walk_node(&mut self, id: usize, parent: &Computed, link: Option<usize>, zone: Option<usize>) {
         let dom = self.dom;
         match &dom.nodes[id].data {
-            NodeData::Document => self.walk_children(id, parent, link),
-            NodeData::Text(t) => self.emit_text(t, parent, link),
-            NodeData::Element(el) => self.walk_element(id, el, parent, link),
+            NodeData::Document => self.walk_children(id, parent, link, zone),
+            NodeData::Text(t) => self.emit_text(t, parent, link, zone),
+            NodeData::Element(el) => self.walk_element(id, el, parent, link, zone),
         }
     }
 
-    fn walk_element(&mut self, id: usize, el: &'a Element, parent: &Computed, link: Option<usize>) {
+    /// Whether `id` carries a JavaScript click handler — via a registered
+    /// listener/property handler or an `onclick=""` attribute.
+    fn is_clickable(&self, id: usize, el: &Element) -> bool {
+        el.attr("onclick").is_some() || self.clickable.binary_search(&id).is_ok()
+    }
+
+    fn walk_element(
+        &mut self,
+        id: usize,
+        el: &'a Element,
+        parent: &Computed,
+        link: Option<usize>,
+        zone: Option<usize>,
+    ) {
         let tag = el.tag();
+        // Open a clickable region for elements with click handlers, so the
+        // renderer emits hit rects for their text.
+        let zone = if self.scripting && self.is_clickable(id, el) {
+            self.click_nodes.push(id);
+            Some(self.click_nodes.len() - 1)
+        } else {
+            zone
+        };
         if skip_subtree(tag) {
             return;
         }
@@ -321,45 +407,46 @@ impl<'a> Flattener<'a> {
                 }
             }
             "img" => self.emit_image(el, &cs),
-            "input" => self.emit_input(el, &cs),
+            "input" => self.emit_input(id, el, &cs),
             "select" => self.emit_select(id, el, &cs),
             "textarea" => self.emit_textarea(id, el, &cs),
             "button" => self.emit_button(id, el, &cs),
             "a" => {
                 let new_link = el.attr("href").map(|href| {
                     self.links.push(String::from(href));
+                    self.link_nodes.push(id);
                     self.links.len() - 1
                 });
-                self.walk_children(id, &cs, new_link.or(link));
+                self.walk_children(id, &cs, new_link.or(link), zone);
             }
-            "ul" | "ol" | "menu" | "dir" => self.walk_list(id, el, &cs, link),
-            "li" => self.walk_list_item(id, &cs, link),
+            "ul" | "ol" | "menu" | "dir" => self.walk_list(id, el, &cs, link, zone),
+            "li" => self.walk_list_item(id, &cs, link, zone),
             "dd" => {
                 // Definition descriptions render as indented, markerless items.
                 let prev = self.begin_block(TextKind::ListItem);
-                self.walk_children(id, &cs, link);
+                self.walk_children(id, &cs, link, zone);
                 self.end_block(prev);
             }
-            "table" => self.walk_table(id, &cs, link),
+            "table" => self.walk_table(id, &cs, link, zone),
             "form" => {
                 let prev_action = core::mem::take(&mut self.form_action);
                 self.form_action = el.attr("action").unwrap_or("").to_string();
                 let prev = self.begin_block(TextKind::Paragraph);
-                self.walk_children(id, &cs, link);
+                self.walk_children(id, &cs, link, zone);
                 self.end_block(prev);
                 self.form_action = prev_action;
             }
             "blockquote" => {
                 self.quote_depth += 1;
                 let prev = self.begin_block(TextKind::Quote);
-                self.walk_children(id, &cs, link);
+                self.walk_children(id, &cs, link, zone);
                 self.end_block(prev);
                 self.quote_depth -= 1;
             }
             "pre" | "xmp" | "listing" | "plaintext" => {
                 self.pre_depth += 1;
                 let prev = self.begin_block(TextKind::Pre);
-                self.walk_children(id, &cs, link);
+                self.walk_children(id, &cs, link, zone);
                 self.end_block(prev);
                 self.pre_depth -= 1;
             }
@@ -373,10 +460,10 @@ impl<'a> Flattener<'a> {
                         kind
                     };
                     let prev = self.begin_block(kind);
-                    self.walk_children(id, &cs, link);
+                    self.walk_children(id, &cs, link, zone);
                     self.end_block(prev);
                 }
-                None => self.walk_children(id, &cs, link), // inline element
+                None => self.walk_children(id, &cs, link, zone), // inline element
             },
         }
     }
@@ -433,7 +520,14 @@ impl<'a> Flattener<'a> {
 
     // ── Lists ───────────────────────────────────────────────────────────────
 
-    fn walk_list(&mut self, id: usize, el: &Element, cs: &Computed, link: Option<usize>) {
+    fn walk_list(
+        &mut self,
+        id: usize,
+        el: &Element,
+        cs: &Computed,
+        link: Option<usize>,
+        zone: Option<usize>,
+    ) {
         self.flush_block();
         let ordered = el.tag() == "ol";
         let numbering = match el.attr("type") {
@@ -452,16 +546,16 @@ impl<'a> Flattener<'a> {
             counter: start - 1,
             numbering,
         });
-        self.walk_children(id, cs, link);
+        self.walk_children(id, cs, link, zone);
         self.list_stack.pop();
         self.flush_block();
     }
 
-    fn walk_list_item(&mut self, id: usize, cs: &Computed, link: Option<usize>) {
+    fn walk_list_item(&mut self, id: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
         let marker = self.next_marker(id);
         let prev = self.begin_block(TextKind::ListItem);
         self.cur_marker = Some(marker);
-        self.walk_children(id, cs, link);
+        self.walk_children(id, cs, link, zone);
         self.end_block(prev);
     }
 
@@ -503,7 +597,7 @@ impl<'a> Flattener<'a> {
 
     /// Linearise a table: caption as its own block, then one block per row
     /// with `|`-separated cells.
-    fn walk_table(&mut self, id: usize, cs: &Computed, link: Option<usize>) {
+    fn walk_table(&mut self, id: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
         self.flush_block();
         let dom = self.dom;
         for &child in &dom.nodes[id].children {
@@ -512,7 +606,7 @@ impl<'a> Flattener<'a> {
                     let (ccs, none) = style::compute(dom, child, self.sheet, cs);
                     if !none {
                         let prev = self.begin_block(TextKind::Paragraph);
-                        self.walk_children(child, &ccs, link);
+                        self.walk_children(child, &ccs, link, zone);
                         self.end_block(prev);
                     }
                 }
@@ -521,19 +615,19 @@ impl<'a> Flattener<'a> {
                     if !none {
                         for &row in &dom.nodes[child].children {
                             if dom.tag(row) == "tr" {
-                                self.walk_row(row, &scs, link);
+                                self.walk_row(row, &scs, link, zone);
                             }
                         }
                     }
                 }
-                "tr" => self.walk_row(child, cs, link),
+                "tr" => self.walk_row(child, cs, link, zone),
                 _ => {}
             }
         }
         self.flush_block();
     }
 
-    fn walk_row(&mut self, row: usize, cs: &Computed, link: Option<usize>) {
+    fn walk_row(&mut self, row: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
         let dom = self.dom;
         let (rcs, none) = style::compute(dom, row, self.sheet, cs);
         if none {
@@ -553,13 +647,14 @@ impl<'a> Flattener<'a> {
                 self.items.push(Inline::Run(Run {
                     text: String::from(" | "),
                     link: None,
+                    zone: None,
                     style: RunStyle::default(),
                 }));
                 self.last_was_space = true;
             }
             first = false;
             self.note_align(&rcs);
-            self.walk_children(cell, &ccs, link);
+            self.walk_children(cell, &ccs, link, zone);
         }
         self.end_block(prev);
     }
@@ -578,7 +673,7 @@ impl<'a> Flattener<'a> {
         }
     }
 
-    fn emit_text(&mut self, text: &str, cs: &Computed, link: Option<usize>) {
+    fn emit_text(&mut self, text: &str, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
         if !cs.visible {
             return;
         }
@@ -596,6 +691,7 @@ impl<'a> Flattener<'a> {
             self.items.push(Inline::Run(Run {
                 text: String::from(text),
                 link,
+                zone,
                 style: Self::run_style(cs),
             }));
             return;
@@ -628,6 +724,7 @@ impl<'a> Flattener<'a> {
         self.items.push(Inline::Run(Run {
             text: out,
             link,
+            zone,
             style: Self::run_style(cs),
         }));
     }
@@ -648,7 +745,7 @@ impl<'a> Flattener<'a> {
         });
     }
 
-    fn emit_input(&mut self, el: &Element, cs: &Computed) {
+    fn emit_input(&mut self, id: usize, el: &Element, cs: &Computed) {
         let kind = match el.attr("type").unwrap_or("text") {
             "submit" | "button" | "reset" => InputKind::Submit,
             "search" => InputKind::Search,
@@ -664,6 +761,7 @@ impl<'a> Flattener<'a> {
             .unwrap_or("")
             .to_string();
         self.push_control(
+            id,
             cs,
             InputMeta {
                 kind,
@@ -689,6 +787,7 @@ impl<'a> Flattener<'a> {
             .cloned()
             .unwrap_or_default();
         self.push_control(
+            id,
             cs,
             InputMeta {
                 kind: InputKind::Select,
@@ -712,6 +811,7 @@ impl<'a> Flattener<'a> {
             _ => collapse_ws(&content),
         };
         self.push_control(
+            id,
             cs,
             InputMeta {
                 kind: InputKind::Text,
@@ -734,6 +834,7 @@ impl<'a> Flattener<'a> {
         let mut label = String::new();
         self.dom.text_content(id, &mut label);
         self.push_control(
+            id,
             cs,
             InputMeta {
                 kind: InputKind::Submit,
@@ -746,10 +847,11 @@ impl<'a> Flattener<'a> {
         );
     }
 
-    fn push_control(&mut self, cs: &Computed, meta: InputMeta) {
+    fn push_control(&mut self, node: usize, cs: &Computed, meta: InputMeta) {
         self.note_align(cs);
         let idx = self.inputs.len();
         self.inputs.push(meta);
+        self.input_nodes.push(node);
         self.items.push(Inline::Control(idx));
         self.last_was_space = true;
     }

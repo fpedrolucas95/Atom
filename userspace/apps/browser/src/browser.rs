@@ -14,7 +14,9 @@ use atom_syscall::debug::log;
 
 use crate::content::{ABOUT_HOME, ABOUT_HTML, ABOUT_LOADING};
 use crate::dom::{Block, Document, Hit, InputKind};
-use crate::html::{parse_document, parse_html};
+use crate::domtree::Dom;
+use crate::html::{flatten_dom, load_page, parse_html};
+use crate::js;
 use crate::net::{decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
 use crate::render::{self, truncate_for_width, Clip, FormCtx};
 use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case};
@@ -37,11 +39,22 @@ const MAX_CSS_BYTES: usize = 512 * 1024;
 /// loop yet, so handlers never fire after the page renders.
 const SCRIPTING_ENABLED: bool = true;
 
+/// The live page behind `Browser::doc`: kept so click events can run script
+/// handlers against the real DOM and the page can be re-flattened.
+struct PageState {
+    dom: Dom,
+    runtime: Option<js::Runtime>,
+}
+
 pub struct Browser {
     url: String,
     loaded_url: String,
     status: String,
     doc: Document,
+    page: Option<PageState>,
+    /// External stylesheets fetched at load, replayed on re-renders so event
+    /// handlers never trigger network traffic.
+    css_cache: Vec<(String, String)>,
     pending_load: bool,
     back_stack: Vec<String>,
     forward_stack: Vec<String>,
@@ -51,6 +64,7 @@ pub struct Browser {
     select_scroll: usize,
     link_hits: Vec<Hit>,
     input_hits: Vec<Hit>,
+    zone_hits: Vec<Hit>,
     select_option_hits: Vec<SelectOptionHit>,
     scroll: u32,
     content_height: u32,
@@ -86,8 +100,13 @@ impl Browser {
                 background: None,
                 blocks: Vec::new(),
                 links: Vec::new(),
+                link_nodes: Vec::new(),
                 inputs: Vec::new(),
+                input_nodes: Vec::new(),
+                click_nodes: Vec::new(),
             },
+            page: None,
+            css_cache: Vec::new(),
             pending_load: false,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
@@ -97,6 +116,7 @@ impl Browser {
             select_scroll: 0,
             link_hits: Vec::new(),
             input_hits: Vec::new(),
+            zone_hits: Vec::new(),
             select_option_hits: Vec::new(),
             scroll: 0,
             content_height: 0,
@@ -152,13 +172,28 @@ impl Browser {
         };
         let mut css_fetches = 0u32;
         let mut js_fetches = 0u32;
-        let page = parse_document(
+        // Stylesheets are cached so later re-renders (after click handlers
+        // mutate the page) replay them without touching the network.
+        let mut css_cache: Vec<(String, String)> = Vec::new();
+        let page = load_page(
             &html,
-            &mut |href| fetch_resource(&mut css_fetches, MAX_CSS_FETCHES, href),
+            &mut |href| {
+                if let Some((_, css)) = css_cache.iter().find(|(h, _)| h == href) {
+                    return Some(css.clone());
+                }
+                let css = fetch_resource(&mut css_fetches, MAX_CSS_FETCHES, href)?;
+                css_cache.push((String::from(href), css.clone()));
+                Some(css)
+            },
             &mut |src| fetch_resource(&mut js_fetches, MAX_JS_FETCHES, src),
             SCRIPTING_ENABLED,
         );
         self.doc = page.doc;
+        self.page = Some(PageState {
+            dom: page.dom,
+            runtime: page.runtime,
+        });
+        self.css_cache = css_cache;
         for line in &page.console {
             log(&format!("browser/js: {}", line));
         }
@@ -189,11 +224,14 @@ impl Browser {
     fn show_loading(&mut self) {
         self.status = String::from("Loading...");
         self.doc = parse_html(ABOUT_LOADING);
+        self.page = None;
+        self.css_cache.clear();
         self.input_text.clear();
         self.focused_input = None;
         self.open_select = None;
         self.link_hits.clear();
         self.input_hits.clear();
+        self.zone_hits.clear();
         self.select_option_hits.clear();
         self.scroll = 0;
         self.content_height = 0;
@@ -314,6 +352,138 @@ impl Browser {
         }
     }
 
+    // ── Script events ───────────────────────────────────────────────────────
+
+    /// Dispatch a `click` on the DOM node behind a hit region. Returns whether
+    /// a handler called `preventDefault` (suppressing the default action).
+    /// When any handler ran, the page is re-flattened so DOM mutations show.
+    fn fire_click(&mut self, node: usize) -> bool {
+        let Some(mut page) = self.page.take() else {
+            return false;
+        };
+        let mut outcome = js::DispatchOutcome::default();
+        if let Some(rt) = &mut page.runtime {
+            let mut console = Vec::new();
+            outcome = rt.dispatch(&mut page.dom, &mut console, js::Target::Node(node), "click");
+            for line in &console {
+                log(&format!("browser/js: {}", line));
+            }
+        }
+        self.page = Some(page);
+        if outcome.fired {
+            self.refresh_page();
+        }
+        outcome.prevented
+    }
+
+    /// Run a `javascript:` URL body in the page's scope, then re-render.
+    fn run_snippet(&mut self, code: &str) {
+        let Some(mut page) = self.page.take() else {
+            return;
+        };
+        if let Some(rt) = &mut page.runtime {
+            let mut console = Vec::new();
+            rt.run_snippet(&mut page.dom, &mut console, code);
+            for line in &console {
+                log(&format!("browser/js: {}", line));
+            }
+        }
+        self.page = Some(page);
+        self.refresh_page();
+    }
+
+    /// Re-flatten the live DOM (cached CSS only — no network) and swap in the
+    /// new document, carrying user-typed input values across by DOM node.
+    fn refresh_page(&mut self) {
+        let Some(page) = self.page.take() else {
+            return;
+        };
+        let clickable = page
+            .runtime
+            .as_ref()
+            .map(|rt| rt.click_targets())
+            .unwrap_or_default();
+        let cache = core::mem::take(&mut self.css_cache);
+        let doc = flatten_dom(
+            &page.dom,
+            &mut |href| cache.iter().find(|(h, _)| h == href).map(|(_, c)| c.clone()),
+            SCRIPTING_ENABLED,
+            &clickable,
+        );
+        self.css_cache = cache;
+
+        // Map typed values and focus from old input indices to new ones via
+        // the underlying DOM node ids (indices shift when the DOM changes).
+        let old_values: Vec<(usize, String)> = self
+            .doc
+            .input_nodes
+            .iter()
+            .copied()
+            .zip(self.input_text.iter().cloned())
+            .collect();
+        let focused_node = self
+            .focused_input
+            .and_then(|i| self.doc.input_nodes.get(i).copied());
+        self.input_text = doc
+            .input_nodes
+            .iter()
+            .zip(doc.inputs.iter())
+            .map(|(node, meta)| {
+                old_values
+                    .iter()
+                    .find(|(n, _)| n == node)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| {
+                        if matches!(meta.kind, InputKind::Select) {
+                            meta.placeholder.clone()
+                        } else {
+                            String::new()
+                        }
+                    })
+            })
+            .collect();
+        self.focused_input = focused_node
+            .and_then(|node| doc.input_nodes.iter().position(|&n| n == node));
+        self.open_select = None;
+
+        let title = if doc.title.is_empty() {
+            self.doc.title.clone()
+        } else {
+            doc.title.clone()
+        };
+        let mut doc = doc;
+        self.carry_images(&mut doc);
+        self.doc = doc;
+        self.doc.title = title;
+        // Only genuinely new images (script-inserted) are fetched/decoded.
+        self.load_images();
+        self.page = Some(page);
+        self.needs_redraw = true;
+    }
+
+    /// Move already-decoded images from the outgoing document into `doc`,
+    /// matched by source URL, so re-renders never refetch or redecode.
+    fn carry_images(&mut self, doc: &mut Document) {
+        let mut old: Vec<(String, Option<libimage::DecodedImage>, Option<String>)> = Vec::new();
+        for block in core::mem::take(&mut self.doc.blocks) {
+            if let Block::Image { src, img, error, .. } = block {
+                if img.is_some() || error.is_some() {
+                    old.push((src, img, error));
+                }
+            }
+        }
+        for block in doc.blocks.iter_mut() {
+            let Block::Image { src, img, error, .. } = block else {
+                continue;
+            };
+            if let Some(pos) = old.iter().position(|(s, _, _)| s == src) {
+                let (_, oimg, oerr) = old.remove(pos);
+                *img = oimg;
+                *error = oerr;
+            }
+        }
+    }
+
     fn load_url(&mut self, url: String, record_history: bool) {
         let current = if self.loaded_url.is_empty() {
             self.url.clone()
@@ -331,6 +501,11 @@ impl Browser {
     fn navigate_to(&mut self, href: &str) {
         let h = href.trim();
         if h.is_empty() || h.starts_with('#') {
+            return;
+        }
+        if let Some(code) = h.strip_prefix("javascript:") {
+            let code = String::from(code);
+            self.run_snippet(&code);
             return;
         }
         if h.starts_with("https://") {
@@ -525,14 +700,29 @@ impl Browser {
             }
         }
 
-        // Content: links first, then form controls.
+        // Content: links first, then form controls, then script click zones.
+        // Each dispatches a `click` event through the page's handlers (with
+        // bubbling); `preventDefault` suppresses the default action.
         if let Some(idx) = self.link_hits.iter().find(|h| h.contains(x, y)).map(|h| h.idx) {
-            if let Some(href) = self.doc.links.get(idx).cloned() {
-                self.navigate_to(&href);
+            let prevented = match self.doc.link_nodes.get(idx).copied() {
+                Some(node) => self.fire_click(node),
+                None => false,
+            };
+            if !prevented {
+                if let Some(href) = self.doc.links.get(idx).cloned() {
+                    self.navigate_to(&href);
+                }
             }
             return;
         }
         if let Some(idx) = self.input_hits.iter().find(|h| h.contains(x, y)).map(|h| h.idx) {
+            let prevented = match self.doc.input_nodes.get(idx).copied() {
+                Some(node) => self.fire_click(node),
+                None => false,
+            };
+            if prevented {
+                return;
+            }
             match self.doc.inputs.get(idx).map(|m| m.kind) {
                 Some(InputKind::Submit) => {
                     let target = self
@@ -556,6 +746,12 @@ impl Browser {
                 }
             }
             return;
+        }
+        if let Some(idx) = self.zone_hits.iter().find(|h| h.contains(x, y)).map(|h| h.idx) {
+            if let Some(node) = self.doc.click_nodes.get(idx).copied() {
+                self.fire_click(node);
+                return;
+            }
         }
         if self.open_select.take().is_some() {
             self.needs_redraw = true;
@@ -715,6 +911,7 @@ impl Browser {
 
         let mut link_hits: Vec<Hit> = Vec::new();
         let mut input_hits: Vec<Hit> = Vec::new();
+        let mut zone_hits: Vec<Hit> = Vec::new();
         let mut select_option_hits: Vec<SelectOptionHit> = Vec::new();
         let mut y = clip.top - self.scroll as i32;
 
@@ -744,6 +941,7 @@ impl Browser {
                     &mut link_hits,
                     &form,
                     &mut input_hits,
+                    &mut zone_hits,
                 ),
                 Block::Rule => render::draw_rule(surface, x0, content_w, y, clip),
                 Block::Image { alt, img, error, align, .. } => {
@@ -763,6 +961,7 @@ impl Browser {
 
         self.link_hits = link_hits;
         self.input_hits = input_hits;
+        self.zone_hits = zone_hits;
         self.select_option_hits = select_option_hits;
         self.needs_redraw = false;
     }

@@ -25,5 +25,8 @@ color formats, external `<link>` sheets, `font-size`), style computation
 whitespace, `pre`, visibility), and the JavaScript engine (language core —
 closures, prototypes, exceptions, arrows, ASI, Math/JSON —, DOM bindings —
 `getElementById`, `querySelector`, `document.write`, `innerHTML`,
-`createElement`, `style` —, and the runaway-script bounds: step budget and
-call-depth aborts that keep the page rendering).
+`createElement`, `style` —, the event model — `addEventListener`/`onclick`
+property and attribute handlers, bubbling, `preventDefault`/`stopPropagation`,
+`DOMContentLoaded`/`load`, click-zone hit regions, re-flattening after
+dispatch —, and the runaway-script bounds: step budget and call-depth aborts
+that keep the page rendering).

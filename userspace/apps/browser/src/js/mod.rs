@@ -3,23 +3,26 @@
 //! Pipeline: [`lexer`] → [`parser`] (recursive descent + precedence climbing,
 //! with ASI) → [`interp`] (tree-walking evaluator with a step budget and
 //! call-depth cap) over [`value`]'s prototype-based object model, with the
-//! standard library in [`builtins`] and DOM access in [`dom_api`].
+//! standard library in [`builtins`], DOM access in [`dom_api`], and event
+//! registration/dispatch in [`events`].
 //!
-//! Execution model (phase 1): scripts run **once, in document order, after
-//! tree construction** — equivalent to every script being `defer`. They may
-//! mutate the DOM (`document.write` output is grafted at the script's
-//! position); styling and flattening happen afterwards, so mutations are
-//! visible in the rendered page. There is no event loop yet: handlers
-//! (`onclick`, `addEventListener`) are accepted but never fire, and timers
-//! only run inline at zero delay.
+//! Execution model: [`Runtime`] holds the page's global scope and handler
+//! table and **stays alive after load**. Load runs every `<script>` once in
+//! document order, then fires `DOMContentLoaded` and `load`. Afterwards the
+//! browser dispatches `click` events through [`Runtime::dispatch`] as the
+//! user interacts, re-flattening the DOM when handlers ran. Each entry gets
+//! its own step budget, so a runaway load script cannot starve later events
+//! and no script can hang the browser. There is still no timer/microtask
+//! queue: `setTimeout` only runs inline at zero delay.
 //!
-//! A misbehaving script cannot take the browser down: parse errors, uncaught
+//! A misbehaving script cannot take the page down: parse errors, uncaught
 //! exceptions, and budget/depth aborts are reported on the console and the
 //! page still renders.
 
 pub mod ast;
 pub mod builtins;
 pub mod dom_api;
+pub mod events;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
@@ -31,7 +34,21 @@ use alloc::vec::Vec;
 
 use interp::{Control, Interp, WriteCursor};
 
+pub use events::{DispatchOutcome, Handlers, Target};
+
 use crate::domtree::{Dom, DOCUMENT};
+
+/// Step budget for the load phase (all `<script>`s plus load events).
+const LOAD_BUDGET: u64 = 3_000_000;
+/// Step budget for each later event dispatch / `javascript:` snippet.
+const EVENT_BUDGET: u64 = 1_000_000;
+
+/// The page's persistent script state: global scope plus registered handlers.
+/// Lives in the browser alongside the DOM for as long as the page is shown.
+pub struct Runtime {
+    pub global: value::EnvRef,
+    pub handlers: Handlers,
+}
 
 /// One script to execute: the element id and its source text.
 struct PageScript {
@@ -39,35 +56,78 @@ struct PageScript {
     source: String,
 }
 
-/// Execute every `<script>` in `dom` in document order. External sources are
-/// resolved through `fetch_js` (`href` as written → source text, or `None`
-/// to skip). Console output and script errors accumulate in `console`.
-pub fn run_page_scripts(
-    dom: &mut Dom,
-    fetch_js: &mut dyn FnMut(&str) -> Option<String>,
-    console: &mut Vec<String>,
-) {
-    let scripts = collect_scripts(dom, fetch_js, console);
-    if scripts.is_empty() {
-        return;
+impl Runtime {
+    pub fn new() -> Self {
+        let global = value::Env::new_global();
+        builtins::install_globals(&global);
+        Self {
+            global,
+            handlers: Handlers::new(),
+        }
     }
 
-    let mut it = Interp::new(dom, console);
-    for script in scripts {
-        it.cursor = Some(write_cursor_for(it.dom, script.node));
-        match parser::parse_program(&script.source) {
+    /// Load phase: run every `<script>` in document order, then fire
+    /// `DOMContentLoaded` on the document and `load` on the window.
+    pub fn run_load_scripts(
+        &mut self,
+        dom: &mut Dom,
+        fetch_js: &mut dyn FnMut(&str) -> Option<String>,
+        console: &mut Vec<String>,
+    ) {
+        let scripts = collect_scripts(dom, fetch_js, console);
+        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), LOAD_BUDGET);
+        for script in scripts {
+            it.cursor = Some(write_cursor_for(it.dom, script.node));
+            match parser::parse_program(&script.source) {
+                Err(e) => it.console.push(format!("[script error] {e}")),
+                Ok(stmts) => match it.run_program(&stmts) {
+                    Ok(()) | Err(Control::Return(_)) => {}
+                    Err(Control::Throw(v)) => it
+                        .console
+                        .push(format!("Uncaught {}", value::to_string(&v))),
+                    Err(Control::Abort(why)) => {
+                        it.console.push(format!("[script aborted] {why}"))
+                    }
+                    Err(Control::Break) | Err(Control::Continue) => {}
+                },
+            }
+        }
+        it.cursor = None;
+        events::dispatch(&mut it, Target::Document, "DOMContentLoaded");
+        events::dispatch(&mut it, Target::Window, "load");
+    }
+
+    /// Dispatch a user-interaction event (e.g. a click on a node).
+    pub fn dispatch(
+        &mut self,
+        dom: &mut Dom,
+        console: &mut Vec<String>,
+        target: Target,
+        ty: &str,
+    ) -> DispatchOutcome {
+        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        events::dispatch(&mut it, target, ty)
+    }
+
+    /// Run a `javascript:` URL's body in the page's global scope.
+    pub fn run_snippet(&mut self, dom: &mut Dom, console: &mut Vec<String>, src: &str) {
+        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        match parser::parse_program(src) {
             Err(e) => it.console.push(format!("[script error] {e}")),
             Ok(stmts) => match it.run_program(&stmts) {
                 Ok(()) | Err(Control::Return(_)) => {}
                 Err(Control::Throw(v)) => it
                     .console
                     .push(format!("Uncaught {}", value::to_string(&v))),
-                Err(Control::Abort(why)) => {
-                    it.console.push(format!("[script aborted] {why}"))
-                }
-                Err(Control::Break) | Err(Control::Continue) => {}
+                Err(Control::Abort(why)) => it.console.push(format!("[script aborted] {why}")),
+                Err(_) => {}
             },
         }
+    }
+
+    /// Node ids carrying click handlers (for clickable-region flattening).
+    pub fn click_targets(&self) -> Vec<usize> {
+        self.handlers.click_targets()
     }
 }
 

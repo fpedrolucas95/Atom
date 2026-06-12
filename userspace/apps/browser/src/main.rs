@@ -21,7 +21,12 @@
 //!   mutation (`getElementById`, `querySelector`, `innerHTML`,
 //!   `document.write`, `createElement`, `style`), `console`, `Math`, `JSON`,
 //!   and the core language (closures, prototypes, try/catch, arrows) — under
-//!   a step budget so a runaway script can never hang the browser.
+//!   a step budget so a runaway script can never hang the browser. The page
+//!   stays live after load: `click` events dispatch through registered
+//!   handlers (`addEventListener`, `onclick` properties and attributes) with
+//!   bubbling and `preventDefault`, `DOMContentLoaded`/`load` fire on load,
+//!   `javascript:` links run in the page scope, and the document re-renders
+//!   after handlers mutate it.
 //! * **Low resource use** — a lazily-`mmap`ed bump heap, redraw only when
 //!   state changes, and bounded network fetches.
 //! * **Clean structure** — focused modules (allocator, text, entities,

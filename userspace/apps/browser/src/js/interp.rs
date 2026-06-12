@@ -19,11 +19,10 @@ use alloc::vec::Vec;
 use super::ast::*;
 use super::builtins;
 use super::dom_api;
+use super::events::Handlers;
 use super::value::*;
 use crate::domtree::Dom;
 
-/// Total evaluation steps allowed per page (across all scripts).
-const STEP_BUDGET: u64 = 3_000_000;
 /// Maximum interpreter call depth (JS frames, not Rust frames).
 const MAX_CALL_DEPTH: u32 = 64;
 
@@ -49,6 +48,7 @@ pub struct WriteCursor {
 pub struct Interp<'a> {
     pub dom: &'a mut Dom,
     pub console: &'a mut Vec<String>,
+    pub handlers: &'a mut Handlers,
     pub global: EnvRef,
     pub cursor: Option<WriteCursor>,
     steps: u64,
@@ -56,15 +56,22 @@ pub struct Interp<'a> {
 }
 
 impl<'a> Interp<'a> {
-    pub fn new(dom: &'a mut Dom, console: &'a mut Vec<String>) -> Self {
-        let global = Env::new_global();
-        builtins::install_globals(&global);
+    /// Build an interpreter over a persistent runtime's global scope and
+    /// handler table, with a fresh step budget for this run.
+    pub fn new(
+        dom: &'a mut Dom,
+        console: &'a mut Vec<String>,
+        handlers: &'a mut Handlers,
+        global: EnvRef,
+        budget: u64,
+    ) -> Self {
         Self {
             dom,
             console,
+            handlers,
             global,
             cursor: None,
-            steps: STEP_BUDGET,
+            steps: budget,
             depth: 0,
         }
     }

@@ -142,9 +142,9 @@ pub fn install_globals(global: &EnvRef) {
         w.props
             .insert("innerHeight".into(), Value::Num(crate::css::VIEWPORT_H as f64));
         w.props
-            .insert("addEventListener".into(), native(global_fn, "noop"));
+            .insert("addEventListener".into(), native(window_listen_fn, "add"));
         w.props
-            .insert("removeEventListener".into(), native(global_fn, "noop"));
+            .insert("removeEventListener".into(), native(window_listen_fn, "remove"));
         w.props.insert("document".into(), Value::Document);
         def("location", Value::Obj(location));
     }
@@ -159,6 +159,19 @@ pub fn install_globals(global: &EnvRef) {
 fn leak_name(prefix: &str, name: &str) -> &'static str {
     let s = format!("{prefix}{name}");
     alloc::boxed::Box::leak(s.into_boxed_str())
+}
+
+/// `window.addEventListener` / `removeEventListener`.
+fn window_listen_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str) -> EResult {
+    let ty = to_string(&args.first().cloned().unwrap_or(Value::Undefined));
+    let f = args.get(1).cloned().unwrap_or(Value::Undefined);
+    use super::events::Target;
+    if name == "add" {
+        it.handlers.add_listener(Target::Window, &ty, f);
+    } else {
+        it.handlers.remove_listener(Target::Window, &ty, &f);
+    }
+    Ok(Value::Undefined)
 }
 
 // ── Global functions ─────────────────────────────────────────────────────────

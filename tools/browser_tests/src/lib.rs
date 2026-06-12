@@ -1111,6 +1111,197 @@ mod tests {
         assert_eq!(out[0], "undefined");
     }
 
+    // ── JavaScript: events ──────────────────────────────────────────────────
+
+    use crate::html::{flatten_dom, load_page, LoadedPage};
+    use crate::js::Target;
+
+    fn load(html: &str) -> LoadedPage {
+        load_page(html, &mut |_| None, &mut |_| None, true)
+    }
+
+    /// Click the node and re-flatten, like the browser does.
+    fn click_and_reflatten(page: &mut LoadedPage, node: usize) -> bool {
+        let rt = page.runtime.as_mut().unwrap();
+        let mut console = Vec::new();
+        let outcome = rt.dispatch(&mut page.dom, &mut console, Target::Node(node), "click");
+        let clickable = page.runtime.as_ref().unwrap().click_targets();
+        page.doc = flatten_dom(&page.dom, &mut |_| None, true, &clickable);
+        outcome.prevented
+    }
+
+    #[test]
+    fn ev_add_event_listener_click_mutates_page() {
+        let mut page = load(
+            "<p id=\"out\">before</p><a id=\"go\" href=\"/x\">go</a>\
+             <script>document.getElementById('go').addEventListener('click', function() {\
+                document.getElementById('out').textContent = 'clicked';\
+             });</script>",
+        );
+        assert!(all_text(&page.doc).contains("before"));
+        let node = page.doc.link_nodes[0];
+        let prevented = click_and_reflatten(&mut page, node);
+        assert!(!prevented, "no preventDefault: navigation proceeds");
+        assert!(all_text(&page.doc).contains("clicked"));
+    }
+
+    #[test]
+    fn ev_prevent_default_blocks_navigation() {
+        let mut page = load(
+            "<a id=\"go\" href=\"/x\">go</a>\
+             <script>document.getElementById('go').onclick = function(e) { e.preventDefault(); };</script>",
+        );
+        let node = page.doc.link_nodes[0];
+        assert!(click_and_reflatten(&mut page, node));
+        // `return false` from a property handler also prevents.
+        let mut page = load(
+            "<a id=\"go\" href=\"/x\">go</a>\
+             <script>document.getElementById('go').onclick = function() { return false; };</script>",
+        );
+        let node = page.doc.link_nodes[0];
+        assert!(click_and_reflatten(&mut page, node));
+    }
+
+    #[test]
+    fn ev_onclick_attribute_fires_and_prevents() {
+        let mut page = load(
+            "<p id=\"out\">x</p>\
+             <a href=\"/x\" onclick=\"document.getElementById('out').textContent = 'attr ran'; return false\">go</a>",
+        );
+        let node = page.doc.link_nodes[0];
+        let prevented = click_and_reflatten(&mut page, node);
+        assert!(prevented);
+        assert!(all_text(&page.doc).contains("attr ran"));
+    }
+
+    #[test]
+    fn ev_bubbling_and_stop_propagation() {
+        let mut page = load(
+            "<div id=\"wrap\"><a id=\"go\" href=\"/x\">go</a></div><p id=\"out\"></p>\
+             <script>\
+             var log = [];\
+             document.getElementById('go').addEventListener('click', function() { log.push('a'); });\
+             document.getElementById('wrap').addEventListener('click', function() { log.push('div'); });\
+             document.addEventListener('click', function() { log.push('doc'); });\
+             window.addEventListener('click', function() {\
+                log.push('win');\
+                document.getElementById('out').textContent = log.join('>');\
+             });\
+             </script>",
+        );
+        let node = page.doc.link_nodes[0];
+        click_and_reflatten(&mut page, node);
+        assert!(all_text(&page.doc).contains("a>div>doc>win"));
+
+        // stopPropagation halts before document/window.
+        let mut page = load(
+            "<div id=\"wrap\"><a id=\"go\" href=\"/x\">go</a></div><p id=\"out\">none</p>\
+             <script>\
+             document.getElementById('go').addEventListener('click', function(e) {\
+                e.stopPropagation();\
+                document.getElementById('out').textContent = 'inner only';\
+             });\
+             document.addEventListener('click', function() {\
+                document.getElementById('out').textContent = 'leaked';\
+             });\
+             </script>",
+        );
+        let node = page.doc.link_nodes[0];
+        click_and_reflatten(&mut page, node);
+        assert!(all_text(&page.doc).contains("inner only"));
+    }
+
+    #[test]
+    fn ev_dom_content_loaded_and_window_onload_fire_at_load() {
+        let page = load(
+            "<p id=\"a\">-</p><p id=\"b\">-</p>\
+             <script>\
+             document.addEventListener('DOMContentLoaded', function() {\
+                document.getElementById('a').textContent = 'dcl ran';\
+             });\
+             window.onload = function() {\
+                document.getElementById('b').textContent = 'onload ran';\
+             };\
+             </script>",
+        );
+        let t = all_text(&page.doc);
+        assert!(t.contains("dcl ran"), "DOMContentLoaded should fire: {t}");
+        assert!(t.contains("onload ran"), "window.onload should fire: {t}");
+    }
+
+    #[test]
+    fn ev_click_zones_for_non_link_elements() {
+        // A span with onclick gets a clickable region in the flat document.
+        let page = load("<p><span onclick=\"1\">tap me</span> plain</p>");
+        assert_eq!(page.doc.click_nodes.len(), 1);
+        let zoned = match &page.doc.blocks[0] {
+            Block::Text { items, .. } => items.iter().any(|it| {
+                matches!(it, Inline::Run(r) if r.zone == Some(0) && r.text.contains("tap"))
+            }),
+            _ => false,
+        };
+        assert!(zoned, "span text should carry the click zone");
+        // addEventListener targets get zones too (registered via script).
+        let page = load(
+            "<p id=\"t\">tap</p>\
+             <script>document.getElementById('t').addEventListener('click', function() {});</script>",
+        );
+        assert_eq!(page.doc.click_nodes.len(), 1);
+    }
+
+    #[test]
+    fn ev_remove_event_listener() {
+        let mut page = load(
+            "<a id=\"go\" href=\"/x\">go</a><p id=\"out\">none</p>\
+             <script>\
+             function h() { document.getElementById('out').textContent = 'fired'; }\
+             var a = document.getElementById('go');\
+             a.addEventListener('click', h);\
+             a.removeEventListener('click', h);\
+             </script>",
+        );
+        let node = page.doc.link_nodes[0];
+        click_and_reflatten(&mut page, node);
+        assert!(!all_text(&page.doc).contains("fired"));
+    }
+
+    #[test]
+    fn ev_element_click_method_dispatches_synchronously() {
+        let page = load(
+            "<a id=\"go\" href=\"/x\">go</a><p id=\"out\">-</p>\
+             <script>\
+             document.getElementById('go').onclick = function() {\
+                document.getElementById('out').textContent = 'via click()';\
+             };\
+             document.getElementById('go').click();\
+             </script>",
+        );
+        assert!(all_text(&page.doc).contains("via click()"));
+    }
+
+    #[test]
+    fn ev_handler_errors_reported_not_fatal() {
+        let mut page = load(
+            "<a id=\"go\" href=\"/x\">go</a>\
+             <script>document.getElementById('go').onclick = function() { boom(); };</script>",
+        );
+        let node = page.doc.link_nodes[0];
+        let rt = page.runtime.as_mut().unwrap();
+        let mut console = Vec::new();
+        let outcome = rt.dispatch(&mut page.dom, &mut console, Target::Node(node), "click");
+        assert!(outcome.fired);
+        assert!(!outcome.prevented);
+        assert!(console.iter().any(|l| l.contains("Uncaught")));
+    }
+
+    #[test]
+    fn ev_input_nodes_track_controls() {
+        let page = load("<input id=\"i\" name=\"q\"><button id=\"b\">Go</button>");
+        assert_eq!(page.doc.inputs.len(), 2);
+        assert_eq!(page.doc.input_nodes.len(), 2);
+        assert_eq!(page.doc.links.len(), page.doc.link_nodes.len());
+    }
+
     #[test]
     fn about_pages_still_render() {
         // The built-in pages from content.rs (inlined here) must keep working.

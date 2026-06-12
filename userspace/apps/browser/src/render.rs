@@ -173,6 +173,7 @@ enum Tok<'a> {
         text: &'a str,
         paint: Painted,
         link: Option<usize>,
+        zone: Option<usize>,
     },
     Ctrl {
         idx: usize,
@@ -288,6 +289,7 @@ pub fn draw_text_block(
     link_hits: &mut Vec<Hit>,
     form: &FormCtx,
     input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
 ) -> i32 {
     if kind == TextKind::Pre {
         return draw_pre(s, items, x0, max_w, y, clip);
@@ -320,6 +322,7 @@ pub fn draw_text_block(
                             text: word,
                             paint,
                             link: run.link,
+                            zone: run.zone,
                         });
                     }
                 }
@@ -369,12 +372,26 @@ pub fn draw_text_block(
         for tok in &toks[i..j] {
             let ty = y + (line_h.saturating_sub(tok.height()) / 2) as i32;
             match *tok {
-                Tok::Word { text, paint, link } => {
+                Tok::Word {
+                    text,
+                    paint,
+                    link,
+                    zone,
+                } => {
                     if line_visible && ty >= 0 {
                         draw_word(s, x, ty as u32, text, &paint, page_bg);
                     }
                     if let Some(idx) = link {
                         link_hits.push(Hit {
+                            x: x as i32,
+                            y: ty - 1,
+                            w: tok.width() as i32,
+                            h: tok.height() as i32 + 3,
+                            idx,
+                        });
+                    }
+                    if let Some(idx) = zone {
+                        zone_hits.push(Hit {
                             x: x as i32,
                             y: ty - 1,
                             w: tok.width() as i32,

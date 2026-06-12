@@ -21,6 +21,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use super::events::{self, Target};
 use super::interp::{Control, EResult, Interp, WriteCursor};
 use super::value::*;
 use crate::css::parse_selector_list;
@@ -88,7 +89,11 @@ pub fn document_set(it: &mut Interp, key: &str, value: Value) -> Result<(), Cont
             };
             it.dom.set_text_content(title, &text);
         }
-        _ => {} // cookie / location / on* assignments are accepted and dropped
+        k if k.starts_with("on") => {
+            // `document.onclick = f` style property handlers.
+            it.handlers.set_prop(Target::Document, &k[2..], value);
+        }
+        _ => {} // cookie / location assignments are accepted and dropped
     }
     Ok(())
 }
@@ -149,7 +154,17 @@ fn document_method(it: &mut Interp, _this: &Value, args: &[Value], name: &'stati
             doc_write(it, &html);
             Value::Undefined
         }
-        _ => Value::Undefined, // event listeners
+        "addEventListener" => {
+            it.handlers
+                .add_listener(Target::Document, &to_string(&arg(0)), arg(1));
+            Value::Undefined
+        }
+        "removeEventListener" => {
+            it.handlers
+                .remove_listener(Target::Document, &to_string(&arg(0)), &arg(1));
+            Value::Undefined
+        }
+        _ => Value::Undefined,
     })
 }
 
@@ -293,7 +308,10 @@ pub fn node_set(it: &mut Interp, id: usize, key: &str, value: Value) -> Result<(
             let v = to_string(&value);
             it.dom.set_attr(id, "style", &v);
         }
-        k if k.starts_with("on") => {} // event handlers: accepted, never fire
+        k if k.starts_with("on") => {
+            // `el.onclick = f` style property handlers.
+            it.handlers.set_prop(Target::Node(id), &k[2..], value);
+        }
         _ => {
             let v = to_string(&value);
             it.dom.set_attr(id, &key.to_ascii_lowercase(), &v);
@@ -407,7 +425,21 @@ fn node_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static str
             let sels = parse_selector_list(&to_string(&arg(0)));
             Value::Bool(sels.iter().any(|s| s.matches(it.dom, id)))
         }
-        _ => Value::Undefined, // listeners / focus / blur / click
+        "addEventListener" => {
+            it.handlers
+                .add_listener(Target::Node(id), &to_string(&arg(0)), arg(1));
+            Value::Undefined
+        }
+        "removeEventListener" => {
+            it.handlers
+                .remove_listener(Target::Node(id), &to_string(&arg(0)), &arg(1));
+            Value::Undefined
+        }
+        "click" => {
+            events::dispatch(it, Target::Node(id), "click");
+            Value::Undefined
+        }
+        _ => Value::Undefined, // focus / blur
     })
 }
 

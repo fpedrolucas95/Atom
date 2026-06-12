@@ -12,11 +12,15 @@
 - DOM depth is capped (`domtree::MAX_DEPTH`) because the flattener recurses on
   tree depth and user stacks are 512 KiB; keep recursion bounded.
 - JavaScript: hand-written interpreter in `js/` (lexer → parser → tree-walking
-  interp; DOM bindings in `js/dom_api.rs`). Scripts run once after tree
-  construction (defer-like), no event loop yet. Step budget + call-depth cap in
-  `js/interp.rs` keep runaway scripts from hanging the browser. The target is
-  soft-float: f64 works, but `floor`/`sqrt` etc. are hand-rolled in
-  `js/value.rs` (no std math).
+  interp; DOM bindings in `js/dom_api.rs`; events in `js/events.rs`). Load
+  scripts run once after tree construction, then DOMContentLoaded/load fire.
+  The page stays live: `browser.rs` keeps `PageState { dom, runtime }` and
+  dispatches `click` (bubbling, preventDefault) on hit regions, re-flattening
+  afterwards (`html::flatten_dom`, CSS replayed from `css_cache`). Step budget
+  + call-depth cap in `js/interp.rs` keep runaway scripts from hanging the
+  browser. No timers/microtasks yet (`setTimeout` only inline at 0 delay).
+  The target is soft-float: f64 works, but `floor`/`sqrt` etc. are hand-rolled
+  in `js/value.rs` (no std math).
 
 ## Build and run
 
