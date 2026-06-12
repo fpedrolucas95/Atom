@@ -22,6 +22,85 @@ use super::interp::{Control, Interp};
 use super::parser;
 use super::value::*;
 
+// ── Timer queue ──────────────────────────────────────────────────────────────
+
+pub struct PendingTimer {
+    pub id: u32,
+    pub deadline_ms: u64,
+    pub callback: Value,
+    pub interval_ms: Option<u64>,
+}
+
+pub struct TimerQueue {
+    pending: Vec<PendingTimer>,
+    next_id: u32,
+}
+
+impl TimerQueue {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub fn schedule(
+        &mut self,
+        callback: Value,
+        now_ms: u64,
+        delay_ms: u64,
+        interval_ms: Option<u64>,
+    ) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.pending.push(PendingTimer {
+            id,
+            deadline_ms: now_ms + delay_ms,
+            callback,
+            interval_ms,
+        });
+        id
+    }
+
+    pub fn cancel(&mut self, id: u32) {
+        self.pending.retain(|t| t.id != id);
+    }
+
+    pub fn take_expired(&mut self, now_ms: u64) -> Vec<PendingTimer> {
+        let mut expired = Vec::new();
+        let mut i = 0;
+        while i < self.pending.len() {
+            if self.pending[i].deadline_ms <= now_ms {
+                let timer = self.pending.remove(i);
+                if let Some(interval) = timer.interval_ms {
+                    // Re-arm before returning so cancel() still works.
+                    self.pending.push(PendingTimer {
+                        id: timer.id,
+                        deadline_ms: now_ms + interval,
+                        callback: timer.callback.clone(),
+                        interval_ms: Some(interval),
+                    });
+                    expired.push(PendingTimer {
+                        id: timer.id,
+                        deadline_ms: timer.deadline_ms,
+                        callback: timer.callback,
+                        interval_ms: Some(interval),
+                    });
+                } else {
+                    expired.push(timer);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        expired
+    }
+}
+
 /// What an event is aimed at.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -48,12 +127,14 @@ struct Entry {
 /// All handlers registered by the page's scripts.
 pub struct Handlers {
     entries: Vec<Entry>,
+    pub timers: TimerQueue,
 }
 
 impl Handlers {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            timers: TimerQueue::new(),
         }
     }
 
@@ -131,6 +212,17 @@ pub struct DispatchOutcome {
 
 /// Dispatch `ty` at `target`, bubbling to document and window.
 pub fn dispatch(it: &mut Interp, target: Target, ty: &str) -> DispatchOutcome {
+    dispatch_with_props(it, target, ty, &[])
+}
+
+/// Dispatch `ty` at `target` with extra key/value pairs injected into the
+/// event object (used for keyboard events etc.).
+pub fn dispatch_with_props(
+    it: &mut Interp,
+    target: Target,
+    ty: &str,
+    extra: &[(&str, Value)],
+) -> DispatchOutcome {
     let ty = ty.to_ascii_lowercase();
     let mut outcome = DispatchOutcome::default();
 
@@ -159,6 +251,10 @@ pub fn dispatch(it: &mut Interp, target: Target, ty: &str) -> DispatchOutcome {
             "stopImmediatePropagation".into(),
             native(event_fn, "stopPropagation"),
         );
+        // Inject extra properties (e.g. key, keyCode for keyboard events).
+        for (k, v) in extra {
+            e.props.insert((*k).into(), v.clone());
+        }
     }
     let event = Value::Obj(ev.clone());
 

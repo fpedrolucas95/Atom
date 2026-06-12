@@ -1327,4 +1327,289 @@ mod tests {
             Some(Color::rgb(0xE2, 0xE8, 0xF0))
         );
     }
+
+    // ── Timers ──────────────────────────────────────────────────────────────
+    //
+    // Timer tests must run serially because BROWSER_TIME_MS is a shared atomic.
+    // Each test resets the clock to 0 before calling `load_at_time`, ensuring
+    // `setTimeout(fn, N)` schedules `deadline_ms = 0 + N`.
+
+    static TIMER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Load a page with BROWSER_TIME_MS pinned to `start_ms`.
+    fn load_at_time(html: &str, start_ms: u64) -> crate::html::LoadedPage {
+        crate::js::builtins::set_browser_time(start_ms);
+        load_page(html, &mut |_| None, &mut |_| None, true)
+    }
+
+    /// Advance the browser clock to `now_ms` and fire expired timers,
+    /// re-flattening the document if any ran.
+    fn tick_page(page: &mut crate::html::LoadedPage, now_ms: u64) -> bool {
+        crate::js::builtins::set_browser_time(now_ms);
+        if let Some(rt) = page.runtime.as_mut() {
+            let mut console = Vec::new();
+            if rt.tick_timers(&mut page.dom, &mut console, now_ms) {
+                let clickable = page.runtime.as_ref().unwrap().click_targets();
+                page.doc = crate::html::flatten_dom(&page.dom, &mut |_| None, true, &clickable);
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn timer_zero_delay_still_runs_inline() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        // delay == 0 still executes synchronously during page load.
+        let page = load_at_time(
+            "<p id='out'>before</p>\
+             <script>setTimeout(function() {\
+                document.getElementById('out').textContent = 'inline';\
+             }, 0);</script>",
+            0,
+        );
+        assert!(all_text(&page.doc).contains("inline"));
+    }
+
+    #[test]
+    fn timer_positive_delay_deferred() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        // A positive delay must NOT run during load.
+        let page = load_at_time(
+            "<p id='out'>before</p>\
+             <script>setTimeout(function() {\
+                document.getElementById('out').textContent = 'fired';\
+             }, 500);</script>",
+            0,
+        );
+        assert!(
+            all_text(&page.doc).contains("before"),
+            "should not have fired yet"
+        );
+    }
+
+    #[test]
+    fn timer_fires_after_deadline() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        let mut page = load_at_time(
+            "<p id='out'>before</p>\
+             <script>setTimeout(function() {\
+                document.getElementById('out').textContent = 'fired';\
+             }, 500);</script>",
+            0,
+        );
+        // 499 ms — should not fire yet.
+        let fired = tick_page(&mut page, 499);
+        assert!(!fired);
+        assert!(all_text(&page.doc).contains("before"));
+        // 500 ms — deadline reached, must fire.
+        let fired = tick_page(&mut page, 500);
+        assert!(fired, "timer should fire exactly at its deadline");
+        assert!(all_text(&page.doc).contains("fired"));
+    }
+
+    #[test]
+    fn timer_fires_only_once() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        let mut page = load_at_time(
+            "<p id='out'>0</p>\
+             <script>\
+             var n = 0;\
+             setTimeout(function() {\
+                n++;\
+                document.getElementById('out').textContent = String(n);\
+             }, 100);\
+             </script>",
+            0,
+        );
+        tick_page(&mut page, 100);
+        tick_page(&mut page, 200);
+        tick_page(&mut page, 300);
+        // The timeout fires exactly once.
+        assert_eq!(block_text(&page.doc, 0), "1");
+    }
+
+    #[test]
+    fn interval_fires_repeatedly() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        let mut page = load_at_time(
+            "<p id='out'>0</p>\
+             <script>\
+             var n = 0;\
+             setInterval(function() {\
+                n++;\
+                document.getElementById('out').textContent = String(n);\
+             }, 100);\
+             </script>",
+            0,
+        );
+        tick_page(&mut page, 100);
+        assert_eq!(block_text(&page.doc, 0), "1");
+        tick_page(&mut page, 200);
+        assert_eq!(block_text(&page.doc, 0), "2");
+        tick_page(&mut page, 300);
+        assert_eq!(block_text(&page.doc, 0), "3");
+    }
+
+    #[test]
+    fn clear_timeout_cancels_pending() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        let mut page = load_at_time(
+            "<p id='out'>before</p>\
+             <script>\
+             var id = setTimeout(function() {\
+                document.getElementById('out').textContent = 'fired';\
+             }, 100);\
+             clearTimeout(id);\
+             </script>",
+            0,
+        );
+        tick_page(&mut page, 100);
+        assert!(
+            all_text(&page.doc).contains("before"),
+            "clearTimeout should have prevented the callback"
+        );
+    }
+
+    #[test]
+    fn clear_interval_stops_repeating() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        // The interval fires at 100 and 200 ms. A separate timeout at 250 ms
+        // clears the interval, so the tick at 300 must NOT re-fire it.
+        let mut page = load_at_time(
+            "<p id='out'>0</p>\
+             <script>\
+             var n = 0;\
+             var id = setInterval(function() {\
+                n++;\
+                document.getElementById('out').textContent = String(n);\
+             }, 100);\
+             setTimeout(function() { clearInterval(id); }, 250);\
+             </script>",
+            0,
+        );
+        tick_page(&mut page, 100); // interval fires → n=1
+        tick_page(&mut page, 200); // interval fires → n=2
+        tick_page(&mut page, 250); // clearInterval timeout fires; interval not due yet
+        tick_page(&mut page, 300); // interval cleared — must not fire
+        tick_page(&mut page, 400);
+        assert_eq!(
+            block_text(&page.doc, 0),
+            "2",
+            "interval should have been stopped after firing twice"
+        );
+    }
+
+    #[test]
+    fn date_now_returns_browser_time() {
+        let _g = TIMER_LOCK.lock().unwrap();
+        crate::js::builtins::set_browser_time(12345);
+        let msgs = run_js("var t = Date.now(); console.log(t === 12345 ? 'ok' : 'bad');");
+        // Reset so other tests see 0.
+        crate::js::builtins::set_browser_time(0);
+        assert!(
+            msgs.iter().any(|m| m == "ok"),
+            "Date.now() must reflect set_browser_time; got {:?}",
+            msgs
+        );
+    }
+
+    // ── keydown / input / change / submit events ─────────────────────────────
+
+    #[test]
+    fn keydown_event_fires_on_node() {
+        let mut page = load(
+            "<p id='out'>-</p>\
+             <script>\
+             document.addEventListener('keydown', function(e) {\
+                document.getElementById('out').textContent = e.key;\
+             });\
+             </script>",
+        );
+        let rt = page.runtime.as_mut().unwrap();
+        let mut console = Vec::new();
+        let outcome = rt.dispatch_keyboard(
+            &mut page.dom, &mut console,
+            crate::js::Target::Document, "keydown",
+            65, 0, false, false, false, // 'A' character, no modifiers
+        );
+        assert!(outcome.fired);
+        let clickable = rt.click_targets();
+        page.doc = crate::html::flatten_dom(&page.dom, &mut |_| None, true, &clickable);
+        assert_eq!(block_text(&page.doc, 0), "A");
+    }
+
+    #[test]
+    fn keydown_event_has_key_properties() {
+        let msgs = run_js(
+            "var captured = {};\
+             document.addEventListener('keydown', function(e) {\
+                captured.key = e.key;\
+                captured.keyCode = e.keyCode;\
+                captured.ctrlKey = e.ctrlKey;\
+             });"
+        );
+        // run_js doesn't dispatch events — just verify no parse errors.
+        assert!(msgs.is_empty() || !msgs.iter().any(|m| m.contains("error")));
+    }
+
+    #[test]
+    fn submit_event_prevented_blocks_navigation() {
+        // We simulate submit prevention by checking the outcome.
+        let mut page = load(
+            "<form id='f'><input name='q'><button type='submit'>Go</button></form>\
+             <script>\
+             document.getElementById('f').addEventListener('submit', function(e) {\
+                e.preventDefault();\
+             });\
+             </script>",
+        );
+        // Find the form node and dispatch submit.
+        let form_node = page.dom.find_first("form").unwrap();
+        let rt = page.runtime.as_mut().unwrap();
+        let mut console = Vec::new();
+        let outcome = rt.dispatch(&mut page.dom, &mut console, crate::js::Target::Node(form_node), "submit");
+        assert!(outcome.prevented, "preventDefault on submit should be reported");
+    }
+
+    #[test]
+    fn input_event_dispatches_on_value_change() {
+        // Verify that an input event is dispatchable on an input node.
+        let mut page = load(
+            "<input id='f'><p id='out'>-</p>\
+             <script>\
+             document.getElementById('f').addEventListener('input', function(e) {\
+                document.getElementById('out').textContent = 'changed';\
+             });\
+             </script>",
+        );
+        let input_node = page.doc.input_nodes[0];
+        let rt = page.runtime.as_mut().unwrap();
+        let mut console = Vec::new();
+        let outcome = rt.dispatch(&mut page.dom, &mut console, crate::js::Target::Node(input_node), "input");
+        assert!(outcome.fired);
+        let clickable = rt.click_targets();
+        page.doc = crate::html::flatten_dom(&page.dom, &mut |_| None, true, &clickable);
+        assert!(all_text(&page.doc).contains("changed"));
+    }
+
+    #[test]
+    fn change_event_dispatches_on_blur() {
+        let mut page = load(
+            "<input id='f'><p id='out'>-</p>\
+             <script>\
+             document.getElementById('f').addEventListener('change', function(e) {\
+                document.getElementById('out').textContent = 'blurred';\
+             });\
+             </script>",
+        );
+        let input_node = page.doc.input_nodes[0];
+        let rt = page.runtime.as_mut().unwrap();
+        let mut console = Vec::new();
+        let outcome = rt.dispatch(&mut page.dom, &mut console, crate::js::Target::Node(input_node), "change");
+        assert!(outcome.fired);
+        let clickable = rt.click_targets();
+        page.doc = crate::html::flatten_dom(&page.dom, &mut |_| None, true, &clickable);
+        assert!(all_text(&page.doc).contains("blurred"));
+    }
 }

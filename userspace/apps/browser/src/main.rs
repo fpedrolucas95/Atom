@@ -63,7 +63,7 @@ use core::alloc::Layout;
 use core::panic::PanicInfo;
 
 use atom_syscall::debug::log;
-use atom_syscall::thread::{exit, yield_now};
+use atom_syscall::thread::{exit, get_time_ms, yield_now};
 use libgui::application::Application;
 use libgui::event::{Event, WindowEvent};
 
@@ -111,6 +111,11 @@ fn main() -> ! {
     let mut browser = Browser::new();
 
     loop {
+        // Update the JS engine's notion of time before any dispatch so
+        // setTimeout deadlines and Date.now() reflect the real clock.
+        let now_ms = get_time_ms();
+        js::builtins::set_browser_time(now_ms);
+
         let mut handled_event = false;
         loop {
             match app.poll_event() {
@@ -144,6 +149,9 @@ fn main() -> ! {
             browser.render(&mut surface);
         }
         browser.finish_pending_load();
+
+        // Fire any expired timers; re-render if they mutated the DOM.
+        browser.tick_timers(now_ms);
 
         // Idle without busy-spinning: block for events when nothing happened.
         if handled_event {

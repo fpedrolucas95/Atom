@@ -354,17 +354,16 @@ impl Browser {
 
     // ── Script events ───────────────────────────────────────────────────────
 
-    /// Dispatch a `click` on the DOM node behind a hit region. Returns whether
-    /// a handler called `preventDefault` (suppressing the default action).
-    /// When any handler ran, the page is re-flattened so DOM mutations show.
-    fn fire_click(&mut self, node: usize) -> bool {
+    /// Core event dispatch helper. Returns `true` when `preventDefault` was
+    /// called; re-flattens the page whenever any handler ran.
+    fn fire_event(&mut self, target: js::Target, ty: &str) -> bool {
         let Some(mut page) = self.page.take() else {
             return false;
         };
         let mut outcome = js::DispatchOutcome::default();
         if let Some(rt) = &mut page.runtime {
             let mut console = Vec::new();
-            outcome = rt.dispatch(&mut page.dom, &mut console, js::Target::Node(node), "click");
+            outcome = rt.dispatch(&mut page.dom, &mut console, target, ty);
             for line in &console {
                 log(&format!("browser/js: {}", line));
             }
@@ -374,6 +373,81 @@ impl Browser {
             self.refresh_page();
         }
         outcome.prevented
+    }
+
+    /// Dispatch a `click` on the DOM node. Returns `true` when `preventDefault`
+    /// was called.
+    fn fire_click(&mut self, node: usize) -> bool {
+        self.fire_event(js::Target::Node(node), "click")
+    }
+
+    /// Dispatch a keyboard event on `target` carrying full key properties.
+    /// Returns `true` when `preventDefault` was called.
+    fn fire_key_event(&mut self, target: js::Target, ty: &str, key: libgui::event::KeyEvent) -> bool {
+        let Some(mut page) = self.page.take() else {
+            return false;
+        };
+        let mut outcome = js::DispatchOutcome::default();
+        if let Some(rt) = &mut page.runtime {
+            let mut console = Vec::new();
+            outcome = rt.dispatch_keyboard(
+                &mut page.dom,
+                &mut console,
+                target,
+                ty,
+                key.character,
+                key.scancode,
+                key.modifiers.ctrl,
+                key.modifiers.alt,
+                key.modifiers.shift,
+            );
+            for line in &console {
+                log(&format!("browser/js: {}", line));
+            }
+        }
+        self.page = Some(page);
+        if outcome.fired {
+            self.refresh_page();
+        }
+        outcome.prevented
+    }
+
+    /// Fire `input` on the DOM node of the given input control.
+    fn fire_input_on(&mut self, idx: usize) {
+        if let Some(&node) = self.doc.input_nodes.get(idx) {
+            self.fire_event(js::Target::Node(node), "input");
+        }
+    }
+
+    /// Fire `change` on the DOM node of the given input control (on blur/Enter).
+    fn blur_field(&mut self, idx: usize) {
+        if let Some(&node) = self.doc.input_nodes.get(idx) {
+            self.fire_event(js::Target::Node(node), "change");
+        }
+    }
+
+    /// Walk the DOM up from `input_node` looking for a `<form>` ancestor.
+    fn find_form_ancestor(&self, input_node: usize) -> Option<usize> {
+        self.page.as_ref()?.dom.find_ancestor_tag(input_node, "form")
+    }
+
+    /// Fire any timers whose deadlines have passed; re-renders if any ran.
+    pub fn tick_timers(&mut self, now_ms: u64) {
+        let Some(mut page) = self.page.take() else {
+            return;
+        };
+        if let Some(rt) = &mut page.runtime {
+            let mut console = Vec::new();
+            if rt.tick_timers(&mut page.dom, &mut console, now_ms) {
+                for line in &console {
+                    log(&format!("browser/js: {}", line));
+                }
+                self.page = Some(page);
+                self.refresh_page();
+                return;
+            }
+        }
+        self.page = Some(page);
     }
 
     /// Run a `javascript:` URL body in the page's scope, then re-render.
@@ -550,6 +624,19 @@ impl Browser {
     }
 
     fn submit_input(&mut self, idx: usize) {
+        // Fire submit on the enclosing <form>; preventDefault cancels navigation.
+        let form_node = self
+            .doc
+            .input_nodes
+            .get(idx)
+            .copied()
+            .and_then(|n| self.find_form_ancestor(n));
+        if let Some(form) = form_node {
+            if self.fire_event(js::Target::Node(form), "submit") {
+                return;
+            }
+        }
+
         let Some(meta) = self.doc.inputs.get(idx) else {
             return;
         };
@@ -586,6 +673,17 @@ impl Browser {
         if !key.pressed {
             return;
         }
+        // Fire keydown on the focused element (or document). preventDefault
+        // suppresses the default editing action.
+        let kd_target = self
+            .focused_input
+            .and_then(|i| self.doc.input_nodes.get(i).copied())
+            .map(js::Target::Node)
+            .unwrap_or(js::Target::Document);
+        let prevented = self.fire_key_event(kd_target, "keydown", key);
+        if prevented {
+            return;
+        }
         if let Some(i) = self.focused_input {
             self.edit_field(i, key);
             return;
@@ -595,14 +693,19 @@ impl Browser {
 
     fn edit_field(&mut self, i: usize, key: KeyEvent) {
         match key.character {
-            b'\n' | b'\r' => self.submit_input(i),
+            b'\n' | b'\r' => {
+                self.blur_field(i); // fire change before submit
+                self.submit_input(i);
+            }
             8 => {
                 self.input_text[i].pop();
                 self.needs_redraw = true;
+                self.fire_input_on(i);
             }
             ch if (32..127).contains(&ch) => {
                 self.input_text[i].push(ch as char);
                 self.needs_redraw = true;
+                self.fire_input_on(i);
             }
             _ => {}
         }
@@ -740,6 +843,13 @@ impl Browser {
                     self.needs_redraw = true;
                 }
                 _ => {
+                    // Blur the previously focused field (fires change) when
+                    // switching focus to a different input.
+                    if let Some(prev) = self.focused_input {
+                        if prev != idx {
+                            self.blur_field(prev);
+                        }
+                    }
                     self.focused_input = Some(idx);
                     self.open_select = None;
                     self.needs_redraw = true;
@@ -756,7 +866,9 @@ impl Browser {
         if self.open_select.take().is_some() {
             self.needs_redraw = true;
         }
-        if self.focused_input.take().is_some() {
+        // Fire change when the user clicks away from a focused text input.
+        if let Some(prev) = self.focused_input.take() {
+            self.blur_field(prev);
             self.needs_redraw = true;
         }
     }

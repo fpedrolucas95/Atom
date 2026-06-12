@@ -9,11 +9,13 @@
 //! Execution model: [`Runtime`] holds the page's global scope and handler
 //! table and **stays alive after load**. Load runs every `<script>` once in
 //! document order, then fires `DOMContentLoaded` and `load`. Afterwards the
-//! browser dispatches `click` events through [`Runtime::dispatch`] as the
-//! user interacts, re-flattening the DOM when handlers ran. Each entry gets
-//! its own step budget, so a runaway load script cannot starve later events
-//! and no script can hang the browser. There is still no timer/microtask
-//! queue: `setTimeout` only runs inline at zero delay.
+//! browser dispatches `click`, `keydown`, `input`, `change`, and `submit`
+//! events through [`Runtime::dispatch`] / [`Runtime::dispatch_keyboard`] as
+//! the user interacts, re-flattening the DOM when handlers ran. Each entry
+//! gets its own step budget, so a runaway load script cannot starve later
+//! events and no script can hang the browser. `setTimeout` with delay > 0
+//! and `setInterval` schedule callbacks in a [`events::TimerQueue`] that the
+//! main event loop drains each iteration via [`Runtime::tick_timers`].
 //!
 //! A misbehaving script cannot take the page down: parse errors, uncaught
 //! exceptions, and budget/depth aborts are reported on the console and the
@@ -33,6 +35,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use interp::{Control, Interp, WriteCursor};
+use value::Value;
 
 pub use events::{DispatchOutcome, Handlers, Target};
 
@@ -128,6 +131,96 @@ impl Runtime {
     /// Node ids carrying click handlers (for clickable-region flattening).
     pub fn click_targets(&self) -> Vec<usize> {
         self.handlers.click_targets()
+    }
+
+    /// Dispatch a keyboard event with full key properties on `target`.
+    /// `ctrl`, `alt`, `shift` come from the hardware modifier state.
+    pub fn dispatch_keyboard(
+        &mut self,
+        dom: &mut Dom,
+        console: &mut Vec<String>,
+        target: Target,
+        ty: &str,
+        character: u8,
+        scancode: u8,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+    ) -> DispatchOutcome {
+        // Map character/scancode to a JS key name and keyCode.
+        let (key_name, key_code): (&str, u32) = if character == 0 {
+            match scancode {
+                0x48 => ("ArrowUp", 38),
+                0x50 => ("ArrowDown", 40),
+                0x4B => ("ArrowLeft", 37),
+                0x4D => ("ArrowRight", 39),
+                0x49 => ("PageUp", 33),
+                0x51 => ("PageDown", 34),
+                0x01 => ("Escape", 27),
+                0x0F => ("Tab", 9),
+                _ => ("Unidentified", 0),
+            }
+        } else {
+            match character {
+                8 => ("Backspace", 8),
+                13 => ("Enter", 13),
+                27 => ("Escape", 27),
+                32..=126 => {
+                    // Leak one &'static str per unique printable char — tiny fixed set.
+                    let ch = character as char;
+                    let s: &'static str = {
+                        let owned = alloc::string::String::from(ch);
+                        alloc::boxed::Box::leak(owned.into_boxed_str())
+                    };
+                    (s, character as u32)
+                }
+                _ => ("Unidentified", 0),
+            }
+        };
+
+        let extra: alloc::vec::Vec<(&str, Value)> = alloc::vec![
+            ("key",      value::str_value(key_name)),
+            ("keyCode",  Value::Num(key_code as f64)),
+            ("which",    Value::Num(key_code as f64)),
+            ("charCode", Value::Num(if character >= 32 && character < 127 { character as f64 } else { 0.0 })),
+            ("ctrlKey",  Value::Bool(ctrl)),
+            ("altKey",   Value::Bool(alt)),
+            ("shiftKey", Value::Bool(shift)),
+            ("metaKey",  Value::Bool(false)),
+        ];
+
+        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        events::dispatch_with_props(&mut it, target, ty, &extra)
+    }
+
+    /// Fire any timers whose deadlines have passed. Returns `true` when at
+    /// least one timer ran (the page may need re-rendering).
+    pub fn tick_timers(
+        &mut self,
+        dom: &mut Dom,
+        console: &mut Vec<String>,
+        now_ms: u64,
+    ) -> bool {
+        let expired = self.handlers.timers.take_expired(now_ms);
+        if expired.is_empty() {
+            return false;
+        }
+        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        for timer in expired {
+            match it.call(&timer.callback, &Value::Undefined, &[]) {
+                Ok(_) | Err(Control::Return(_)) => {}
+                Err(Control::Throw(v)) => {
+                    let s = format!("Uncaught (in timer) {}", value::to_string(&v));
+                    it.console.push(s);
+                }
+                Err(Control::Abort(why)) => {
+                    it.console.push(format!("[timer aborted] {why}"));
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        true
     }
 }
 

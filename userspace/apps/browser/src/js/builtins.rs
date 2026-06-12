@@ -44,8 +44,8 @@ pub fn install_globals(global: &EnvRef) {
     def("alert", native(global_fn, "alert"));
     def("setTimeout", native(global_fn, "setTimeout"));
     def("setInterval", native(global_fn, "setInterval"));
-    def("clearTimeout", native(global_fn, "noop"));
-    def("clearInterval", native(global_fn, "noop"));
+    def("clearTimeout", native(global_fn, "clearTimeout"));
+    def("clearInterval", native(global_fn, "clearInterval"));
     def("eval", native(global_fn, "noop"));
     def("String", native(global_fn, "String"));
     def("Number", native(global_fn, "Number"));
@@ -266,15 +266,38 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
             it.console.push(format!("[alert] {msg}"));
             Value::Undefined
         }
-        "setTimeout" | "setInterval" => {
-            // No event loop: a zero-delay setTimeout runs inline once; other
-            // delays (and all intervals) are dropped.
-            if name == "setTimeout" && to_number(&arg(1)) == 0.0 {
-                if let f @ Value::Obj(_) = arg(0) {
-                    it.call(&f, &Value::Undefined, &[])?;
-                }
+        "setTimeout" => {
+            let f = arg(0);
+            let delay = {
+                let d = to_number(&arg(1));
+                if d.is_nan() || d < 0.0 { 0.0 } else { d }
+            } as u64;
+            if !matches!(type_of(&f), "function") {
+                return Ok(Value::Num(0.0));
             }
-            Value::Num(0.0)
+            if delay == 0 {
+                it.call(&f, &Value::Undefined, &[])?;
+                return Ok(Value::Num(0.0));
+            }
+            let id = it.handlers.timers.schedule(f, get_browser_time(), delay, None);
+            Value::Num(id as f64)
+        }
+        "setInterval" => {
+            let f = arg(0);
+            let delay = {
+                let d = to_number(&arg(1));
+                if d.is_nan() || d < 1.0 { 10.0 } else { d }
+            } as u64;
+            if !matches!(type_of(&f), "function") {
+                return Ok(Value::Num(0.0));
+            }
+            let id = it.handlers.timers.schedule(f, get_browser_time(), delay, Some(delay));
+            Value::Num(id as f64)
+        }
+        "clearTimeout" | "clearInterval" => {
+            let id = to_number(&arg(0)) as u32;
+            it.handlers.timers.cancel(id);
+            Value::Undefined
         }
         "String" => str_value(&to_string(&arg(0))),
         "Number" => Value::Num(to_number(&arg(0))),
@@ -305,7 +328,7 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
             }
             Value::Obj(o)
         }
-        "Date.now" => Value::Num(0.0),
+        "Date.now" => Value::Num(get_browser_time() as f64),
         "RegExp" => {
             let o = new_plain();
             o.borrow_mut()
@@ -345,6 +368,19 @@ fn console_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str
 }
 
 // ── Math ─────────────────────────────────────────────────────────────────────
+
+/// Current browser time in milliseconds; updated by `main.rs` at each loop
+/// iteration. Avoids an `atom_syscall` dependency in JS engine modules, which
+/// must compile for both the OS target and the Linux test harness.
+static BROWSER_TIME_MS: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_browser_time(ms: u64) {
+    BROWSER_TIME_MS.store(ms, Ordering::Relaxed);
+}
+
+pub fn get_browser_time() -> u64 {
+    BROWSER_TIME_MS.load(Ordering::Relaxed)
+}
 
 static RNG_STATE: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
 

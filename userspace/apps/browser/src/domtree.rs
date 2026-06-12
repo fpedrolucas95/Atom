@@ -164,6 +164,21 @@ impl Dom {
         }
     }
 
+    /// Walk up the ancestor chain from `node` (exclusive) and return the first
+    /// node whose tag matches `tag`. Returns `None` at the root.
+    pub fn find_ancestor_tag(&self, node: usize, tag: &str) -> Option<usize> {
+        let mut cur = self.nodes[node].parent;
+        loop {
+            if cur == usize::MAX {
+                return None;
+            }
+            if self.tag(cur) == tag {
+                return Some(cur);
+            }
+            cur = self.nodes[cur].parent;
+        }
+    }
+
     /// First element with `tag` in tree order, searched iteratively.
     pub fn find_first(&self, tag: &str) -> Option<usize> {
         let mut stack = alloc::vec![DOCUMENT];
