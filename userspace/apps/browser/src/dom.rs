@@ -38,13 +38,30 @@ pub enum Align {
 
 /// Inline rendering attributes applied to a [`Run`]. Resolved at parse time
 /// from HTML tags (`b`, `code`, `a`, …) and CSS so the renderer stays trivial.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct RunStyle {
     pub color: Option<Color>,
     pub bold: bool,
+    pub italic: bool,
     pub mono: bool,
     pub underline: bool,
     pub strike: bool,
+    /// Glyph scale (1 = native 8px), derived from the computed `font-size`.
+    pub size: u8,
+}
+
+impl Default for RunStyle {
+    fn default() -> Self {
+        Self {
+            color: None,
+            bold: false,
+            italic: false,
+            mono: false,
+            underline: false,
+            strike: false,
+            size: 1,
+        }
+    }
 }
 
 /// A contiguous run of inline text sharing one style and optional hyperlink

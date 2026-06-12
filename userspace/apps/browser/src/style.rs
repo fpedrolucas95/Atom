@@ -9,9 +9,12 @@
 
 use libgui::color::Color;
 
-use crate::css::{self, Decls, Stylesheet, TextTransform};
+use crate::css::{self, Decls, FontSize, Stylesheet, TextTransform};
 use crate::dom::Align;
 use crate::domtree::{Dom, Element};
+
+/// The default (`medium`) font size in CSS pixels.
+pub const DEFAULT_FONT_PX: u16 = 16;
 
 /// Fully resolved style for one element.
 #[derive(Clone, Copy)]
@@ -30,6 +33,8 @@ pub struct Computed {
     pub visible: bool,
     pub align: Option<Align>,
     pub transform: Option<TextTransform>,
+    /// Computed `font-size` in CSS pixels (inherited; `em`/`%` resolve here).
+    pub font_px: u16,
 }
 
 impl Default for Computed {
@@ -45,6 +50,7 @@ impl Default for Computed {
             visible: true,
             align: None,
             transform: None,
+            font_px: DEFAULT_FONT_PX,
         }
     }
 }
@@ -84,6 +90,16 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
     }
 
     apply(&mut out, &acc);
+    // Resolve font-size last: relative units cascade off the parent's pixels.
+    if let Some(fs) = acc.font_size {
+        out.font_px = match fs {
+            FontSize::Px(px) => px,
+            FontSize::Percent(p) => {
+                ((parent.font_px as u32 * p as u32) / 100).min(4000) as u16
+            }
+        }
+        .clamp(6, 400);
+    }
     (out, acc.display_none)
 }
 
@@ -137,6 +153,18 @@ fn ua_defaults(tag: &str) -> Decls {
         "caption" => d.align = Some(Align::Center),
         _ => {}
     }
+    // Heading and small-print default sizes (the bitmap font scales in integer
+    // steps, so these bucket into a few distinct glyph scales in the renderer).
+    d.font_size = match tag {
+        "h1" => Some(FontSize::Px(32)),
+        "h2" => Some(FontSize::Px(26)),
+        "h3" => Some(FontSize::Px(20)),
+        "h4" => Some(FontSize::Px(16)),
+        "h5" => Some(FontSize::Px(14)),
+        "h6" | "small" | "sub" | "sup" => Some(FontSize::Px(13)),
+        "big" => Some(FontSize::Px(20)),
+        _ => None,
+    };
     if tag == "th" {
         d.align = Some(Align::Center);
     }

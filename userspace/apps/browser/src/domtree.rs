@@ -12,10 +12,10 @@
 //! * an active-formatting-elements list with reconstruction and a simplified
 //!   adoption agency, so misnested markup like `<b>1<i>2</b>3</i>` styles each
 //!   region correctly and `<b><div>x</b>y</div>` does not leak bold,
-//! * the Noah's Ark clause (max 3 identical formatting entries).
-//!
-//! Foster parenting of table-misnested content is not implemented; stray
-//! text inside `<table>` stays inside the table node.
+//! * the Noah's Ark clause (max 3 identical formatting entries),
+//! * foster parenting — non-table content (text, `<div>`, `<p>`, …) appearing
+//!   directly inside `<table>`/`<tr>`/table sections is moved to just before
+//!   the table, as the spec requires, instead of being dropped or nested.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -211,6 +211,27 @@ fn implied_end(tag: &str) -> bool {
     )
 }
 
+/// Tags allowed to nest directly inside a table context without being foster
+/// parented out (the table-structure elements plus metadata content).
+fn is_table_structural(tag: &str) -> bool {
+    matches!(
+        tag,
+        "caption"
+            | "colgroup"
+            | "col"
+            | "tbody"
+            | "tfoot"
+            | "thead"
+            | "tr"
+            | "td"
+            | "th"
+            | "table"
+            | "style"
+            | "script"
+            | "template"
+    )
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Builder
 // ────────────────────────────────────────────────────────────────────────────
@@ -253,13 +274,23 @@ impl Builder {
     // ── Node plumbing ───────────────────────────────────────────────────────
 
     fn new_node(&mut self, parent: usize, data: NodeData) -> usize {
+        self.new_node_at(parent, None, data)
+    }
+
+    /// Append (or insert before `before` index) a fresh node under `parent`.
+    fn new_node_at(&mut self, parent: usize, before: Option<usize>, data: NodeData) -> usize {
         let id = self.dom.nodes.len();
         self.dom.nodes.push(Node {
             parent,
             children: Vec::new(),
             data,
         });
-        self.dom.nodes[parent].children.push(id);
+        match before {
+            Some(idx) if idx <= self.dom.nodes[parent].children.len() => {
+                self.dom.nodes[parent].children.insert(idx, id)
+            }
+            _ => self.dom.nodes[parent].children.push(id),
+        }
         id
     }
 
@@ -268,8 +299,44 @@ impl Builder {
     }
 
     fn insert_element(&mut self, tag: SmallStr, attrs: Attrs) -> usize {
+        // Foster parenting: non-table content inserted while a table context is
+        // current is relocated to just before the table.
+        if self.in_table_insert_context() && !is_table_structural(tag.as_str()) {
+            if let Some((parent, idx)) = self.foster_target() {
+                return self.new_node_at(parent, Some(idx), NodeData::Element(Element { tag, attrs }));
+            }
+        }
         let parent = self.current();
         self.new_node(parent, NodeData::Element(Element { tag, attrs }))
+    }
+
+    /// Whether the current node is a table context that triggers fostering.
+    fn in_table_insert_context(&self) -> bool {
+        matches!(
+            self.tag_at(self.current()),
+            "table" | "tbody" | "tfoot" | "thead" | "tr"
+        )
+    }
+
+    /// Where fostered content goes: `(parent, index)` placing it immediately
+    /// before the nearest open `<table>` in that table's parent. `None` when
+    /// there is no suitable table (then the caller falls back to `current`).
+    fn foster_target(&self) -> Option<(usize, usize)> {
+        let table = self
+            .open
+            .iter()
+            .rev()
+            .copied()
+            .find(|&n| self.tag_at(n) == "table")?;
+        let parent = self.dom.nodes[table].parent;
+        if parent == usize::MAX {
+            return None;
+        }
+        let idx = self.dom.nodes[parent]
+            .children
+            .iter()
+            .position(|&c| c == table)?;
+        Some((parent, idx))
     }
 
     fn tag_at(&self, id: usize) -> &str {
@@ -752,6 +819,21 @@ impl Builder {
     }
 
     fn append_text(&mut self, t: String) {
+        // Foster non-whitespace text out of a table context, merging with the
+        // fostered text node immediately before the table when possible.
+        if self.in_table_insert_context() && !t.trim().is_empty() {
+            if let Some((parent, idx)) = self.foster_target() {
+                if idx > 0 {
+                    let prev = self.dom.nodes[parent].children[idx - 1];
+                    if let NodeData::Text(existing) = &mut self.dom.nodes[prev].data {
+                        existing.push_str(&t);
+                        return;
+                    }
+                }
+                self.new_node_at(parent, Some(idx), NodeData::Text(t));
+                return;
+            }
+        }
         let target = self.current();
         if let Some(&last) = self.dom.nodes[target].children.last() {
             if let NodeData::Text(existing) = &mut self.dom.nodes[last].data {

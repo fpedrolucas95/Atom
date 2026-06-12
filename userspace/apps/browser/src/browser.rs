@@ -12,7 +12,7 @@ use libgui::surface::Surface;
 
 use crate::content::{ABOUT_HOME, ABOUT_HTML, ABOUT_LOADING};
 use crate::dom::{Block, Document, Hit, InputKind};
-use crate::html::parse_html;
+use crate::html::{parse_html, parse_html_with_css};
 use crate::net::{decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
 use crate::render::{self, truncate_for_width, Clip, FormCtx};
 use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case};
@@ -23,6 +23,12 @@ use crate::url::{normalize_http_url, resolve_url};
 const MAX_IMAGE_FETCHES: u32 = 6;
 /// Upper bound on total images decoded per page (network + inline `data:`).
 const MAX_IMAGE_DECODES: u32 = 12;
+/// Maximum external stylesheets (`<link rel=stylesheet>`) fetched per page,
+/// bounding network work the same way image fetches are bounded.
+const MAX_CSS_FETCHES: u32 = 4;
+/// Cap on a single external stylesheet's size, so one huge sheet can't blow
+/// the bump heap or stall parsing.
+const MAX_CSS_BYTES: usize = 512 * 1024;
 
 pub struct Browser {
     url: String,
@@ -120,7 +126,24 @@ impl Browser {
         self.select_scroll = 0;
 
         let html = self.resolve_page_source();
-        self.doc = parse_html(&html);
+        // `resolve_page_source` has settled `self.url` to the final document
+        // URL, so relative `<link href>` resolve against it. Only http(s)
+        // sheets are fetched (about: pages carry their CSS inline).
+        let base = self.url.clone();
+        let allow_net = normalize_http_url(&base).is_some();
+        let mut css_fetches = 0u32;
+        self.doc = parse_html_with_css(&html, |href| {
+            if !allow_net || css_fetches >= MAX_CSS_FETCHES {
+                return None;
+            }
+            css_fetches += 1;
+            let url = resolve_url(&base, href)?;
+            let bytes = fetch_url_bytes(&url)?;
+            if bytes.is_empty() || bytes.len() > MAX_CSS_BYTES {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        });
         if self.doc.title.is_empty() {
             self.doc.title = String::from("Untitled");
         }

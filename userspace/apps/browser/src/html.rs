@@ -25,28 +25,64 @@ use crate::dom::{Align, Block, Document, Inline, InputKind, InputMeta, Run, RunS
 use crate::domtree::{build_dom, Dom, Element, NodeData, DOCUMENT};
 use crate::style::{self, Computed};
 
-/// Parse a full HTML document into the renderer's model.
+/// Parse a full HTML document into the renderer's model. External stylesheets
+/// (`<link rel=stylesheet>`) are not fetched — use [`parse_html_with_css`].
 pub fn parse_html(html: &str) -> Document {
+    parse_html_with_css(html, |_| None)
+}
+
+/// Parse HTML, resolving external stylesheets through `fetch_css`.
+///
+/// `fetch_css` receives a `<link rel="stylesheet">` `href` (as written in the
+/// document) and returns the stylesheet text, or `None` to skip it. Keeping
+/// the fetch behind a closure lets the network-aware caller resolve relative
+/// URLs and bound how many sheets are loaded, while this module stays pure.
+pub fn parse_html_with_css(html: &str, mut fetch_css: impl FnMut(&str) -> Option<String>) -> Document {
     let dom = build_dom(html);
     let mut sheet = Stylesheet::new();
-    collect_styles(&dom, DOCUMENT, &mut sheet);
+    collect_styles(&dom, DOCUMENT, &mut sheet, &mut fetch_css);
 
     let mut f = Flattener::new(&dom, &sheet);
     f.walk_node(DOCUMENT, &Computed::default(), None);
     f.finish()
 }
 
-/// Gather every `<style>` element's text into the stylesheet, in tree order,
-/// so rules in `<head>` apply to the whole body.
-fn collect_styles(dom: &Dom, id: usize, sheet: &mut Stylesheet) {
-    if dom.tag(id) == "style" {
-        let mut css = String::new();
-        dom.text_content(id, &mut css);
-        sheet.parse_into(&css);
-        return;
+/// Gather author CSS into the stylesheet in tree order, so rules in `<head>`
+/// apply to the whole body: inline `<style>` blocks and external sheets linked
+/// with `<link rel="stylesheet">` (fetched via `fetch_css`).
+fn collect_styles(
+    dom: &Dom,
+    id: usize,
+    sheet: &mut Stylesheet,
+    fetch_css: &mut impl FnMut(&str) -> Option<String>,
+) {
+    match dom.tag(id) {
+        "style" => {
+            let mut css = String::new();
+            dom.text_content(id, &mut css);
+            sheet.parse_into(&css);
+            return;
+        }
+        "link" => {
+            if let Some(el) = dom.element(id) {
+                let rel = el.attr("rel").unwrap_or("");
+                let is_sheet = rel
+                    .split_ascii_whitespace()
+                    .any(|r| r.eq_ignore_ascii_case("stylesheet"));
+                if is_sheet {
+                    if let Some(href) = el.attr("href").filter(|h| !h.trim().is_empty()) {
+                        if let Some(css) = fetch_css(href) {
+                            sheet.parse_into(&css);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        _ => {}
     }
     for &c in &dom.nodes[id].children {
-        collect_styles(dom, c, sheet);
+        collect_styles(dom, c, sheet, fetch_css);
     }
 }
 
@@ -498,9 +534,11 @@ impl<'a> Flattener<'a> {
         RunStyle {
             color: cs.color,
             bold: cs.bold,
+            italic: cs.italic,
             mono: cs.mono,
             underline: cs.underline,
             strike: cs.strike,
+            size: scale_for_px(cs.font_px),
         }
     }
 
@@ -702,6 +740,19 @@ fn collect_options(dom: &Dom, id: usize, out: &mut Vec<String>, chosen: &mut Opt
             "optgroup" => collect_options(dom, c, out, chosen),
             _ => {}
         }
+    }
+}
+
+/// Map a computed `font-size` in CSS pixels to an integer glyph scale. The
+/// base bitmap glyph is 8px, so sizes bucket into a few discrete steps; most
+/// body text (≤20px) renders at the native 1× and only larger headings grow.
+fn scale_for_px(px: u16) -> u8 {
+    match px {
+        0..=20 => 1,
+        21..=30 => 2,
+        31..=46 => 3,
+        47..=62 => 4,
+        _ => 5,
     }
 }
 

@@ -50,6 +50,16 @@ pub enum TextTransform {
     Capitalize,
 }
 
+/// A `font-size` value. Absolute sizes resolve immediately; relative ones
+/// (`em`, `%`) are resolved against the parent's computed size in [`crate::style`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FontSize {
+    /// Absolute pixels.
+    Px(u16),
+    /// Percentage of the parent's size (`em` and `%`, stored ×1 as percent).
+    Percent(u16),
+}
+
 /// A set of parsed declaration values. `None` means "not set here".
 #[derive(Clone, Copy, Default)]
 pub struct Decls {
@@ -60,6 +70,7 @@ pub struct Decls {
     pub mono: Option<bool>,
     pub underline: Option<bool>,
     pub strike: Option<bool>,
+    pub font_size: Option<FontSize>,
     /// `display: none` prunes the subtree; other display values are ignored
     /// (the renderer has a single flow layout).
     pub display_none: bool,
@@ -85,6 +96,7 @@ impl Decls {
         take!(mono);
         take!(underline);
         take!(strike);
+        take!(font_size);
         take!(visible);
         take!(align);
         take!(transform);
@@ -145,6 +157,11 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
             d.italic = Some(matches!(lw, "italic" | "oblique") || lw.starts_with("oblique"))
         }
         "font-family" => d.mono = Some(is_mono_family(lw)),
+        "font-size" => {
+            if let Some(fs) = parse_font_size(lw) {
+                d.font_size = Some(fs);
+            }
+        }
         "font" => apply_font_shorthand(d, lw),
         "text-decoration" | "text-decoration-line" => {
             if lw.split_whitespace().any(|t| t == "none") {
@@ -220,12 +237,85 @@ fn apply_font_shorthand(d: &mut Decls, lw: &str) {
         match tok {
             "italic" | "oblique" => d.italic = Some(true),
             "bold" | "bolder" => d.bold = Some(true),
-            _ => {}
+            _ => {
+                // The size sits before the family; take the first token that
+                // parses as a font-size (units/keyword required, so a weight
+                // like `400` is not mistaken for a size). Strip any
+                // `/line-height` suffix first.
+                if d.font_size.is_none() {
+                    let base = tok.split('/').next().unwrap_or(tok);
+                    if let Some(fs) = parse_font_size(base) {
+                        d.font_size = Some(fs);
+                    }
+                }
+            }
         }
     }
     if is_mono_family(lw) {
         d.mono = Some(true);
     }
+}
+
+/// Parse a `font-size` value. Keywords map to pixels; `px`/`pt`/`rem` resolve
+/// to absolute pixels; `em`/`%` stay relative (resolved against the parent).
+/// Unitless values are rejected so the `font` shorthand cannot confuse a
+/// numeric weight for a size.
+fn parse_font_size(lw: &str) -> Option<FontSize> {
+    match lw {
+        "xx-small" => return Some(FontSize::Px(9)),
+        "x-small" => return Some(FontSize::Px(10)),
+        "small" => return Some(FontSize::Px(13)),
+        "medium" => return Some(FontSize::Px(16)),
+        "large" => return Some(FontSize::Px(18)),
+        "x-large" => return Some(FontSize::Px(24)),
+        "xx-large" => return Some(FontSize::Px(32)),
+        "smaller" => return Some(FontSize::Percent(80)),
+        "larger" => return Some(FontSize::Percent(125)),
+        _ => {}
+    }
+    if let Some(n) = lw.strip_suffix('%') {
+        return Some(FontSize::Percent(clamp_size(parse_num_x100(n)? / 100)));
+    }
+    if let Some(n) = lw.strip_suffix("px") {
+        return Some(FontSize::Px(clamp_size((parse_num_x100(n)? + 50) / 100)));
+    }
+    if let Some(n) = lw.strip_suffix("pt") {
+        // 1pt = 4/3 px.
+        return Some(FontSize::Px(clamp_size((parse_num_x100(n)? * 4 / 3 + 50) / 100)));
+    }
+    if let Some(n) = lw.strip_suffix("rem") {
+        // rem is relative to the 16px root font size.
+        return Some(FontSize::Px(clamp_size((parse_num_x100(n)? * 16 + 50) / 100)));
+    }
+    if let Some(n) = lw.strip_suffix("em") {
+        return Some(FontSize::Percent(clamp_size(parse_num_x100(n)?)));
+    }
+    None
+}
+
+fn clamp_size(v: u32) -> u16 {
+    v.clamp(1, 4000) as u16
+}
+
+/// Parse a non-negative decimal with up to two fractional digits into a
+/// hundredths-scaled integer: `"1.5"` → 150, `"2"` → 200, `".75"` → 75.
+fn parse_num_x100(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (int_part, frac_part) = s.split_once('.').unwrap_or((s, ""));
+    let int: u32 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().ok()?
+    };
+    let mut frac = 0u32;
+    for (i, c) in frac_part.chars().take(2).enumerate() {
+        let d = c.to_digit(10)?;
+        frac += d * if i == 0 { 10 } else { 1 };
+    }
+    Some(int.checked_mul(100)?.checked_add(frac)?)
 }
 
 /// First parseable color in a shorthand value (skipping urls/gradients).

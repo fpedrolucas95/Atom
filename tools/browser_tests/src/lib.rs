@@ -26,7 +26,7 @@ pub mod html;
 #[cfg(test)]
 mod tests {
     use crate::dom::{Align, Block, Document, Inline, InputKind, TextKind};
-    use crate::html::parse_html;
+    use crate::html::{parse_html, parse_html_with_css};
     use libgui::color::Color;
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -657,6 +657,164 @@ mod tests {
             _ => panic!(),
         }
         assert_eq!(doc.inputs[0].options, ["x"]);
+    }
+
+    // ── Foster parenting ────────────────────────────────────────────────────
+
+    #[test]
+    fn foster_parents_text_before_table() {
+        // Stray text inside a table is relocated to just before the table, so
+        // it renders ahead of the row content rather than being lost.
+        let doc = parse_html("<div>A</div><table><tr><td>B</td></tr>C</table>");
+        assert_eq!(texts(&doc), ["A", "C", "B"]);
+    }
+
+    #[test]
+    fn foster_parents_block_before_table() {
+        let doc = parse_html("<table><div>moved</div><tr><td>cell</td></tr></table>");
+        let t = texts(&doc);
+        let moved = t.iter().position(|s| s == "moved").unwrap();
+        let cell = t.iter().position(|s| s == "cell").unwrap();
+        assert!(moved < cell, "fostered block should precede the table rows");
+    }
+
+    #[test]
+    fn foster_parented_text_keeps_formatting() {
+        // A formatting element open across a table is reconstructed for the
+        // fostered text, which should still be styled.
+        let doc = parse_html("<b><table><tr><td>in</td></tr>out</table></b>");
+        assert!(find_run(&doc, "out").style.bold);
+    }
+
+    #[test]
+    fn table_structural_content_not_fostered() {
+        // Normal table content is untouched by fostering.
+        let doc = parse_html(
+            "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>",
+        );
+        assert_eq!(texts(&doc), ["a | b", "c"]);
+    }
+
+    // ── External stylesheets ────────────────────────────────────────────────
+
+    #[test]
+    fn link_stylesheet_is_fetched_and_applied() {
+        let mut requested = String::new();
+        let doc = parse_html_with_css(
+            "<head><link rel=\"stylesheet\" href=\"/site.css\"></head><body><p>x</p></body>",
+            |href| {
+                requested.push_str(href);
+                Some(String::from("p{color:#00ff00}"))
+            },
+        );
+        assert_eq!(requested, "/site.css");
+        assert_eq!(find_run(&doc, "x").style.color, Some(Color::rgb(0, 255, 0)));
+    }
+
+    #[test]
+    fn link_without_stylesheet_rel_is_ignored() {
+        let mut fetched = false;
+        let _ = parse_html_with_css(
+            "<head><link rel=\"icon\" href=\"/favicon.ico\"></head><body><p>x</p></body>",
+            |_| {
+                fetched = true;
+                Some(String::new())
+            },
+        );
+        assert!(!fetched, "only rel=stylesheet links should be fetched");
+    }
+
+    #[test]
+    fn external_and_inline_css_cascade_in_order() {
+        // The external sheet comes first in the head, the inline <style> after,
+        // so the later inline rule wins on equal specificity.
+        let doc = parse_html_with_css(
+            "<head><link rel=stylesheet href=a><style>p{color:#0000ff}</style></head>\
+             <body><p>x</p></body>",
+            |_| Some(String::from("p{color:#ff0000}")),
+        );
+        assert_eq!(find_run(&doc, "x").style.color, Some(Color::rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn missing_external_css_is_skipped() {
+        let doc = parse_html_with_css(
+            "<head><link rel=stylesheet href=gone.css></head><body><p>x</p></body>",
+            |_| None,
+        );
+        // No panic, no styling applied.
+        assert_eq!(find_run(&doc, "x").style.color, None);
+    }
+
+    // ── Italic ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn italic_from_tags_and_css() {
+        let doc = parse_html(
+            "<p><i>a</i> <em>b</em> <cite>c</cite> \
+             <span style=\"font-style:italic\">d</span> \
+             <span style=\"font:italic 16px sans\">e</span> plain</p>",
+        );
+        for word in ["a", "b", "c", "d", "e"] {
+            assert!(find_run(&doc, word).style.italic, "{word} should be italic");
+        }
+        assert!(!find_run(&doc, "plain").style.italic);
+    }
+
+    #[test]
+    fn font_style_normal_overrides_inherited_italic() {
+        let doc = parse_html(
+            "<em>a<span style=\"font-style:normal\">b</span></em>",
+        );
+        assert!(find_run(&doc, "a").style.italic);
+        assert!(!find_run(&doc, "b").style.italic);
+    }
+
+    // ── font-size ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn font_size_units_map_to_scales() {
+        let doc = parse_html(
+            "<p style=\"font-size:16px\">base</p>\
+             <p style=\"font-size:24px\">mid</p>\
+             <p style=\"font-size:40px\">big</p>\
+             <p style=\"font-size:small\">tiny</p>\
+             <p style=\"font-size:200%\">pct</p>",
+        );
+        assert_eq!(find_run(&doc, "base").style.size, 1);
+        assert_eq!(find_run(&doc, "mid").style.size, 2);
+        assert_eq!(find_run(&doc, "big").style.size, 3);
+        assert_eq!(find_run(&doc, "tiny").style.size, 1);
+        assert_eq!(find_run(&doc, "pct").style.size, 3); // 200% of 16 = 32px
+    }
+
+    #[test]
+    fn em_font_size_resolves_against_parent() {
+        // 1.5em of the parent's 24px ⇒ 36px ⇒ scale 3.
+        let doc = parse_html(
+            "<div style=\"font-size:24px\"><span style=\"font-size:1.5em\">x</span></div>",
+        );
+        assert_eq!(find_run(&doc, "x").style.size, 3);
+    }
+
+    #[test]
+    fn headings_have_larger_default_size() {
+        let doc = parse_html("<h1>a</h1><h2>b</h2><p>c</p>");
+        let h1 = find_run(&doc, "a").style.size;
+        let h2 = find_run(&doc, "b").style.size;
+        let p = find_run(&doc, "c").style.size;
+        assert!(h1 > h2, "h1 should be larger than h2");
+        assert!(h2 > p, "h2 should be larger than body text");
+    }
+
+    #[test]
+    fn font_size_inherits_to_children() {
+        let doc = parse_html(
+            "<div style=\"font-size:24px\">a <b>b</b> <span>c</span></div>",
+        );
+        assert_eq!(find_run(&doc, "a").style.size, 2);
+        assert_eq!(find_run(&doc, "b").style.size, 2);
+        assert_eq!(find_run(&doc, "c").style.size, 2);
     }
 
     #[test]

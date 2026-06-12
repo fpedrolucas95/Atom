@@ -5,14 +5,18 @@
 //! * **HTML5 / CSS compatibility** — a real engine pipeline: a spec-shaped
 //!   HTML5 tokenizer (tags, attributes, comments, CDATA, RCDATA/RAWTEXT/
 //!   PLAINTEXT/script-data content models, full character-reference rules),
-//!   tree construction with implied end tags, scope-aware closing, and
-//!   formatting-element reconstruction (tag-soup recovery), then a CSS engine
-//!   with selectors (compound, combinators, attributes, structural
-//!   pseudo-classes), specificity + `!important` cascade, inheritance,
-//!   `@media` evaluation, and presentational-attribute support. The styled
-//!   DOM is flattened into renderer blocks: headings, flow content, nested
-//!   lists, tables (one row per line), blockquotes, preformatted text, rules,
-//!   images (PNG/JPEG/GIF over HTTP or `data:`), and inline form controls.
+//!   tree construction with implied end tags, scope-aware closing,
+//!   formatting-element reconstruction (tag-soup recovery), and foster
+//!   parenting of table-misnested content, then a CSS engine with selectors
+//!   (compound, combinators, attributes, structural pseudo-classes),
+//!   specificity + `!important` cascade, inheritance, `@media` evaluation,
+//!   `font-size`, and presentational-attribute support — fed by inline
+//!   `style`, `<style>` blocks, and external `<link rel=stylesheet>` sheets.
+//!   The styled DOM is flattened into renderer blocks: headings, flow content,
+//!   nested lists, tables (one row per line), blockquotes, preformatted text,
+//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), and inline form
+//!   controls. The painter synthesises bold, italic, and font scaling the 8x8
+//!   bitmap font has no native faces for.
 //! * **Low resource use** — a lazily-`mmap`ed bump heap, redraw only when
 //!   state changes, and bounded network fetches.
 //! * **Clean structure** — focused modules (allocator, text, entities,

@@ -93,8 +93,11 @@ pub struct FormCtx<'a> {
 struct Painted {
     color: Color,
     bold: bool,
+    italic: bool,
     underline: bool,
     strike: bool,
+    /// Integer glyph scale (1 = native 8px).
+    scale: u32,
 }
 
 fn paint_for(run: &Run, default: Color) -> Painted {
@@ -108,8 +111,10 @@ fn paint_for(run: &Run, default: Color) -> Painted {
     Painted {
         color,
         bold: run.style.bold,
+        italic: run.style.italic,
         underline: run.style.underline || run.link.is_some(),
         strike: run.style.strike,
+        scale: (run.style.size.max(1)) as u32,
     }
 }
 
@@ -146,18 +151,18 @@ fn block_metrics(kind: TextKind, page_bg: Color) -> (Color, i32, i32) {
 }
 
 /// Draw one wrapped, styled word and register a hit region if it is a link.
+/// Faux bold/italic and integer scaling are synthesised by the surface; only
+/// the underline/strike rules are drawn here, sized to the glyph scale.
 fn draw_word(s: &mut Surface, x: u32, y: u32, word: &str, p: &Painted, bg: Color) {
-    s.draw_string(x, y, word, p.color, bg);
-    if p.bold {
-        // Bitmap font has no bold face; overstrike one pixel to fake weight.
-        s.draw_string(x + 1, y, word, p.color, bg);
-    }
-    let wpx = word.chars().count() as u32 * CHAR_W;
+    s.draw_text_styled(x, y, word, p.color, bg, p.scale, p.italic, p.bold);
+    let cw = CHAR_W * p.scale;
+    let ch = CHAR_H * p.scale;
+    let wpx = word.chars().count() as u32 * cw;
     if p.underline {
-        s.draw_hline(x, y + CHAR_H, wpx, p.color);
+        s.draw_hline(x, y + ch, wpx, p.color);
     }
     if p.strike {
-        s.draw_hline(x, y + CHAR_H / 2, wpx, p.color);
+        s.draw_hline(x, y + ch / 2, wpx, p.color);
     }
 }
 
@@ -179,14 +184,14 @@ enum Tok<'a> {
 impl Tok<'_> {
     fn width(&self) -> u32 {
         match self {
-            Tok::Word { text, .. } => text.chars().count() as u32 * CHAR_W,
+            Tok::Word { text, paint, .. } => text.chars().count() as u32 * CHAR_W * paint.scale,
             Tok::Ctrl { w, .. } => *w,
         }
     }
 
     fn height(&self) -> u32 {
         match self {
-            Tok::Word { .. } => CHAR_H,
+            Tok::Word { paint, .. } => CHAR_H * paint.scale,
             Tok::Ctrl { h, .. } => *h,
         }
     }
@@ -373,7 +378,7 @@ pub fn draw_text_block(
                             x: x as i32,
                             y: ty - 1,
                             w: tok.width() as i32,
-                            h: (CHAR_H + 3) as i32,
+                            h: tok.height() as i32 + 3,
                             idx,
                         });
                     }
