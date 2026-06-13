@@ -318,7 +318,7 @@ impl Browser {
         let mut image_blocks: Vec<&mut Block> = Vec::new();
         crate::dom::collect_image_blocks(&mut self.doc.blocks, &mut image_blocks);
         for pb in &mut self.doc.positioned {
-            crate::dom::collect_image_blocks(&mut pb.blocks, &mut image_blocks);
+            crate::dom::collect_positioned_images(pb, &mut image_blocks);
         }
         for block in image_blocks {
             let Block::Image {
@@ -590,13 +590,13 @@ impl Browser {
         let mut old: Vec<(String, Option<libimage::DecodedImage>, Option<String>)> = Vec::new();
         drain_images(core::mem::take(&mut self.doc.blocks), &mut old);
         for pb in core::mem::take(&mut self.doc.positioned) {
-            drain_images(pb.blocks, &mut old);
+            drain_positioned_images(pb, &mut old);
         }
 
         let mut image_blocks: Vec<&mut Block> = Vec::new();
         crate::dom::collect_image_blocks(&mut doc.blocks, &mut image_blocks);
         for pb in &mut doc.positioned {
-            crate::dom::collect_image_blocks(&mut pb.blocks, &mut image_blocks);
+            crate::dom::collect_positioned_images(pb, &mut image_blocks);
         }
         for block in image_blocks {
             let Block::Image {
@@ -1201,17 +1201,26 @@ impl Browser {
         self.scroll = self.scroll.min(self.max_scroll());
 
         // Out-of-flow boxes paint over the flow, against the content area, in
-        // ascending z-index (stable, so equal z keeps document order).
+        // ascending z-index (stable, so equal z keeps document order). `fixed`
+        // boxes pin to the viewport; `absolute` ones scroll with the document.
         let mut order: Vec<usize> = (0..self.doc.positioned.len()).collect();
         order.sort_by_key(|&i| self.doc.positioned[i].style.z_index);
+        let cb_h = (clip.bottom - clip.top).max(0) as u32;
         for &i in &order {
+            let pb = &self.doc.positioned[i];
+            let cb_y = if pb.style.position == crate::dom::Position::Fixed {
+                clip.top
+            } else {
+                clip.top - self.scroll as i32
+            };
             render::draw_positioned(
                 surface,
-                &self.doc.positioned[i],
-                x0,
+                pb,
+                x0 as i32,
+                cb_y,
                 content_w,
+                cb_h,
                 clip,
-                self.scroll,
                 page_bg,
                 &mut link_hits,
                 &form,
@@ -1473,8 +1482,28 @@ fn drain_images(
                     drain_images(child.blocks, out);
                 }
             }
-            Block::Box { children, .. } => drain_images(children, out),
+            Block::Box {
+                children,
+                abs_children,
+                ..
+            } => {
+                drain_images(children, out);
+                for pb in abs_children {
+                    drain_positioned_images(pb, out);
+                }
+            }
             _ => {}
         }
+    }
+}
+
+/// Drain images from a positioned box and its absolute descendants.
+fn drain_positioned_images(
+    pb: crate::dom::PositionedBox,
+    out: &mut Vec<(String, Option<libimage::DecodedImage>, Option<String>)>,
+) {
+    drain_images(pb.blocks, out);
+    for child in pb.abs_children {
+        drain_positioned_images(child, out);
     }
 }

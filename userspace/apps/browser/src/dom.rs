@@ -252,14 +252,30 @@ pub enum Block {
     Box {
         style: BoxStyle,
         children: Vec<Block>,
+        /// `position: absolute` descendants whose containing block is this box
+        /// (i.e. this box is positioned). Painted relative to its padding box.
+        abs_children: Vec<PositionedBox>,
     },
 }
 
-/// An out-of-flow box (`position: absolute`/`fixed`) hoisted out of the normal
-/// flow and painted against the content area in a deferred pass.
+/// An out-of-flow box (`position: absolute`/`fixed`). Absolute boxes are
+/// attached to their nearest positioned ancestor's containing block; fixed
+/// boxes (and absolutes with no positioned ancestor) live at the document root
+/// against the viewport / content area. Painted in a deferred pass.
 pub struct PositionedBox {
     pub style: BoxStyle,
     pub blocks: Vec<Block>,
+    /// Absolute descendants whose containing block is this box.
+    pub abs_children: Vec<PositionedBox>,
+}
+
+/// Collect image-block references from a positioned box and its absolute
+/// descendants into `out`.
+pub fn collect_positioned_images<'a>(pb: &'a mut PositionedBox, out: &mut Vec<&'a mut Block>) {
+    collect_image_blocks(&mut pb.blocks, out);
+    for child in pb.abs_children.iter_mut() {
+        collect_positioned_images(child, out);
+    }
 }
 
 /// Collect a mutable reference to every image block in document order,
@@ -273,7 +289,16 @@ pub fn collect_image_blocks<'a>(blocks: &'a mut [Block], out: &mut Vec<&'a mut B
                     collect_image_blocks(&mut child.blocks, out);
                 }
             }
-            Block::Box { children, .. } => collect_image_blocks(children, out),
+            Block::Box {
+                children,
+                abs_children,
+                ..
+            } => {
+                collect_image_blocks(children, out);
+                for child in abs_children.iter_mut() {
+                    collect_positioned_images(child, out);
+                }
+            }
             Block::Image { .. } => out.push(block),
             _ => {}
         }

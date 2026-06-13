@@ -406,7 +406,7 @@ mod tests {
     /// The first `Block::Box` in the document, with its decoration and children.
     fn first_box(doc: &Document) -> (&BoxStyle, &[Block]) {
         for b in &doc.blocks {
-            if let Block::Box { style, children } = b {
+            if let Block::Box { style, children, .. } = b {
                 return (style, children);
             }
         }
@@ -556,6 +556,42 @@ mod tests {
         assert_eq!(doc.positioned[0].style.position, Position::Absolute);
         assert_eq!(doc.positioned[0].style.inset[1], Some(Length::Px(0))); // right
         assert_eq!(blocks_text(&doc.positioned[0].blocks), "badge");
+    }
+
+    #[test]
+    fn absolute_attaches_to_positioned_ancestor() {
+        // The absolute child's containing block is the relative parent, so it
+        // is nested under that box rather than the document root.
+        let doc = parse_html(
+            "<div style=\"position:relative; padding:4px\">\
+             <p>host</p>\
+             <div style=\"position:absolute; top:0; right:0\"><p>badge</p></div>\
+             </div>",
+        );
+        // No document-root positioned box — it attached to its ancestor.
+        assert!(doc.positioned.is_empty());
+        let (style, children) = first_box(&doc);
+        assert_eq!(style.position, Position::Relative);
+        // The relative box carries the absolute child.
+        let abs = match &doc.blocks[0] {
+            Block::Box { abs_children, .. } => abs_children,
+            _ => panic!("expected a box block"),
+        };
+        assert_eq!(abs.len(), 1);
+        assert_eq!(abs[0].style.position, Position::Absolute);
+        assert_eq!(blocks_text(&abs[0].blocks), "badge");
+        // The host paragraph stays in the box's normal flow.
+        assert_eq!(blocks_text(children), "host");
+    }
+
+    #[test]
+    fn absolute_without_positioned_ancestor_goes_to_root() {
+        let doc = parse_html(
+            "<div style=\"padding:4px\"><div style=\"position:absolute; top:0\">x</div></div>",
+        );
+        // The static parent does not establish a containing block.
+        assert_eq!(doc.positioned.len(), 1);
+        assert_eq!(doc.positioned[0].style.position, Position::Absolute);
     }
 
     #[test]

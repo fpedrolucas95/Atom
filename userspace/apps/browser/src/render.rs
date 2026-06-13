@@ -11,7 +11,7 @@ use libgui::surface::Surface;
 
 use crate::dom::{
     Align, AlignItems, Block, BoxStyle, FlexChild, FlexDirection, Hit, Inline, InputKind,
-    InputMeta, JustifyContent, Position, PositionedBox, Run, TextKind,
+    InputMeta, JustifyContent, PositionedBox, Run, TextKind,
 };
 
 /// Truncate `text` with an ellipsis so it fits within `width` pixels.
@@ -521,8 +521,23 @@ pub fn draw_blocks(
                 s, *direction, *justify, *align, *gap, *wrap, children, x0, max_w, y, clip,
                 page_bg, link_hits, form, input_hits, zone_hits,
             ),
-            Block::Box { style, children } => draw_box(
-                s, style, children, x0, max_w, y, clip, page_bg, link_hits, form, input_hits,
+            Block::Box {
+                style,
+                children,
+                abs_children,
+            } => draw_box(
+                s,
+                style,
+                children,
+                abs_children,
+                x0,
+                max_w,
+                y,
+                clip,
+                page_bg,
+                link_hits,
+                form,
+                input_hits,
                 zone_hits,
             ),
         };
@@ -585,6 +600,7 @@ fn draw_box(
     s: &mut Surface,
     style: &BoxStyle,
     children: &[Block],
+    abs_children: &[PositionedBox],
     x0: u32,
     max_w: u32,
     y: i32,
@@ -677,9 +693,60 @@ fn draw_box(
         zone_hits,
     );
 
+    // Absolute descendants whose containing block is this box are placed
+    // against its padding box.
+    paint_abs_children(
+        s,
+        abs_children,
+        box_x,
+        top,
+        outer_w,
+        outer_h,
+        bw,
+        clip,
+        page_bg,
+        link_hits,
+        form,
+        input_hits,
+        zone_hits,
+    );
+
     // Flow advances by the in-flow box height; a relative offset does not move
     // following content.
     flow_top + outer_h as i32 + mb as i32
+}
+
+/// Paint a box's `position: absolute` descendants against its padding box (the
+/// containing block for absolutely-positioned children).
+#[allow(clippy::too_many_arguments)]
+fn paint_abs_children(
+    s: &mut Surface,
+    abs_children: &[PositionedBox],
+    box_x: u32,
+    top: i32,
+    outer_w: u32,
+    outer_h: u32,
+    bw: u32,
+    clip: Clip,
+    page_bg: Color,
+    link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
+) {
+    if abs_children.is_empty() {
+        return;
+    }
+    let pad_x = box_x as i32 + bw as i32;
+    let pad_y = top + bw as i32;
+    let pad_w = outer_w.saturating_sub(bw * 2);
+    let pad_h = outer_h.saturating_sub(bw * 2);
+    for child in abs_children {
+        draw_positioned(
+            s, child, pad_x, pad_y, pad_w, pad_h, clip, page_bg, link_hits, form, input_hits,
+            zone_hits,
+        );
+    }
 }
 
 /// Restrict the clip band to the box's content area when `overflow` clips, so
@@ -776,17 +843,20 @@ fn paint_box_frame(
     }
 }
 
-/// Paint an out-of-flow box (`position: absolute`/`fixed`) against the content
-/// area. `fixed` boxes are pinned to the viewport; `absolute` boxes are placed
-/// against the document content origin and scroll with the page.
+/// Paint an out-of-flow box (`position: absolute`/`fixed`) against a containing
+/// block `(cb_x, cb_y, cb_w, cb_h)` — the document content area for a root box
+/// (with `cb_y` carrying the scroll for `absolute`, fixed for `fixed`), or a
+/// positioned ancestor's padding box for a nested one. Its own absolute
+/// descendants recurse against this box's padding box.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_positioned(
     s: &mut Surface,
     pb: &PositionedBox,
-    content_x0: u32,
-    content_w: u32,
+    cb_x: i32,
+    cb_y: i32,
+    cb_w: u32,
+    cb_h: u32,
     clip: Clip,
-    scroll: u32,
     page_bg: Color,
     link_hits: &mut Vec<Hit>,
     form: &FormCtx,
@@ -796,7 +866,7 @@ pub fn draw_positioned(
     let style = &pb.style;
     let bw = style.border_width as u32;
     let frame = bw * 2 + style.padding[1] as u32 + style.padding[3] as u32;
-    let avail = content_w;
+    let avail = cb_w;
 
     let left = style.inset[3].map(|l| l.resolve(avail));
     let right = style.inset[1].map(|r| r.resolve(avail));
@@ -824,11 +894,11 @@ pub fn draw_positioned(
     let content_w_inner = outer_w.saturating_sub(frame).max(CHAR_W);
 
     let x = if let Some(l) = left {
-        content_x0 + l
+        cb_x + l as i32
     } else if let Some(r) = right {
-        content_x0 + avail.saturating_sub(outer_w + r)
+        cb_x + cb_w as i32 - outer_w as i32 - r as i32
     } else {
-        content_x0
+        cb_x
     };
 
     let inner_bg = style
@@ -842,24 +912,19 @@ pub fn draw_positioned(
         .max(style.min_height.unwrap_or(0));
     let outer_h = bw * 2 + style.padding[0] as u32 + style.padding[2] as u32 + content_h;
 
-    // Vertical origin: the viewport top for `fixed`, the document content origin
-    // (scrolling) for `absolute`.
-    let base_top = if style.position == Position::Fixed {
-        clip.top
+    // Top/bottom offsets resolve against the containing block height.
+    let y = if let Some(t) = style.inset[0].map(|t| t.resolve(cb_h) as i32) {
+        cb_y + t
+    } else if let Some(b) = style.inset[2].map(|b| b.resolve(cb_h) as i32) {
+        cb_y + cb_h as i32 - outer_h as i32 - b
     } else {
-        clip.top - scroll as i32
-    };
-    let y = if let Some(t) = style.inset[0].map(|t| t.resolve(avail) as i32) {
-        base_top + t
-    } else if let Some(b) = style.inset[2].map(|b| b.resolve(avail) as i32) {
-        clip.bottom - b - outer_h as i32
-    } else {
-        base_top
+        cb_y
     };
 
-    paint_box_frame(s, style, x, y, outer_w, outer_h, clip);
+    let box_x = x.max(0) as u32;
+    paint_box_frame(s, style, box_x, y, outer_w, outer_h, clip);
 
-    let content_x = x + bw + style.padding[3] as u32;
+    let content_x = box_x + bw + style.padding[3] as u32;
     let content_y = y + (bw + style.padding[0] as u32) as i32;
     let content_clip = clip_for_content(style, clip, content_y, content_h);
     draw_blocks(
@@ -870,6 +935,22 @@ pub fn draw_positioned(
         content_y,
         content_clip,
         inner_bg,
+        link_hits,
+        form,
+        input_hits,
+        zone_hits,
+    );
+
+    paint_abs_children(
+        s,
+        &pb.abs_children,
+        box_x,
+        y,
+        outer_w,
+        outer_h,
+        bw,
+        clip,
+        page_bg,
         link_hits,
         form,
         input_hits,
@@ -1161,7 +1242,9 @@ fn intrinsic_width(blocks: &[Block], form: &FormCtx) -> (u32, u32) {
                 children,
                 ..
             } => flex_intrinsic(children, *gap as u32, *direction, form),
-            Block::Box { style, children } => {
+            Block::Box {
+                style, children, ..
+            } => {
                 let (cmin, cpref) = intrinsic_width(children, form);
                 let frame = (style.border_width as u32) * 2
                     + style.padding[1] as u32

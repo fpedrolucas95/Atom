@@ -327,6 +327,10 @@ struct Flattener<'a> {
 
     blocks: Vec<Block>,
     positioned: Vec<PositionedBox>,
+    /// Stack of containing-block sinks for `position: absolute` descendants;
+    /// the active sink is the nearest positioned ancestor, or the document root
+    /// (`positioned`) when empty.
+    abs_stack: Vec<Vec<PositionedBox>>,
     items: Vec<Inline>,
     cur_kind: TextKind,
     cur_align: Option<Align>,
@@ -360,6 +364,7 @@ impl<'a> Flattener<'a> {
             clickable,
             blocks: Vec::new(),
             positioned: Vec::new(),
+            abs_stack: Vec::new(),
             items: Vec::new(),
             cur_kind: TextKind::Paragraph,
             cur_align: None,
@@ -692,6 +697,13 @@ impl<'a> Flattener<'a> {
         let style = box_style_of(cs);
         let kind = block_kind(tag).unwrap_or(TextKind::Paragraph);
         let as_flex = cs.flex_container && !is_flex_ineligible(tag);
+        // A positioned box (relative/absolute/fixed) establishes a containing
+        // block for its `absolute` descendants: collect them into a fresh sink
+        // while walking the subtree.
+        let establishes_cb = cs.position != Position::Static;
+        if establishes_cb {
+            self.abs_stack.push(Vec::new());
+        }
         let children = self.capture_blocks(|f| {
             if as_flex {
                 f.emit_flex(id, cs, link, zone);
@@ -700,20 +712,49 @@ impl<'a> Flattener<'a> {
                 f.walk_children(id, cs, link, zone);
             }
         });
-        // An empty, purely-padded box has nothing to show; keep it only if it
-        // paints (background/border) or holds content.
-        if children.is_empty() && style.background.is_none() && style.border_width == 0 {
+        let abs_children = if establishes_cb {
+            self.abs_stack.pop().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // An empty box with nothing to paint and no positioned descendants has
+        // nothing to show.
+        if children.is_empty()
+            && abs_children.is_empty()
+            && style.background.is_none()
+            && style.gradient.is_none()
+            && style.shadow.is_none()
+            && style.border_width == 0
+        {
             return;
         }
-        // Out-of-flow boxes are hoisted to the document level and painted in a
-        // deferred pass; they take no space in the normal flow.
-        if matches!(cs.position, Position::Absolute | Position::Fixed) {
-            self.positioned.push(PositionedBox {
+        match cs.position {
+            // Absolute boxes attach to the nearest positioned ancestor (or the
+            // document root); fixed boxes always live at the root (viewport).
+            Position::Absolute => self.push_abs(PositionedBox {
                 style,
                 blocks: children,
-            });
-        } else {
-            self.blocks.push(Block::Box { style, children });
+                abs_children,
+            }),
+            Position::Fixed => self.positioned.push(PositionedBox {
+                style,
+                blocks: children,
+                abs_children,
+            }),
+            _ => self.blocks.push(Block::Box {
+                style,
+                children,
+                abs_children,
+            }),
+        }
+    }
+
+    /// Push an absolute box into the active containing-block sink (the nearest
+    /// positioned ancestor), or the document root when there is none.
+    fn push_abs(&mut self, pb: PositionedBox) {
+        match self.abs_stack.last_mut() {
+            Some(sink) => sink.push(pb),
+            None => self.positioned.push(pb),
         }
     }
 
