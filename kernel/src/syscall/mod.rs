@@ -877,7 +877,7 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_REGISTER_FAULT_HANDLER => sys_register_fault_handler(arg0),
         SYS_MOUSE_POLL => sys_mouse_poll(arg0),
         SYS_IO_PORT_READ => sys_io_port_read(arg0 as u16, arg1 as u8),
-        SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u8),
+        SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u32, arg2 as u8),
         SYS_KEYBOARD_POLL => sys_keyboard_poll(arg0),
         SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0),
         SYS_GET_TICKS => sys_get_ticks(),
@@ -1139,38 +1139,94 @@ fn sys_mouse_get_id() -> u64 {
 }
 
 /// Read a byte from an IO port (privileged operation for drivers)
-fn sys_io_port_read(port: u16, _size: u8) -> u64 {
-    if let Err(e) = policy::validate_io_port_access(port, crate::cap::CapPermissions::READ) {
-        return e;
+fn sys_io_port_read(port: u16, size: u8) -> u64 {
+    // Word/dword accesses span `port .. port + size`; every covered port must be
+    // permitted. Devices like AC'97 require 16/32-bit register accesses.
+    let width = match size {
+        1 | 2 | 4 => size as u16,
+        _ => return EINVAL,
+    };
+    for offset in 0..width {
+        if let Err(e) =
+            policy::validate_io_port_access(port + offset, crate::cap::CapPermissions::READ)
+        {
+            return e;
+        }
     }
 
-    let value: u8 = unsafe {
-        let mut val: u8;
-        core::arch::asm!(
-            "in al, dx",
-            out("al") val,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags)
-        );
-        val
+    let value: u32 = unsafe {
+        match width {
+            2 => {
+                let mut val: u16;
+                core::arch::asm!(
+                    "in ax, dx",
+                    out("ax") val,
+                    in("dx") port,
+                    options(nomem, nostack, preserves_flags)
+                );
+                val as u32
+            }
+            4 => {
+                let mut val: u32;
+                core::arch::asm!(
+                    "in eax, dx",
+                    out("eax") val,
+                    in("dx") port,
+                    options(nomem, nostack, preserves_flags)
+                );
+                val
+            }
+            _ => {
+                let mut val: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") val,
+                    in("dx") port,
+                    options(nomem, nostack, preserves_flags)
+                );
+                val as u32
+            }
+        }
     };
 
     value as u64
 }
 
-/// Write a byte to an IO port (privileged operation for drivers)
-fn sys_io_port_write(port: u16, value: u8) -> u64 {
-    if let Err(e) = policy::validate_io_port_access(port, crate::cap::CapPermissions::WRITE) {
-        return e;
+/// Write 1/2/4 bytes to an IO port (privileged operation for drivers).
+fn sys_io_port_write(port: u16, value: u32, size: u8) -> u64 {
+    let width = match size {
+        1 | 2 | 4 => size as u16,
+        _ => return EINVAL,
+    };
+    for offset in 0..width {
+        if let Err(e) =
+            policy::validate_io_port_access(port + offset, crate::cap::CapPermissions::WRITE)
+        {
+            return e;
+        }
     }
 
     unsafe {
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") port,
-            in("al") value,
-            options(nomem, nostack, preserves_flags)
-        );
+        match width {
+            2 => core::arch::asm!(
+                "out dx, ax",
+                in("dx") port,
+                in("ax") value as u16,
+                options(nomem, nostack, preserves_flags)
+            ),
+            4 => core::arch::asm!(
+                "out dx, eax",
+                in("dx") port,
+                in("eax") value,
+                options(nomem, nostack, preserves_flags)
+            ),
+            _ => core::arch::asm!(
+                "out dx, al",
+                in("dx") port,
+                in("al") value as u8,
+                options(nomem, nostack, preserves_flags)
+            ),
+        }
     }
 
     ESUCCESS
@@ -4860,6 +4916,36 @@ fn apply_spawn_grants(
                         log_info!(
                             "spawn",
                             "Granted DeviceCap({:02x}:{:02x}.{}) to '{}'",
+                            dev.bus,
+                            dev.device,
+                            dev.function,
+                            name
+                        );
+                    }
+                }
+            }
+            EnvGrant::AudioDevices => {
+                // 0x04 = multimedia class; subclass 0x01 = AC'97, 0x03 = Intel
+                // HD Audio. The audio service supports both.
+                let audio_devs: alloc::vec::Vec<_> =
+                    crate::drivers::pci::get_devices_by_class(0x04)
+                        .into_iter()
+                        .filter(|dev| dev.subclass == 0x01 || dev.subclass == 0x03)
+                        .collect();
+                if audio_devs.is_empty() {
+                    log_warn!(
+                        "spawn",
+                        "AudioDevices requested by '{}' but no PCI audio device found",
+                        name
+                    );
+                }
+                for dev in audio_devs {
+                    let res = ResourceType::Device { bdf: dev.bdf() };
+                    if let Ok(c) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
+                        let _ = crate::thread::add_thread_capability(pid, c);
+                        log_info!(
+                            "spawn",
+                            "Granted audio DeviceCap({:02x}:{:02x}.{}) to '{}'",
                             dev.bus,
                             dev.device,
                             dev.function,
@@ -8662,15 +8748,12 @@ fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
         None => return EINVAL,
     };
 
-    if bar.is_mmio {
-        // Userspace device drivers program MMIO registers and descriptor rings
-        // through this BAR. Make the standard PCI command bits explicit here so
-        // DMA-backed devices keep working regardless of firmware defaults.
-        let command_status = crate::drivers::pci::read_config_dword(bus, dev, func, 0x04);
-        let command = command_status | 0x6; // Memory Space Enable | Bus Master Enable
-        if command != command_status {
-            crate::drivers::pci::write_config_dword(bus, dev, func, 0x04, command);
-        }
+    // Userspace drivers need the BAR's address space enabled and DMA devices
+    // need bus mastering regardless of whether their registers are MMIO or I/O.
+    let command_status = crate::drivers::pci::read_config_dword(bus, dev, func, 0x04);
+    let command = command_status | if bar.is_mmio { 0x6 } else { 0x5 };
+    if command != command_status {
+        crate::drivers::pci::write_config_dword(bus, dev, func, 0x04, command);
     }
 
     let info_ptr = match validate_user_addr(info_ptr) {

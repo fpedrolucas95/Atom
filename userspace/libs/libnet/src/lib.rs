@@ -27,4 +27,5 @@ pub enum NetError {
     TcpError,
     IpcError,
     NetdNotFound,
+    ResponseTooLarge,
 }

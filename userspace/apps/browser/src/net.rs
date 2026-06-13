@@ -1,5 +1,5 @@
-//! Network and resource fetching: HTTP GET (with redirect following), image
-//! retrieval, `data:` URI decoding, and image format detection.
+//! Network and resource fetching: HTTP/HTTPS GET (with redirect following),
+//! image retrieval, `data:` URI decoding, and image format detection.
 
 use alloc::format;
 use alloc::string::String;
@@ -20,6 +20,7 @@ const MAX_IMAGE_REDIRECTS: u32 = 3;
 pub struct PageFetch {
     pub body: String,
     pub final_url: String,
+    pub cert_unverified: bool,
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -30,64 +31,73 @@ fn is_success(status: u16) -> bool {
     status == 0 || (200..300).contains(&status)
 }
 
-/// Fetch a page body as text, following plain-HTTP redirects.
+/// Fetch a page body as text, following HTTP and HTTPS redirects.
 pub fn fetch_http(url: &str) -> Result<PageFetch, String> {
     let netd = lookup_service("netd").map_err(|_| String::from("netd service not found"))?;
 
     let mut current = String::from(url);
+    let mut cert_warning = false;
     for _ in 0..MAX_PAGE_REDIRECTS {
         let target = split_http_url(&current)?;
-        let response = libnet::http_get(netd, &target.host, &target.path, target.port)
-            .map_err(|e| format!("HTTP request failed ({:?})", e))?;
+        let (status, body, location) = if target.https {
+            let resp = libtls::https_get(netd, &target.host, &target.path, target.port)
+                .map_err(|e| format!("HTTPS request failed ({:?})", e))?;
+            if resp.cert_unverified {
+                cert_warning = true;
+            }
+            (resp.status, resp.body, resp.location)
+        } else {
+            let resp = libnet::http_get(netd, &target.host, &target.path, target.port)
+                .map_err(|e| format!("HTTP request failed ({:?})", e))?;
+            (resp.status, resp.body, resp.location)
+        };
 
-        if is_redirect(response.status) {
-            if let Some(location) = response.location {
-                if location.trim().starts_with("https://") {
-                    return Err(format!(
-                        "This site requires HTTPS, but TLS is not implemented yet: {}",
-                        location
-                    ));
-                }
-                if let Some(next) = normalize_redirect_url(&current, &location) {
+        if is_redirect(status) {
+            if let Some(loc) = location {
+                if let Some(next) = normalize_redirect_url(&current, &loc) {
                     current = next;
                     continue;
                 }
             }
         }
 
-        if response.status == 0 && response.body.is_empty() {
-            return Err(String::from("No HTTP response received"));
+        if status == 0 && body.is_empty() {
+            return Err(String::from("No response received"));
         }
-        if response.body.is_empty() {
-            return Err(format!("HTTP {} with empty body", response.status));
+        if body.is_empty() {
+            return Err(format!("HTTP {} with empty body", status));
         }
+        let page_body = String::from_utf8_lossy(&body).into_owned();
         return Ok(PageFetch {
-            body: String::from_utf8_lossy(&response.body).into_owned(),
+            body: page_body,
             final_url: current,
+            cert_unverified: cert_warning,
         });
     }
-    Err(String::from("Too many HTTP redirects"))
+    Err(String::from("Too many redirects"))
 }
 
-/// Fetch raw bytes (e.g. images), following plain-HTTP redirects.
+/// Fetch raw bytes (e.g. images), following HTTP and HTTPS redirects.
 pub fn fetch_url_bytes(url: &str) -> Option<Vec<u8>> {
     let netd = lookup_service("netd").ok()?;
     let mut current = String::from(url);
     for _ in 0..MAX_IMAGE_REDIRECTS {
         let target = split_http_url(&current).ok()?;
-        let resp = libnet::http_get(netd, &target.host, &target.path, target.port).ok()?;
-        if is_redirect(resp.status) {
-            let loc = resp.location?;
-            if loc.trim().starts_with("https://") {
-                return None;
-            }
-            current = normalize_redirect_url(&current, &loc)?;
+        let (status, body, location) = if target.https {
+            let resp = libtls::https_get(netd, &target.host, &target.path, target.port).ok()?;
+            (resp.status, resp.body, resp.location)
+        } else {
+            let resp = libnet::http_get(netd, &target.host, &target.path, target.port).ok()?;
+            (resp.status, resp.body, resp.location)
+        };
+        if is_redirect(status) {
+            current = normalize_redirect_url(&current, &location?)?;
             continue;
         }
-        if resp.body.is_empty() || !is_success(resp.status) {
+        if body.is_empty() || !is_success(status) {
             return None;
         }
-        return Some(resp.body);
+        return Some(body);
     }
     None
 }

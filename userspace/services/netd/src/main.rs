@@ -17,45 +17,7 @@ use libipc::protocol::{
 };
 use libring::{RingConsumer, RingEntry, RingHeader, RingProducer};
 
-mod allocator {
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::cell::UnsafeCell;
-    use core::ptr::null_mut;
-
-    const HEAP_SIZE: usize = 512 * 1024;
-
-    #[repr(align(4096))]
-    struct Heap {
-        data: UnsafeCell<[u8; HEAP_SIZE]>,
-        next: UnsafeCell<usize>,
-    }
-    unsafe impl Sync for Heap {}
-
-    static HEAP: Heap = Heap {
-        data: UnsafeCell::new([0; HEAP_SIZE]),
-        next: UnsafeCell::new(0),
-    };
-
-    pub struct BumpAllocator;
-    unsafe impl GlobalAlloc for BumpAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let next = HEAP.next.get();
-            let heap_start = HEAP.data.get() as *mut u8;
-            let current = *next;
-            let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-            if aligned + layout.size() > HEAP_SIZE {
-                return null_mut();
-            }
-            *next = aligned + layout.size();
-            heap_start.add(aligned)
-        }
-        unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: BumpAllocator = BumpAllocator;
-}
-
+mod allocator;
 mod arp;
 mod buf;
 mod config;
@@ -77,6 +39,9 @@ use ip::{build_ipv4, next_hop, parse_ipv4, IP_PROTO_ICMP, IP_PROTO_TCP, IP_PROTO
 use socket::SocketManager;
 use tcp::{parse_tcp, TcpEvent, TcpManager};
 use udp::{build_udp, build_udp_with_checksum, parse_udp};
+
+const MAX_RX_BURST: usize = 16;
+const MAX_IPC_BURST: usize = 16;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -256,7 +221,8 @@ fn main() -> ! {
         let mut did_work = false;
 
         // ── 7a. Process RX ring ───────────────────────────────────────────────
-        while rx_consumer.can_pop() {
+        let mut rx_processed = 0usize;
+        while rx_processed < MAX_RX_BURST && rx_consumer.can_pop() {
             if let Some(entry) = rx_consumer.pop() {
                 let frame_data = &entry.data[..entry.len as usize];
                 if let Some((eth_hdr, eth_payload)) = parse_eth_frame(frame_data) {
@@ -273,6 +239,7 @@ fn main() -> ! {
                     );
                 }
                 did_work = true;
+                rx_processed += 1;
             }
         }
 
@@ -322,8 +289,11 @@ fn main() -> ! {
         }
 
         // ── 7c. Process IPC messages ──────────────────────────────────────────
-        while let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) {
-            log("netd: processing IPC message");
+        let mut ipc_processed = 0usize;
+        while ipc_processed < MAX_IPC_BURST {
+            let Ok(Some((header, len))) = try_recv_message(port, &mut ipc_buf) else {
+                break;
+            };
             let payload = get_payload(&ipc_buf, len);
             handle_ipc(
                 header.msg_type,
@@ -336,6 +306,7 @@ fn main() -> ! {
                 &mut tx_producer,
             );
             did_work = true;
+            ipc_processed += 1;
         }
 
         // ── 7c. Tick timers ───────────────────────────────────────────────────

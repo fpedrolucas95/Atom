@@ -122,7 +122,7 @@ impl FramebufferInfo {
 }
 
 /// Maximum number of drivers that can be loaded at boot
-pub const MAX_BOOT_DRIVERS: usize = 16;
+pub const MAX_BOOT_DRIVERS: usize = 32;
 
 /// Maximum length for driver names
 pub const MAX_DRIVER_NAME_LEN: usize = 32;

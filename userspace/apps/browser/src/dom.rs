@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use libgui::color::Color;
 
 /// Block-level kind, which drives spacing, weight, and default colour.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextKind {
     H1,
     H2,
@@ -19,7 +19,7 @@ pub enum TextKind {
 }
 
 /// Interactive input kind.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputKind {
     Text,
     Search,
@@ -29,20 +29,39 @@ pub enum InputKind {
 }
 
 /// Horizontal alignment of a block's content.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Align {
     Left,
     Center,
+    Right,
 }
 
 /// Inline rendering attributes applied to a [`Run`]. Resolved at parse time
 /// from HTML tags (`b`, `code`, `a`, …) and CSS so the renderer stays trivial.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct RunStyle {
     pub color: Option<Color>,
     pub bold: bool,
+    pub italic: bool,
     pub mono: bool,
     pub underline: bool,
+    pub strike: bool,
+    /// Glyph scale (1 = native 8px), derived from the computed `font-size`.
+    pub size: u8,
+}
+
+impl Default for RunStyle {
+    fn default() -> Self {
+        Self {
+            color: None,
+            bold: false,
+            italic: false,
+            mono: false,
+            underline: false,
+            strike: false,
+            size: 1,
+        }
+    }
 }
 
 /// A contiguous run of inline text sharing one style and optional hyperlink
@@ -50,6 +69,9 @@ pub struct RunStyle {
 pub struct Run {
     pub text: String,
     pub link: Option<usize>,
+    /// Clickable region (an index into [`Document::click_nodes`]) when an
+    /// enclosing element has a JavaScript click handler.
+    pub zone: Option<usize>,
     pub style: RunStyle,
 }
 
@@ -114,5 +136,12 @@ pub struct Document {
     pub background: Option<Color>,
     pub blocks: Vec<Block>,
     pub links: Vec<String>,
+    /// DOM node id behind each entry of `links` (for event dispatch).
+    pub link_nodes: Vec<usize>,
     pub inputs: Vec<InputMeta>,
+    /// DOM node id behind each entry of `inputs`.
+    pub input_nodes: Vec<usize>,
+    /// DOM node ids of elements with JavaScript click handlers, indexed by
+    /// [`Run::zone`].
+    pub click_nodes: Vec<usize>,
 }

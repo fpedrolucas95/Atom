@@ -7,10 +7,11 @@ description = "Simple Atom userspace browser for rendering basic HTML"
 
 [dependencies]
 atom_syscall = { path = "../../libs/syscall" }
-libipc = { path = "../../libs/libipc" }
-libgui = { path = "../../libs/libgui" }
-libnet = { path = "../../libs/libnet" }
-libimage = { path = "../../libs/libimage" }
+libipc    = { path = "../../libs/libipc" }
+libgui    = { path = "../../libs/libgui" }
+libnet    = { path = "../../libs/libnet" }
+libimage  = { path = "../../libs/libimage" }
+libtls    = { path = "../../libs/libtls" }
 
 [[bin]]
 name = "browser"

@@ -10,7 +10,20 @@ use libgui::color::Color;
 use libgui::surface::Surface;
 
 use crate::dom::{Align, Hit, Inline, InputKind, InputMeta, Run, TextKind};
-use crate::text::truncate_for_width;
+
+/// Truncate `text` with an ellipsis so it fits within `width` pixels.
+pub fn truncate_for_width(text: &str, width: u32) -> String {
+    let max_chars = (width / CHAR_W) as usize;
+    if text.chars().count() <= max_chars {
+        return String::from(text);
+    }
+    if max_chars <= 3 {
+        return String::from("...");
+    }
+    let mut out: String = text.chars().take(max_chars - 3).collect();
+    out.push_str("...");
+    out
+}
 
 // ── Glyph / layout metrics ──────────────────────────────────────────────────
 pub const CHAR_W: u32 = 8;
@@ -80,7 +93,11 @@ pub struct FormCtx<'a> {
 struct Painted {
     color: Color,
     bold: bool,
+    italic: bool,
     underline: bool,
+    strike: bool,
+    /// Integer glyph scale (1 = native 8px).
+    scale: u32,
 }
 
 fn paint_for(run: &Run, default: Color) -> Painted {
@@ -94,16 +111,17 @@ fn paint_for(run: &Run, default: Color) -> Painted {
     Painted {
         color,
         bold: run.style.bold,
+        italic: run.style.italic,
         underline: run.style.underline || run.link.is_some(),
+        strike: run.style.strike,
+        scale: (run.style.size.max(1)) as u32,
     }
 }
 
 /// Default block text colour and vertical padding (top, bottom) by kind.
 fn block_metrics(kind: TextKind, page_bg: Color) -> (Color, i32, i32) {
-    let light_page = page_bg.r as u32 * 299
-        + page_bg.g as u32 * 587
-        + page_bg.b as u32 * 114
-        >= 160_000;
+    let light_page =
+        page_bg.r as u32 * 299 + page_bg.g as u32 * 587 + page_bg.b as u32 * 114 >= 160_000;
     let text = if light_page {
         Color::rgb(32, 37, 45)
     } else {
@@ -131,15 +149,18 @@ fn block_metrics(kind: TextKind, page_bg: Color) -> (Color, i32, i32) {
 }
 
 /// Draw one wrapped, styled word and register a hit region if it is a link.
+/// Faux bold/italic and integer scaling are synthesised by the surface; only
+/// the underline/strike rules are drawn here, sized to the glyph scale.
 fn draw_word(s: &mut Surface, x: u32, y: u32, word: &str, p: &Painted, bg: Color) {
-    s.draw_string(x, y, word, p.color, bg);
-    if p.bold {
-        // Bitmap font has no bold face; overstrike one pixel to fake weight.
-        s.draw_string(x + 1, y, word, p.color, bg);
-    }
+    s.draw_text_styled(x, y, word, p.color, bg, p.scale, p.italic, p.bold);
+    let cw = CHAR_W * p.scale;
+    let ch = CHAR_H * p.scale;
+    let wpx = word.chars().count() as u32 * cw;
     if p.underline {
-        let wpx = word.chars().count() as u32 * CHAR_W;
-        s.draw_hline(x, y + CHAR_H, wpx, p.color);
+        s.draw_hline(x, y + ch, wpx, p.color);
+    }
+    if p.strike {
+        s.draw_hline(x, y + ch / 2, wpx, p.color);
     }
 }
 
@@ -150,6 +171,7 @@ enum Tok<'a> {
         text: &'a str,
         paint: Painted,
         link: Option<usize>,
+        zone: Option<usize>,
     },
     Ctrl {
         idx: usize,
@@ -161,14 +183,14 @@ enum Tok<'a> {
 impl Tok<'_> {
     fn width(&self) -> u32 {
         match self {
-            Tok::Word { text, .. } => text.chars().count() as u32 * CHAR_W,
+            Tok::Word { text, paint, .. } => text.chars().count() as u32 * CHAR_W * paint.scale,
             Tok::Ctrl { w, .. } => *w,
         }
     }
 
     fn height(&self) -> u32 {
         match self {
-            Tok::Word { .. } => CHAR_H,
+            Tok::Word { paint, .. } => CHAR_H * paint.scale,
             Tok::Ctrl { h, .. } => *h,
         }
     }
@@ -189,7 +211,16 @@ fn control_dims(meta: &InputMeta, max_w: u32) -> (u32, u32) {
 
 /// Draw a form control at the given position.
 #[allow(clippy::too_many_arguments)]
-fn draw_control(s: &mut Surface, meta: &InputMeta, value: &str, focused: bool, x: u32, y: u32, w: u32, h: u32) {
+fn draw_control(
+    s: &mut Surface,
+    meta: &InputMeta,
+    value: &str,
+    focused: bool,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) {
     match meta.kind {
         InputKind::Submit => {
             s.fill_rect(x, y, w, h, ACCENT);
@@ -198,7 +229,13 @@ fn draw_control(s: &mut Surface, meta: &InputMeta, value: &str, focused: bool, x
             } else {
                 &meta.placeholder
             };
-            s.draw_string(x + 8, y + 6, &truncate_for_width(label, w.saturating_sub(12)), Color::WHITE, ACCENT);
+            s.draw_string(
+                x + 8,
+                y + 6,
+                &truncate_for_width(label, w.saturating_sub(12)),
+                Color::WHITE,
+                ACCENT,
+            );
         }
         InputKind::Select => {
             let label = if value.is_empty() {
@@ -265,6 +302,7 @@ pub fn draw_text_block(
     link_hits: &mut Vec<Hit>,
     form: &FormCtx,
     input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
 ) -> i32 {
     if kind == TextKind::Pre {
         return draw_pre(s, items, x0, max_w, y, clip);
@@ -297,6 +335,7 @@ pub fn draw_text_block(
                             text: word,
                             paint,
                             link: run.link,
+                            zone: run.zone,
                         });
                     }
                 }
@@ -339,13 +378,19 @@ pub fn draw_text_block(
 
         let mut x = match align {
             Align::Center => line_x + eff_w.saturating_sub(line_w) / 2,
+            Align::Right => line_x + eff_w.saturating_sub(line_w),
             Align::Left => line_x,
         };
         let line_visible = clip.visible(y, line_h as i32);
         for tok in &toks[i..j] {
             let ty = y + (line_h.saturating_sub(tok.height()) / 2) as i32;
             match *tok {
-                Tok::Word { text, paint, link } => {
+                Tok::Word {
+                    text,
+                    paint,
+                    link,
+                    zone,
+                } => {
                     if line_visible && ty >= 0 {
                         draw_word(s, x, ty as u32, text, &paint, page_bg);
                     }
@@ -354,7 +399,16 @@ pub fn draw_text_block(
                             x: x as i32,
                             y: ty - 1,
                             w: tok.width() as i32,
-                            h: (CHAR_H + 3) as i32,
+                            h: tok.height() as i32 + 3,
+                            idx,
+                        });
+                    }
+                    if let Some(idx) = zone {
+                        zone_hits.push(Hit {
+                            x: x as i32,
+                            y: ty - 1,
+                            w: tok.width() as i32,
+                            h: tok.height() as i32 + 3,
                             idx,
                         });
                     }
@@ -455,6 +509,7 @@ pub fn draw_image_block(
     y += 8;
     let centered = |w: u32| match align {
         Align::Center => x0 + max_w.saturating_sub(w) / 2,
+        Align::Right => x0 + max_w.saturating_sub(w),
         Align::Left => x0,
     };
     match img {

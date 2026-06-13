@@ -43,7 +43,8 @@ $USERSPACE_SERVICES = @(
     "app_launcher",
     "netd",
     "nic_driver",
-    "timesync"
+    "timesync",
+    "audiod"
 )
 
 # Userspace applications
@@ -66,6 +67,27 @@ function Header        { param([string]$Title)
     Write-Host ""
     Write-Host "========== $Title ==========" -ForegroundColor Magenta
     Write-Host ""
+}
+
+function Prepare-StartupSound {
+    $startupMp3 = "userspace\system_apps\ui_shell\sounds\startup.mp3"
+    $startupWav = "userspace\system_apps\ui_shell\sounds\startup.wav"
+
+    if ((Test-Path $startupMp3) -and
+        ((-not (Test-Path $startupWav)) -or
+         ((Get-Item $startupMp3).LastWriteTime -gt (Get-Item $startupWav).LastWriteTime))) {
+        $ffmpeg = Get-Command "ffmpeg" -ErrorAction SilentlyContinue
+        if ($ffmpeg) {
+            Write-Step "Convertendo startup.mp3 para PCM 48 kHz..."
+            & $ffmpeg.Source -loglevel error -y -i $startupMp3 -ar 48000 -ac 2 -c:a pcm_s16le $startupWav
+        } else {
+            Write-Warning "startup.mp3 mudou, mas ffmpeg não está disponível; usando WAV existente"
+        }
+    }
+
+    if (-not (Test-Path $startupWav)) {
+        Write-ErrorMsg "startup.wav não existe e não pôde ser gerado"
+    }
 }
 
 # -------------------------------------------------------------------------
@@ -130,7 +152,9 @@ if ($Clean) {
 # Preparar diretórios
 # -------------------------------------------------------------------------
 
-New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\system\services","efi\system\wallpapers","efi\apps\system","efi\apps\user","efi\user\home","efi\user\config","efi\user\data" -Force | Out-Null
+New-Item -ItemType Directory -Path "build","build\userspace","efi\EFI\BOOT","efi\system\services","efi\system\wallpapers","efi\system\sounds","efi\apps\system","efi\apps\user","efi\user\home","efi\user\config","efi\user\data" -Force | Out-Null
+
+Prepare-StartupSound
 
 # =========================================================================
 # BUILD ELF2ATXF TOOL
@@ -446,6 +470,13 @@ if (-not $Kernel) {
         Write-Warning "Diretório userspace\system_apps\ui_shell\img não encontrado"
     }
 
+    Write-Step "Copiando sons do sistema..."
+    $soundFiles = Get-ChildItem "userspace\system_apps\ui_shell\sounds\*.wav" -ErrorAction SilentlyContinue
+    foreach ($sound in $soundFiles) {
+        Copy-Item $sound.FullName "efi\system\sounds\$($sound.Name)" -Force
+        Write-Success "$($sound.Name) → system\sounds\"
+    }
+
     Write-Success "Userspace concluído"
 }
 
@@ -591,6 +622,23 @@ if ($Run) {
     Write-Step "Iniciando QEMU (smp=$Smp)..."
     Write-Host "Pressione Ctrl+C para sair" -ForegroundColor Yellow
 
+    # Seleciona o backend de áudio do host. Dispositivo: Intel HD Audio com o
+    # codec só-de-saída hda-output (o audiod detecta HDA e usa AC'97 como
+    # fallback). O guest fala 48 kHz estéreo; o QEMU reamostra para o backend.
+    # No Windows o padrão é DirectSound, com SDL como alternativa.
+    $audioDrivers = (& qemu-system-x86_64 -audiodev help 2>&1 | Out-String)
+    $hdaArgs = @("-device", "intel-hda", "-device", "hda-output,audiodev=audio0")
+    $audioArgs = @()
+    if ($audioDrivers -match "dsound") {
+        $audioArgs = @("-audiodev", "dsound,id=audio0") + $hdaArgs
+        Write-Success "Áudio: Intel HD Audio (hda-output) via DirectSound"
+    } elseif ($audioDrivers -match "sdl") {
+        $audioArgs = @("-audiodev", "sdl,id=audio0") + $hdaArgs
+        Write-Success "Áudio: Intel HD Audio (hda-output) via SDL"
+    } else {
+        Write-Warning "Nenhum backend de áudio do QEMU disponível; som desabilitado"
+    }
+
     qemu-system-x86_64 `
         -machine q35 `
         -cpu qemu64,+rdrand `
@@ -599,6 +647,7 @@ if ($Run) {
         -bios "$OVMF_PATH" `
         -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
         -device VGA `
+        @audioArgs `
         -serial stdio `
         -debugcon file:serial_log.txt `
         -global isa-debugcon.iobase=0xE9 `

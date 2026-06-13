@@ -10,6 +10,8 @@ pub struct HttpResponse {
     pub date: Option<String>,
 }
 
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
 fn copy_bytes(dst: &mut [u8], pos: &mut usize, src: &[u8]) {
     let available = dst.len().saturating_sub(*pos);
     let len = src.len().min(available);
@@ -62,7 +64,13 @@ pub fn http_get(
     loop {
         match net_recv(netd_port, socket_id, &mut recv_buf, 10000) {
             Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&recv_buf[..n]),
+            Ok(n) => {
+                if response.len().saturating_add(n) > MAX_RESPONSE_BYTES {
+                    let _ = net_close(netd_port, socket_id);
+                    return Err(NetError::ResponseTooLarge);
+                }
+                response.extend_from_slice(&recv_buf[..n]);
+            }
             Err(NetError::NotConnected) | Err(NetError::Timeout) => break,
             Err(e) => {
                 let _ = net_close(netd_port, socket_id);

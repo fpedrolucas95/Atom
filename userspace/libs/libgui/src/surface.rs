@@ -204,6 +204,73 @@ impl Surface {
         inner.dirty = true;
     }
 
+    /// Draw a string with synthetic styling the 8x8 bitmap font lacks a native
+    /// face for: an integer pixel `scale` (1 = native 8px), faux-italic shear,
+    /// and faux-bold overstrike. Returns the advance width in pixels
+    /// (`scale * 8 * chars`), not counting the small italic overhang past the
+    /// last glyph.
+    ///
+    /// The background is filled solid for the whole run first; the foreground
+    /// is then painted over it (sheared and/or overstruck), so a slanted glyph
+    /// never leaves per-pixel background gaps. Scaling blits each source pixel
+    /// as a `scale × scale` block.
+    pub fn draw_text_styled(
+        &mut self,
+        x: u32,
+        y: u32,
+        text: &str,
+        fg: Color,
+        bg: Color,
+        scale: u32,
+        italic: bool,
+        bold: bool,
+    ) -> u32 {
+        // Fast path: native size with no synthetic styling renders identically
+        // to `draw_string`, so avoid the per-pixel block work.
+        if scale <= 1 && !italic && !bold {
+            self.draw_string(x, y, text, fg, bg);
+            return FONT_WIDTH * text.len() as u32;
+        }
+
+        let scale = scale.max(1);
+        let mut inner = self.inner.borrow_mut();
+        let fg_atom = atom_syscall::graphics::Color::new(fg.r, fg.g, fg.b);
+        let bg_atom = atom_syscall::graphics::Color::new(bg.r, bg.g, bg.b);
+        let cell_w = FONT_WIDTH * scale;
+        let cell_h = FONT_HEIGHT * scale;
+        let advance = cell_w * text.len() as u32;
+
+        inner.shared.fill_rect(x, y, advance, cell_h, bg_atom);
+
+        for (i, ch) in text.bytes().enumerate() {
+            let gx = x + i as u32 * cell_w;
+            let glyph = get_glyph(ch);
+            for row in 0..FONT_HEIGHT {
+                // Italic: lean the top of the glyph rightward, easing from
+                // ~2*scale px at the top to 0 at the baseline.
+                let shear = if italic {
+                    ((FONT_HEIGHT - 1 - row) * scale) / 3
+                } else {
+                    0
+                };
+                let glyph_row = glyph[row as usize];
+                for col in 0..FONT_WIDTH {
+                    if (glyph_row >> (7 - col)) & 1 == 0 {
+                        continue;
+                    }
+                    let px = gx + col * scale + shear;
+                    let py = y + row * scale;
+                    inner.shared.fill_rect(px, py, scale, scale, fg_atom);
+                    if bold {
+                        inner.shared.fill_rect(px + 1, py, scale, scale, fg_atom);
+                    }
+                }
+            }
+        }
+        inner.dirty = true;
+        advance
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Advanced drawing — rounded rectangles, alpha, gradients, shadows
     // ─────────────────────────────────────────────────────────────────────

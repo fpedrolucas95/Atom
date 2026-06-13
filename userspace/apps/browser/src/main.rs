@@ -2,19 +2,35 @@
 //!
 //! The browser targets three goals:
 //!
-//! * **HTML5 / CSS compatibility** — a forgiving parser covering headings,
-//!   flow content, ordered/unordered lists, blockquotes, preformatted text,
-//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls
-//!   (text/search inputs, buttons, and `<select>` drop-downs flowing alongside
-//!   text), centered content (`<center>` / `align`), inline formatting
-//!   (`b`/`strong`, `i`/`em`, `code`, `u`, `a`, …), HTML entities (named and
-//!   numeric), and a practical CSS subset for `color`, `font-weight`,
-//!   `text-decoration`, and `display` via inline `style="..."` and `<style>`
-//!   blocks.
-//! * **Low resource use** — a lazily-`mmap`ed bump heap, zero-allocation tag
-//!   tokenisation, redraw only when state changes, and bounded network fetches.
-//! * **Clean structure** — the monolith is split into focused modules
-//!   (allocator, text, url, net, css, dom, html, render, browser) with single
+//! * **HTML5 / CSS compatibility** — a real engine pipeline: a spec-shaped
+//!   HTML5 tokenizer (tags, attributes, comments, CDATA, RCDATA/RAWTEXT/
+//!   PLAINTEXT/script-data content models, full character-reference rules),
+//!   tree construction with implied end tags, scope-aware closing,
+//!   formatting-element reconstruction (tag-soup recovery), and foster
+//!   parenting of table-misnested content, then a CSS engine with selectors
+//!   (compound, combinators, attributes, structural pseudo-classes),
+//!   specificity + `!important` cascade, inheritance, `@media` evaluation,
+//!   `font-size`, and presentational-attribute support — fed by inline
+//!   `style`, `<style>` blocks, and external `<link rel=stylesheet>` sheets.
+//!   The styled DOM is flattened into renderer blocks: headings, flow content,
+//!   nested lists, tables (one row per line), blockquotes, preformatted text,
+//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), and inline form
+//!   controls. The painter synthesises bold, italic, and font scaling the 8x8
+//!   bitmap font has no native faces for. A hand-written JavaScript
+//!   interpreter (`js/`) runs page scripts after tree construction — DOM
+//!   mutation (`getElementById`, `querySelector`, `innerHTML`,
+//!   `document.write`, `createElement`, `style`), `console`, `Math`, `JSON`,
+//!   and the core language (closures, prototypes, try/catch, arrows) — under
+//!   a step budget so a runaway script can never hang the browser. The page
+//!   stays live after load: `click` events dispatch through registered
+//!   handlers (`addEventListener`, `onclick` properties and attributes) with
+//!   bubbling and `preventDefault`, `DOMContentLoaded`/`load` fire on load,
+//!   `javascript:` links run in the page scope, and the document re-renders
+//!   after handlers mutate it.
+//! * **Low resource use** — a lazily-`mmap`ed bump heap, redraw only when
+//!   state changes, and bounded network fetches.
+//! * **Clean structure** — focused modules (allocator, text, entities,
+//!   tokenizer, domtree, css, style, dom, html, render, browser) with single
 //!   responsibilities and shared primitives (DRY).
 //!
 //! Mouse: click links to navigate, click the address bar / Go button, click
@@ -31,10 +47,15 @@ mod browser;
 mod content;
 mod css;
 mod dom;
+mod domtree;
+mod entities;
 mod html;
+mod js;
 mod net;
 mod render;
+mod style;
 mod text;
+mod tokenizer;
 mod url;
 
 use alloc::format;
@@ -42,7 +63,7 @@ use core::alloc::Layout;
 use core::panic::PanicInfo;
 
 use atom_syscall::debug::log;
-use atom_syscall::thread::{exit, yield_now};
+use atom_syscall::thread::{exit, get_time_ms, yield_now};
 use libgui::application::Application;
 use libgui::event::{Event, WindowEvent};
 
@@ -90,6 +111,11 @@ fn main() -> ! {
     let mut browser = Browser::new();
 
     loop {
+        // Update the JS engine's notion of time before any dispatch so
+        // setTimeout deadlines and Date.now() reflect the real clock.
+        let now_ms = get_time_ms();
+        js::builtins::set_browser_time(now_ms);
+
         let mut handled_event = false;
         loop {
             match app.poll_event() {
@@ -123,6 +149,9 @@ fn main() -> ! {
             browser.render(&mut surface);
         }
         browser.finish_pending_load();
+
+        // Fire any expired timers; re-render if they mutated the DOM.
+        browser.tick_timers(now_ms);
 
         // Idle without busy-spinning: block for events when nothing happened.
         if handled_event {
