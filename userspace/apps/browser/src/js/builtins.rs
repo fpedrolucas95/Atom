@@ -132,11 +132,22 @@ pub fn install_globals(global: &EnvRef) {
             .insert("href".into(), str_value(""));
         w.props.insert("location".into(), Value::Obj(location.clone()));
         let navigator = new_plain();
-        navigator
-            .borrow_mut()
-            .props
-            .insert("userAgent".into(), str_value("AtomBrowser/0.1 (AtomOS)"));
-        w.props.insert("navigator".into(), Value::Obj(navigator));
+        {
+            let mut n = navigator.borrow_mut();
+            n.props.insert("userAgent".into(), str_value("AtomBrowser/0.1 (AtomOS)"));
+            n.props.insert("language".into(), str_value("en-US"));
+            n.props.insert("platform".into(), str_value("AtomOS"));
+            n.props.insert("cookieEnabled".into(), Value::Bool(false));
+            n.props.insert("onLine".into(), Value::Bool(true));
+        }
+        w.props.insert("navigator".into(), Value::Obj(navigator.clone()));
+        let screen = new_plain();
+        {
+            let mut s = screen.borrow_mut();
+            s.props.insert("width".into(), Value::Num(crate::css::VIEWPORT_W as f64));
+            s.props.insert("height".into(), Value::Num(crate::css::VIEWPORT_H as f64));
+        }
+        w.props.insert("screen".into(), Value::Obj(screen.clone()));
         w.props
             .insert("innerWidth".into(), Value::Num(crate::css::VIEWPORT_W as f64));
         w.props
@@ -147,6 +158,8 @@ pub fn install_globals(global: &EnvRef) {
             .insert("removeEventListener".into(), native(window_listen_fn, "remove"));
         w.props.insert("document".into(), Value::Document);
         def("location", Value::Obj(location));
+        def("navigator", Value::Obj(navigator));
+        def("screen", Value::Obj(screen));
     }
     def("window", Value::Obj(window.clone()));
     def("globalThis", Value::Obj(window.clone()));

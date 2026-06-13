@@ -91,7 +91,12 @@ pub fn https_get(netd_port: PortId, host: &str, path: &str, port: u16) -> Result
 
     let status   = parse_status(&response);
     let location = parse_location(&response);
-    let body     = split_body(&response);
+    let raw_body = split_body(&response);
+    let body = if has_header_token(&response, b"transfer-encoding:", b"chunked") {
+        decode_chunked_body(&raw_body)
+    } else {
+        raw_body
+    };
 
     Ok(HttpsResponse {
         status,
@@ -146,4 +151,79 @@ fn parse_location(r: &[u8]) -> Option<String> {
 fn starts_with_ignore_case(s: &[u8], prefix: &[u8]) -> bool {
     s.len() >= prefix.len()
         && s[..prefix.len()].iter().zip(prefix).all(|(&a, &b)| a.eq_ignore_ascii_case(&b))
+}
+
+fn has_header_token(response: &[u8], name: &[u8], token: &[u8]) -> bool {
+    let Some(end) = response.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = &response[..end];
+    let mut pos = 0;
+    while pos < headers.len() {
+        let le = headers[pos..].windows(2).position(|w| w == b"\r\n")
+            .map(|p| pos + p)
+            .unwrap_or(headers.len());
+        let line = &headers[pos..le];
+        if starts_with_ignore_case(line, name) {
+            let mut v = &line[name.len()..];
+            while !v.is_empty() && (v[0] == b' ' || v[0] == b'\t') { v = &v[1..]; }
+            return !token.is_empty()
+                && v.windows(token.len()).any(|w| {
+                    w.iter().zip(token).all(|(&a, &b)| a.eq_ignore_ascii_case(&b))
+                });
+        }
+        if le == headers.len() { break; }
+        pos = le + 2;
+    }
+    false
+}
+
+/// Decode an HTTP/1.1 chunked body.  Falls back to the raw bytes when the
+/// framing is malformed and nothing was decoded yet.
+fn decode_chunked_body(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    loop {
+        let Some(rel) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
+            return if out.is_empty() { raw.to_vec() } else { out };
+        };
+        let line_end = pos + rel;
+        let Some(size) = parse_chunk_size(&raw[pos..line_end]) else {
+            return if out.is_empty() { raw.to_vec() } else { out };
+        };
+        pos = line_end + 2;
+        if size == 0 {
+            break;
+        }
+        if pos + size > raw.len() {
+            return if out.is_empty() { raw.to_vec() } else { out };
+        }
+        out.extend_from_slice(&raw[pos..pos + size]);
+        pos += size;
+        if pos + 2 <= raw.len() && &raw[pos..pos + 2] == b"\r\n" {
+            pos += 2;
+        } else if pos < raw.len() {
+            return out;
+        }
+    }
+    out
+}
+
+fn parse_chunk_size(line: &[u8]) -> Option<usize> {
+    let mut size = 0usize;
+    let mut saw_digit = false;
+    for &b in line {
+        if b == b';' { break; }
+        let digit = match b {
+            b'0'..=b'9' => (b - b'0') as usize,
+            b'a'..=b'f' => (b - b'a' + 10) as usize,
+            b'A'..=b'F' => (b - b'A' + 10) as usize,
+            b' ' | b'\t' if !saw_digit => continue,
+            b' ' | b'\t' => break,
+            _ => return None,
+        };
+        saw_digit = true;
+        size = size.checked_mul(16)?.checked_add(digit)?;
+    }
+    if saw_digit { Some(size) } else { None }
 }

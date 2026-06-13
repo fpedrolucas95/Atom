@@ -26,6 +26,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("neverssl.com", "http://neverssl.com/"),
     ("example", "http://example.com/"),
     ("example.com", "http://example.com/"),
+    // JS-free search frontend — works on static browsers, unlike Google's
+    // search results page which requires JavaScript.
+    ("ddg", "https://html.duckduckgo.com/html/"),
+    ("duckduckgo", "https://html.duckduckgo.com/html/"),
+    ("duckduckgo.com", "https://html.duckduckgo.com/html/"),
 ];
 
 /// Turn user input into a browsable URL (http:// or https://), or `None`.

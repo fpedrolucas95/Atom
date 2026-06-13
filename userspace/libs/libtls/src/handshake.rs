@@ -115,7 +115,10 @@ pub fn run_handshake(
     let derived_hs  = derive_secret(&hs_secret, "derived", &empty_hash);
     let master_secret = hkdf_extract(&derived_hs, &zeros_32);
 
-    // 5. Receive encrypted handshake messages
+    // 5. Receive encrypted handshake messages.  Messages may be split across
+    //    or coalesced within records, so reassemble them in a byte buffer and
+    //    only consume complete messages from the front.
+    let mut hs_buf: Vec<u8> = Vec::new();
     let mut got_ee       = false;
     let mut got_finished = false;
     let mut server_finished_verify = [0u8; 32];
@@ -124,15 +127,16 @@ pub fn run_handshake(
         let rec = stream.recv_record()?;
         match rec.content_type {
             CT_HANDSHAKE => {
+                hs_buf.extend_from_slice(&rec.data);
                 let mut pos = 0;
-                while pos + 4 <= rec.data.len() {
-                    let msg_type = rec.data[pos];
-                    let len = u24_to_usize(&rec.data[pos + 1..pos + 4]);
-                    if pos + 4 + len > rec.data.len() {
-                        break;
+                while pos + 4 <= hs_buf.len() {
+                    let msg_type = hs_buf[pos];
+                    let len = u24_to_usize(&hs_buf[pos + 1..pos + 4]);
+                    if pos + 4 + len > hs_buf.len() {
+                        break; // incomplete — wait for the next record
                     }
-                    let msg = &rec.data[pos..pos + 4 + len];
-                    let body = &rec.data[pos + 4..pos + 4 + len];
+                    let msg = &hs_buf[pos..pos + 4 + len];
+                    let body = &hs_buf[pos + 4..pos + 4 + len];
 
                     match msg_type {
                         HT_ENCRYPTED_EXTENSIONS => {
@@ -164,7 +168,11 @@ pub fn run_handshake(
                         }
                     }
                     pos += 4 + len;
+                    if got_finished {
+                        break;
+                    }
                 }
+                hs_buf.drain(..pos);
             }
             CT_APPLICATION_DATA => {
                 // Encrypted record already decrypted by RecordStream.
