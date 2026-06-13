@@ -17,7 +17,8 @@
 //!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls,
 //!   `display: flex` containers (row/column with `justify-content`,
 //!   `align-items`, `gap`, and `flex-grow`/`flex-basis` sizing), and decorated
-//!   box containers (`background`, `padding`, `border`). The painter synthesises bold, italic, and font scaling the 8x8
+//!   box containers (`background`, `padding`, `border`, `margin` incl.
+//!   `margin: auto` centring, and `width`/`max-width`/`min-height`). The painter synthesises bold, italic, and font scaling the 8x8
 //!   bitmap font has no native faces for. A hand-written JavaScript
 //!   interpreter (`js/`) runs page scripts after tree construction — DOM
 //!   mutation (`getElementById`, `querySelector`, `innerHTML`,

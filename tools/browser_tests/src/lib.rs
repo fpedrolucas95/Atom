@@ -488,6 +488,47 @@ mod tests {
     }
 
     #[test]
+    fn margin_triggers_a_box() {
+        let doc = parse_html("<div style=\"margin:10px 20px\"><p>x</p></div>");
+        let (style, _) = first_box(&doc);
+        assert_eq!(style.margin, [10, 20, 10, 20]);
+        assert!(!style.center);
+    }
+
+    #[test]
+    fn margin_auto_centers_box() {
+        // The canonical centred content column.
+        let doc = parse_html(
+            "<div style=\"max-width:600px; margin:0 auto\"><p>centered</p></div>",
+        );
+        let (style, children) = first_box(&doc);
+        assert!(style.center);
+        assert_eq!(style.width, Some(600));
+        assert_eq!(style.margin, [0, 0, 0, 0]);
+        assert_eq!(blocks_text(children), "centered");
+    }
+
+    #[test]
+    fn width_sets_box_and_flex_basis() {
+        // `width` doubles as the flex basis; here it just sizes the block box.
+        let doc = parse_html("<div style=\"width:320px; background:#000\">x</div>");
+        assert_eq!(first_box(&doc).0.width, Some(320));
+    }
+
+    #[test]
+    fn min_height_recorded_on_box() {
+        let doc = parse_html("<div style=\"min-height:200px; background:#111\">x</div>");
+        assert_eq!(first_box(&doc).0.min_height, Some(200));
+    }
+
+    #[test]
+    fn percent_width_is_ignored() {
+        // Percentage lengths aren't resolved; such a div stays unboxed.
+        let doc = parse_html("<div style=\"width:50%\"><p>x</p></div>");
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Box { .. })));
+    }
+
+    #[test]
     fn end_tag_br_acts_as_br() {
         let doc = parse_html("<p>a</br>b</p>");
         assert_eq!(texts(&doc), ["a", "b"]);

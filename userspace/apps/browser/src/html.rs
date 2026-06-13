@@ -240,8 +240,12 @@ fn box_style_of(cs: &Computed) -> BoxStyle {
     BoxStyle {
         background: cs.background,
         padding: cs.padding,
+        margin: cs.margin,
+        center: cs.margin_center,
         border_width: cs.border_width,
         border_color: cs.border_color,
+        width: cs.box_width.map(u32::from),
+        min_height: cs.box_height.map(u32::from),
     }
 }
 
@@ -471,7 +475,7 @@ impl<'a> Flattener<'a> {
         // A decorated flow container (background/padding/border) is wrapped in
         // a box block; its layout mode (normal flow or flex) becomes the box's
         // content. This composes box decoration with flex on the same element.
-        if is_boxable(tag) && box_style_of(&cs).is_visible() {
+        if is_boxable(tag) && box_style_of(&cs).needs_box() {
             self.emit_box(id, tag, &cs, link, zone);
             return;
         }

@@ -117,15 +117,30 @@ pub struct BoxStyle {
     pub background: Option<Color>,
     /// Padding in pixels, in CSS order: top, right, bottom, left.
     pub padding: [u16; 4],
+    /// Margin in pixels, in CSS order: top, right, bottom, left.
+    pub margin: [u16; 4],
+    /// `margin-left`/`margin-right: auto`: centre the box in its container.
+    pub center: bool,
     pub border_width: u16,
     pub border_color: Option<Color>,
+    /// Explicit content width (`width`/`max-width`) in pixels, capped to the
+    /// available width.
+    pub width: Option<u32>,
+    /// Content-area height floor (`height`/`min-height`) in pixels.
+    pub min_height: Option<u32>,
 }
 
 impl BoxStyle {
-    /// Whether this decoration paints anything or insets its content — i.e.
-    /// whether wrapping the element in a box block is worthwhile.
-    pub fn is_visible(&self) -> bool {
-        self.background.is_some() || self.border_width > 0 || self.padding.iter().any(|&p| p > 0)
+    /// Whether wrapping the element in a box block is worthwhile — it either
+    /// paints, insets, offsets, or constrains the size of its content.
+    pub fn needs_box(&self) -> bool {
+        self.background.is_some()
+            || self.border_width > 0
+            || self.center
+            || self.width.is_some()
+            || self.min_height.is_some()
+            || self.padding.iter().any(|&p| p > 0)
+            || self.margin.iter().any(|&m| m > 0)
     }
 }
 

@@ -540,9 +540,10 @@ fn fill_clipped(s: &mut Surface, x: u32, y: i32, w: u32, h: u32, clip: Clip, col
     s.fill_rect(x, top as u32, w, (bottom - top) as u32, color);
 }
 
-/// Lay out a decorated box: paint its background and border, inset the content
-/// by the border + padding, and draw the children within. Returns the y below
-/// the box's bottom border.
+/// Lay out a decorated box: apply margins, resolve the box width (explicit or
+/// container-filling, optionally centred), paint background + border, inset the
+/// content by border + padding, and draw the children. Returns the y below the
+/// box including its bottom margin.
 #[allow(clippy::too_many_arguments)]
 fn draw_box(
     s: &mut Surface,
@@ -565,33 +566,56 @@ fn draw_box(
         style.padding[2] as u32,
         style.padding[3] as u32,
     ];
-    let content_x = x0 + bw + pl;
-    let content_w = max_w.saturating_sub(bw * 2 + pl + pr).max(CHAR_W);
+    let [mt, mr, mb, ml] = [
+        style.margin[0] as u32,
+        style.margin[1] as u32,
+        style.margin[2] as u32,
+        style.margin[3] as u32,
+    ];
+
+    // Horizontal: margins shrink the available band; an explicit width caps the
+    // box, and a centred box splits the remaining space evenly.
+    let avail = max_w.saturating_sub(ml + mr);
+    let frame = bw * 2 + pl + pr;
+    let outer_w = match style.width {
+        Some(w) => (w + frame).min(avail).max(frame + CHAR_W),
+        None => avail,
+    };
+    let box_x = if style.center && outer_w < avail {
+        x0 + ml + (avail - outer_w) / 2
+    } else {
+        x0 + ml
+    };
+    let content_x = box_x + bw + pl;
+    let content_w = outer_w.saturating_sub(frame).max(CHAR_W);
+
     // Children paint against the box background so glyph anti-aliasing blends
     // correctly and text colour adapts to the box's own backdrop.
     let inner_bg = style.background.unwrap_or(page_bg);
 
-    let content_h = measure_blocks(s, children, content_w, inner_bg, form).max(0) as u32;
+    let measured = measure_blocks(s, children, content_w, inner_bg, form).max(0) as u32;
+    let content_h = measured.max(style.min_height.unwrap_or(0));
     let outer_h = bw * 2 + pt + pb + content_h;
 
+    let top = y + mt as i32;
     if let Some(bg) = style.background {
-        fill_clipped(s, x0, y, max_w, outer_h, clip, bg);
+        fill_clipped(s, box_x, top, outer_w, outer_h, clip, bg);
     }
     if bw > 0 {
         let bc = style.border_color.unwrap_or(Color::rgb(148, 163, 184));
-        fill_clipped(s, x0, y, max_w, bw, clip, bc); // top
-        fill_clipped(s, x0, y + (outer_h - bw) as i32, max_w, bw, clip, bc); // bottom
-        fill_clipped(s, x0, y, bw, outer_h, clip, bc); // left
-        fill_clipped(s, x0 + max_w - bw, y, bw, outer_h, clip, bc); // right
+        fill_clipped(s, box_x, top, outer_w, bw, clip, bc); // top
+        fill_clipped(s, box_x, top + (outer_h - bw) as i32, outer_w, bw, clip, bc); // bottom
+        fill_clipped(s, box_x, top, bw, outer_h, clip, bc); // left
+        fill_clipped(s, box_x + outer_w - bw, top, bw, outer_h, clip, bc); // right
     }
 
-    let content_y = y + (bw + pt) as i32;
+    let content_y = top + (bw + pt) as i32;
     draw_blocks(
         s, children, content_x, content_w, content_y, clip, inner_bg, link_hits, form, input_hits,
         zone_hits,
     );
 
-    y + outer_h as i32
+    top + outer_h as i32 + mb as i32
 }
 
 /// Measure the height a block sequence occupies at width `w` without painting.

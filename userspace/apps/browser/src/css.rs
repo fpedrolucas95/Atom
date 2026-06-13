@@ -98,6 +98,17 @@ pub struct Decls {
     /// Uniform border width in pixels and its colour.
     pub border_width: Option<u16>,
     pub border_color: Option<Color>,
+    /// Margin in pixels (top, right, bottom, left), each set independently.
+    pub margin_top: Option<u16>,
+    pub margin_right: Option<u16>,
+    pub margin_bottom: Option<u16>,
+    pub margin_left: Option<u16>,
+    /// `margin: auto` on both horizontal sides — centre the box.
+    pub margin_center: Option<bool>,
+    /// Explicit content width (`width`/`max-width`) in pixels.
+    pub box_width: Option<u16>,
+    /// Content-area height floor (`height`/`min-height`) in pixels.
+    pub box_height: Option<u16>,
 }
 
 impl Decls {
@@ -135,6 +146,13 @@ impl Decls {
         take!(pad_left);
         take!(border_width);
         take!(border_color);
+        take!(margin_top);
+        take!(margin_right);
+        take!(margin_bottom);
+        take!(margin_left);
+        take!(margin_center);
+        take!(box_width);
+        take!(box_height);
     }
 }
 
@@ -261,12 +279,39 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
             }
         }
         "flex-grow" => d.flex_grow = lw.split('.').next().and_then(|n| n.parse().ok()),
-        "flex-basis" | "width" | "min-width" => {
-            if let Some(px) = parse_css_length(lw) {
-                d.flex_basis = Some(px.min(u16::MAX as u32) as u16);
+        "flex-basis" | "min-width" => d.flex_basis = parse_len_u16(lw),
+        "width" => {
+            // `width` feeds both the flex item's preferred size and the block
+            // box's explicit width.
+            let v = parse_len_u16(lw);
+            d.flex_basis = v;
+            d.box_width = v;
+        }
+        "max-width" => d.box_width = parse_len_u16(lw),
+        "height" | "min-height" => d.box_height = parse_len_u16(lw),
+        "flex" => apply_flex_shorthand(d, lw),
+        "margin" => {
+            let (sides, center) = parse_margin_sides(lw);
+            d.margin_top = sides[0];
+            d.margin_right = sides[1];
+            d.margin_bottom = sides[2];
+            d.margin_left = sides[3];
+            d.margin_center = Some(center);
+        }
+        "margin-top" => d.margin_top = parse_len_u16(lw),
+        "margin-bottom" => d.margin_bottom = parse_len_u16(lw),
+        "margin-right" => {
+            d.margin_right = parse_len_u16(lw);
+            if lw.trim() == "auto" {
+                d.margin_right = Some(0);
             }
         }
-        "flex" => apply_flex_shorthand(d, lw),
+        "margin-left" => {
+            d.margin_left = parse_len_u16(lw);
+            if lw.trim() == "auto" {
+                d.margin_left = Some(0);
+            }
+        }
         "padding" => {
             let sides = parse_box_sides(lw);
             d.pad_top = sides[0];
@@ -421,6 +466,31 @@ fn parse_box_sides(value: &str) -> [Option<u16>; 4] {
         [t, r, b, l, ..] => [Some(*t), Some(*r), Some(*b), Some(*l)],
         [] => [None; 4],
     }
+}
+
+/// Expand a 1–4 value `margin` shorthand into per-side values (top, right,
+/// bottom, left) and a centring flag (`true` when both horizontal sides are
+/// `auto`). `auto` sides contribute a zero fixed margin.
+fn parse_margin_sides(value: &str) -> ([Option<u16>; 4], bool) {
+    let parsed: alloc::vec::Vec<(u16, bool)> = value
+        .split_whitespace()
+        .map(|t| {
+            if t.eq_ignore_ascii_case("auto") {
+                (0, true)
+            } else {
+                (parse_len_u16(t).unwrap_or(0), false)
+            }
+        })
+        .collect();
+    let (t, r, b, l) = match parsed.as_slice() {
+        [a] => (*a, *a, *a, *a),
+        [v, h] => (*v, *h, *v, *h),
+        [t, h, b] => (*t, *h, *b, *h),
+        [t, r, b, l, ..] => (*t, *r, *b, *l),
+        [] => return ([None; 4], false),
+    };
+    let center = r.1 && l.1;
+    ([Some(t.0), Some(r.0), Some(b.0), Some(l.0)], center)
 }
 
 /// Parse a `border`/`border-<side>` shorthand: a width length, an optional

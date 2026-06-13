@@ -49,9 +49,17 @@ pub struct Computed {
     pub flex_basis: Option<u16>,
     /// Box-model padding in pixels (top, right, bottom, left).
     pub padding: [u16; 4],
+    /// Box-model margin in pixels (top, right, bottom, left).
+    pub margin: [u16; 4],
+    /// Horizontal `margin: auto` centring.
+    pub margin_center: bool,
     /// Uniform border width in pixels and its colour.
     pub border_width: u16,
     pub border_color: Option<Color>,
+    /// Explicit content width (`width`/`max-width`) in pixels.
+    pub box_width: Option<u16>,
+    /// Content-area height floor (`height`/`min-height`) in pixels.
+    pub box_height: Option<u16>,
 }
 
 impl Default for Computed {
@@ -76,8 +84,12 @@ impl Default for Computed {
             flex_grow: 0,
             flex_basis: None,
             padding: [0; 4],
+            margin: [0; 4],
+            margin_center: false,
             border_width: 0,
             border_color: None,
+            box_width: None,
+            box_height: None,
         }
     }
 }
@@ -97,8 +109,12 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         flex_grow: 0,
         flex_basis: None,
         padding: [0; 4],
+        margin: [0; 4],
+        margin_center: false,
         border_width: 0,
         border_color: None,
+        box_width: None,
+        box_height: None,
         ..*parent
     };
     let Some(element) = dom.element(el) else {
@@ -208,6 +224,27 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(c) = d.border_color {
         out.border_color = Some(c);
+    }
+    if let Some(v) = d.margin_top {
+        out.margin[0] = v;
+    }
+    if let Some(v) = d.margin_right {
+        out.margin[1] = v;
+    }
+    if let Some(v) = d.margin_bottom {
+        out.margin[2] = v;
+    }
+    if let Some(v) = d.margin_left {
+        out.margin[3] = v;
+    }
+    if let Some(v) = d.margin_center {
+        out.margin_center = v;
+    }
+    if let Some(v) = d.box_width {
+        out.box_width = Some(v);
+    }
+    if let Some(v) = d.box_height {
+        out.box_height = Some(v);
     }
 }
 
