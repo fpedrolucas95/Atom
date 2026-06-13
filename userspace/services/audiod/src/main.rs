@@ -737,12 +737,15 @@ impl Ac97 {
         self.stream.is_some()
     }
 
+    // AC'97 registers are width-sensitive: the NAM mixer and several NABM
+    // registers (SR, PICB) only respond to word accesses, and BDBAR/GLOB_CNT
+    // require a dword access. Each helper issues a single in/out of that width.
     fn read8(&self, port: u16) -> Result<u8, ()> {
         atom_syscall::io::port_read_u8(port).map_err(|_| ())
     }
 
     fn read16(&self, port: u16) -> Result<u16, ()> {
-        Ok(self.read8(port)? as u16 | ((self.read8(port + 1)? as u16) << 8))
+        atom_syscall::io::port_read_u16(port).map_err(|_| ())
     }
 
     fn write8(&self, port: u16, value: u8) -> Result<(), ()> {
@@ -750,15 +753,11 @@ impl Ac97 {
     }
 
     fn write16(&self, port: u16, value: u16) -> Result<(), ()> {
-        self.write8(port, value as u8)?;
-        self.write8(port + 1, (value >> 8) as u8)
+        atom_syscall::io::port_write_u16(port, value).map_err(|_| ())
     }
 
     fn write32(&self, port: u16, value: u32) -> Result<(), ()> {
-        for shift in [0, 8, 16, 24] {
-            self.write8(port + (shift / 8) as u16, (value >> shift) as u8)?;
-        }
-        Ok(())
+        atom_syscall::io::port_write_u32(port, value).map_err(|_| ())
     }
 }
 
@@ -811,6 +810,7 @@ impl AudioService {
         if path == STARTUP_SOUND_PATH {
             if device.start_stream(Source::mem(STARTUP_SOUND)) {
                 self.boot_chime_done = true;
+                log("audiod: startup chime playing");
             }
             return;
         }

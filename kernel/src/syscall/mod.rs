@@ -877,7 +877,7 @@ extern "win64" fn rust_syscall_dispatcher(
         SYS_REGISTER_FAULT_HANDLER => sys_register_fault_handler(arg0),
         SYS_MOUSE_POLL => sys_mouse_poll(arg0),
         SYS_IO_PORT_READ => sys_io_port_read(arg0 as u16, arg1 as u8),
-        SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u8),
+        SYS_IO_PORT_WRITE => sys_io_port_write(arg0 as u16, arg1 as u32, arg2 as u8),
         SYS_KEYBOARD_POLL => sys_keyboard_poll(arg0),
         SYS_GET_FRAMEBUFFER => sys_get_framebuffer(arg0),
         SYS_GET_TICKS => sys_get_ticks(),
@@ -1139,38 +1139,94 @@ fn sys_mouse_get_id() -> u64 {
 }
 
 /// Read a byte from an IO port (privileged operation for drivers)
-fn sys_io_port_read(port: u16, _size: u8) -> u64 {
-    if let Err(e) = policy::validate_io_port_access(port, crate::cap::CapPermissions::READ) {
-        return e;
+fn sys_io_port_read(port: u16, size: u8) -> u64 {
+    // Word/dword accesses span `port .. port + size`; every covered port must be
+    // permitted. Devices like AC'97 require 16/32-bit register accesses.
+    let width = match size {
+        1 | 2 | 4 => size as u16,
+        _ => return EINVAL,
+    };
+    for offset in 0..width {
+        if let Err(e) =
+            policy::validate_io_port_access(port + offset, crate::cap::CapPermissions::READ)
+        {
+            return e;
+        }
     }
 
-    let value: u8 = unsafe {
-        let mut val: u8;
-        core::arch::asm!(
-            "in al, dx",
-            out("al") val,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags)
-        );
-        val
+    let value: u32 = unsafe {
+        match width {
+            2 => {
+                let mut val: u16;
+                core::arch::asm!(
+                    "in ax, dx",
+                    out("ax") val,
+                    in("dx") port,
+                    options(nomem, nostack, preserves_flags)
+                );
+                val as u32
+            }
+            4 => {
+                let mut val: u32;
+                core::arch::asm!(
+                    "in eax, dx",
+                    out("eax") val,
+                    in("dx") port,
+                    options(nomem, nostack, preserves_flags)
+                );
+                val
+            }
+            _ => {
+                let mut val: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") val,
+                    in("dx") port,
+                    options(nomem, nostack, preserves_flags)
+                );
+                val as u32
+            }
+        }
     };
 
     value as u64
 }
 
-/// Write a byte to an IO port (privileged operation for drivers)
-fn sys_io_port_write(port: u16, value: u8) -> u64 {
-    if let Err(e) = policy::validate_io_port_access(port, crate::cap::CapPermissions::WRITE) {
-        return e;
+/// Write 1/2/4 bytes to an IO port (privileged operation for drivers).
+fn sys_io_port_write(port: u16, value: u32, size: u8) -> u64 {
+    let width = match size {
+        1 | 2 | 4 => size as u16,
+        _ => return EINVAL,
+    };
+    for offset in 0..width {
+        if let Err(e) =
+            policy::validate_io_port_access(port + offset, crate::cap::CapPermissions::WRITE)
+        {
+            return e;
+        }
     }
 
     unsafe {
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") port,
-            in("al") value,
-            options(nomem, nostack, preserves_flags)
-        );
+        match width {
+            2 => core::arch::asm!(
+                "out dx, ax",
+                in("dx") port,
+                in("ax") value as u16,
+                options(nomem, nostack, preserves_flags)
+            ),
+            4 => core::arch::asm!(
+                "out dx, eax",
+                in("dx") port,
+                in("eax") value,
+                options(nomem, nostack, preserves_flags)
+            ),
+            _ => core::arch::asm!(
+                "out dx, al",
+                in("dx") port,
+                in("al") value as u8,
+                options(nomem, nostack, preserves_flags)
+            ),
+        }
     }
 
     ESUCCESS

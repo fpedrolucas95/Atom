@@ -5,21 +5,38 @@
 // ports can be accessed.
 
 use crate::error::{SyscallError, SyscallResult, EINVAL, EPERM, ESUCCESS};
-use crate::raw::{numbers::*, syscall2};
+use crate::raw::{numbers::*, syscall2, syscall3};
 
 /// Read a byte from an I/O port
 ///
 /// Returns the byte read, or an error if access is denied.
 /// Only ports authorized by the kernel can be accessed.
 pub fn port_read_u8(port: u16) -> SyscallResult<u8> {
-    let result = unsafe { syscall2(SYS_IO_PORT_READ, port as u64, 1) };
+    port_read(port, 1).map(|v| v as u8)
+}
+
+/// Read a 16-bit word from an I/O port (single `inw`).
+///
+/// Required by devices whose registers only respond to word accesses
+/// (e.g. the AC'97 mixer and several bus-master status registers).
+pub fn port_read_u16(port: u16) -> SyscallResult<u16> {
+    port_read(port, 2).map(|v| v as u16)
+}
+
+/// Read a 32-bit dword from an I/O port (single `inl`).
+pub fn port_read_u32(port: u16) -> SyscallResult<u32> {
+    port_read(port, 4)
+}
+
+fn port_read(port: u16, size: u8) -> SyscallResult<u32> {
+    let result = unsafe { syscall2(SYS_IO_PORT_READ, port as u64, size as u64) };
 
     if result == EPERM {
         Err(SyscallError::PermissionDenied)
     } else if result == EINVAL {
         Err(SyscallError::InvalidArgument)
     } else {
-        Ok(result as u8)
+        Ok(result as u32)
     }
 }
 
@@ -28,7 +45,21 @@ pub fn port_read_u8(port: u16) -> SyscallResult<u8> {
 /// Returns Ok(()) on success, or an error if access is denied.
 /// Only ports authorized by the kernel can be accessed.
 pub fn port_write_u8(port: u16, value: u8) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYS_IO_PORT_WRITE, port as u64, value as u64) };
+    port_write(port, value as u32, 1)
+}
+
+/// Write a 16-bit word to an I/O port (single `outw`).
+pub fn port_write_u16(port: u16, value: u16) -> SyscallResult<()> {
+    port_write(port, value as u32, 2)
+}
+
+/// Write a 32-bit dword to an I/O port (single `outl`).
+pub fn port_write_u32(port: u16, value: u32) -> SyscallResult<()> {
+    port_write(port, value, 4)
+}
+
+fn port_write(port: u16, value: u32, size: u8) -> SyscallResult<()> {
+    let result = unsafe { syscall3(SYS_IO_PORT_WRITE, port as u64, value as u64, size as u64) };
 
     if result == ESUCCESS {
         Ok(())
