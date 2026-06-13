@@ -11,6 +11,7 @@ members = [
     "userspace/libs/libimage",
     "userspace/libs/libring",
     "userspace/libs/libnet",
+    "userspace/libs/libtls",
 ]
 # Os drivers userspace serao compilados separadamente como binarios ATXF
 # quando o loader de executaveis estiver pronto.

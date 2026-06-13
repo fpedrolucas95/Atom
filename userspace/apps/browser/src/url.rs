@@ -1,8 +1,7 @@
-//! URL normalisation and resolution for plain-HTTP browsing.
+//! URL normalisation and resolution.
 //!
-//! Atom has no TLS stack, so HTTPS is rewritten to HTTP where possible and
-//! otherwise rejected with a clear message. Relative references are resolved
-//! against the current page following RFC 3986 path semantics.
+//! Handles both `http://` and `https://` URLs.  Relative references are
+//! resolved against the current page following RFC 3986 path semantics.
 
 use alloc::format;
 use alloc::string::String;
@@ -10,11 +9,12 @@ use alloc::vec::Vec;
 
 use crate::text::starts_with_ignore_ascii_case;
 
-/// A parsed `http://` URL split into its addressable parts.
+/// A parsed HTTP or HTTPS URL split into its addressable parts.
 pub struct HttpTarget {
-    pub host: String,
-    pub path: String,
-    pub port: u16,
+    pub host:  String,
+    pub path:  String,
+    pub port:  u16,
+    pub https: bool,
 }
 
 /// Well-known shorthands that expand to a full plain-HTTP URL.
@@ -28,15 +28,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("example.com", "http://example.com/"),
 ];
 
-/// Turn user input into a canonical `http://` URL, or `None` if it isn't a
-/// browsable address.
+/// Turn user input into a browsable URL (http:// or https://), or `None`.
 pub fn normalize_http_url(input: &str) -> Option<String> {
     let trimmed = input.trim();
-    if trimmed.starts_with("http://") {
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         return Some(String::from(trimmed));
-    }
-    if let Some(rest) = trimmed.strip_prefix("https://") {
-        return Some(format!("http://{}", rest));
     }
     if let Some((_, url)) = SHORTCUTS.iter().find(|(name, _)| *name == trimmed) {
         return Some(String::from(*url));
@@ -47,11 +43,16 @@ pub fn normalize_http_url(input: &str) -> Option<String> {
     None
 }
 
-/// Split an `http://` URL into host, path, and port.
+/// Split an `http://` or `https://` URL into host, path, port, and scheme.
 pub fn split_http_url(url: &str) -> Result<HttpTarget, String> {
-    let Some(rest_with_fragment) = url.strip_prefix("http://") else {
-        return Err(String::from("Only plain HTTP is supported"));
+    let (rest_with_fragment, https) = if let Some(r) = url.strip_prefix("https://") {
+        (r, true)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (r, false)
+    } else {
+        return Err(String::from("Only HTTP/HTTPS URLs are supported"));
     };
+
     let rest = rest_with_fragment
         .split_once('#')
         .map(|(before, _)| before)
@@ -68,17 +69,19 @@ pub fn split_http_url(url: &str) -> Result<HttpTarget, String> {
         _ => String::from(&rest[path_start..]),
     };
 
+    let default_port = if https { 443 } else { 80 };
     let (host, port) = match host_port.split_once(':') {
-        Some((h, p)) => (h, parse_port(p).unwrap_or(80)),
-        None => (host_port, 80),
+        Some((h, p)) => (h, parse_port(p).unwrap_or(default_port)),
+        None => (host_port, default_port),
     };
     if host.is_empty() {
-        return Err(String::from("Invalid HTTP host"));
+        return Err(String::from("Invalid host"));
     }
     Ok(HttpTarget {
         host: String::from(host),
         path,
         port,
+        https,
     })
 }
 
@@ -88,7 +91,7 @@ pub fn normalize_redirect_url(base_url: &str, location: &str) -> Option<String> 
 }
 
 /// Resolve a (possibly relative) reference against the page URL. Returns `None`
-/// for unsupported schemes (`https:`, `data:` are handled elsewhere).
+/// for unsupported schemes (`data:` is handled elsewhere).
 pub fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     let rel = rel.trim();
     if rel.is_empty() || rel.starts_with('#') {
@@ -97,14 +100,13 @@ pub fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     if starts_with_ignore_ascii_case(rel.as_bytes(), b"data:") {
         return None;
     }
-    if rel.starts_with("http://") {
+    if rel.starts_with("http://") || rel.starts_with("https://") {
         return Some(String::from(rel));
     }
-    if rel.starts_with("https://") {
-        return None;
-    }
+    // Protocol-relative reference: inherit scheme from base
     if let Some(stripped) = rel.strip_prefix("//") {
-        return Some(format!("http://{}", stripped));
+        let scheme = if base_url.starts_with("https://") { "https" } else { "http" };
+        return Some(format!("{}://{}", scheme, stripped));
     }
     // A scheme before any slash means an unsupported absolute URL.
     if let Some(colon) = rel.find(':') {
@@ -114,7 +116,9 @@ pub fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     }
 
     let target = split_http_url(base_url).ok()?;
-    let hostport = if target.port == 80 {
+    let scheme = if target.https { "https" } else { "http" };
+    let default_port = if target.https { 443u16 } else { 80u16 };
+    let hostport = if target.port == default_port {
         target.host
     } else {
         format!("{}:{}", target.host, target.port)
@@ -126,7 +130,7 @@ pub fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
         .unwrap_or(&target.path);
 
     if rel.starts_with('?') {
-        return Some(format!("http://{}{}{}", hostport, base_path, rel));
+        return Some(format!("{}://{}{}{}", scheme, hostport, base_path, rel));
     }
 
     let (path_part, suffix) = split_path_suffix(rel);
@@ -136,7 +140,7 @@ pub fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
         let dir_end = base_path.rfind('/').map(|i| i + 1).unwrap_or(0);
         normalize_url_path(&format!("{}{}", &base_path[..dir_end], path_part))
     };
-    Some(format!("http://{}{}{}", hostport, resolved, suffix))
+    Some(format!("{}://{}{}{}", scheme, hostport, resolved, suffix))
 }
 
 fn split_path_suffix(path: &str) -> (&str, &str) {
