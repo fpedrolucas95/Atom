@@ -11,7 +11,7 @@ use libgui::surface::Surface;
 
 use crate::dom::{
     Align, AlignItems, Block, BoxStyle, FlexChild, FlexDirection, Hit, Inline, InputKind,
-    InputMeta, JustifyContent, Run, TextKind,
+    InputMeta, JustifyContent, Position, PositionedBox, Run, TextKind,
 };
 
 /// Truncate `text` with an ellipsis so it fits within `width` pixels.
@@ -633,7 +633,6 @@ fn draw_box(
     } else {
         x0 + ml
     };
-    let content_x = box_x + bw + pl;
     let content_w = outer_w.saturating_sub(frame).max(CHAR_W);
 
     // Children paint against the box background so glyph anti-aliasing blends
@@ -644,12 +643,53 @@ fn draw_box(
     let content_h = measured.max(style.min_height.unwrap_or(0));
     let outer_h = bw * 2 + pt + pb + content_h;
 
-    let top = y + mt as i32;
-    // Rounded corners need the whole box on-screen (the AA primitives can't be
-    // band-clipped); when scrolled across an edge, fall back to square fills.
+    // `position: relative` shifts the painted box (and its content) while still
+    // reserving its in-flow space.
+    let (dx, dy) = relative_offset(style, avail);
+    let box_x = (box_x as i32 + dx).max(0) as u32;
+    let flow_top = y + mt as i32;
+    let top = flow_top + dy;
+
+    paint_box_frame(s, style, box_x, top, outer_w, outer_h, clip);
+
+    let content_x = box_x + bw + pl;
+    let content_y = top + (bw + pt) as i32;
+    draw_blocks(
+        s, children, content_x, content_w, content_y, clip, inner_bg, link_hits, form, input_hits,
+        zone_hits,
+    );
+
+    // Flow advances by the in-flow box height; a relative offset does not move
+    // following content.
+    flow_top + outer_h as i32 + mb as i32
+}
+
+/// The paint-time `(dx, dy)` shift for a `position: relative` box (`left`/`top`
+/// win over `right`/`bottom`); zero for any other position.
+fn relative_offset(style: &BoxStyle, base: u32) -> (i32, i32) {
+    if style.position != crate::dom::Position::Relative {
+        return (0, 0);
+    }
+    let at = |i: usize| style.inset[i].map(|l| l.resolve(base) as i32);
+    let dx = at(3).or_else(|| at(1).map(|r| -r)).unwrap_or(0);
+    let dy = at(0).or_else(|| at(2).map(|b| -b)).unwrap_or(0);
+    (dx, dy)
+}
+
+/// Paint a box's shadow, background, and border within the rect
+/// `(box_x, top, outer_w, outer_h)`. Rounded/alpha primitives need the box
+/// fully on-screen; otherwise square, band-clipped fills are used.
+fn paint_box_frame(
+    s: &mut Surface,
+    style: &BoxStyle,
+    box_x: u32,
+    top: i32,
+    outer_w: u32,
+    outer_h: u32,
+    clip: Clip,
+) {
+    let bw = style.border_width as u32;
     let radius = style.radius as u32;
-    // Rounded corners and shadows need the whole box on-screen — the AA/alpha
-    // primitives can't be band-clipped.
     let fully_visible = top >= clip.top && top >= 0 && top + outer_h as i32 <= clip.bottom;
     let rounded = radius > 0 && fully_visible;
     let bc = style.border_color.unwrap_or(Color::rgb(148, 163, 184));
@@ -686,14 +726,100 @@ fn draw_box(
             fill_clipped(s, box_x + outer_w - bw, top, bw, outer_h, clip, bc); // right
         }
     }
+}
 
-    let content_y = top + (bw + pt) as i32;
+/// Paint an out-of-flow box (`position: absolute`/`fixed`) against the content
+/// area. `fixed` boxes are pinned to the viewport; `absolute` boxes are placed
+/// against the document content origin and scroll with the page.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_positioned(
+    s: &mut Surface,
+    pb: &PositionedBox,
+    content_x0: u32,
+    content_w: u32,
+    clip: Clip,
+    scroll: u32,
+    page_bg: Color,
+    link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
+) {
+    let style = &pb.style;
+    let bw = style.border_width as u32;
+    let frame = bw * 2 + style.padding[1] as u32 + style.padding[3] as u32;
+    let avail = content_w;
+
+    let left = style.inset[3].map(|l| l.resolve(avail));
+    let right = style.inset[1].map(|r| r.resolve(avail));
+
+    // Resolve the box width: explicit, or stretched between left+right, or
+    // shrink-to-fit on the content's max-content width.
+    let outer_w = match style.width {
+        Some(w) => {
+            let r = w.resolve(avail);
+            if style.border_box {
+                r
+            } else {
+                r + frame
+            }
+        }
+        None if left.is_some() && right.is_some() => {
+            avail.saturating_sub(left.unwrap() + right.unwrap())
+        }
+        None => {
+            let (_, pref) = intrinsic_width(&pb.blocks, form);
+            pref + frame
+        }
+    }
+    .clamp(frame + CHAR_W, avail.max(frame + CHAR_W));
+    let content_w_inner = outer_w.saturating_sub(frame).max(CHAR_W);
+
+    let x = if let Some(l) = left {
+        content_x0 + l
+    } else if let Some(r) = right {
+        content_x0 + avail.saturating_sub(outer_w + r)
+    } else {
+        content_x0
+    };
+
+    let inner_bg = style.background.unwrap_or(page_bg);
+    let measured = measure_blocks(s, &pb.blocks, content_w_inner, inner_bg, form).max(0) as u32;
+    let content_h = measured.max(style.min_height.unwrap_or(0));
+    let outer_h = bw * 2 + style.padding[0] as u32 + style.padding[2] as u32 + content_h;
+
+    // Vertical origin: the viewport top for `fixed`, the document content origin
+    // (scrolling) for `absolute`.
+    let base_top = if style.position == Position::Fixed {
+        clip.top
+    } else {
+        clip.top - scroll as i32
+    };
+    let y = if let Some(t) = style.inset[0].map(|t| t.resolve(avail) as i32) {
+        base_top + t
+    } else if let Some(b) = style.inset[2].map(|b| b.resolve(avail) as i32) {
+        clip.bottom - b - outer_h as i32
+    } else {
+        base_top
+    };
+
+    paint_box_frame(s, style, x, y, outer_w, outer_h, clip);
+
+    let content_x = x + bw + style.padding[3] as u32;
+    let content_y = y + (bw + style.padding[0] as u32) as i32;
     draw_blocks(
-        s, children, content_x, content_w, content_y, clip, inner_bg, link_hits, form, input_hits,
+        s,
+        &pb.blocks,
+        content_x,
+        content_w_inner,
+        content_y,
+        clip,
+        inner_bg,
+        link_hits,
+        form,
+        input_hits,
         zone_hits,
     );
-
-    top + outer_h as i32 + mb as i32
 }
 
 /// Measure the height a block sequence occupies at width `w` without painting.

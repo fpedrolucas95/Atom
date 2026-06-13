@@ -29,7 +29,7 @@ pub mod tokenizer;
 mod tests {
     use crate::dom::{
         Align, AlignItems, Block, BoxStyle, Document, FlexChild, FlexDirection, Inline, InputKind,
-        JustifyContent, Length, TextKind,
+        JustifyContent, Length, Position, TextKind,
     };
     use crate::html::{parse_html, parse_html_with_css};
     use libgui::color::Color;
@@ -501,6 +501,49 @@ mod tests {
         let sh = first_box(&doc).0.shadow.expect("shadow present");
         assert_eq!((sh.dx, sh.dy, sh.blur, sh.spread), (-3, 2, 0, 0));
         assert_eq!(sh.color, Color::rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn relative_position_stays_in_flow_with_offsets() {
+        let doc = parse_html(
+            "<div style=\"position:relative; top:10px; left:5px\"><p>x</p></div>",
+        );
+        let (style, _) = first_box(&doc);
+        assert_eq!(style.position, Position::Relative);
+        assert_eq!(style.inset[0], Some(Length::Px(10))); // top
+        assert_eq!(style.inset[3], Some(Length::Px(5))); // left
+        // It stays in the normal flow, not hoisted out.
+        assert!(doc.positioned.is_empty());
+    }
+
+    #[test]
+    fn absolute_position_is_hoisted_out_of_flow() {
+        let doc = parse_html(
+            "<p>flow</p><div style=\"position:absolute; top:0; right:0\"><p>badge</p></div>",
+        );
+        // No box block in the normal flow…
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Box { .. })));
+        // …it moved to the positioned list.
+        assert_eq!(doc.positioned.len(), 1);
+        assert_eq!(doc.positioned[0].style.position, Position::Absolute);
+        assert_eq!(doc.positioned[0].style.inset[1], Some(Length::Px(0))); // right
+        assert_eq!(blocks_text(&doc.positioned[0].blocks), "badge");
+    }
+
+    #[test]
+    fn fixed_position_is_hoisted() {
+        let doc = parse_html("<div style=\"position:fixed; bottom:8px\"><p>bar</p></div>");
+        assert_eq!(doc.positioned.len(), 1);
+        assert_eq!(doc.positioned[0].style.position, Position::Fixed);
+        assert_eq!(doc.positioned[0].style.inset[2], Some(Length::Px(8))); // bottom
+    }
+
+    #[test]
+    fn positioned_box_links_stay_addressable() {
+        let doc = parse_html(
+            "<div style=\"position:absolute; top:0\"><a href=\"/x\">go</a></div>",
+        );
+        assert_eq!(doc.links, vec!["/x".to_string()]);
     }
 
     #[test]

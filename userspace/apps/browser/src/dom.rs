@@ -129,6 +129,15 @@ impl Length {
     }
 }
 
+/// CSS `position`. `Sticky` is parsed but treated as `Relative`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
 /// A drop shadow (`box-shadow`): offset, blur, spread, and colour. Inset
 /// shadows are not modelled.
 #[derive(Clone, Copy)]
@@ -164,6 +173,10 @@ pub struct BoxStyle {
     pub min_height: Option<u32>,
     /// Drop shadow (`box-shadow`).
     pub shadow: Option<BoxShadow>,
+    /// `position`.
+    pub position: Position,
+    /// `top`, `right`, `bottom`, `left` offsets.
+    pub inset: [Option<Length>; 4],
 }
 
 impl BoxStyle {
@@ -176,6 +189,7 @@ impl BoxStyle {
             || self.width.is_some()
             || self.min_height.is_some()
             || self.shadow.is_some()
+            || self.position != Position::Static
             || self.padding.iter().any(|&p| p > 0)
             || self.margin.iter().any(|&m| m > 0)
     }
@@ -231,6 +245,13 @@ pub enum Block {
     },
 }
 
+/// An out-of-flow box (`position: absolute`/`fixed`) hoisted out of the normal
+/// flow and painted against the content area in a deferred pass.
+pub struct PositionedBox {
+    pub style: BoxStyle,
+    pub blocks: Vec<Block>,
+}
+
 /// Collect a mutable reference to every image block in document order,
 /// descending into flex children so nested `<img>` elements are reachable for
 /// fetching/decoding.
@@ -282,6 +303,8 @@ pub struct Document {
     pub title: String,
     pub background: Option<Color>,
     pub blocks: Vec<Block>,
+    /// Out-of-flow boxes (`position: absolute`/`fixed`), painted after the flow.
+    pub positioned: Vec<PositionedBox>,
     pub links: Vec<String>,
     /// DOM node id behind each entry of `links` (for event dispatch).
     pub link_nodes: Vec<usize>,

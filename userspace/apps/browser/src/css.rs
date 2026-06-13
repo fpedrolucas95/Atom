@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use libgui::color::Color;
 
-use crate::dom::{Align, AlignItems, BoxShadow, FlexDirection, JustifyContent, Length};
+use crate::dom::{Align, AlignItems, BoxShadow, FlexDirection, JustifyContent, Length, Position};
 use crate::domtree::Dom;
 
 /// Viewport used for media-query evaluation (browser window content area).
@@ -106,6 +106,13 @@ pub struct Decls {
     pub box_sizing_border: Option<bool>,
     /// Drop shadow (`box-shadow`).
     pub box_shadow: Option<BoxShadow>,
+    /// `position`.
+    pub position: Option<Position>,
+    /// `top`, `right`, `bottom`, `left` offsets.
+    pub inset_top: Option<Length>,
+    pub inset_right: Option<Length>,
+    pub inset_bottom: Option<Length>,
+    pub inset_left: Option<Length>,
     /// Margin in pixels (top, right, bottom, left), each set independently.
     pub margin_top: Option<u16>,
     pub margin_right: Option<u16>,
@@ -158,6 +165,11 @@ impl Decls {
         take!(border_radius);
         take!(box_sizing_border);
         take!(box_shadow);
+        take!(position);
+        take!(inset_top);
+        take!(inset_right);
+        take!(inset_bottom);
+        take!(inset_left);
         take!(margin_top);
         take!(margin_right);
         take!(margin_bottom);
@@ -386,6 +398,20 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
                 d.box_shadow = Some(sh);
             }
         }
+        "position" => {
+            d.position = match lw {
+                "static" => Some(Position::Static),
+                "relative" => Some(Position::Relative),
+                "absolute" => Some(Position::Absolute),
+                "fixed" => Some(Position::Fixed),
+                "sticky" | "-webkit-sticky" => Some(Position::Relative),
+                _ => None,
+            }
+        }
+        "top" => d.inset_top = parse_length(lw),
+        "right" => d.inset_right = parse_length(lw),
+        "bottom" => d.inset_bottom = parse_length(lw),
+        "left" => d.inset_left = parse_length(lw),
         "visibility" => match lw {
             "hidden" | "collapse" => d.visible = Some(false),
             "visible" => d.visible = Some(true),

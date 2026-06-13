@@ -10,7 +10,7 @@
 use libgui::color::Color;
 
 use crate::css::{self, Decls, FontSize, Stylesheet, TextTransform};
-use crate::dom::{Align, AlignItems, BoxShadow, FlexDirection, JustifyContent, Length};
+use crate::dom::{Align, AlignItems, BoxShadow, FlexDirection, JustifyContent, Length, Position};
 use crate::domtree::{Dom, Element};
 
 /// The default (`medium`) font size in CSS pixels.
@@ -64,6 +64,9 @@ pub struct Computed {
     pub box_sizing_border: bool,
     /// Drop shadow (`box-shadow`).
     pub box_shadow: Option<BoxShadow>,
+    /// `position` and its `top`/`right`/`bottom`/`left` offsets.
+    pub position: Position,
+    pub inset: [Option<Length>; 4],
     /// Explicit content width (`width`/`max-width`); may be a percentage.
     pub box_width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
@@ -100,6 +103,8 @@ impl Default for Computed {
             border_radius: 0,
             box_sizing_border: false,
             box_shadow: None,
+            position: Position::Static,
+            inset: [None; 4],
             box_width: None,
             box_height: None,
         }
@@ -129,6 +134,8 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         border_radius: 0,
         box_sizing_border: false,
         box_shadow: None,
+        position: Position::Static,
+        inset: [None; 4],
         box_width: None,
         box_height: None,
         ..*parent
@@ -252,6 +259,21 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(v) = d.box_shadow {
         out.box_shadow = Some(v);
+    }
+    if let Some(v) = d.position {
+        out.position = v;
+    }
+    if d.inset_top.is_some() {
+        out.inset[0] = d.inset_top;
+    }
+    if d.inset_right.is_some() {
+        out.inset[1] = d.inset_right;
+    }
+    if d.inset_bottom.is_some() {
+        out.inset[2] = d.inset_bottom;
+    }
+    if d.inset_left.is_some() {
+        out.inset[3] = d.inset_left;
     }
     if let Some(v) = d.margin_top {
         out.margin[0] = v;

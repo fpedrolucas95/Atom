@@ -22,8 +22,8 @@ use libgui::color::Color;
 
 use crate::css::{Stylesheet, TextTransform};
 use crate::dom::{
-    Align, Block, BoxStyle, Document, FlexChild, Inline, InputKind, InputMeta, Run, RunStyle,
-    TextKind,
+    Align, Block, BoxStyle, Document, FlexChild, Inline, InputKind, InputMeta, Position,
+    PositionedBox, Run, RunStyle, TextKind,
 };
 use crate::domtree::{build_dom, Dom, Element, NodeData, DOCUMENT};
 use crate::style::{self, Computed};
@@ -249,6 +249,8 @@ fn box_style_of(cs: &Computed) -> BoxStyle {
         width: cs.box_width,
         min_height: cs.box_height.map(u32::from),
         shadow: cs.box_shadow,
+        position: cs.position,
+        inset: cs.inset,
     }
 }
 
@@ -320,6 +322,7 @@ struct Flattener<'a> {
     sheet: &'a Stylesheet,
 
     blocks: Vec<Block>,
+    positioned: Vec<PositionedBox>,
     items: Vec<Inline>,
     cur_kind: TextKind,
     cur_align: Option<Align>,
@@ -352,6 +355,7 @@ impl<'a> Flattener<'a> {
             scripting,
             clickable,
             blocks: Vec::new(),
+            positioned: Vec::new(),
             items: Vec::new(),
             cur_kind: TextKind::Paragraph,
             cur_align: None,
@@ -390,6 +394,7 @@ impl<'a> Flattener<'a> {
             title: self.title,
             background: self.background,
             blocks: self.blocks,
+            positioned: self.positioned,
             links: self.links,
             link_nodes: self.link_nodes,
             inputs: self.inputs,
@@ -696,7 +701,16 @@ impl<'a> Flattener<'a> {
         if children.is_empty() && style.background.is_none() && style.border_width == 0 {
             return;
         }
-        self.blocks.push(Block::Box { style, children });
+        // Out-of-flow boxes are hoisted to the document level and painted in a
+        // deferred pass; they take no space in the normal flow.
+        if matches!(cs.position, Position::Absolute | Position::Fixed) {
+            self.positioned.push(PositionedBox {
+                style,
+                blocks: children,
+            });
+        } else {
+            self.blocks.push(Block::Box { style, children });
+        }
     }
 
     /// Run `body` against a fresh block/inline buffer and return the blocks it

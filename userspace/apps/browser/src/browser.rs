@@ -102,6 +102,7 @@ impl Browser {
                 title: String::from("Home"),
                 background: None,
                 blocks: Vec::new(),
+                positioned: Vec::new(),
                 links: Vec::new(),
                 link_nodes: Vec::new(),
                 inputs: Vec::new(),
@@ -316,6 +317,9 @@ impl Browser {
         let mut failed = 0u32;
         let mut image_blocks: Vec<&mut Block> = Vec::new();
         crate::dom::collect_image_blocks(&mut self.doc.blocks, &mut image_blocks);
+        for pb in &mut self.doc.positioned {
+            crate::dom::collect_image_blocks(&mut pb.blocks, &mut image_blocks);
+        }
         for block in image_blocks {
             let Block::Image {
                 src, img, error, ..
@@ -585,9 +589,15 @@ impl Browser {
     fn carry_images(&mut self, doc: &mut Document) {
         let mut old: Vec<(String, Option<libimage::DecodedImage>, Option<String>)> = Vec::new();
         drain_images(core::mem::take(&mut self.doc.blocks), &mut old);
+        for pb in core::mem::take(&mut self.doc.positioned) {
+            drain_images(pb.blocks, &mut old);
+        }
 
         let mut image_blocks: Vec<&mut Block> = Vec::new();
         crate::dom::collect_image_blocks(&mut doc.blocks, &mut image_blocks);
+        for pb in &mut doc.positioned {
+            crate::dom::collect_image_blocks(&mut pb.blocks, &mut image_blocks);
+        }
         for block in image_blocks {
             let Block::Image {
                 src, img, error, ..
@@ -1189,6 +1199,23 @@ impl Browser {
         self.content_height = (y + self.scroll as i32 - clip.top).max(0) as u32;
         self.view_h = (clip.bottom - clip.top).max(1) as u32;
         self.scroll = self.scroll.min(self.max_scroll());
+
+        // Out-of-flow boxes paint over the flow, against the content area.
+        for pb in &self.doc.positioned {
+            render::draw_positioned(
+                surface,
+                pb,
+                x0,
+                content_w,
+                clip,
+                self.scroll,
+                page_bg,
+                &mut link_hits,
+                &form,
+                &mut input_hits,
+                &mut zone_hits,
+            );
+        }
 
         self.draw_select_popup(surface, &input_hits, &mut select_option_hits, clip.bottom);
         self.draw_scrollbar(surface, width);
