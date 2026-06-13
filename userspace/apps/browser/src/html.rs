@@ -244,7 +244,7 @@ fn box_style_of(cs: &Computed) -> BoxStyle {
         center: cs.margin_center,
         border_width: cs.border_width,
         border_color: cs.border_color,
-        width: cs.box_width.map(u32::from),
+        width: cs.box_width,
         min_height: cs.box_height.map(u32::from),
     }
 }
@@ -632,7 +632,7 @@ impl<'a> Flattener<'a> {
                     }
                     children.push(FlexChild {
                         grow: ccs.flex_grow,
-                        basis: ccs.flex_basis.map(u32::from),
+                        basis: ccs.flex_basis,
                         blocks,
                     });
                 }

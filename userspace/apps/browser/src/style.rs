@@ -10,7 +10,7 @@
 use libgui::color::Color;
 
 use crate::css::{self, Decls, FontSize, Stylesheet, TextTransform};
-use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent};
+use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent, Length};
 use crate::domtree::{Dom, Element};
 
 /// The default (`medium`) font size in CSS pixels.
@@ -45,8 +45,8 @@ pub struct Computed {
     pub gap: u16,
     /// This element's `flex-grow` factor (read when it is a flex item).
     pub flex_grow: u16,
-    /// This element's preferred main-axis size (`flex-basis`/`width`), in px.
-    pub flex_basis: Option<u16>,
+    /// This element's preferred main-axis size (`flex-basis`/`width`).
+    pub flex_basis: Option<Length>,
     /// Box-model padding in pixels (top, right, bottom, left).
     pub padding: [u16; 4],
     /// Box-model margin in pixels (top, right, bottom, left).
@@ -56,8 +56,8 @@ pub struct Computed {
     /// Uniform border width in pixels and its colour.
     pub border_width: u16,
     pub border_color: Option<Color>,
-    /// Explicit content width (`width`/`max-width`) in pixels.
-    pub box_width: Option<u16>,
+    /// Explicit content width (`width`/`max-width`); may be a percentage.
+    pub box_width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
     pub box_height: Option<u16>,
 }

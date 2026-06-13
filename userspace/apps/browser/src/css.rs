@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use libgui::color::Color;
 
-use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent};
+use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent, Length};
 use crate::domtree::Dom;
 
 /// Viewport used for media-query evaluation (browser window content area).
@@ -88,8 +88,8 @@ pub struct Decls {
     pub gap: Option<u16>,
     /// `flex-grow` factor for a flex item.
     pub flex_grow: Option<u16>,
-    /// Preferred main-axis size (`flex-basis`/`width`) in pixels.
-    pub flex_basis: Option<u16>,
+    /// Preferred main-axis size (`flex-basis`/`width`); may be a percentage.
+    pub flex_basis: Option<Length>,
     /// Padding in pixels (top, right, bottom, left), each set independently.
     pub pad_top: Option<u16>,
     pub pad_right: Option<u16>,
@@ -105,8 +105,8 @@ pub struct Decls {
     pub margin_left: Option<u16>,
     /// `margin: auto` on both horizontal sides — centre the box.
     pub margin_center: Option<bool>,
-    /// Explicit content width (`width`/`max-width`) in pixels.
-    pub box_width: Option<u16>,
+    /// Explicit content width (`width`/`max-width`); may be a percentage.
+    pub box_width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
     pub box_height: Option<u16>,
 }
@@ -279,15 +279,15 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
             }
         }
         "flex-grow" => d.flex_grow = lw.split('.').next().and_then(|n| n.parse().ok()),
-        "flex-basis" | "min-width" => d.flex_basis = parse_len_u16(lw),
+        "flex-basis" | "min-width" => d.flex_basis = parse_length(lw),
         "width" => {
             // `width` feeds both the flex item's preferred size and the block
             // box's explicit width.
-            let v = parse_len_u16(lw);
+            let v = parse_length(lw);
             d.flex_basis = v;
             d.box_width = v;
         }
-        "max-width" => d.box_width = parse_len_u16(lw),
+        "max-width" => d.box_width = parse_length(lw),
         "height" | "min-height" => d.box_height = parse_len_u16(lw),
         "flex" => apply_flex_shorthand(d, lw),
         "margin" => {
@@ -435,8 +435,8 @@ fn apply_flex_shorthand(d: &mut Decls, lw: &str) {
     }
     let mut seen_grow = false;
     for tok in lw.split_whitespace() {
-        if let Some(px) = tok.strip_suffix("px").and_then(|n| n.parse::<u32>().ok()) {
-            d.flex_basis = Some(px.min(u16::MAX as u32) as u16);
+        if tok.ends_with("px") || tok.ends_with('%') {
+            d.flex_basis = parse_length(tok);
         } else if tok == "0" && !seen_grow {
             d.flex_grow = Some(0);
             seen_grow = true;
@@ -453,6 +453,17 @@ fn apply_flex_shorthand(d: &mut Decls, lw: &str) {
 /// Parse a CSS length into a clamped `u16` of pixels.
 fn parse_len_u16(value: &str) -> Option<u16> {
     parse_css_length(value).map(|px| px.min(u16::MAX as u32) as u16)
+}
+
+/// Parse a CSS length that may be a percentage, deferring percentage
+/// resolution to layout time.
+fn parse_length(value: &str) -> Option<Length> {
+    let v = value.trim();
+    if let Some(pct) = v.strip_suffix('%') {
+        let n = pct.trim().split('.').next()?.parse::<u32>().ok()?;
+        return Some(Length::Pct(n.min(1000) as u16));
+    }
+    parse_css_length(v).map(Length::Px)
 }
 
 /// Expand a 1–4 value box shorthand (`padding`/`margin`) into per-side values

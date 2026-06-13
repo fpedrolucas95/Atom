@@ -29,7 +29,7 @@ pub mod tokenizer;
 mod tests {
     use crate::dom::{
         Align, AlignItems, Block, BoxStyle, Document, FlexChild, FlexDirection, Inline, InputKind,
-        JustifyContent, TextKind,
+        JustifyContent, Length, TextKind,
     };
     use crate::html::{parse_html, parse_html_with_css};
     use libgui::color::Color;
@@ -318,8 +318,14 @@ mod tests {
         );
         let (_, _, _, _, children) = first_flex(&doc);
         assert_eq!((children[0].grow, children[0].basis), (2, None));
-        assert_eq!((children[1].grow, children[1].basis), (1, Some(80)));
-        assert_eq!((children[2].grow, children[2].basis), (0, Some(120)));
+        assert_eq!(
+            (children[1].grow, children[1].basis),
+            (1, Some(Length::Px(80)))
+        );
+        assert_eq!(
+            (children[2].grow, children[2].basis),
+            (0, Some(Length::Px(120)))
+        );
     }
 
     #[test]
@@ -503,7 +509,7 @@ mod tests {
         );
         let (style, children) = first_box(&doc);
         assert!(style.center);
-        assert_eq!(style.width, Some(600));
+        assert_eq!(style.width, Some(Length::Px(600)));
         assert_eq!(style.margin, [0, 0, 0, 0]);
         assert_eq!(blocks_text(children), "centered");
     }
@@ -512,7 +518,32 @@ mod tests {
     fn width_sets_box_and_flex_basis() {
         // `width` doubles as the flex basis; here it just sizes the block box.
         let doc = parse_html("<div style=\"width:320px; background:#000\">x</div>");
-        assert_eq!(first_box(&doc).0.width, Some(320));
+        assert_eq!(first_box(&doc).0.width, Some(Length::Px(320)));
+    }
+
+    #[test]
+    fn percentage_width_is_recorded() {
+        let doc = parse_html("<div style=\"width:50%; background:#000\">x</div>");
+        assert_eq!(first_box(&doc).0.width, Some(Length::Pct(50)));
+    }
+
+    #[test]
+    fn percentage_resolves_against_base() {
+        assert_eq!(Length::Pct(50).resolve(600), 300);
+        assert_eq!(Length::Pct(33).resolve(900), 297);
+        assert_eq!(Length::Px(120).resolve(600), 120);
+    }
+
+    #[test]
+    fn flex_basis_accepts_percentage() {
+        let doc = parse_html(
+            "<div style=\"display:flex\">\
+             <div style=\"flex-basis:33%\">A</div>\
+             <div style=\"flex:1 1 25%\">B</div></div>",
+        );
+        let (_, _, _, _, children) = first_flex(&doc);
+        assert_eq!(children[0].basis, Some(Length::Pct(33)));
+        assert_eq!((children[1].grow, children[1].basis), (1, Some(Length::Pct(25))));
     }
 
     #[test]
@@ -521,12 +552,6 @@ mod tests {
         assert_eq!(first_box(&doc).0.min_height, Some(200));
     }
 
-    #[test]
-    fn percent_width_is_ignored() {
-        // Percentage lengths aren't resolved; such a div stays unboxed.
-        let doc = parse_html("<div style=\"width:50%\"><p>x</p></div>");
-        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Box { .. })));
-    }
 
     #[test]
     fn end_tag_br_acts_as_br() {

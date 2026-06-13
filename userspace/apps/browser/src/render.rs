@@ -578,7 +578,9 @@ fn draw_box(
     let avail = max_w.saturating_sub(ml + mr);
     let frame = bw * 2 + pl + pr;
     let outer_w = match style.width {
-        Some(w) => (w + frame).min(avail).max(frame + CHAR_W),
+        // `width`/`max-width` give the content width; percentages resolve
+        // against the available band.
+        Some(w) => (w.resolve(avail) + frame).min(avail).max(frame + CHAR_W),
         None => avail,
     };
     let box_x = if style.center && outer_w < avail {
@@ -703,7 +705,12 @@ fn draw_flex_block(
     let total_grow: u32 = children.iter().map(|c| c.grow as u32).sum();
     let mut widths: Vec<u32> = children
         .iter()
-        .map(|c| c.basis.unwrap_or(equal).min(avail))
+        .map(|c| {
+            c.basis
+                .map(|b| b.resolve(avail))
+                .unwrap_or(equal)
+                .min(avail)
+        })
         .collect();
     let sum_pref: u32 = widths.iter().sum();
 

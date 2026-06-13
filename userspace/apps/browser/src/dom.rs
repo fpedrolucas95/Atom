@@ -110,6 +110,25 @@ pub enum Inline {
     Control(usize),
 }
 
+/// A CSS length that may be absolute or relative to a containing size.
+/// Percentages are resolved at layout time, when the container width is known.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Length {
+    Px(u32),
+    /// A percentage (whole number) of the resolution base.
+    Pct(u16),
+}
+
+impl Length {
+    /// Resolve to pixels against `base` (the relevant container dimension).
+    pub fn resolve(self, base: u32) -> u32 {
+        match self {
+            Length::Px(v) => v,
+            Length::Pct(p) => base * p as u32 / 100,
+        }
+    }
+}
+
 /// Box-model decoration for a [`Block::Box`] container: background fill,
 /// padding (top/right/bottom/left, in pixels) and a uniform border.
 #[derive(Clone, Copy)]
@@ -123,9 +142,9 @@ pub struct BoxStyle {
     pub center: bool,
     pub border_width: u16,
     pub border_color: Option<Color>,
-    /// Explicit content width (`width`/`max-width`) in pixels, capped to the
-    /// available width.
-    pub width: Option<u32>,
+    /// Explicit content width (`width`/`max-width`), capped to the available
+    /// width; percentages resolve against the container at layout time.
+    pub width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
     pub min_height: Option<u32>,
 }
@@ -149,8 +168,9 @@ impl BoxStyle {
 pub struct FlexChild {
     /// `flex-grow` factor (0 = does not grow).
     pub grow: u16,
-    /// Preferred main-axis size in pixels (`flex-basis`/`width`), if any.
-    pub basis: Option<u32>,
+    /// Preferred main-axis size (`flex-basis`/`width`), if any; percentages
+    /// resolve against the flex container's available width at layout time.
+    pub basis: Option<Length>,
     /// The child's content, laid out within its flex line column.
     pub blocks: Vec<Block>,
 }
