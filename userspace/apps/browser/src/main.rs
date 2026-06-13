@@ -14,8 +14,9 @@
 //!   `style`, `<style>` blocks, and external `<link rel=stylesheet>` sheets.
 //!   The styled DOM is flattened into renderer blocks: headings, flow content,
 //!   nested lists, tables (one row per line), blockquotes, preformatted text,
-//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), and inline form
-//!   controls. The painter synthesises bold, italic, and font scaling the 8x8
+//!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls,
+//!   and `display: flex` containers (row/column with `justify-content`,
+//!   `align-items`, `gap`, and `flex-grow`/`flex-basis` sizing). The painter synthesises bold, italic, and font scaling the 8x8
 //!   bitmap font has no native faces for. A hand-written JavaScript
 //!   interpreter (`js/`) runs page scripts after tree construction — DOM
 //!   mutation (`getElementById`, `querySelector`, `innerHTML`,

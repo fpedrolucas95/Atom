@@ -36,6 +36,33 @@ pub enum Align {
     Right,
 }
 
+/// Main-axis direction of a flex container.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
+/// Main-axis distribution of free space in a flex container
+/// (`justify-content`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JustifyContent {
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+    SpaceAround,
+}
+
+/// Cross-axis placement of flex items within a line (`align-items`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AlignItems {
+    Start,
+    Center,
+    End,
+    Stretch,
+}
+
 /// Inline rendering attributes applied to a [`Run`]. Resolved at parse time
 /// from HTML tags (`b`, `code`, `a`, …) and CSS so the renderer stays trivial.
 #[derive(Clone, Copy)]
@@ -83,6 +110,17 @@ pub enum Inline {
     Control(usize),
 }
 
+/// One child of a flex container: its own sub-flow of blocks plus the flex
+/// sizing inputs resolved from the child's computed style.
+pub struct FlexChild {
+    /// `flex-grow` factor (0 = does not grow).
+    pub grow: u16,
+    /// Preferred main-axis size in pixels (`flex-basis`/`width`), if any.
+    pub basis: Option<u32>,
+    /// The child's content, laid out within its flex line column.
+    pub blocks: Vec<Block>,
+}
+
 /// A laid-out block in document order.
 pub enum Block {
     Text {
@@ -100,6 +138,33 @@ pub enum Block {
         src: String,
         align: Align,
     },
+    /// A `display: flex` container. Children lay out along `direction`,
+    /// distributing free space per `justify` and aligning on the cross axis
+    /// per `align`.
+    Flex {
+        direction: FlexDirection,
+        justify: JustifyContent,
+        align: AlignItems,
+        gap: u16,
+        children: Vec<FlexChild>,
+    },
+}
+
+/// Collect a mutable reference to every image block in document order,
+/// descending into flex children so nested `<img>` elements are reachable for
+/// fetching/decoding.
+pub fn collect_image_blocks<'a>(blocks: &'a mut [Block], out: &mut Vec<&'a mut Block>) {
+    for block in blocks {
+        match block {
+            Block::Flex { children, .. } => {
+                for child in children.iter_mut() {
+                    collect_image_blocks(&mut child.blocks, out);
+                }
+            }
+            Block::Image { .. } => out.push(block),
+            _ => {}
+        }
+    }
 }
 
 /// Metadata for a form control, addressed by index from [`Inline::Control`].

@@ -9,7 +9,10 @@ use alloc::vec::Vec;
 use libgui::color::Color;
 use libgui::surface::Surface;
 
-use crate::dom::{Align, Hit, Inline, InputKind, InputMeta, Run, TextKind};
+use crate::dom::{
+    Align, AlignItems, Block, FlexChild, FlexDirection, Hit, Inline, InputKind, InputMeta,
+    JustifyContent, Run, TextKind,
+};
 
 /// Truncate `text` with an ellipsis so it fits within `width` pixels.
 pub fn truncate_for_width(text: &str, width: u32) -> String {
@@ -75,6 +78,15 @@ pub struct Clip {
 impl Clip {
     fn visible(&self, y: i32, height: i32) -> bool {
         y + height >= self.top && y <= self.bottom && y + height >= 0
+    }
+
+    /// A clip that contains nothing: block-drawing routines still advance `y`
+    /// correctly but paint no pixels, giving a paint-free measurement pass.
+    pub fn hidden() -> Self {
+        Self {
+            top: i32::MAX,
+            bottom: i32::MIN,
+        }
     }
 }
 
@@ -448,6 +460,231 @@ pub fn draw_text_block(
     }
 
     y + bottom_pad
+}
+
+/// Lay out and paint a sequence of blocks within the column `[x0, x0+max_w)`,
+/// starting at `y` and returning the y just below the last block. This is the
+/// single flow walker shared by the page root and every flex item.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_blocks(
+    s: &mut Surface,
+    blocks: &[Block],
+    x0: u32,
+    max_w: u32,
+    mut y: i32,
+    clip: Clip,
+    page_bg: Color,
+    link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
+) -> i32 {
+    for block in blocks {
+        y = match block {
+            Block::Text {
+                kind,
+                items,
+                align,
+                marker,
+            } => draw_text_block(
+                s,
+                *kind,
+                items,
+                *align,
+                marker.as_deref(),
+                x0,
+                max_w,
+                y,
+                clip,
+                page_bg,
+                link_hits,
+                form,
+                input_hits,
+                zone_hits,
+            ),
+            Block::Rule => draw_rule(s, x0, max_w, y, clip),
+            Block::Image {
+                alt,
+                img,
+                error,
+                align,
+                ..
+            } => draw_image_block(s, alt, img, error.as_deref(), *align, x0, max_w, y, clip),
+            Block::Flex {
+                direction,
+                justify,
+                align,
+                gap,
+                children,
+            } => draw_flex_block(
+                s, *direction, *justify, *align, *gap, children, x0, max_w, y, clip, page_bg,
+                link_hits, form, input_hits, zone_hits,
+            ),
+        };
+    }
+    y
+}
+
+/// Measure the height a block sequence occupies at width `w` without painting.
+fn measure_blocks(
+    s: &mut Surface,
+    blocks: &[Block],
+    w: u32,
+    page_bg: Color,
+    form: &FormCtx,
+) -> i32 {
+    let mut junk_l = Vec::new();
+    let mut junk_i = Vec::new();
+    let mut junk_z = Vec::new();
+    draw_blocks(
+        s,
+        blocks,
+        0,
+        w,
+        0,
+        Clip::hidden(),
+        page_bg,
+        &mut junk_l,
+        form,
+        &mut junk_i,
+        &mut junk_z,
+    )
+}
+
+/// Lay out a flex container. Row containers size children from `flex-grow` /
+/// `flex-basis`, distribute leftover space per `justify-content`, and place
+/// each item on the cross axis per `align-items`; column containers stack the
+/// children with `gap` between them.
+#[allow(clippy::too_many_arguments)]
+fn draw_flex_block(
+    s: &mut Surface,
+    direction: FlexDirection,
+    justify: JustifyContent,
+    align: AlignItems,
+    gap: u16,
+    children: &[FlexChild],
+    x0: u32,
+    max_w: u32,
+    y: i32,
+    clip: Clip,
+    page_bg: Color,
+    link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
+) -> i32 {
+    if children.is_empty() {
+        return y;
+    }
+    let gap = gap as u32;
+
+    if direction == FlexDirection::Column {
+        let mut cy = y;
+        for (i, child) in children.iter().enumerate() {
+            if i > 0 {
+                cy += gap as i32;
+            }
+            cy = draw_blocks(
+                s,
+                &child.blocks,
+                x0,
+                max_w,
+                cy,
+                clip,
+                page_bg,
+                link_hits,
+                form,
+                input_hits,
+                zone_hits,
+            );
+        }
+        return cy;
+    }
+
+    // ── Row layout: resolve each column's width ───────────────────────────────
+    let n = children.len() as u32;
+    let total_gap = gap.saturating_mul(n.saturating_sub(1));
+    let avail = max_w.saturating_sub(total_gap).max(n);
+    let equal = (avail / n).max(CHAR_W);
+
+    let total_grow: u32 = children.iter().map(|c| c.grow as u32).sum();
+    let mut widths: Vec<u32> = children
+        .iter()
+        .map(|c| c.basis.unwrap_or(equal).min(avail))
+        .collect();
+    let sum_pref: u32 = widths.iter().sum();
+
+    if total_grow > 0 && sum_pref < avail {
+        // Grow: hand the free space to grow>0 items, last absorbing rounding.
+        let free = avail - sum_pref;
+        let last_grow = children.iter().rposition(|c| c.grow > 0);
+        let mut spent = 0u32;
+        for (i, child) in children.iter().enumerate() {
+            if child.grow == 0 {
+                continue;
+            }
+            let add = if Some(i) == last_grow {
+                free - spent
+            } else {
+                free * child.grow as u32 / total_grow
+            };
+            widths[i] += add;
+            spent += add;
+        }
+    } else if sum_pref > avail && sum_pref > 0 {
+        // Overflow: shrink columns proportionally to fit the line.
+        for w in widths.iter_mut() {
+            *w = (*w * avail / sum_pref).max(CHAR_W);
+        }
+    }
+
+    // ── Measure each column's height, then place on the main + cross axes ─────
+    let mut heights: Vec<i32> = Vec::with_capacity(children.len());
+    let mut row_h = 0i32;
+    for (i, child) in children.iter().enumerate() {
+        let h = measure_blocks(s, &child.blocks, widths[i], page_bg, form);
+        heights.push(h);
+        row_h = row_h.max(h);
+    }
+
+    let used: u32 = widths.iter().sum::<u32>() + total_gap;
+    let leftover = max_w.saturating_sub(used);
+    let (start_x, extra_gap) = match justify {
+        JustifyContent::Start => (x0, 0),
+        JustifyContent::Center => (x0 + leftover / 2, 0),
+        JustifyContent::End => (x0 + leftover, 0),
+        JustifyContent::SpaceBetween if n > 1 => (x0, leftover / (n - 1)),
+        JustifyContent::SpaceBetween => (x0, 0),
+        JustifyContent::SpaceAround => {
+            let e = leftover / n;
+            (x0 + e / 2, e)
+        }
+    };
+
+    let mut cx = start_x;
+    for (i, child) in children.iter().enumerate() {
+        let cy = match align {
+            AlignItems::Start | AlignItems::Stretch => y,
+            AlignItems::Center => y + (row_h - heights[i]) / 2,
+            AlignItems::End => y + (row_h - heights[i]),
+        };
+        draw_blocks(
+            s,
+            &child.blocks,
+            cx,
+            widths[i],
+            cy,
+            clip,
+            page_bg,
+            link_hits,
+            form,
+            input_hits,
+            zone_hits,
+        );
+        cx += widths[i] + gap + extra_gap;
+    }
+
+    y + row_h
 }
 
 /// Extra vertical breathing room a control adds to its line.

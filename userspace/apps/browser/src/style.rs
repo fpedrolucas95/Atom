@@ -10,7 +10,7 @@
 use libgui::color::Color;
 
 use crate::css::{self, Decls, FontSize, Stylesheet, TextTransform};
-use crate::dom::Align;
+use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent};
 use crate::domtree::{Dom, Element};
 
 /// The default (`medium`) font size in CSS pixels.
@@ -35,6 +35,18 @@ pub struct Computed {
     pub transform: Option<TextTransform>,
     /// Computed `font-size` in CSS pixels (inherited; `em`/`%` resolve here).
     pub font_px: u16,
+    // ── Flex (not inherited; reset per element) ──────────────────────────────
+    /// This element establishes a flex formatting context (`display: flex`).
+    pub flex_container: bool,
+    pub flex_direction: FlexDirection,
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+    /// `gap` between flex items, in pixels.
+    pub gap: u16,
+    /// This element's `flex-grow` factor (read when it is a flex item).
+    pub flex_grow: u16,
+    /// This element's preferred main-axis size (`flex-basis`/`width`), in px.
+    pub flex_basis: Option<u16>,
 }
 
 impl Default for Computed {
@@ -51,6 +63,13 @@ impl Default for Computed {
             align: None,
             transform: None,
             font_px: DEFAULT_FONT_PX,
+            flex_container: false,
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::Start,
+            align_items: AlignItems::Stretch,
+            gap: 0,
+            flex_grow: 0,
+            flex_basis: None,
         }
     }
 }
@@ -58,9 +77,17 @@ impl Default for Computed {
 /// Resolve the computed style of element `el`. Returns the style and whether
 /// the element is `display: none` (subtree pruned by the caller).
 pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (Computed, bool) {
-    // Inherited properties start from the parent.
+    // Inherited properties start from the parent; flex layout inputs and the
+    // background are element-local and reset to their initial values.
     let mut out = Computed {
         background: None,
+        flex_container: false,
+        flex_direction: FlexDirection::Row,
+        justify_content: JustifyContent::Start,
+        align_items: AlignItems::Stretch,
+        gap: 0,
+        flex_grow: 0,
+        flex_basis: None,
         ..*parent
     };
     let Some(element) = dom.element(el) else {
@@ -131,6 +158,27 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(t) = d.transform {
         out.transform = t;
+    }
+    if let Some(v) = d.flex_container {
+        out.flex_container = v;
+    }
+    if let Some(v) = d.flex_direction {
+        out.flex_direction = v;
+    }
+    if let Some(v) = d.justify_content {
+        out.justify_content = v;
+    }
+    if let Some(v) = d.align_items {
+        out.align_items = v;
+    }
+    if let Some(v) = d.gap {
+        out.gap = v;
+    }
+    if let Some(v) = d.flex_grow {
+        out.flex_grow = v;
+    }
+    if let Some(v) = d.flex_basis {
+        out.flex_basis = Some(v);
     }
 }
 

@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use libgui::color::Color;
 
-use crate::dom::Align;
+use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent};
 use crate::domtree::Dom;
 
 /// Viewport used for media-query evaluation (browser window content area).
@@ -78,6 +78,18 @@ pub struct Decls {
     pub visible: Option<bool>,
     pub align: Option<Align>,
     pub transform: Option<Option<TextTransform>>,
+    /// `Some(true)` when `display` is `flex`/`inline-flex`; `Some(false)` for
+    /// any other visible display, so a later rule can turn flex layout back off.
+    pub flex_container: Option<bool>,
+    pub flex_direction: Option<FlexDirection>,
+    pub justify_content: Option<JustifyContent>,
+    pub align_items: Option<AlignItems>,
+    /// `gap` / `column-gap` in pixels.
+    pub gap: Option<u16>,
+    /// `flex-grow` factor for a flex item.
+    pub flex_grow: Option<u16>,
+    /// Preferred main-axis size (`flex-basis`/`width`) in pixels.
+    pub flex_basis: Option<u16>,
 }
 
 impl Decls {
@@ -102,6 +114,13 @@ impl Decls {
         take!(visible);
         take!(align);
         take!(transform);
+        take!(flex_container);
+        take!(flex_direction);
+        take!(justify_content);
+        take!(align_items);
+        take!(gap);
+        take!(flex_grow);
+        take!(flex_basis);
     }
 }
 
@@ -184,8 +203,56 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
         "display" => match lw {
             "none" => d.display_none = Some(true),
             "inherit" | "initial" | "unset" | "revert" | "revert-layer" => {}
-            _ => d.display_none = Some(false),
+            "flex" | "inline-flex" => {
+                d.display_none = Some(false);
+                d.flex_container = Some(true);
+            }
+            _ => {
+                d.display_none = Some(false);
+                d.flex_container = Some(false);
+            }
         },
+        "flex-direction" => {
+            d.flex_direction = match lw {
+                "row" | "row-reverse" => Some(FlexDirection::Row),
+                "column" | "column-reverse" => Some(FlexDirection::Column),
+                _ => None,
+            }
+        }
+        "justify-content" => {
+            d.justify_content = match lw {
+                "flex-start" | "start" | "left" | "normal" => Some(JustifyContent::Start),
+                "center" => Some(JustifyContent::Center),
+                "flex-end" | "end" | "right" => Some(JustifyContent::End),
+                "space-between" => Some(JustifyContent::SpaceBetween),
+                "space-around" | "space-evenly" => Some(JustifyContent::SpaceAround),
+                _ => None,
+            }
+        }
+        "align-items" => {
+            d.align_items = match lw {
+                "flex-start" | "start" | "self-start" => Some(AlignItems::Start),
+                "center" => Some(AlignItems::Center),
+                "flex-end" | "end" | "self-end" => Some(AlignItems::End),
+                "stretch" | "normal" => Some(AlignItems::Stretch),
+                _ => None,
+            }
+        }
+        "gap" | "column-gap" | "grid-column-gap" => {
+            // For shorthand `gap: <row> <col>` the first token is the row gap;
+            // we lay out a single line, so the column gap (last token) governs.
+            let token = lw.split_whitespace().last().unwrap_or(lw);
+            if let Some(px) = parse_css_length(token) {
+                d.gap = Some(px.min(u16::MAX as u32) as u16);
+            }
+        }
+        "flex-grow" => d.flex_grow = lw.split('.').next().and_then(|n| n.parse().ok()),
+        "flex-basis" | "width" | "min-width" => {
+            if let Some(px) = parse_css_length(lw) {
+                d.flex_basis = Some(px.min(u16::MAX as u32) as u16);
+            }
+        }
+        "flex" => apply_flex_shorthand(d, lw),
         "visibility" => match lw {
             "hidden" | "collapse" => d.visible = Some(false),
             "visible" => d.visible = Some(true),
@@ -265,6 +332,38 @@ fn apply_font_shorthand(d: &mut Decls, lw: &str) {
     }
     if is_mono_family(lw) {
         d.mono = Some(true);
+    }
+}
+
+/// Parse the `flex` shorthand. We model only the grow factor and an optional
+/// pixel basis: `flex: <grow> <shrink>? <basis>?`, plus the `none`/`auto`/
+/// `initial` keywords and the single-number form (`flex: 1`).
+fn apply_flex_shorthand(d: &mut Decls, lw: &str) {
+    match lw.trim() {
+        "none" => {
+            d.flex_grow = Some(0);
+            return;
+        }
+        "auto" | "initial" => {
+            d.flex_grow = Some(if lw.trim() == "auto" { 1 } else { 0 });
+            return;
+        }
+        _ => {}
+    }
+    let mut seen_grow = false;
+    for tok in lw.split_whitespace() {
+        if let Some(px) = tok.strip_suffix("px").and_then(|n| n.parse::<u32>().ok()) {
+            d.flex_basis = Some(px.min(u16::MAX as u32) as u16);
+        } else if tok == "0" && !seen_grow {
+            d.flex_grow = Some(0);
+            seen_grow = true;
+        } else if let Ok(n) = tok.split('.').next().unwrap_or(tok).parse::<u16>() {
+            // First unitless integer is grow, second is shrink (ignored).
+            if !seen_grow {
+                d.flex_grow = Some(n);
+                seen_grow = true;
+            }
+        }
     }
 }
 

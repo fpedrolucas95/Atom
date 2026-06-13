@@ -21,7 +21,9 @@ use alloc::vec::Vec;
 use libgui::color::Color;
 
 use crate::css::{Stylesheet, TextTransform};
-use crate::dom::{Align, Block, Document, Inline, InputKind, InputMeta, Run, RunStyle, TextKind};
+use crate::dom::{
+    Align, Block, Document, FlexChild, Inline, InputKind, InputMeta, Run, RunStyle, TextKind,
+};
 use crate::domtree::{build_dom, Dom, Element, NodeData, DOCUMENT};
 use crate::style::{self, Computed};
 
@@ -210,6 +212,15 @@ fn skip_subtree(tag: &str) -> bool {
             | "map"
             | "noembed"
             | "noframes"
+    )
+}
+
+/// Elements that never establish a flex container even when CSS asks: void or
+/// replaced elements whose layout the renderer already owns.
+fn is_flex_ineligible(tag: &str) -> bool {
+    matches!(
+        tag,
+        "br" | "hr" | "img" | "input" | "select" | "textarea" | "button" | "table"
     )
 }
 
@@ -436,6 +447,14 @@ impl<'a> Flattener<'a> {
             self.background = cs.background;
         }
 
+        // A `display: flex` container lays its element children out along a
+        // main axis. Replaced/void elements ignore flex (they have no flow
+        // children to arrange).
+        if cs.flex_container && !is_flex_ineligible(tag) {
+            self.emit_flex(id, &cs, link, zone);
+            return;
+        }
+
         match tag {
             "br" => self.line_break(),
             "hr" => {
@@ -554,6 +573,88 @@ impl<'a> Flattener<'a> {
         if self.cur_align.is_none() {
             self.cur_align = Some(cs.align.unwrap_or(Align::Left));
         }
+    }
+
+    // ── Flex containers ───────────────────────────────────────────────────────
+
+    /// Emit a [`Block::Flex`] for a `display: flex` element. Each element child
+    /// becomes a flex item with its own captured sub-flow; runs of significant
+    /// text between elements become anonymous items so bare text still lays out.
+    fn emit_flex(&mut self, id: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
+        self.flush_block();
+        let dom = self.dom;
+        let mut children: Vec<FlexChild> = Vec::new();
+        for &c in &dom.nodes[id].children {
+            match &dom.nodes[c].data {
+                NodeData::Element(_) => {
+                    // Resolve the child's style once for its flex sizing inputs
+                    // and to honour `display: none`.
+                    let (ccs, none) = style::compute(dom, c, self.sheet, cs);
+                    if none {
+                        continue;
+                    }
+                    let blocks = self.capture_blocks(|f| f.walk_node(c, cs, link, zone));
+                    if blocks.is_empty() {
+                        continue;
+                    }
+                    children.push(FlexChild {
+                        grow: ccs.flex_grow,
+                        basis: ccs.flex_basis.map(u32::from),
+                        blocks,
+                    });
+                }
+                NodeData::Text(t) => {
+                    if t.chars().any(|ch| !ch.is_whitespace()) {
+                        let text = t.clone();
+                        let blocks = self.capture_blocks(|f| f.emit_text(&text, cs, link, zone));
+                        if !blocks.is_empty() {
+                            children.push(FlexChild {
+                                grow: 0,
+                                basis: None,
+                                blocks,
+                            });
+                        }
+                    }
+                }
+                NodeData::Document => {}
+            }
+        }
+        if children.is_empty() {
+            return;
+        }
+        self.blocks.push(Block::Flex {
+            direction: cs.flex_direction,
+            justify: cs.justify_content,
+            align: cs.align_items,
+            gap: cs.gap,
+            children,
+        });
+    }
+
+    /// Run `body` against a fresh block/inline buffer and return the blocks it
+    /// produced, restoring the previous flow state afterwards. Side tables
+    /// (links, inputs, click zones) stay shared so item-local indices remain
+    /// valid in the final [`Document`].
+    fn capture_blocks(&mut self, body: impl FnOnce(&mut Self)) -> Vec<Block> {
+        let saved_blocks = core::mem::take(&mut self.blocks);
+        let saved_items = core::mem::take(&mut self.items);
+        let saved_kind = self.cur_kind;
+        let saved_align = self.cur_align.take();
+        let saved_marker = self.cur_marker.take();
+        let saved_space = self.last_was_space;
+
+        self.cur_kind = TextKind::Paragraph;
+        self.last_was_space = true;
+        body(self);
+        self.flush_block();
+
+        let produced = core::mem::replace(&mut self.blocks, saved_blocks);
+        self.items = saved_items;
+        self.cur_kind = saved_kind;
+        self.cur_align = saved_align;
+        self.cur_marker = saved_marker;
+        self.last_was_space = saved_space;
+        produced
     }
 
     // ── Lists ───────────────────────────────────────────────────────────────

@@ -27,7 +27,10 @@ pub mod tokenizer;
 
 #[cfg(test)]
 mod tests {
-    use crate::dom::{Align, Block, Document, Inline, InputKind, TextKind};
+    use crate::dom::{
+        Align, AlignItems, Block, Document, FlexChild, FlexDirection, Inline, InputKind,
+        JustifyContent, TextKind,
+    };
     use crate::html::{parse_html, parse_html_with_css};
     use libgui::color::Color;
 
@@ -242,6 +245,143 @@ mod tests {
         // header cells are bold by default
         assert!(find_run(&doc, "H1").style.bold);
         assert!(!find_run(&doc, "a").style.bold);
+    }
+
+    // ── Flexbox layout ───────────────────────────────────────────────────────
+
+    /// The first `Block::Flex` in the document, with its container properties.
+    fn first_flex(doc: &Document) -> (FlexDirection, JustifyContent, AlignItems, u16, &[FlexChild]) {
+        for b in &doc.blocks {
+            if let Block::Flex {
+                direction,
+                justify,
+                align,
+                gap,
+                children,
+            } = b
+            {
+                return (*direction, *justify, *align, *gap, children);
+            }
+        }
+        panic!("no flex block found");
+    }
+
+    /// Joined, trimmed text of a flex child's sub-flow.
+    fn child_text(child: &FlexChild) -> String {
+        let mut s = String::new();
+        for b in &child.blocks {
+            if let Block::Text { items, .. } = b {
+                for it in items {
+                    if let Inline::Run(r) = it {
+                        s.push_str(&r.text);
+                    }
+                }
+            }
+        }
+        s.trim().to_string()
+    }
+
+    #[test]
+    fn flex_container_lays_out_element_children() {
+        let doc =
+            parse_html("<div style=\"display:flex\"><div>A</div><span>B</span><p>C</p></div>");
+        let (dir, _, _, _, children) = first_flex(&doc);
+        assert_eq!(dir, FlexDirection::Row);
+        assert_eq!(children.len(), 3);
+        assert_eq!(child_text(&children[0]), "A");
+        assert_eq!(child_text(&children[1]), "B");
+        assert_eq!(child_text(&children[2]), "C");
+    }
+
+    #[test]
+    fn flex_container_properties_parse() {
+        let doc = parse_html(
+            "<div style=\"display:flex; flex-direction:column; \
+             justify-content:space-between; align-items:center; gap:12px\">\
+             <div>A</div><div>B</div></div>",
+        );
+        let (dir, justify, align, gap, children) = first_flex(&doc);
+        assert_eq!(dir, FlexDirection::Column);
+        assert_eq!(justify, JustifyContent::SpaceBetween);
+        assert_eq!(align, AlignItems::Center);
+        assert_eq!(gap, 12);
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn flex_item_grow_and_basis_resolve() {
+        let doc = parse_html(
+            "<div style=\"display:flex\">\
+             <div style=\"flex:2\">A</div>\
+             <div style=\"flex-grow:1; flex-basis:80px\">B</div>\
+             <div style=\"width:120px\">C</div></div>",
+        );
+        let (_, _, _, _, children) = first_flex(&doc);
+        assert_eq!((children[0].grow, children[0].basis), (2, None));
+        assert_eq!((children[1].grow, children[1].basis), (1, Some(80)));
+        assert_eq!((children[2].grow, children[2].basis), (0, Some(120)));
+    }
+
+    #[test]
+    fn flex_containers_nest() {
+        let doc = parse_html(
+            "<div style=\"display:flex\">\
+             <div style=\"display:flex\"><div>A</div><div>B</div></div>\
+             <div>C</div></div>",
+        );
+        let (_, _, _, _, children) = first_flex(&doc);
+        assert_eq!(children.len(), 2);
+        // The first child is itself a flex container with two items.
+        match &children[0].blocks[0] {
+            Block::Flex { children: inner, .. } => {
+                assert_eq!(inner.len(), 2);
+                assert_eq!(child_text(&inner[0]), "A");
+                assert_eq!(child_text(&inner[1]), "B");
+            }
+            _ => panic!("expected nested flex block"),
+        }
+        assert_eq!(child_text(&children[1]), "C");
+    }
+
+    #[test]
+    fn flex_bare_text_becomes_anonymous_item() {
+        let doc = parse_html("<div style=\"display:flex\">Label<div>X</div></div>");
+        let (_, _, _, _, children) = first_flex(&doc);
+        assert_eq!(children.len(), 2);
+        assert_eq!(child_text(&children[0]), "Label");
+        assert_eq!(child_text(&children[1]), "X");
+    }
+
+    #[test]
+    fn flex_skips_display_none_children() {
+        let doc = parse_html(
+            "<div style=\"display:flex\">\
+             <div style=\"display:none\">gone</div><div>here</div></div>",
+        );
+        let (_, _, _, _, children) = first_flex(&doc);
+        assert_eq!(children.len(), 1);
+        assert_eq!(child_text(&children[0]), "here");
+    }
+
+    #[test]
+    fn flex_links_inside_items_stay_addressable() {
+        // Links nested in flex items must still register in the document's
+        // global link table so clicks resolve.
+        let doc = parse_html(
+            "<div style=\"display:flex\"><a href=\"/one\">1</a><a href=\"/two\">2</a></div>",
+        );
+        assert_eq!(doc.links, vec!["/one".to_string(), "/two".to_string()]);
+    }
+
+    #[test]
+    fn flex_ignored_on_replaced_elements() {
+        // `display:flex` on an <img> must not swallow it into a flex container.
+        let doc = parse_html("<img src=\"x.png\" style=\"display:flex\" alt=\"a\">");
+        assert!(doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Image { .. })));
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Flex { .. })));
     }
 
     #[test]

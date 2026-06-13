@@ -314,7 +314,9 @@ impl Browser {
         let mut decoded = 0u32;
         let mut ok = 0u32;
         let mut failed = 0u32;
-        for block in self.doc.blocks.iter_mut() {
+        let mut image_blocks: Vec<&mut Block> = Vec::new();
+        crate::dom::collect_image_blocks(&mut self.doc.blocks, &mut image_blocks);
+        for block in image_blocks {
             let Block::Image {
                 src, img, error, ..
             } = block
@@ -582,17 +584,11 @@ impl Browser {
     /// matched by source URL, so re-renders never refetch or redecode.
     fn carry_images(&mut self, doc: &mut Document) {
         let mut old: Vec<(String, Option<libimage::DecodedImage>, Option<String>)> = Vec::new();
-        for block in core::mem::take(&mut self.doc.blocks) {
-            if let Block::Image {
-                src, img, error, ..
-            } = block
-            {
-                if img.is_some() || error.is_some() {
-                    old.push((src, img, error));
-                }
-            }
-        }
-        for block in doc.blocks.iter_mut() {
+        drain_images(core::mem::take(&mut self.doc.blocks), &mut old);
+
+        let mut image_blocks: Vec<&mut Block> = Vec::new();
+        crate::dom::collect_image_blocks(&mut doc.blocks, &mut image_blocks);
+        for block in image_blocks {
             let Block::Image {
                 src, img, error, ..
             } = block
@@ -1176,49 +1172,19 @@ impl Browser {
             values: &self.input_text,
             focused: self.focused_input,
         };
-        for block in &self.doc.blocks {
-            y = match block {
-                Block::Text {
-                    kind,
-                    items,
-                    align,
-                    marker,
-                } => render::draw_text_block(
-                    surface,
-                    *kind,
-                    items,
-                    *align,
-                    marker.as_deref(),
-                    x0,
-                    content_w,
-                    y,
-                    clip,
-                    page_bg,
-                    &mut link_hits,
-                    &form,
-                    &mut input_hits,
-                    &mut zone_hits,
-                ),
-                Block::Rule => render::draw_rule(surface, x0, content_w, y, clip),
-                Block::Image {
-                    alt,
-                    img,
-                    error,
-                    align,
-                    ..
-                } => render::draw_image_block(
-                    surface,
-                    alt,
-                    img,
-                    error.as_deref(),
-                    *align,
-                    x0,
-                    content_w,
-                    y,
-                    clip,
-                ),
-            };
-        }
+        y = render::draw_blocks(
+            surface,
+            &self.doc.blocks,
+            x0,
+            content_w,
+            y,
+            clip,
+            page_bg,
+            &mut link_hits,
+            &form,
+            &mut input_hits,
+            &mut zone_hits,
+        );
 
         self.content_height = (y + self.scroll as i32 - clip.top).max(0) as u32;
         self.view_h = (clip.bottom - clip.top).max(1) as u32;
@@ -1455,4 +1421,29 @@ fn append_notice(notice: &mut String, value: &str) {
         notice.push_str(" | ");
     }
     notice.push_str(value);
+}
+
+/// Consume a block tree and collect the already-fetched/failed images so a
+/// reload can reuse them, recursing through flex children.
+fn drain_images(
+    blocks: Vec<Block>,
+    out: &mut Vec<(String, Option<libimage::DecodedImage>, Option<String>)>,
+) {
+    for block in blocks {
+        match block {
+            Block::Image {
+                src, img, error, ..
+            } => {
+                if img.is_some() || error.is_some() {
+                    out.push((src, img, error));
+                }
+            }
+            Block::Flex { children, .. } => {
+                for child in children {
+                    drain_images(child.blocks, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
