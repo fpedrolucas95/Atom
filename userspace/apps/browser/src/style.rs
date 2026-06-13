@@ -58,6 +58,10 @@ pub struct Computed {
     /// Uniform border width in pixels and its colour.
     pub border_width: u16,
     pub border_color: Option<Color>,
+    /// Corner radius in pixels (`border-radius`).
+    pub border_radius: u16,
+    /// `box-sizing: border-box`.
+    pub box_sizing_border: bool,
     /// Explicit content width (`width`/`max-width`); may be a percentage.
     pub box_width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
@@ -91,6 +95,8 @@ impl Default for Computed {
             margin_center: false,
             border_width: 0,
             border_color: None,
+            border_radius: 0,
+            box_sizing_border: false,
             box_width: None,
             box_height: None,
         }
@@ -117,6 +123,8 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         margin_center: false,
         border_width: 0,
         border_color: None,
+        border_radius: 0,
+        box_sizing_border: false,
         box_width: None,
         box_height: None,
         ..*parent
@@ -231,6 +239,12 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(c) = d.border_color {
         out.border_color = Some(c);
+    }
+    if let Some(v) = d.border_radius {
+        out.border_radius = v;
+    }
+    if let Some(v) = d.box_sizing_border {
+        out.box_sizing_border = v;
     }
     if let Some(v) = d.margin_top {
         out.margin[0] = v;

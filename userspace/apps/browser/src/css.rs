@@ -100,6 +100,10 @@ pub struct Decls {
     /// Uniform border width in pixels and its colour.
     pub border_width: Option<u16>,
     pub border_color: Option<Color>,
+    /// Corner radius in pixels (`border-radius`).
+    pub border_radius: Option<u16>,
+    /// `box-sizing: border-box`.
+    pub box_sizing_border: Option<bool>,
     /// Margin in pixels (top, right, bottom, left), each set independently.
     pub margin_top: Option<u16>,
     pub margin_right: Option<u16>,
@@ -149,6 +153,8 @@ impl Decls {
         take!(pad_left);
         take!(border_width);
         take!(border_color);
+        take!(border_radius);
+        take!(box_sizing_border);
         take!(margin_top);
         take!(margin_right);
         take!(margin_bottom);
@@ -356,6 +362,18 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
         "border-style" => {
             if matches!(lw, "none" | "hidden") {
                 d.border_width = Some(0);
+            }
+        }
+        "border-radius" => {
+            // Take the first radius; per-corner and elliptical radii collapse
+            // to this single value.
+            d.border_radius = lw.split_whitespace().find_map(parse_len_u16);
+        }
+        "box-sizing" => {
+            d.box_sizing_border = match lw {
+                "border-box" => Some(true),
+                "content-box" => Some(false),
+                _ => None,
             }
         }
         "visibility" => match lw {

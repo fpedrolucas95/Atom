@@ -468,6 +468,25 @@ mod tests {
     }
 
     #[test]
+    fn border_radius_and_box_sizing_parse() {
+        let doc = parse_html(
+            "<div style=\"background:#222; border-radius:8px; box-sizing:border-box; \
+             width:200px\">x</div>",
+        );
+        let (style, _) = first_box(&doc);
+        assert_eq!(style.radius, 8);
+        assert!(style.border_box);
+        assert_eq!(style.width, Some(Length::Px(200)));
+    }
+
+    #[test]
+    fn box_sizing_defaults_to_content_box() {
+        let doc = parse_html("<div style=\"background:#222; width:200px\">x</div>");
+        assert!(!first_box(&doc).0.border_box);
+        assert_eq!(first_box(&doc).0.radius, 0);
+    }
+
+    #[test]
     fn border_none_keeps_box_unboxed_without_other_decoration() {
         // `border-style:none` zeroes the width; with nothing else to paint the
         // div stays a plain flow element (no box block).

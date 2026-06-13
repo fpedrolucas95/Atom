@@ -579,9 +579,18 @@ fn draw_box(
     let avail = max_w.saturating_sub(ml + mr);
     let frame = bw * 2 + pl + pr;
     let outer_w = match style.width {
-        // `width`/`max-width` give the content width; percentages resolve
-        // against the available band.
-        Some(w) => (w.resolve(avail) + frame).min(avail).max(frame + CHAR_W),
+        // `width`/`max-width` give the content width under `content-box`, or the
+        // border-box width under `border-box`; percentages resolve against the
+        // available band.
+        Some(w) => {
+            let resolved = w.resolve(avail);
+            let outer = if style.border_box {
+                resolved
+            } else {
+                resolved + frame
+            };
+            outer.min(avail).max(frame + CHAR_W)
+        }
         None => avail,
     };
     let box_x = if style.center && outer_w < avail {
@@ -601,15 +610,37 @@ fn draw_box(
     let outer_h = bw * 2 + pt + pb + content_h;
 
     let top = y + mt as i32;
-    if let Some(bg) = style.background {
-        fill_clipped(s, box_x, top, outer_w, outer_h, clip, bg);
-    }
-    if bw > 0 {
-        let bc = style.border_color.unwrap_or(Color::rgb(148, 163, 184));
-        fill_clipped(s, box_x, top, outer_w, bw, clip, bc); // top
-        fill_clipped(s, box_x, top + (outer_h - bw) as i32, outer_w, bw, clip, bc); // bottom
-        fill_clipped(s, box_x, top, bw, outer_h, clip, bc); // left
-        fill_clipped(s, box_x + outer_w - bw, top, bw, outer_h, clip, bc); // right
+    // Rounded corners need the whole box on-screen (the AA primitives can't be
+    // band-clipped); when scrolled across an edge, fall back to square fills.
+    let radius = style.radius as u32;
+    let rounded = radius > 0 && top >= clip.top && top >= 0 && top + outer_h as i32 <= clip.bottom;
+    let bc = style.border_color.unwrap_or(Color::rgb(148, 163, 184));
+
+    if rounded {
+        if let Some(bg) = style.background {
+            s.fill_rect_rounded_aa(box_x, top as u32, outer_w, outer_h, radius, bg);
+        }
+        // Approximate a thick rounded border with concentric 1px outlines.
+        for i in 0..bw {
+            s.draw_rect_rounded_aa(
+                box_x + i,
+                top as u32 + i,
+                outer_w - i * 2,
+                outer_h - i * 2,
+                radius.saturating_sub(i),
+                bc,
+            );
+        }
+    } else {
+        if let Some(bg) = style.background {
+            fill_clipped(s, box_x, top, outer_w, outer_h, clip, bg);
+        }
+        if bw > 0 {
+            fill_clipped(s, box_x, top, outer_w, bw, clip, bc); // top
+            fill_clipped(s, box_x, top + (outer_h - bw) as i32, outer_w, bw, clip, bc); // bottom
+            fill_clipped(s, box_x, top, bw, outer_h, clip, bc); // left
+            fill_clipped(s, box_x + outer_w - bw, top, bw, outer_h, clip, bc); // right
+        }
     }
 
     let content_y = top + (bw + pt) as i32;
@@ -913,6 +944,8 @@ fn intrinsic_width(blocks: &[Block], form: &FormCtx) -> (u32, u32) {
                     + style.margin[1] as u32
                     + style.margin[3] as u32;
                 match style.width {
+                    // Under border-box the width already includes the frame.
+                    Some(crate::dom::Length::Px(w)) if style.border_box => (w, w),
                     Some(crate::dom::Length::Px(w)) => (w + frame, w + frame),
                     _ => (cmin + frame, cpref + frame),
                 }

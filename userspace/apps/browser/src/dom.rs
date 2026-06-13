@@ -142,6 +142,10 @@ pub struct BoxStyle {
     pub center: bool,
     pub border_width: u16,
     pub border_color: Option<Color>,
+    /// Corner radius in pixels (`border-radius`).
+    pub radius: u16,
+    /// `box-sizing: border-box` — the `width` includes padding + border.
+    pub border_box: bool,
     /// Explicit content width (`width`/`max-width`), capped to the available
     /// width; percentages resolve against the container at layout time.
     pub width: Option<Length>,
