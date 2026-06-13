@@ -122,8 +122,14 @@ pub struct Decls {
     pub margin_center: Option<bool>,
     /// Explicit content width (`width`/`max-width`); may be a percentage.
     pub box_width: Option<Length>,
-    /// Content-area height floor (`height`/`min-height`) in pixels.
+    /// Fixed content-area height (`height`) in pixels.
     pub box_height: Option<u16>,
+    /// Content-area height floor (`min-height`) in pixels.
+    pub box_min_height: Option<u16>,
+    /// `overflow` other than `visible`.
+    pub overflow_clip: Option<bool>,
+    /// `z-index`.
+    pub z_index: Option<i32>,
 }
 
 impl Decls {
@@ -177,6 +183,9 @@ impl Decls {
         take!(margin_center);
         take!(box_width);
         take!(box_height);
+        take!(box_min_height);
+        take!(overflow_clip);
+        take!(z_index);
     }
 }
 
@@ -331,7 +340,21 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
             d.box_width = v;
         }
         "max-width" => d.box_width = parse_length(lw),
-        "height" | "min-height" => d.box_height = parse_len_u16(lw),
+        "height" | "max-height" => d.box_height = parse_len_u16(lw),
+        "min-height" => d.box_min_height = parse_len_u16(lw),
+        "overflow" | "overflow-x" | "overflow-y" => {
+            // Any non-visible overflow clips; we don't render inner scrollbars.
+            match lw {
+                "visible" => d.overflow_clip = Some(false),
+                "hidden" | "clip" | "auto" | "scroll" => d.overflow_clip = Some(true),
+                _ => {}
+            }
+        }
+        "z-index" => {
+            if lw != "auto" {
+                d.z_index = lw.split('.').next().and_then(|n| n.parse().ok());
+            }
+        }
         "flex" => apply_flex_shorthand(d, lw),
         "margin" => {
             let (sides, center) = parse_margin_sides(lw);

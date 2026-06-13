@@ -539,6 +539,31 @@ mod tests {
     }
 
     #[test]
+    fn height_overflow_and_zindex_parse() {
+        let doc = parse_html(
+            "<div style=\"position:absolute; height:120px; min-height:40px; \
+             overflow:hidden; z-index:5\"><p>x</p></div>",
+        );
+        let style = doc.positioned[0].style;
+        assert_eq!(style.height, Some(120));
+        assert_eq!(style.min_height, Some(40));
+        assert!(style.overflow_clip);
+        assert_eq!(style.z_index, 5);
+    }
+
+    #[test]
+    fn overflow_visible_does_not_clip() {
+        let doc = parse_html("<div style=\"background:#222; overflow:visible\">x</div>");
+        assert!(!first_box(&doc).0.overflow_clip);
+    }
+
+    #[test]
+    fn negative_zindex_parses() {
+        let doc = parse_html("<div style=\"position:fixed; z-index:-1\"><p>x</p></div>");
+        assert_eq!(doc.positioned[0].style.z_index, -1);
+    }
+
+    #[test]
     fn positioned_box_links_stay_addressable() {
         let doc = parse_html(
             "<div style=\"position:absolute; top:0\"><a href=\"/x\">go</a></div>",

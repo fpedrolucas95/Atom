@@ -247,10 +247,13 @@ fn box_style_of(cs: &Computed) -> BoxStyle {
         radius: cs.border_radius,
         border_box: cs.box_sizing_border,
         width: cs.box_width,
-        min_height: cs.box_height.map(u32::from),
+        min_height: cs.box_min_height.map(u32::from),
+        height: cs.box_height.map(u32::from),
+        overflow_clip: cs.overflow_clip,
         shadow: cs.box_shadow,
         position: cs.position,
         inset: cs.inset,
+        z_index: cs.z_index,
     }
 }
 

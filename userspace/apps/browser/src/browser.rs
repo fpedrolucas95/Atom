@@ -1200,11 +1200,14 @@ impl Browser {
         self.view_h = (clip.bottom - clip.top).max(1) as u32;
         self.scroll = self.scroll.min(self.max_scroll());
 
-        // Out-of-flow boxes paint over the flow, against the content area.
-        for pb in &self.doc.positioned {
+        // Out-of-flow boxes paint over the flow, against the content area, in
+        // ascending z-index (stable, so equal z keeps document order).
+        let mut order: Vec<usize> = (0..self.doc.positioned.len()).collect();
+        order.sort_by_key(|&i| self.doc.positioned[i].style.z_index);
+        for &i in &order {
             render::draw_positioned(
                 surface,
-                pb,
+                &self.doc.positioned[i],
                 x0,
                 content_w,
                 clip,

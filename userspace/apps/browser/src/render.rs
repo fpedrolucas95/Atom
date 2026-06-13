@@ -640,7 +640,12 @@ fn draw_box(
     let inner_bg = style.background.unwrap_or(page_bg);
 
     let measured = measure_blocks(s, children, content_w, inner_bg, form).max(0) as u32;
-    let content_h = measured.max(style.min_height.unwrap_or(0));
+    // A fixed `height` overrides the measured content height; `min-height` is a
+    // floor on either.
+    let content_h = style
+        .height
+        .unwrap_or(measured)
+        .max(style.min_height.unwrap_or(0));
     let outer_h = bw * 2 + pt + pb + content_h;
 
     // `position: relative` shifts the painted box (and its content) while still
@@ -654,14 +659,36 @@ fn draw_box(
 
     let content_x = box_x + bw + pl;
     let content_y = top + (bw + pt) as i32;
+    let content_clip = clip_for_content(style, clip, content_y, content_h);
     draw_blocks(
-        s, children, content_x, content_w, content_y, clip, inner_bg, link_hits, form, input_hits,
+        s,
+        children,
+        content_x,
+        content_w,
+        content_y,
+        content_clip,
+        inner_bg,
+        link_hits,
+        form,
+        input_hits,
         zone_hits,
     );
 
     // Flow advances by the in-flow box height; a relative offset does not move
     // following content.
     flow_top + outer_h as i32 + mb as i32
+}
+
+/// Restrict the clip band to the box's content area when `overflow` clips, so
+/// content taller than the box (e.g. a fixed `height`) is cut off vertically.
+fn clip_for_content(style: &BoxStyle, clip: Clip, content_y: i32, content_h: u32) -> Clip {
+    if !style.overflow_clip {
+        return clip;
+    }
+    Clip {
+        top: content_y.max(clip.top),
+        bottom: (content_y + content_h as i32).min(clip.bottom),
+    }
 }
 
 /// The paint-time `(dx, dy)` shift for a `position: relative` box (`left`/`top`
@@ -785,7 +812,10 @@ pub fn draw_positioned(
 
     let inner_bg = style.background.unwrap_or(page_bg);
     let measured = measure_blocks(s, &pb.blocks, content_w_inner, inner_bg, form).max(0) as u32;
-    let content_h = measured.max(style.min_height.unwrap_or(0));
+    let content_h = style
+        .height
+        .unwrap_or(measured)
+        .max(style.min_height.unwrap_or(0));
     let outer_h = bw * 2 + style.padding[0] as u32 + style.padding[2] as u32 + content_h;
 
     // Vertical origin: the viewport top for `fixed`, the document content origin
@@ -807,13 +837,14 @@ pub fn draw_positioned(
 
     let content_x = x + bw + style.padding[3] as u32;
     let content_y = y + (bw + style.padding[0] as u32) as i32;
+    let content_clip = clip_for_content(style, clip, content_y, content_h);
     draw_blocks(
         s,
         &pb.blocks,
         content_x,
         content_w_inner,
         content_y,
-        clip,
+        content_clip,
         inner_bg,
         link_hits,
         form,

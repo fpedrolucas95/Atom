@@ -69,8 +69,14 @@ pub struct Computed {
     pub inset: [Option<Length>; 4],
     /// Explicit content width (`width`/`max-width`); may be a percentage.
     pub box_width: Option<Length>,
-    /// Content-area height floor (`height`/`min-height`) in pixels.
+    /// Fixed content-area height (`height`/`max-height`) in pixels.
     pub box_height: Option<u16>,
+    /// Content-area height floor (`min-height`) in pixels.
+    pub box_min_height: Option<u16>,
+    /// `overflow` other than `visible`.
+    pub overflow_clip: bool,
+    /// Paint order among positioned boxes (`z-index`).
+    pub z_index: i32,
 }
 
 impl Default for Computed {
@@ -107,6 +113,9 @@ impl Default for Computed {
             inset: [None; 4],
             box_width: None,
             box_height: None,
+            box_min_height: None,
+            overflow_clip: false,
+            z_index: 0,
         }
     }
 }
@@ -138,6 +147,9 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         inset: [None; 4],
         box_width: None,
         box_height: None,
+        box_min_height: None,
+        overflow_clip: false,
+        z_index: 0,
         ..*parent
     };
     let Some(element) = dom.element(el) else {
@@ -295,6 +307,15 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(v) = d.box_height {
         out.box_height = Some(v);
+    }
+    if let Some(v) = d.box_min_height {
+        out.box_min_height = Some(v);
+    }
+    if let Some(v) = d.overflow_clip {
+        out.overflow_clip = v;
+    }
+    if let Some(v) = d.z_index {
+        out.z_index = v;
     }
 }
 

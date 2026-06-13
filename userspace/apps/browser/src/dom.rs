@@ -169,14 +169,20 @@ pub struct BoxStyle {
     /// Explicit content width (`width`/`max-width`), capped to the available
     /// width; percentages resolve against the container at layout time.
     pub width: Option<Length>,
-    /// Content-area height floor (`height`/`min-height`) in pixels.
+    /// Content-area height floor (`min-height`) in pixels.
     pub min_height: Option<u32>,
+    /// Fixed content-area height (`height`) in pixels.
+    pub height: Option<u32>,
+    /// `overflow` other than `visible`: clip content to the box bounds.
+    pub overflow_clip: bool,
     /// Drop shadow (`box-shadow`).
     pub shadow: Option<BoxShadow>,
     /// `position`.
     pub position: Position,
     /// `top`, `right`, `bottom`, `left` offsets.
     pub inset: [Option<Length>; 4],
+    /// Paint order among positioned boxes (`z-index`).
+    pub z_index: i32,
 }
 
 impl BoxStyle {
@@ -188,6 +194,7 @@ impl BoxStyle {
             || self.center
             || self.width.is_some()
             || self.min_height.is_some()
+            || self.height.is_some()
             || self.shadow.is_some()
             || self.position != Position::Static
             || self.padding.iter().any(|&p| p > 0)
