@@ -110,6 +110,25 @@ pub enum Inline {
     Control(usize),
 }
 
+/// Box-model decoration for a [`Block::Box`] container: background fill,
+/// padding (top/right/bottom/left, in pixels) and a uniform border.
+#[derive(Clone, Copy)]
+pub struct BoxStyle {
+    pub background: Option<Color>,
+    /// Padding in pixels, in CSS order: top, right, bottom, left.
+    pub padding: [u16; 4],
+    pub border_width: u16,
+    pub border_color: Option<Color>,
+}
+
+impl BoxStyle {
+    /// Whether this decoration paints anything or insets its content — i.e.
+    /// whether wrapping the element in a box block is worthwhile.
+    pub fn is_visible(&self) -> bool {
+        self.background.is_some() || self.border_width > 0 || self.padding.iter().any(|&p| p > 0)
+    }
+}
+
 /// One child of a flex container: its own sub-flow of blocks plus the flex
 /// sizing inputs resolved from the child's computed style.
 pub struct FlexChild {
@@ -148,6 +167,12 @@ pub enum Block {
         gap: u16,
         children: Vec<FlexChild>,
     },
+    /// A decorated block container (`background`, `padding`, `border`) wrapping
+    /// its element's sub-flow.
+    Box {
+        style: BoxStyle,
+        children: Vec<Block>,
+    },
 }
 
 /// Collect a mutable reference to every image block in document order,
@@ -161,6 +186,7 @@ pub fn collect_image_blocks<'a>(blocks: &'a mut [Block], out: &mut Vec<&'a mut B
                     collect_image_blocks(&mut child.blocks, out);
                 }
             }
+            Block::Box { children, .. } => collect_image_blocks(children, out),
             Block::Image { .. } => out.push(block),
             _ => {}
         }

@@ -10,8 +10,8 @@ use libgui::color::Color;
 use libgui::surface::Surface;
 
 use crate::dom::{
-    Align, AlignItems, Block, FlexChild, FlexDirection, Hit, Inline, InputKind, InputMeta,
-    JustifyContent, Run, TextKind,
+    Align, AlignItems, Block, BoxStyle, FlexChild, FlexDirection, Hit, Inline, InputKind,
+    InputMeta, JustifyContent, Run, TextKind,
 };
 
 /// Truncate `text` with an ellipsis so it fits within `width` pixels.
@@ -520,9 +520,78 @@ pub fn draw_blocks(
                 s, *direction, *justify, *align, *gap, children, x0, max_w, y, clip, page_bg,
                 link_hits, form, input_hits, zone_hits,
             ),
+            Block::Box { style, children } => draw_box(
+                s, style, children, x0, max_w, y, clip, page_bg, link_hits, form, input_hits,
+                zone_hits,
+            ),
         };
     }
     y
+}
+
+/// Fill the part of `[y, y+h)` that lies within the content `clip` band, so a
+/// box background never bleeds over the toolbar or status bar when scrolled.
+fn fill_clipped(s: &mut Surface, x: u32, y: i32, w: u32, h: u32, clip: Clip, color: Color) {
+    let top = y.max(clip.top).max(0);
+    let bottom = (y + h as i32).min(clip.bottom);
+    if bottom <= top {
+        return;
+    }
+    s.fill_rect(x, top as u32, w, (bottom - top) as u32, color);
+}
+
+/// Lay out a decorated box: paint its background and border, inset the content
+/// by the border + padding, and draw the children within. Returns the y below
+/// the box's bottom border.
+#[allow(clippy::too_many_arguments)]
+fn draw_box(
+    s: &mut Surface,
+    style: &BoxStyle,
+    children: &[Block],
+    x0: u32,
+    max_w: u32,
+    y: i32,
+    clip: Clip,
+    page_bg: Color,
+    link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
+) -> i32 {
+    let bw = style.border_width as u32;
+    let [pt, pr, pb, pl] = [
+        style.padding[0] as u32,
+        style.padding[1] as u32,
+        style.padding[2] as u32,
+        style.padding[3] as u32,
+    ];
+    let content_x = x0 + bw + pl;
+    let content_w = max_w.saturating_sub(bw * 2 + pl + pr).max(CHAR_W);
+    // Children paint against the box background so glyph anti-aliasing blends
+    // correctly and text colour adapts to the box's own backdrop.
+    let inner_bg = style.background.unwrap_or(page_bg);
+
+    let content_h = measure_blocks(s, children, content_w, inner_bg, form).max(0) as u32;
+    let outer_h = bw * 2 + pt + pb + content_h;
+
+    if let Some(bg) = style.background {
+        fill_clipped(s, x0, y, max_w, outer_h, clip, bg);
+    }
+    if bw > 0 {
+        let bc = style.border_color.unwrap_or(Color::rgb(148, 163, 184));
+        fill_clipped(s, x0, y, max_w, bw, clip, bc); // top
+        fill_clipped(s, x0, y + (outer_h - bw) as i32, max_w, bw, clip, bc); // bottom
+        fill_clipped(s, x0, y, bw, outer_h, clip, bc); // left
+        fill_clipped(s, x0 + max_w - bw, y, bw, outer_h, clip, bc); // right
+    }
+
+    let content_y = y + (bw + pt) as i32;
+    draw_blocks(
+        s, children, content_x, content_w, content_y, clip, inner_bg, link_hits, form, input_hits,
+        zone_hits,
+    );
+
+    y + outer_h as i32
 }
 
 /// Measure the height a block sequence occupies at width `w` without painting.

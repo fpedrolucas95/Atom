@@ -28,7 +28,7 @@ pub mod tokenizer;
 #[cfg(test)]
 mod tests {
     use crate::dom::{
-        Align, AlignItems, Block, Document, FlexChild, FlexDirection, Inline, InputKind,
+        Align, AlignItems, Block, BoxStyle, Document, FlexChild, FlexDirection, Inline, InputKind,
         JustifyContent, TextKind,
     };
     use crate::html::{parse_html, parse_html_with_css};
@@ -382,6 +382,109 @@ mod tests {
             .iter()
             .any(|b| matches!(b, Block::Image { .. })));
         assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Flex { .. })));
+    }
+
+    // ── Box model (background / padding / border) ────────────────────────────
+
+    /// The first `Block::Box` in the document, with its decoration and children.
+    fn first_box(doc: &Document) -> (&BoxStyle, &[Block]) {
+        for b in &doc.blocks {
+            if let Block::Box { style, children } = b {
+                return (style, children);
+            }
+        }
+        panic!("no box block found");
+    }
+
+    /// Joined, trimmed text of a sub-flow of blocks.
+    fn blocks_text(blocks: &[Block]) -> String {
+        let mut s = String::new();
+        for b in blocks {
+            if let Block::Text { items, .. } = b {
+                for it in items {
+                    if let Inline::Run(r) = it {
+                        s.push_str(&r.text);
+                    }
+                }
+            }
+        }
+        s.trim().to_string()
+    }
+
+    #[test]
+    fn decorated_div_becomes_a_box() {
+        let doc = parse_html(
+            "<div style=\"background:#102030; padding:8px\"><p>hi</p></div>",
+        );
+        let (style, children) = first_box(&doc);
+        assert_eq!(style.background, Some(Color::rgb(0x10, 0x20, 0x30)));
+        assert_eq!(style.padding, [8, 8, 8, 8]);
+        assert_eq!(blocks_text(children), "hi");
+    }
+
+    #[test]
+    fn padding_shorthand_expands_per_side() {
+        // one value → all sides
+        let (s1, _) = {
+            let doc = parse_html("<div style=\"padding:5px\">x</div>");
+            let (s, _) = first_box(&doc);
+            (*s, ())
+        };
+        assert_eq!(s1.padding, [5, 5, 5, 5]);
+        // two values → vertical / horizontal
+        let doc = parse_html("<div style=\"padding:4px 8px\">x</div>");
+        assert_eq!(first_box(&doc).0.padding, [4, 8, 4, 8]);
+        // three values → top / horizontal / bottom
+        let doc = parse_html("<div style=\"padding:1px 2px 3px\">x</div>");
+        assert_eq!(first_box(&doc).0.padding, [1, 2, 3, 2]);
+        // four values → top right bottom left
+        let doc = parse_html("<div style=\"padding:1px 2px 3px 4px\">x</div>");
+        assert_eq!(first_box(&doc).0.padding, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn border_shorthand_parses_width_and_color() {
+        let doc = parse_html("<div style=\"border:2px solid #ff0000\">x</div>");
+        let (style, _) = first_box(&doc);
+        assert_eq!(style.border_width, 2);
+        assert_eq!(style.border_color, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn border_none_keeps_box_unboxed_without_other_decoration() {
+        // `border-style:none` zeroes the width; with nothing else to paint the
+        // div stays a plain flow element (no box block).
+        let doc = parse_html("<div style=\"border-style:none\"><p>x</p></div>");
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Box { .. })));
+    }
+
+    #[test]
+    fn undecorated_div_is_not_boxed() {
+        let doc = parse_html("<div><p>a</p><p>b</p></div>");
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Box { .. })));
+        assert_eq!(texts(&doc), ["a", "b"]);
+    }
+
+    #[test]
+    fn box_wraps_flex_when_both_apply() {
+        let doc = parse_html(
+            "<div style=\"display:flex; background:#222; padding:6px\">\
+             <div>A</div><div>B</div></div>",
+        );
+        let (style, children) = first_box(&doc);
+        assert_eq!(style.padding, [6, 6, 6, 6]);
+        assert_eq!(style.background, Some(Color::rgb(0x22, 0x22, 0x22)));
+        match &children[0] {
+            Block::Flex { children: items, .. } => assert_eq!(items.len(), 2),
+            _ => panic!("expected a flex block inside the box"),
+        }
+    }
+
+    #[test]
+    fn box_children_links_stay_addressable() {
+        let doc =
+            parse_html("<div style=\"padding:4px\"><a href=\"/deep\">go</a></div>");
+        assert_eq!(doc.links, vec!["/deep".to_string()]);
     }
 
     #[test]

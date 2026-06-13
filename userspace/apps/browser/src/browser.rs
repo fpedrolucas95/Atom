@@ -1443,6 +1443,7 @@ fn drain_images(
                     drain_images(child.blocks, out);
                 }
             }
+            Block::Box { children, .. } => drain_images(children, out),
             _ => {}
         }
     }

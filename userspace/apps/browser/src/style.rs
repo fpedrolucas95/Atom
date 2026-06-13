@@ -47,6 +47,11 @@ pub struct Computed {
     pub flex_grow: u16,
     /// This element's preferred main-axis size (`flex-basis`/`width`), in px.
     pub flex_basis: Option<u16>,
+    /// Box-model padding in pixels (top, right, bottom, left).
+    pub padding: [u16; 4],
+    /// Uniform border width in pixels and its colour.
+    pub border_width: u16,
+    pub border_color: Option<Color>,
 }
 
 impl Default for Computed {
@@ -70,6 +75,9 @@ impl Default for Computed {
             gap: 0,
             flex_grow: 0,
             flex_basis: None,
+            padding: [0; 4],
+            border_width: 0,
+            border_color: None,
         }
     }
 }
@@ -88,6 +96,9 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         gap: 0,
         flex_grow: 0,
         flex_basis: None,
+        padding: [0; 4],
+        border_width: 0,
+        border_color: None,
         ..*parent
     };
     let Some(element) = dom.element(el) else {
@@ -179,6 +190,24 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(v) = d.flex_basis {
         out.flex_basis = Some(v);
+    }
+    if let Some(v) = d.pad_top {
+        out.padding[0] = v;
+    }
+    if let Some(v) = d.pad_right {
+        out.padding[1] = v;
+    }
+    if let Some(v) = d.pad_bottom {
+        out.padding[2] = v;
+    }
+    if let Some(v) = d.pad_left {
+        out.padding[3] = v;
+    }
+    if let Some(v) = d.border_width {
+        out.border_width = v;
+    }
+    if let Some(c) = d.border_color {
+        out.border_color = Some(c);
     }
 }
 

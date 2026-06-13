@@ -90,6 +90,14 @@ pub struct Decls {
     pub flex_grow: Option<u16>,
     /// Preferred main-axis size (`flex-basis`/`width`) in pixels.
     pub flex_basis: Option<u16>,
+    /// Padding in pixels (top, right, bottom, left), each set independently.
+    pub pad_top: Option<u16>,
+    pub pad_right: Option<u16>,
+    pub pad_bottom: Option<u16>,
+    pub pad_left: Option<u16>,
+    /// Uniform border width in pixels and its colour.
+    pub border_width: Option<u16>,
+    pub border_color: Option<Color>,
 }
 
 impl Decls {
@@ -121,6 +129,12 @@ impl Decls {
         take!(gap);
         take!(flex_grow);
         take!(flex_basis);
+        take!(pad_top);
+        take!(pad_right);
+        take!(pad_bottom);
+        take!(pad_left);
+        take!(border_width);
+        take!(border_color);
     }
 }
 
@@ -253,6 +267,30 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
             }
         }
         "flex" => apply_flex_shorthand(d, lw),
+        "padding" => {
+            let sides = parse_box_sides(lw);
+            d.pad_top = sides[0];
+            d.pad_right = sides[1];
+            d.pad_bottom = sides[2];
+            d.pad_left = sides[3];
+        }
+        "padding-top" => d.pad_top = parse_len_u16(lw),
+        "padding-right" => d.pad_right = parse_len_u16(lw),
+        "padding-bottom" => d.pad_bottom = parse_len_u16(lw),
+        "padding-left" => d.pad_left = parse_len_u16(lw),
+        "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            apply_border_shorthand(d, lw)
+        }
+        "border-width" => {
+            // Take the first length so `border-width: 1px 2px` still applies.
+            d.border_width = lw.split_whitespace().find_map(parse_len_u16);
+        }
+        "border-color" => d.border_color = lw.split_whitespace().find_map(parse_color),
+        "border-style" => {
+            if matches!(lw, "none" | "hidden") {
+                d.border_width = Some(0);
+            }
+        }
         "visibility" => match lw {
             "hidden" | "collapse" => d.visible = Some(false),
             "visible" => d.visible = Some(true),
@@ -364,6 +402,49 @@ fn apply_flex_shorthand(d: &mut Decls, lw: &str) {
                 seen_grow = true;
             }
         }
+    }
+}
+
+/// Parse a CSS length into a clamped `u16` of pixels.
+fn parse_len_u16(value: &str) -> Option<u16> {
+    parse_css_length(value).map(|px| px.min(u16::MAX as u32) as u16)
+}
+
+/// Expand a 1–4 value box shorthand (`padding`/`margin`) into per-side values
+/// in CSS order: top, right, bottom, left.
+fn parse_box_sides(value: &str) -> [Option<u16>; 4] {
+    let vals: alloc::vec::Vec<u16> = value.split_whitespace().filter_map(parse_len_u16).collect();
+    match vals.as_slice() {
+        [all] => [Some(*all); 4],
+        [v, h] => [Some(*v), Some(*h), Some(*v), Some(*h)],
+        [t, h, b] => [Some(*t), Some(*h), Some(*b), Some(*h)],
+        [t, r, b, l, ..] => [Some(*t), Some(*r), Some(*b), Some(*l)],
+        [] => [None; 4],
+    }
+}
+
+/// Parse a `border`/`border-<side>` shorthand: a width length, an optional
+/// colour, and a style keyword (`none`/`hidden` zero the width; other styles
+/// are accepted but not visually distinguished).
+fn apply_border_shorthand(d: &mut Decls, lw: &str) {
+    let mut width = None;
+    let mut zeroed = false;
+    for tok in lw.split_whitespace() {
+        if let Some(px) = parse_len_u16(tok) {
+            width = Some(px);
+        } else if matches!(tok, "none" | "hidden") {
+            zeroed = true;
+        } else if let Some(c) = parse_color(tok) {
+            d.border_color = Some(c);
+        }
+    }
+    if zeroed {
+        d.border_width = Some(0);
+    } else if let Some(w) = width {
+        d.border_width = Some(w);
+    } else if d.border_color.is_some() {
+        // A bare `border-color`-only shorthand implies a default 1px line.
+        d.border_width = d.border_width.or(Some(1));
     }
 }
 

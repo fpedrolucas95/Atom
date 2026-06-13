@@ -22,7 +22,8 @@ use libgui::color::Color;
 
 use crate::css::{Stylesheet, TextTransform};
 use crate::dom::{
-    Align, Block, Document, FlexChild, Inline, InputKind, InputMeta, Run, RunStyle, TextKind,
+    Align, Block, BoxStyle, Document, FlexChild, Inline, InputKind, InputMeta, Run, RunStyle,
+    TextKind,
 };
 use crate::domtree::{build_dom, Dom, Element, NodeData, DOCUMENT};
 use crate::style::{self, Computed};
@@ -222,6 +223,26 @@ fn is_flex_ineligible(tag: &str) -> bool {
         tag,
         "br" | "hr" | "img" | "input" | "select" | "textarea" | "button" | "table"
     )
+}
+
+/// Flow containers that may carry box decoration. Restricted to generic block
+/// boxes and headings so elements with bespoke layout (lists, tables, `pre`,
+/// blockquotes) keep their existing rendering.
+fn is_boxable(tag: &str) -> bool {
+    matches!(
+        block_kind(tag),
+        Some(TextKind::H1 | TextKind::H2 | TextKind::H3 | TextKind::Paragraph)
+    )
+}
+
+/// Assemble a [`BoxStyle`] from a computed style.
+fn box_style_of(cs: &Computed) -> BoxStyle {
+    BoxStyle {
+        background: cs.background,
+        padding: cs.padding,
+        border_width: cs.border_width,
+        border_color: cs.border_color,
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -447,6 +468,14 @@ impl<'a> Flattener<'a> {
             self.background = cs.background;
         }
 
+        // A decorated flow container (background/padding/border) is wrapped in
+        // a box block; its layout mode (normal flow or flex) becomes the box's
+        // content. This composes box decoration with flex on the same element.
+        if is_boxable(tag) && box_style_of(&cs).is_visible() {
+            self.emit_box(id, tag, &cs, link, zone);
+            return;
+        }
+
         // A `display: flex` container lays its element children out along a
         // main axis. Replaced/void elements ignore flex (they have no flow
         // children to arrange).
@@ -629,6 +658,37 @@ impl<'a> Flattener<'a> {
             gap: cs.gap,
             children,
         });
+    }
+
+    /// Emit a [`Block::Box`] for a decorated flow container. Its content is the
+    /// element's captured sub-flow — a flex layout when the element is also a
+    /// flex container, otherwise normal flow.
+    fn emit_box(
+        &mut self,
+        id: usize,
+        tag: &str,
+        cs: &Computed,
+        link: Option<usize>,
+        zone: Option<usize>,
+    ) {
+        self.flush_block();
+        let style = box_style_of(cs);
+        let kind = block_kind(tag).unwrap_or(TextKind::Paragraph);
+        let as_flex = cs.flex_container && !is_flex_ineligible(tag);
+        let children = self.capture_blocks(|f| {
+            if as_flex {
+                f.emit_flex(id, cs, link, zone);
+            } else {
+                f.cur_kind = kind;
+                f.walk_children(id, cs, link, zone);
+            }
+        });
+        // An empty, purely-padded box has nothing to show; keep it only if it
+        // paints (background/border) or holds content.
+        if children.is_empty() && style.background.is_none() && style.border_width == 0 {
+            return;
+        }
+        self.blocks.push(Block::Box { style, children });
     }
 
     /// Run `body` against a fresh block/inline buffer and return the blocks it
