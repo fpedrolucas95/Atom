@@ -1443,10 +1443,7 @@ impl AudioService {
             }
             MessageType::AudioPlayFile => {
                 if let Some(request) = AudioPlayFileMsg::from_bytes(payload) {
-                    // Skip a redundant startup request if we already chimed.
-                    if request.path == STARTUP_SOUND_PATH && self.boot_chime_done {
-                        return;
-                    }
+                    // Allow the startup sound to be played again for manual tests.
                     self.play_path(&request.path);
                 }
             }
