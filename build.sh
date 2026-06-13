@@ -862,9 +862,15 @@ if [ "$RUN" = true ]; then
         AUDIO_DEVICE_ARGS=""
     elif [ "$AUDIO_DRIVER" = "coreaudio" ]; then
         # macOS: saída fixa em 44,1 kHz para o CoreAudio produzir som.
-        AUDIO_BACKEND_ARGS="-audiodev coreaudio,id=audio0,out.fixed-settings=on,out.frequency=44100,out.channels=2,out.buffer-count=4"
+        # in.fixed-settings=off evita que o QEMU force um formato de captura;
+        # ainda assim o CoreAudio não implementa entrada (ADC), então as voices
+        # de gravação do AC97 (ac97.pi / ac97.mc) não abrem — isso é esperado e
+        # NÃO afeta a saída (ac97.po). Veja a nota abaixo.
+        AUDIO_BACKEND_ARGS="-audiodev coreaudio,id=audio0,out.fixed-settings=on,out.frequency=44100,out.channels=2,out.buffer-count=4,in.fixed-settings=off"
         AUDIO_DEVICE_ARGS="$AUDIO_BACKEND_ARGS -device AC97,audiodev=audio0"
         success "Áudio: CoreAudio (saída fixada em 44,1 kHz para o macOS)"
+        warning "macOS/CoreAudio não tem captura: avisos 'Can not open ac97.pi/ac97.mc'"
+        warning "são esperados e inofensivos — a saída de som (boot, apps) funciona normalmente."
     else
         AUDIO_DEVICE_ARGS="-audiodev $AUDIO_DRIVER,id=audio0 -device AC97,audiodev=audio0"
         success "Áudio: backend $AUDIO_DRIVER via AC97"
