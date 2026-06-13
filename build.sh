@@ -831,6 +831,16 @@ if [ "$RUN" = true ]; then
 
     step "Iniciando QEMU com imagem real (smp=$SMP_CPUS)..."
 
+    # ---------------------------------------------------------------------
+    # Áudio: seleciona o backend do host e monta o -audiodev correspondente.
+    #
+    # O guest (audiod) sempre fala AC'97 a 48 kHz estéreo; o QEMU reamostra
+    # para a taxa do host. No macOS, o backend CoreAudio fica MUDO quando o
+    # AC'97 roda a uma taxa diferente de 44,1 kHz — então fixamos a saída do
+    # audiodev em 44100 Hz com fixed-settings=on, fazendo o QEMU reamostrar
+    # 48 kHz -> 44,1 kHz do seu lado. Buffers maiores evitam áudio picotado.
+    # Ref.: https://superuser.com/questions/1720118/macos-host-problems-with-qemu-audio-on-debian-installation
+    # ---------------------------------------------------------------------
     AUDIO_DRIVER="none"
     AUDIO_DRIVERS="$(qemu-system-x86_64 -audiodev help 2>&1 || true)"
     if [ "$(uname -s)" = "Darwin" ] && echo "$AUDIO_DRIVERS" | grep -q "coreaudio"; then
@@ -841,12 +851,23 @@ if [ "$RUN" = true ]; then
         AUDIO_DRIVER="pa"
     elif echo "$AUDIO_DRIVERS" | grep -q "alsa"; then
         AUDIO_DRIVER="alsa"
+    elif echo "$AUDIO_DRIVERS" | grep -q "sdl"; then
+        AUDIO_DRIVER="sdl"
+    elif echo "$AUDIO_DRIVERS" | grep -q "dsound"; then
+        AUDIO_DRIVER="dsound"
     fi
 
     if [ "$AUDIO_DRIVER" = "none" ]; then
+        warning "Nenhum backend de áudio do QEMU disponível; som desabilitado"
         AUDIO_DEVICE_ARGS=""
+    elif [ "$AUDIO_DRIVER" = "coreaudio" ]; then
+        # macOS: saída fixa em 44,1 kHz para o CoreAudio produzir som.
+        AUDIO_BACKEND_ARGS="-audiodev coreaudio,id=audio0,out.fixed-settings=on,out.frequency=44100,out.channels=2,out.buffer-count=4"
+        AUDIO_DEVICE_ARGS="$AUDIO_BACKEND_ARGS -device AC97,audiodev=audio0"
+        success "Áudio: CoreAudio (saída fixada em 44,1 kHz para o macOS)"
     else
         AUDIO_DEVICE_ARGS="-audiodev $AUDIO_DRIVER,id=audio0 -device AC97,audiodev=audio0"
+        success "Áudio: backend $AUDIO_DRIVER via AC97"
     fi
     
     qemu-system-x86_64 \

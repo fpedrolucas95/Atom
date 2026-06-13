@@ -622,6 +622,21 @@ if ($Run) {
     Write-Step "Iniciando QEMU (smp=$Smp)..."
     Write-Host "Pressione Ctrl+C para sair" -ForegroundColor Yellow
 
+    # Seleciona o backend de áudio do host. O guest (audiod) fala AC'97 a
+    # 48 kHz estéreo; o QEMU reamostra para o backend escolhido. No Windows o
+    # padrão é DirectSound, com SDL como alternativa.
+    $audioDrivers = (& qemu-system-x86_64 -audiodev help 2>&1 | Out-String)
+    $audioArgs = @()
+    if ($audioDrivers -match "dsound") {
+        $audioArgs = @("-audiodev", "dsound,id=audio0", "-device", "AC97,audiodev=audio0")
+        Write-Success "Áudio: DirectSound via AC97"
+    } elseif ($audioDrivers -match "sdl") {
+        $audioArgs = @("-audiodev", "sdl,id=audio0", "-device", "AC97,audiodev=audio0")
+        Write-Success "Áudio: SDL via AC97"
+    } else {
+        Write-Warning "Nenhum backend de áudio do QEMU disponível; som desabilitado"
+    }
+
     qemu-system-x86_64 `
         -machine q35 `
         -cpu qemu64,+rdrand `
@@ -630,8 +645,7 @@ if ($Run) {
         -bios "$OVMF_PATH" `
         -drive format=raw,file=fat:rw:"$REPO_PATH\efi" `
         -device VGA `
-        -audiodev dsound,id=audio0 `
-        -device AC97,audiodev=audio0 `
+        @audioArgs `
         -serial stdio `
         -debugcon file:serial_log.txt `
         -global isa-debugcon.iobase=0xE9 `

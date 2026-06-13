@@ -556,6 +556,8 @@ pub enum MessageType {
     AudioSetState = 1602,
     /// Client -> audiod: play a system PCM WAV asset
     AudioPlayFile = 1603,
+    /// Client -> audiod: stop any audio currently playing
+    AudioStop = 1604,
 }
 
 impl MessageType {
@@ -710,6 +712,7 @@ impl MessageType {
             1601 => Some(Self::AudioStateReply),
             1602 => Some(Self::AudioSetState),
             1603 => Some(Self::AudioPlayFile),
+            1604 => Some(Self::AudioStop),
             _ => None,
         }
     }
@@ -1098,6 +1101,27 @@ impl AudioPlayFileMsg {
         let path = core::str::from_utf8(bytes.get(2..2 + len)?).ok()?;
         Some(Self {
             path: String::from(path),
+        })
+    }
+}
+
+/// Client -> audiod: stop whatever is currently playing. Carries an optional
+/// reply port so the caller can learn the resulting state (0 = no reply).
+#[derive(Debug, Clone, Copy)]
+pub struct AudioStopMsg {
+    pub reply_port: u64,
+}
+
+impl AudioStopMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.reply_port.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
         })
     }
 }
@@ -3373,6 +3397,11 @@ mod tests {
         };
         let decoded_play = AudioPlayFileMsg::from_bytes(&play.to_bytes()).unwrap();
         assert_eq!(decoded_play.path, play.path);
+
+        let stop = AudioStopMsg { reply_port: 7 };
+        let decoded_stop = AudioStopMsg::from_bytes(&stop.to_bytes()).unwrap();
+        assert_eq!(decoded_stop.reply_port, 7);
+        assert_eq!(MessageType::from_u32(1604), Some(MessageType::AudioStop));
     }
 
     #[test]
