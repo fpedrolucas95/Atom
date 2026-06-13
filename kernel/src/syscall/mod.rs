@@ -4925,10 +4925,12 @@ fn apply_spawn_grants(
                 }
             }
             EnvGrant::AudioDevices => {
+                // 0x04 = multimedia class; subclass 0x01 = AC'97, 0x03 = Intel
+                // HD Audio. The audio service supports both.
                 let audio_devs: alloc::vec::Vec<_> =
                     crate::drivers::pci::get_devices_by_class(0x04)
                         .into_iter()
-                        .filter(|dev| dev.subclass == 0x01)
+                        .filter(|dev| dev.subclass == 0x01 || dev.subclass == 0x03)
                         .collect();
                 if audio_devs.is_empty() {
                     log_warn!(

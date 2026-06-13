@@ -834,11 +834,15 @@ if [ "$RUN" = true ]; then
     # ---------------------------------------------------------------------
     # Áudio: seleciona o backend do host e monta o -audiodev correspondente.
     #
-    # O guest (audiod) sempre fala AC'97 a 48 kHz estéreo; o QEMU reamostra
-    # para a taxa do host. No macOS, o backend CoreAudio fica MUDO quando o
-    # AC'97 roda a uma taxa diferente de 44,1 kHz — então fixamos a saída do
-    # audiodev em 44100 Hz com fixed-settings=on, fazendo o QEMU reamostrar
-    # 48 kHz -> 44,1 kHz do seu lado. Buffers maiores evitam áudio picotado.
+    # Dispositivo: Intel HD Audio (intel-hda) com o codec SÓ-DE-SAÍDA
+    # `hda-output`. Como ele não tem stream de captura, não há voices de
+    # gravação para falhar em hosts cujo backend não suporta entrada (ex.: o
+    # CoreAudio do macOS) — diferente do AC'97, que sempre abre `ac97.pi/mc` e
+    # emite avisos. O audiod detecta HDA e usa AC'97 só como fallback.
+    #
+    # O guest fala 48 kHz estéreo; o QEMU reamostra para a taxa do host. No
+    # macOS fixamos a saída em 44100 Hz (fixed-settings=on) para o CoreAudio
+    # abrir na sua taxa nativa; buffers maiores evitam áudio picotado.
     # Ref.: https://superuser.com/questions/1720118/macos-host-problems-with-qemu-audio-on-debian-installation
     # ---------------------------------------------------------------------
     AUDIO_DRIVER="none"
@@ -857,23 +861,20 @@ if [ "$RUN" = true ]; then
         AUDIO_DRIVER="dsound"
     fi
 
+    # HD Audio controller + output-only codec.
+    HDA_DEVICE_ARGS="-device intel-hda -device hda-output,audiodev=audio0"
+
     if [ "$AUDIO_DRIVER" = "none" ]; then
         warning "Nenhum backend de áudio do QEMU disponível; som desabilitado"
         AUDIO_DEVICE_ARGS=""
     elif [ "$AUDIO_DRIVER" = "coreaudio" ]; then
         # macOS: saída fixa em 44,1 kHz para o CoreAudio produzir som.
-        # in.fixed-settings=off evita que o QEMU force um formato de captura;
-        # ainda assim o CoreAudio não implementa entrada (ADC), então as voices
-        # de gravação do AC97 (ac97.pi / ac97.mc) não abrem — isso é esperado e
-        # NÃO afeta a saída (ac97.po). Veja a nota abaixo.
-        AUDIO_BACKEND_ARGS="-audiodev coreaudio,id=audio0,out.fixed-settings=on,out.frequency=44100,out.channels=2,out.buffer-count=4,in.fixed-settings=off"
-        AUDIO_DEVICE_ARGS="$AUDIO_BACKEND_ARGS -device AC97,audiodev=audio0"
-        success "Áudio: CoreAudio (saída fixada em 44,1 kHz para o macOS)"
-        warning "macOS/CoreAudio não tem captura: avisos 'Can not open ac97.pi/ac97.mc'"
-        warning "são esperados e inofensivos — a saída de som (boot, apps) funciona normalmente."
+        AUDIO_BACKEND_ARGS="-audiodev coreaudio,id=audio0,out.fixed-settings=on,out.frequency=44100,out.channels=2,out.buffer-count=4"
+        AUDIO_DEVICE_ARGS="$AUDIO_BACKEND_ARGS $HDA_DEVICE_ARGS"
+        success "Áudio: Intel HD Audio (hda-output) via CoreAudio, saída fixada em 44,1 kHz (macOS)"
     else
-        AUDIO_DEVICE_ARGS="-audiodev $AUDIO_DRIVER,id=audio0 -device AC97,audiodev=audio0"
-        success "Áudio: backend $AUDIO_DRIVER via AC97"
+        AUDIO_DEVICE_ARGS="-audiodev $AUDIO_DRIVER,id=audio0 $HDA_DEVICE_ARGS"
+        success "Áudio: Intel HD Audio (hda-output) via backend $AUDIO_DRIVER"
     fi
     
     qemu-system-x86_64 \
