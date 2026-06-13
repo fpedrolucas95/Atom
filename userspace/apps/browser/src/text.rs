@@ -13,10 +13,7 @@ use alloc::vec::Vec;
 // ────────────────────────────────────────────────────────────────────────────
 
 pub fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.eq_ignore_ascii_case(y))
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 pub fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
@@ -64,7 +61,6 @@ impl SmallStr {
         // Safety: populated only from ASCII-lowercased bytes.
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
-
 }
 
 // ────────────────────────────────────────────────────────────────────────────

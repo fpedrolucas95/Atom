@@ -198,7 +198,6 @@ impl Handlers {
         out.dedup();
         out
     }
-
 }
 
 /// Result of a dispatch, read by the browser to decide on default actions.
@@ -245,8 +244,10 @@ pub fn dispatch_with_props(
         e.props.insert("cancelBubble".into(), Value::Bool(false));
         e.props
             .insert("preventDefault".into(), native(event_fn, "preventDefault"));
-        e.props
-            .insert("stopPropagation".into(), native(event_fn, "stopPropagation"));
+        e.props.insert(
+            "stopPropagation".into(),
+            native(event_fn, "stopPropagation"),
+        );
         e.props.insert(
             "stopImmediatePropagation".into(),
             native(event_fn, "stopPropagation"),
@@ -326,14 +327,15 @@ pub fn dispatch_with_props(
 }
 
 fn ev_flag(ev: &Obj, key: &str) -> bool {
-    ev.borrow()
-        .props
-        .get(key)
-        .map(truthy)
-        .unwrap_or(false)
+    ev.borrow().props.get(key).map(truthy).unwrap_or(false)
 }
 
-fn event_fn(_it: &mut Interp, this: &Value, _args: &[Value], name: &'static str) -> super::interp::EResult {
+fn event_fn(
+    _it: &mut Interp,
+    this: &Value,
+    _args: &[Value],
+    name: &'static str,
+) -> super::interp::EResult {
     if let Value::Obj(o) = this {
         let key = match name {
             "preventDefault" => "defaultPrevented",
@@ -394,8 +396,7 @@ fn compile_attr_handler(it: &mut Interp, id: usize, ty: &str) -> Option<Value> {
             Some(it.make_function(Rc::new(def), &global, None))
         }
         Err(e) => {
-            it.console
-                .push(format!("[handler error] on{ty}: {e}"));
+            it.console.push(format!("[handler error] on{ty}: {e}"));
             None
         }
     }

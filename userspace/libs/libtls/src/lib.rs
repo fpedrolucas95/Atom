@@ -18,10 +18,10 @@ pub mod x25519;
 
 mod client;
 
+pub use aead::{chacha20_poly1305_open, chacha20_poly1305_seal, AeadError};
+pub use chacha20::{chacha20_xor, ChaCha20};
 pub use client::{https_get, HttpsError, HttpsResponse};
-pub use sha256::{sha256, sha256_two, Sha256};
+pub use hkdf::{derive_secret, hkdf_expand, hkdf_expand_label, hkdf_extract};
 pub use hmac::{hmac_sha256, hmac_sha256_two};
-pub use hkdf::{hkdf_extract, hkdf_expand, hkdf_expand_label, derive_secret};
-pub use chacha20::{ChaCha20, chacha20_xor};
 pub use poly1305::poly1305_mac;
-pub use aead::{AeadError, chacha20_poly1305_seal, chacha20_poly1305_open};
+pub use sha256::{sha256, sha256_two, Sha256};

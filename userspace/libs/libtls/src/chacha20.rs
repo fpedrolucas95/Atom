@@ -17,10 +17,18 @@ const C3: u32 = 0x6b206574;
 /// ChaCha20 quarter-round on indices `a,b,c,d` of `w`.
 #[inline(always)]
 fn quarter_round(w: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    w[a] = w[a].wrapping_add(w[b]); w[d] ^= w[a]; w[d] = w[d].rotate_left(16);
-    w[c] = w[c].wrapping_add(w[d]); w[b] ^= w[c]; w[b] = w[b].rotate_left(12);
-    w[a] = w[a].wrapping_add(w[b]); w[d] ^= w[a]; w[d] = w[d].rotate_left(8);
-    w[c] = w[c].wrapping_add(w[d]); w[b] ^= w[c]; w[b] = w[b].rotate_left(7);
+    w[a] = w[a].wrapping_add(w[b]);
+    w[d] ^= w[a];
+    w[d] = w[d].rotate_left(16);
+    w[c] = w[c].wrapping_add(w[d]);
+    w[b] ^= w[c];
+    w[b] = w[b].rotate_left(12);
+    w[a] = w[a].wrapping_add(w[b]);
+    w[d] ^= w[a];
+    w[d] = w[d].rotate_left(8);
+    w[c] = w[c].wrapping_add(w[d]);
+    w[b] ^= w[c];
+    w[b] = w[b].rotate_left(7);
 }
 
 /// Produce one 64-byte ChaCha20 block from `state` into `out`.
@@ -30,15 +38,15 @@ fn chacha20_block(state: &[u32; 16], out: &mut [u8; 64]) {
     // 20 rounds = 10 double-rounds
     for _ in 0..10 {
         // Column rounds
-        quarter_round(&mut w,  0,  4,  8, 12);
-        quarter_round(&mut w,  1,  5,  9, 13);
-        quarter_round(&mut w,  2,  6, 10, 14);
-        quarter_round(&mut w,  3,  7, 11, 15);
+        quarter_round(&mut w, 0, 4, 8, 12);
+        quarter_round(&mut w, 1, 5, 9, 13);
+        quarter_round(&mut w, 2, 6, 10, 14);
+        quarter_round(&mut w, 3, 7, 11, 15);
         // Diagonal rounds
-        quarter_round(&mut w,  0,  5, 10, 15);
-        quarter_round(&mut w,  1,  6, 11, 12);
-        quarter_round(&mut w,  2,  7,  8, 13);
-        quarter_round(&mut w,  3,  4,  9, 14);
+        quarter_round(&mut w, 0, 5, 10, 15);
+        quarter_round(&mut w, 1, 6, 11, 12);
+        quarter_round(&mut w, 2, 7, 8, 13);
+        quarter_round(&mut w, 3, 4, 9, 14);
     }
 
     // Add original state

@@ -37,8 +37,14 @@ pub fn install_globals(global: &EnvRef) {
     def("parseFloat", native(global_fn, "parseFloat"));
     def("isNaN", native(global_fn, "isNaN"));
     def("isFinite", native(global_fn, "isFinite"));
-    def("encodeURIComponent", native(global_fn, "encodeURIComponent"));
-    def("decodeURIComponent", native(global_fn, "decodeURIComponent"));
+    def(
+        "encodeURIComponent",
+        native(global_fn, "encodeURIComponent"),
+    );
+    def(
+        "decodeURIComponent",
+        native(global_fn, "decodeURIComponent"),
+    );
     def("encodeURI", native(global_fn, "encodeURIComponent"));
     def("decodeURI", native(global_fn, "decodeURIComponent"));
     def("alert", native(global_fn, "alert"));
@@ -75,13 +81,19 @@ pub fn install_globals(global: &EnvRef) {
             "abs", "floor", "ceil", "round", "trunc", "sqrt", "pow", "min", "max", "random",
             "sign", "cbrt", "hypot", "log", "exp", "sin", "cos", "tan", "atan", "atan2",
         ] {
-            mb.props.insert(m.into(), native(math_fn, leak_name("Math.", m)));
+            mb.props
+                .insert(m.into(), native(math_fn, leak_name("Math.", m)));
         }
-        mb.props.insert("PI".into(), Value::Num(core::f64::consts::PI));
-        mb.props.insert("E".into(), Value::Num(core::f64::consts::E));
-        mb.props.insert("LN2".into(), Value::Num(core::f64::consts::LN_2));
-        mb.props.insert("LN10".into(), Value::Num(core::f64::consts::LN_10));
-        mb.props.insert("SQRT2".into(), Value::Num(core::f64::consts::SQRT_2));
+        mb.props
+            .insert("PI".into(), Value::Num(core::f64::consts::PI));
+        mb.props
+            .insert("E".into(), Value::Num(core::f64::consts::E));
+        mb.props
+            .insert("LN2".into(), Value::Num(core::f64::consts::LN_2));
+        mb.props
+            .insert("LN10".into(), Value::Num(core::f64::consts::LN_10));
+        mb.props
+            .insert("SQRT2".into(), Value::Num(core::f64::consts::SQRT_2));
     }
     def("Math", Value::Obj(math));
 
@@ -130,32 +142,43 @@ pub fn install_globals(global: &EnvRef) {
             .borrow_mut()
             .props
             .insert("href".into(), str_value(""));
-        w.props.insert("location".into(), Value::Obj(location.clone()));
+        w.props
+            .insert("location".into(), Value::Obj(location.clone()));
         let navigator = new_plain();
         {
             let mut n = navigator.borrow_mut();
-            n.props.insert("userAgent".into(), str_value("AtomBrowser/0.1 (AtomOS)"));
+            n.props
+                .insert("userAgent".into(), str_value("AtomBrowser/0.1 (AtomOS)"));
             n.props.insert("language".into(), str_value("en-US"));
             n.props.insert("platform".into(), str_value("AtomOS"));
             n.props.insert("cookieEnabled".into(), Value::Bool(false));
             n.props.insert("onLine".into(), Value::Bool(true));
         }
-        w.props.insert("navigator".into(), Value::Obj(navigator.clone()));
+        w.props
+            .insert("navigator".into(), Value::Obj(navigator.clone()));
         let screen = new_plain();
         {
             let mut s = screen.borrow_mut();
-            s.props.insert("width".into(), Value::Num(crate::css::VIEWPORT_W as f64));
-            s.props.insert("height".into(), Value::Num(crate::css::VIEWPORT_H as f64));
+            s.props
+                .insert("width".into(), Value::Num(crate::css::VIEWPORT_W as f64));
+            s.props
+                .insert("height".into(), Value::Num(crate::css::VIEWPORT_H as f64));
         }
         w.props.insert("screen".into(), Value::Obj(screen.clone()));
-        w.props
-            .insert("innerWidth".into(), Value::Num(crate::css::VIEWPORT_W as f64));
-        w.props
-            .insert("innerHeight".into(), Value::Num(crate::css::VIEWPORT_H as f64));
+        w.props.insert(
+            "innerWidth".into(),
+            Value::Num(crate::css::VIEWPORT_W as f64),
+        );
+        w.props.insert(
+            "innerHeight".into(),
+            Value::Num(crate::css::VIEWPORT_H as f64),
+        );
         w.props
             .insert("addEventListener".into(), native(window_listen_fn, "add"));
-        w.props
-            .insert("removeEventListener".into(), native(window_listen_fn, "remove"));
+        w.props.insert(
+            "removeEventListener".into(),
+            native(window_listen_fn, "remove"),
+        );
         w.props.insert("document".into(), Value::Document);
         def("location", Value::Obj(location));
         def("navigator", Value::Obj(navigator));
@@ -283,7 +306,11 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
             let f = arg(0);
             let delay = {
                 let d = to_number(&arg(1));
-                if d.is_nan() || d < 0.0 { 0.0 } else { d }
+                if d.is_nan() || d < 0.0 {
+                    0.0
+                } else {
+                    d
+                }
             } as u64;
             if !matches!(type_of(&f), "function") {
                 return Ok(Value::Num(0.0));
@@ -292,19 +319,29 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
                 it.call(&f, &Value::Undefined, &[])?;
                 return Ok(Value::Num(0.0));
             }
-            let id = it.handlers.timers.schedule(f, get_browser_time(), delay, None);
+            let id = it
+                .handlers
+                .timers
+                .schedule(f, get_browser_time(), delay, None);
             Value::Num(id as f64)
         }
         "setInterval" => {
             let f = arg(0);
             let delay = {
                 let d = to_number(&arg(1));
-                if d.is_nan() || d < 1.0 { 10.0 } else { d }
+                if d.is_nan() || d < 1.0 {
+                    10.0
+                } else {
+                    d
+                }
             } as u64;
             if !matches!(type_of(&f), "function") {
                 return Ok(Value::Num(0.0));
             }
-            let id = it.handlers.timers.schedule(f, get_browser_time(), delay, Some(delay));
+            let id = it
+                .handlers
+                .timers
+                .schedule(f, get_browser_time(), delay, Some(delay));
             Value::Num(id as f64)
         }
         "clearTimeout" | "clearInterval" => {
@@ -333,8 +370,17 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
         "Date" => {
             // No wall clock yet: a stub fixed at the epoch.
             let o = new_plain();
-            for m in ["getTime", "getFullYear", "getMonth", "getDate", "getHours",
-                      "getMinutes", "getSeconds", "getDay", "toISOString"] {
+            for m in [
+                "getTime",
+                "getFullYear",
+                "getMonth",
+                "getDate",
+                "getHours",
+                "getMinutes",
+                "getSeconds",
+                "getDay",
+                "toISOString",
+            ] {
                 o.borrow_mut()
                     .props
                     .insert((*m).into(), native(date_fn, leak_name("Date#", m)));
@@ -356,7 +402,9 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
 fn date_fn(_it: &mut Interp, _this: &Value, _args: &[Value], name: &'static str) -> EResult {
     Ok(match name {
         "Date#getFullYear" => Value::Num(1970.0),
-        "Date#getDay" | "Date#getDate" => Value::Num(if name.ends_with("Date") { 1.0 } else { 4.0 }),
+        "Date#getDay" | "Date#getDate" => {
+            Value::Num(if name.ends_with("Date") { 1.0 } else { 4.0 })
+        }
         "Date#toISOString" => str_value("1970-01-01T00:00:00.000Z"),
         _ => Value::Num(0.0),
     })
@@ -601,7 +649,12 @@ fn poor_atan(x: f64) -> f64 {
 
 // ── Object / Array statics ──────────────────────────────────────────────────
 
-fn object_static_fn(_it: &mut Interp, _this: &Value, args: &[Value], name: &'static str) -> EResult {
+fn object_static_fn(
+    _it: &mut Interp,
+    _this: &Value,
+    args: &[Value],
+    name: &'static str,
+) -> EResult {
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
     Ok(match name {
         "Object.keys" | "Object.values" => {
@@ -778,7 +831,7 @@ fn json_parse(s: &str, pos: &mut usize) -> Option<Value> {
                                 let mut cp = 0u32;
                                 for _ in 0..4 {
                                     *pos += 1;
-                                    cp = cp * 16 + (*b.get(*pos)? as char).to_digit(16)? ;
+                                    cp = cp * 16 + (*b.get(*pos)? as char).to_digit(16)?;
                                 }
                                 out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                             }
@@ -813,8 +866,7 @@ fn json_parse(s: &str, pos: &mut usize) -> Option<Value> {
                 *pos += 1;
             }
             while *pos < b.len()
-                && (b[*pos].is_ascii_digit()
-                    || matches!(b[*pos], b'.' | b'e' | b'E' | b'+' | b'-'))
+                && (b[*pos].is_ascii_digit() || matches!(b[*pos], b'.' | b'e' | b'E' | b'+' | b'-'))
             {
                 *pos += 1;
             }
@@ -897,9 +949,29 @@ fn json_quote(s: &str, out: &mut String) {
 // ── Method dispatchers ───────────────────────────────────────────────────────
 
 static STRING_METHODS: &[&str] = &[
-    "charAt", "charCodeAt", "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith",
-    "slice", "substring", "substr", "toUpperCase", "toLowerCase", "trim", "split", "replace",
-    "replaceAll", "repeat", "concat", "padStart", "padEnd", "toString", "valueOf", "at",
+    "charAt",
+    "charCodeAt",
+    "indexOf",
+    "lastIndexOf",
+    "includes",
+    "startsWith",
+    "endsWith",
+    "slice",
+    "substring",
+    "substr",
+    "toUpperCase",
+    "toLowerCase",
+    "trim",
+    "split",
+    "replace",
+    "replaceAll",
+    "repeat",
+    "concat",
+    "padStart",
+    "padEnd",
+    "toString",
+    "valueOf",
+    "at",
 ];
 
 pub fn string_member(s: &Rc<str>, key: &str) -> EResult {
@@ -1106,8 +1178,8 @@ fn number_method(_it: &mut Interp, this: &Value, args: &[Value], name: &'static 
     let n = to_number(this);
     Ok(match name {
         "toFixed" => {
-            let digits = (to_number(&args.first().cloned().unwrap_or(Value::Undefined))
-                .max(0.0) as usize)
+            let digits = (to_number(&args.first().cloned().unwrap_or(Value::Undefined)).max(0.0)
+                as usize)
                 .min(20);
             if !n.is_finite() {
                 return Ok(str_value(&num_to_string(n)));
@@ -1139,9 +1211,31 @@ fn number_method(_it: &mut Interp, this: &Value, args: &[Value], name: &'static 
 }
 
 static ARRAY_METHODS: &[&str] = &[
-    "push", "pop", "shift", "unshift", "indexOf", "lastIndexOf", "includes", "join", "slice",
-    "splice", "concat", "reverse", "map", "filter", "forEach", "reduce", "some", "every",
-    "find", "findIndex", "sort", "fill", "flat", "keys", "toString",
+    "push",
+    "pop",
+    "shift",
+    "unshift",
+    "indexOf",
+    "lastIndexOf",
+    "includes",
+    "join",
+    "slice",
+    "splice",
+    "concat",
+    "reverse",
+    "map",
+    "filter",
+    "forEach",
+    "reduce",
+    "some",
+    "every",
+    "find",
+    "findIndex",
+    "sort",
+    "fill",
+    "flat",
+    "keys",
+    "toString",
 ];
 
 pub fn array_member(key: &str) -> Option<Value> {
@@ -1248,7 +1342,12 @@ fn array_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static st
             } else {
                 norm(to_number(&arg(1)))
             };
-            new_array(items.get(a as usize..b.max(a) as usize).unwrap_or(&[]).to_vec())
+            new_array(
+                items
+                    .get(a as usize..b.max(a) as usize)
+                    .unwrap_or(&[])
+                    .to_vec(),
+            )
         }
         "splice" => with_items(&mut |items| {
             let len = items.len() as i64;
@@ -1265,7 +1364,12 @@ fn array_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static st
             } else {
                 (to_number(&arg(1)).max(0.0) as usize).min(items.len() - start)
             };
-            let removed: Vec<Value> = items.splice(start..start + count, args[2.min(args.len())..].iter().cloned()).collect();
+            let removed: Vec<Value> = items
+                .splice(
+                    start..start + count,
+                    args[2.min(args.len())..].iter().cloned(),
+                )
+                .collect();
             new_array(removed)
         }),
         "concat" => {
@@ -1323,7 +1427,11 @@ fn array_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static st
             let items = snapshot();
             let mut out = Vec::new();
             for (i, v) in items.iter().enumerate() {
-                let r = it.call(&f, &Value::Undefined, &[v.clone(), Value::Num(i as f64), this.clone()])?;
+                let r = it.call(
+                    &f,
+                    &Value::Undefined,
+                    &[v.clone(), Value::Num(i as f64), this.clone()],
+                )?;
                 match name {
                     "map" => out.push(r),
                     "filter" => {

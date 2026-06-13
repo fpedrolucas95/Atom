@@ -321,8 +321,23 @@ pub fn build_dom(input: &str) -> Dom {
 pub fn is_void(tag: &str) -> bool {
     matches!(
         tag,
-        "area" | "base" | "basefont" | "bgsound" | "br" | "col" | "embed" | "frame" | "hr"
-            | "img" | "input" | "keygen" | "link" | "meta" | "param" | "source" | "track"
+        "area"
+            | "base"
+            | "basefont"
+            | "bgsound"
+            | "br"
+            | "col"
+            | "embed"
+            | "frame"
+            | "hr"
+            | "img"
+            | "input"
+            | "keygen"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
             | "wbr"
     )
 }
@@ -330,8 +345,19 @@ pub fn is_void(tag: &str) -> bool {
 fn is_formatting(tag: &str) -> bool {
     matches!(
         tag,
-        "a" | "b" | "big" | "code" | "em" | "font" | "i" | "nobr" | "s" | "small" | "strike"
-            | "strong" | "tt" | "u"
+        "a" | "b"
+            | "big"
+            | "code"
+            | "em"
+            | "font"
+            | "i"
+            | "nobr"
+            | "s"
+            | "small"
+            | "strike"
+            | "strong"
+            | "tt"
+            | "u"
     )
 }
 
@@ -340,17 +366,89 @@ fn is_formatting(tag: &str) -> bool {
 fn is_special(tag: &str) -> bool {
     matches!(
         tag,
-        "address" | "applet" | "area" | "article" | "aside" | "base" | "basefont" | "bgsound"
-            | "blockquote" | "body" | "br" | "button" | "caption" | "center" | "col"
-            | "colgroup" | "dd" | "details" | "dialog" | "dir" | "div" | "dl" | "dt" | "embed"
-            | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "frame" | "frameset"
-            | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "head" | "header" | "hgroup" | "hr"
-            | "html" | "iframe" | "img" | "input" | "keygen" | "li" | "link" | "listing"
-            | "main" | "marquee" | "menu" | "meta" | "nav" | "noembed" | "noframes"
-            | "noscript" | "object" | "ol" | "p" | "param" | "plaintext" | "pre" | "script"
-            | "section" | "select" | "source" | "style" | "summary" | "table" | "tbody"
-            | "td" | "template" | "textarea" | "tfoot" | "th" | "thead" | "title" | "tr"
-            | "track" | "ul" | "wbr" | "xmp"
+        "address"
+            | "applet"
+            | "area"
+            | "article"
+            | "aside"
+            | "base"
+            | "basefont"
+            | "bgsound"
+            | "blockquote"
+            | "body"
+            | "br"
+            | "button"
+            | "caption"
+            | "center"
+            | "col"
+            | "colgroup"
+            | "dd"
+            | "details"
+            | "dialog"
+            | "dir"
+            | "div"
+            | "dl"
+            | "dt"
+            | "embed"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "frame"
+            | "frameset"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "html"
+            | "iframe"
+            | "img"
+            | "input"
+            | "keygen"
+            | "li"
+            | "link"
+            | "listing"
+            | "main"
+            | "marquee"
+            | "menu"
+            | "meta"
+            | "nav"
+            | "noembed"
+            | "noframes"
+            | "noscript"
+            | "object"
+            | "ol"
+            | "p"
+            | "param"
+            | "plaintext"
+            | "pre"
+            | "script"
+            | "section"
+            | "select"
+            | "source"
+            | "style"
+            | "summary"
+            | "table"
+            | "tbody"
+            | "td"
+            | "template"
+            | "textarea"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "title"
+            | "tr"
+            | "track"
+            | "ul"
+            | "wbr"
+            | "xmp"
     )
 }
 
@@ -358,11 +456,46 @@ fn is_special(tag: &str) -> bool {
 fn closes_p(tag: &str) -> bool {
     matches!(
         tag,
-        "address" | "article" | "aside" | "blockquote" | "center" | "details" | "dialog"
-            | "dir" | "div" | "dl" | "dd" | "dt" | "fieldset" | "figcaption" | "figure"
-            | "footer" | "form" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header"
-            | "hgroup" | "hr" | "li" | "listing" | "main" | "menu" | "nav" | "ol" | "p"
-            | "plaintext" | "pre" | "section" | "summary" | "table" | "ul" | "xmp"
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "center"
+            | "details"
+            | "dialog"
+            | "dir"
+            | "div"
+            | "dl"
+            | "dd"
+            | "dt"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "li"
+            | "listing"
+            | "main"
+            | "menu"
+            | "nav"
+            | "ol"
+            | "p"
+            | "plaintext"
+            | "pre"
+            | "section"
+            | "summary"
+            | "table"
+            | "ul"
+            | "xmp"
     )
 }
 
@@ -370,8 +503,16 @@ fn closes_p(tag: &str) -> bool {
 fn is_head_content(tag: &str) -> bool {
     matches!(
         tag,
-        "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "script" | "style"
-            | "template" | "title"
+        "base"
+            | "basefont"
+            | "bgsound"
+            | "link"
+            | "meta"
+            | "noframes"
+            | "script"
+            | "style"
+            | "template"
+            | "title"
     )
 }
 
@@ -381,11 +522,43 @@ fn is_known_html(tag: &str) -> bool {
         || is_formatting(tag)
         || matches!(
             tag,
-            "abbr" | "acronym" | "audio" | "bdi" | "bdo" | "canvas" | "cite" | "data"
-                | "datalist" | "del" | "dfn" | "ins" | "kbd" | "label" | "legend" | "map"
-                | "mark" | "meter" | "optgroup" | "option" | "output" | "picture" | "progress"
-                | "q" | "rb" | "rp" | "rt" | "rtc" | "ruby" | "samp" | "slot" | "span" | "sub"
-                | "sup" | "time" | "var" | "video"
+            "abbr"
+                | "acronym"
+                | "audio"
+                | "bdi"
+                | "bdo"
+                | "canvas"
+                | "cite"
+                | "data"
+                | "datalist"
+                | "del"
+                | "dfn"
+                | "ins"
+                | "kbd"
+                | "label"
+                | "legend"
+                | "map"
+                | "mark"
+                | "meter"
+                | "optgroup"
+                | "option"
+                | "output"
+                | "picture"
+                | "progress"
+                | "q"
+                | "rb"
+                | "rp"
+                | "rt"
+                | "rtc"
+                | "ruby"
+                | "samp"
+                | "slot"
+                | "span"
+                | "sub"
+                | "sup"
+                | "time"
+                | "var"
+                | "video"
         )
 }
 
@@ -401,8 +574,17 @@ fn is_fmt_marker(tag: &str) -> bool {
 fn is_scope_boundary(tag: &str) -> bool {
     matches!(
         tag,
-        "applet" | "caption" | "html" | "table" | "td" | "th" | "marquee" | "object"
-            | "template" | "svg" | "math"
+        "applet"
+            | "caption"
+            | "html"
+            | "table"
+            | "td"
+            | "th"
+            | "marquee"
+            | "object"
+            | "template"
+            | "svg"
+            | "math"
     )
 }
 
@@ -505,7 +687,11 @@ impl Builder {
         // current is relocated to just before the table.
         if self.in_table_insert_context() && !is_table_structural(tag.as_str()) {
             if let Some((parent, idx)) = self.foster_target() {
-                return self.new_node_at(parent, Some(idx), NodeData::Element(Element { tag, attrs }));
+                return self.new_node_at(
+                    parent,
+                    Some(idx),
+                    NodeData::Element(Element { tag, attrs }),
+                );
             }
         }
         let parent = self.current();
@@ -863,9 +1049,12 @@ impl Builder {
                 "button" => self.close_in_scope("button", &[]),
                 "select" => self.close_in_scope("select", &[]),
                 "a" => {
-                    let has_a = self.fmt.iter().rev().take_while(|e| !matches!(e, FmtEntry::Marker)).any(
-                        |e| matches!(e, FmtEntry::El(n) if self.tag_at(*n) == "a"),
-                    );
+                    let has_a = self
+                        .fmt
+                        .iter()
+                        .rev()
+                        .take_while(|e| !matches!(e, FmtEntry::Marker))
+                        .any(|e| matches!(e, FmtEntry::El(n) if self.tag_at(*n) == "a"));
                     if has_a {
                         self.adoption("a");
                     }
@@ -968,10 +1157,7 @@ impl Builder {
                 if heading_open {
                     self.generate_implied_end_tags(None);
                     while let Some(top) = self.open.pop() {
-                        if matches!(
-                            self.tag_at(top),
-                            "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                        ) {
+                        if matches!(self.tag_at(top), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
                             break;
                         }
                     }
@@ -995,7 +1181,9 @@ impl Builder {
     }
 
     fn text(&mut self, t: String) {
-        let only_ws = t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r'));
+        let only_ws = t
+            .bytes()
+            .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r'));
         if only_ws {
             // Inter-element whitespace: keep it where it is unless nothing is
             // open yet (whitespace before <html> is dropped per spec).

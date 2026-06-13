@@ -34,19 +34,19 @@ pub fn x25519(scalar: &[u8; 32], point: &[u8; 32]) -> [u8; 32] {
         fe_cswap(&mut z2, &mut z3, swap);
         swap = k_t;
 
-        let a   = fe_add(x2, z2);           // A  = x2 + z2
-        let aa  = fe_sq(a);                  // AA = A^2
-        let b   = fe_sub(x2, z2);           // B  = x2 - z2
-        let bb  = fe_sq(b);                  // BB = B^2
-        let e   = fe_sub(aa, bb);           // E  = AA - BB
-        let c   = fe_add(x3, z3);           // C  = x3 + z3
-        let d   = fe_sub(x3, z3);           // D  = x3 - z3
-        let da  = fe_mul(d, a);             // DA = D * A
-        let cb  = fe_mul(c, b);             // CB = C * B
-        x3 = fe_sq(fe_add(da, cb));          // x3 = (DA+CB)^2
+        let a = fe_add(x2, z2); // A  = x2 + z2
+        let aa = fe_sq(a); // AA = A^2
+        let b = fe_sub(x2, z2); // B  = x2 - z2
+        let bb = fe_sq(b); // BB = B^2
+        let e = fe_sub(aa, bb); // E  = AA - BB
+        let c = fe_add(x3, z3); // C  = x3 + z3
+        let d = fe_sub(x3, z3); // D  = x3 - z3
+        let da = fe_mul(d, a); // DA = D * A
+        let cb = fe_mul(c, b); // CB = C * B
+        x3 = fe_sq(fe_add(da, cb)); // x3 = (DA+CB)^2
         z3 = fe_mul(x1, fe_sq(fe_sub(da, cb))); // z3 = x1*(DA-CB)^2
-        x2 = fe_mul(aa, bb);                 // x2 = AA * BB
-        // z2 = E*(AA + a24*E),  a24 = 121665
+        x2 = fe_mul(aa, bb); // x2 = AA * BB
+                             // z2 = E*(AA + a24*E),  a24 = 121665
         z2 = fe_mul(e, fe_add(aa, fe_mul_small(e, 121665)));
     }
     fe_cswap(&mut x2, &mut x3, swap);
@@ -68,7 +68,7 @@ struct Fe([u64; 5]);
 
 const MASK51: u64 = (1u64 << 51) - 1;
 const FE_ZERO: Fe = Fe([0, 0, 0, 0, 0]);
-const FE_ONE:  Fe = Fe([1, 0, 0, 0, 0]);
+const FE_ONE: Fe = Fe([1, 0, 0, 0, 0]);
 
 fn fe_add(a: Fe, b: Fe) -> Fe {
     Fe([
@@ -155,55 +155,71 @@ fn fe_cswap(a: &mut Fe, b: &mut Fe, swap: u64) {
 /// Modular inverse via Fermat: a^(p-2) = a^(2^255 - 21).
 fn fe_invert(z: Fe) -> Fe {
     // Addition chain from djb's original:
-    let z2    = fe_sq(z);
-    let z4    = fe_sq(z2);
-    let z8    = fe_sq(z4);
-    let z9    = fe_mul(z8, z);
-    let z11   = fe_mul(z9, z2);
-    let z22   = fe_sq(z11);
-    let t0    = fe_mul(z22, z9);      // z^(2^5 - 1)
+    let z2 = fe_sq(z);
+    let z4 = fe_sq(z2);
+    let z8 = fe_sq(z4);
+    let z9 = fe_mul(z8, z);
+    let z11 = fe_mul(z9, z2);
+    let z22 = fe_sq(z11);
+    let t0 = fe_mul(z22, z9); // z^(2^5 - 1)
 
     let t1 = {
         let mut x = t0;
-        for _ in 0..5 { x = fe_sq(x); }
-        fe_mul(x, t0)                  // z^(2^10 - 1)
+        for _ in 0..5 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t0) // z^(2^10 - 1)
     };
     let t2 = {
         let mut x = t1;
-        for _ in 0..10 { x = fe_sq(x); }
-        fe_mul(x, t1)                  // z^(2^20 - 1)
+        for _ in 0..10 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t1) // z^(2^20 - 1)
     };
     let t3 = {
         let mut x = t2;
-        for _ in 0..20 { x = fe_sq(x); }
-        fe_mul(x, t2)                  // z^(2^40 - 1)
+        for _ in 0..20 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t2) // z^(2^40 - 1)
     };
     let t4 = {
         let mut x = t3;
-        for _ in 0..10 { x = fe_sq(x); }
-        fe_mul(x, t1)                  // z^(2^50 - 1)
+        for _ in 0..10 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t1) // z^(2^50 - 1)
     };
     let t5 = {
         let mut x = t4;
-        for _ in 0..50 { x = fe_sq(x); }
-        fe_mul(x, t4)                  // z^(2^100 - 1)
+        for _ in 0..50 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t4) // z^(2^100 - 1)
     };
     let t6 = {
         let mut x = t5;
-        for _ in 0..100 { x = fe_sq(x); }
-        fe_mul(x, t5)                  // z^(2^200 - 1)
+        for _ in 0..100 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t5) // z^(2^200 - 1)
     };
     let t7 = {
         let mut x = t6;
-        for _ in 0..50 { x = fe_sq(x); }
-        fe_mul(x, t4)                  // z^(2^250 - 1)
+        for _ in 0..50 {
+            x = fe_sq(x);
+        }
+        fe_mul(x, t4) // z^(2^250 - 1)
     };
     let t8 = {
         let mut x = t7;
-        for _ in 0..5 { x = fe_sq(x); }
-        x                              // z^(2^255 - 32)
+        for _ in 0..5 {
+            x = fe_sq(x);
+        }
+        x // z^(2^255 - 32)
     };
-    fe_mul(t8, z11)                    // z^(2^255 - 21) = z^(p-2)
+    fe_mul(t8, z11) // z^(2^255 - 21) = z^(p-2)
 }
 
 /// Canonical form: fully reduce to [0, p).

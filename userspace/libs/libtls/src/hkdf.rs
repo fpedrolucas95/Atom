@@ -2,8 +2,8 @@
 // TLS 1.3 label helpers — RFC 8446 §7.1
 // no_std + alloc compatible; depends only on the sibling hmac module.
 
-use alloc::vec::Vec;
 use super::hmac::hmac_sha256;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // HKDF-Extract
@@ -44,7 +44,7 @@ pub fn hkdf_expand(prk: &[u8; 32], info: &[u8], len: usize) -> Vec<u8> {
     let mut okm: Vec<u8> = Vec::with_capacity(n * 32);
 
     let mut t_prev: [u8; 32] = [0u8; 32]; // T(0) = "" represented as zeroed array
-    let mut t_prev_len: usize = 0;          // 0 for the first iteration (T(0) is empty)
+    let mut t_prev_len: usize = 0; // 0 for the first iteration (T(0) is empty)
 
     for i in 1..=(n as u8) {
         // HMAC input: T(i-1) || info || i
@@ -88,28 +88,19 @@ pub fn hkdf_expand(prk: &[u8; 32], info: &[u8], len: usize) -> Vec<u8> {
 ///     opaque context<0..255>;
 /// } HkdfLabel;
 /// ```
-pub fn hkdf_expand_label(
-    secret: &[u8; 32],
-    label: &str,
-    context: &[u8],
-    len: usize,
-) -> Vec<u8> {
+pub fn hkdf_expand_label(secret: &[u8; 32], label: &str, context: &[u8], len: usize) -> Vec<u8> {
     // Build the HkdfLabel byte string.
     // "tls13 " prefix is 6 bytes; label may be at most 249 bytes so the
     // combined label field fits in one byte length prefix (max 255).
     let prefix = b"tls13 ";
     let full_label_len = prefix.len() + label.len();
-    debug_assert!(
-        full_label_len <= 255,
-        "hkdf_expand_label: label too long"
-    );
+    debug_assert!(full_label_len <= 255, "hkdf_expand_label: label too long");
     debug_assert!(context.len() <= 255, "hkdf_expand_label: context too long");
 
     // Total HkdfLabel capacity:
     //   2 (uint16 length) + 1 (label length byte) + full_label_len
     //   + 1 (context length byte) + context.len()
-    let mut hkdf_label: Vec<u8> =
-        Vec::with_capacity(2 + 1 + full_label_len + 1 + context.len());
+    let mut hkdf_label: Vec<u8> = Vec::with_capacity(2 + 1 + full_label_len + 1 + context.len());
 
     // uint16 length — big-endian output length
     hkdf_label.push((len >> 8) as u8);
@@ -140,11 +131,7 @@ pub fn hkdf_expand_label(
 ///
 /// The caller provides the already-computed `transcript_hash` (SHA-256 of the
 /// handshake transcript).  Returns exactly 32 bytes.
-pub fn derive_secret(
-    secret: &[u8; 32],
-    label: &str,
-    transcript_hash: &[u8; 32],
-) -> [u8; 32] {
+pub fn derive_secret(secret: &[u8; 32], label: &str, transcript_hash: &[u8; 32]) -> [u8; 32] {
     let out = hkdf_expand_label(secret, label, transcript_hash, 32);
     // SAFETY: hkdf_expand_label with len=32 always returns exactly 32 bytes.
     let mut result = [0u8; 32];

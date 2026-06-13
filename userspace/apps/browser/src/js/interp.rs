@@ -143,7 +143,9 @@ impl<'a> Interp<'a> {
                 }
                 self.hoist_stmt(body, env)?;
             }
-            Stmt::ForIn { decl, var, body, .. } => {
+            Stmt::ForIn {
+                decl, var, body, ..
+            } => {
                 if *decl && env_get(env, var).is_none() {
                     env_define(env, var, Value::Undefined, true);
                 }
@@ -415,8 +417,9 @@ impl<'a> Interp<'a> {
             Expr::Null => Ok(Value::Null),
             Expr::Undefined => Ok(Value::Undefined),
             Expr::This => Ok(this.clone()),
-            Expr::Ident(name) => env_get(env, name)
-                .ok_or_else(|| Self::throw_str("ReferenceError", &format!("{name} is not defined"))),
+            Expr::Ident(name) => env_get(env, name).ok_or_else(|| {
+                Self::throw_str("ReferenceError", &format!("{name} is not defined"))
+            }),
             Expr::Array(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
@@ -564,7 +567,12 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn member_key(&mut self, prop: &MemberProp, env: &EnvRef, this: &Value) -> Result<String, Control> {
+    fn member_key(
+        &mut self,
+        prop: &MemberProp,
+        env: &EnvRef,
+        this: &Value,
+    ) -> Result<String, Control> {
         match prop {
             MemberProp::Dot(name) => Ok(name.clone()),
             MemberProp::Index(e) => {
@@ -912,23 +920,16 @@ impl<'a> Interp<'a> {
                     }
                     env_define(&scope, &p.name, v, false);
                 }
-                env_define(
-                    &scope,
-                    "arguments",
-                    new_array(args.to_vec()),
-                    false,
-                );
+                env_define(&scope, "arguments", new_array(args.to_vec()), false);
                 let result = match &def.body {
                     FnBody::Expr(e) => self.expr(e, &scope, &effective_this),
                     FnBody::Block(stmts) => {
-                        let r = self
-                            .hoist(stmts, &scope)
-                            .and_then(|_| {
-                                for s in stmts {
-                                    self.stmt(s, &scope, &effective_this)?;
-                                }
-                                Ok(())
-                            });
+                        let r = self.hoist(stmts, &scope).and_then(|_| {
+                            for s in stmts {
+                                self.stmt(s, &scope, &effective_this)?;
+                            }
+                            Ok(())
+                        });
                         match r {
                             Ok(()) => Ok(Value::Undefined),
                             Err(Control::Return(v)) => Ok(v),

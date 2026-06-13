@@ -120,10 +120,8 @@ fn paint_for(run: &Run, default: Color) -> Painted {
 
 /// Default block text colour and vertical padding (top, bottom) by kind.
 fn block_metrics(kind: TextKind, page_bg: Color) -> (Color, i32, i32) {
-    let light_page = page_bg.r as u32 * 299
-        + page_bg.g as u32 * 587
-        + page_bg.b as u32 * 114
-        >= 160_000;
+    let light_page =
+        page_bg.r as u32 * 299 + page_bg.g as u32 * 587 + page_bg.b as u32 * 114 >= 160_000;
     let text = if light_page {
         Color::rgb(32, 37, 45)
     } else {
@@ -213,7 +211,16 @@ fn control_dims(meta: &InputMeta, max_w: u32) -> (u32, u32) {
 
 /// Draw a form control at the given position.
 #[allow(clippy::too_many_arguments)]
-fn draw_control(s: &mut Surface, meta: &InputMeta, value: &str, focused: bool, x: u32, y: u32, w: u32, h: u32) {
+fn draw_control(
+    s: &mut Surface,
+    meta: &InputMeta,
+    value: &str,
+    focused: bool,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) {
     match meta.kind {
         InputKind::Submit => {
             s.fill_rect(x, y, w, h, ACCENT);
@@ -222,7 +229,13 @@ fn draw_control(s: &mut Surface, meta: &InputMeta, value: &str, focused: bool, x
             } else {
                 &meta.placeholder
             };
-            s.draw_string(x + 8, y + 6, &truncate_for_width(label, w.saturating_sub(12)), Color::WHITE, ACCENT);
+            s.draw_string(
+                x + 8,
+                y + 6,
+                &truncate_for_width(label, w.saturating_sub(12)),
+                Color::WHITE,
+                ACCENT,
+            );
         }
         InputKind::Select => {
             let label = if value.is_empty() {

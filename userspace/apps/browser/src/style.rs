@@ -94,13 +94,11 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
     if let Some(fs) = acc.font_size {
         out.font_px = match fs {
             FontSize::Px(px) => px,
-            FontSize::Percent(p) => {
-                ((parent.font_px as u32 * p as u32) / 100).min(4000) as u16
-            }
+            FontSize::Percent(p) => ((parent.font_px as u32 * p as u32) / 100).min(4000) as u16,
         }
         .clamp(6, 400);
     }
-    (out, acc.display_none)
+    (out, acc.display_none.unwrap_or(false))
 }
 
 fn apply(out: &mut Computed, d: &Decls) {
@@ -177,7 +175,7 @@ fn ua_defaults(tag: &str) -> Decls {
 /// Legacy presentational attributes, applied below author CSS in the cascade.
 fn presentational_hints(el: &Element, d: &mut Decls) {
     if el.attr("hidden").is_some() {
-        d.display_none = true;
+        d.display_none = Some(true);
     }
     if let Some(c) = el.attr("color").and_then(css::parse_color) {
         d.color = Some(c);

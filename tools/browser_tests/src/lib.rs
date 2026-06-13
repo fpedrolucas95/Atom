@@ -6,24 +6,24 @@
 
 extern crate alloc;
 
-#[path = "../../../userspace/apps/browser/src/text.rs"]
-pub mod text;
-#[path = "../../../userspace/apps/browser/src/entities.rs"]
-pub mod entities;
-#[path = "../../../userspace/apps/browser/src/tokenizer.rs"]
-pub mod tokenizer;
-#[path = "../../../userspace/apps/browser/src/domtree.rs"]
-pub mod domtree;
-#[path = "../../../userspace/apps/browser/src/dom.rs"]
-pub mod dom;
 #[path = "../../../userspace/apps/browser/src/css.rs"]
 pub mod css;
-#[path = "../../../userspace/apps/browser/src/style.rs"]
-pub mod style;
+#[path = "../../../userspace/apps/browser/src/dom.rs"]
+pub mod dom;
+#[path = "../../../userspace/apps/browser/src/domtree.rs"]
+pub mod domtree;
+#[path = "../../../userspace/apps/browser/src/entities.rs"]
+pub mod entities;
 #[path = "../../../userspace/apps/browser/src/html.rs"]
 pub mod html;
 #[path = "../../../userspace/apps/browser/src/js/mod.rs"]
 pub mod js;
+#[path = "../../../userspace/apps/browser/src/style.rs"]
+pub mod style;
+#[path = "../../../userspace/apps/browser/src/text.rs"]
+pub mod text;
+#[path = "../../../userspace/apps/browser/src/tokenizer.rs"]
+pub mod tokenizer;
 
 #[cfg(test)]
 mod tests {
@@ -118,9 +118,8 @@ mod tests {
 
     #[test]
     fn script_and_style_content_hidden() {
-        let doc = parse_html(
-            "<style>p{}</style><script>var a = '<p>nope</p>';</script><p>shown</p>",
-        );
+        let doc =
+            parse_html("<style>p{}</style><script>var a = '<p>nope</p>';</script><p>shown</p>");
         assert_eq!(all_text(&doc), "shown");
     }
 
@@ -320,9 +319,8 @@ mod tests {
 
     #[test]
     fn source_order_breaks_ties() {
-        let doc = parse_html(
-            "<style>.a{color:#ff0000}.b{color:#00ff00}</style><p class=\"a b\">x</p>",
-        );
+        let doc =
+            parse_html("<style>.a{color:#ff0000}.b{color:#00ff00}</style><p class=\"a b\">x</p>");
         assert_eq!(find_run(&doc, "x").style.color, Some(Color::rgb(0, 255, 0)));
     }
 
@@ -406,18 +404,16 @@ mod tests {
 
     #[test]
     fn not_pseudo_class() {
-        let doc = parse_html(
-            "<style>p:not(.skip){color:#010101}</style><p>yes</p><p class=skip>no</p>",
-        );
+        let doc =
+            parse_html("<style>p:not(.skip){color:#010101}</style><p>yes</p><p class=skip>no</p>");
         assert_eq!(find_run(&doc, "yes").style.color, Some(Color::rgb(1, 1, 1)));
         assert_eq!(find_run(&doc, "no").style.color, None);
     }
 
     #[test]
     fn hover_never_matches_but_parses() {
-        let doc = parse_html(
-            "<style>a:hover{color:#010101} a{color:#020202}</style><a href=x>l</a>",
-        );
+        let doc =
+            parse_html("<style>a:hover{color:#010101} a{color:#020202}</style><a href=x>l</a>");
         assert_eq!(find_run(&doc, "l").style.color, Some(Color::rgb(2, 2, 2)));
     }
 
@@ -502,6 +498,15 @@ mod tests {
         assert!(!t.contains("unseen"));
         assert!(t.contains("seen"));
         assert!(t.contains("after"));
+    }
+
+    #[test]
+    fn inline_display_block_overrides_stylesheet_display_none() {
+        let doc = parse_html(
+            "<style>div,span,p { display:none }</style>\
+             <div style=\"display:block\">fallback link</div>",
+        );
+        assert!(all_text(&doc).contains("fallback link"));
     }
 
     #[test]
@@ -652,9 +657,7 @@ mod tests {
         let doc = parse_html("<p>pick <select><option>x</option></select> now</p>");
         match &doc.blocks[0] {
             Block::Text { items, .. } => {
-                assert!(items
-                    .iter()
-                    .any(|it| matches!(it, Inline::Control(0))));
+                assert!(items.iter().any(|it| matches!(it, Inline::Control(0))));
             }
             _ => panic!(),
         }
@@ -691,9 +694,7 @@ mod tests {
     #[test]
     fn table_structural_content_not_fostered() {
         // Normal table content is untouched by fostering.
-        let doc = parse_html(
-            "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>",
-        );
+        let doc = parse_html("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>");
         assert_eq!(texts(&doc), ["a | b", "c"]);
     }
 
@@ -765,9 +766,7 @@ mod tests {
 
     #[test]
     fn font_style_normal_overrides_inherited_italic() {
-        let doc = parse_html(
-            "<em>a<span style=\"font-style:normal\">b</span></em>",
-        );
+        let doc = parse_html("<em>a<span style=\"font-style:normal\">b</span></em>");
         assert!(find_run(&doc, "a").style.italic);
         assert!(!find_run(&doc, "b").style.italic);
     }
@@ -811,9 +810,7 @@ mod tests {
 
     #[test]
     fn font_size_inherits_to_children() {
-        let doc = parse_html(
-            "<div style=\"font-size:24px\">a <b>b</b> <span>c</span></div>",
-        );
+        let doc = parse_html("<div style=\"font-size:24px\">a <b>b</b> <span>c</span></div>");
         assert_eq!(find_run(&doc, "a").style.size, 2);
         assert_eq!(find_run(&doc, "b").style.size, 2);
         assert_eq!(find_run(&doc, "c").style.size, 2);
@@ -984,9 +981,8 @@ mod tests {
 
     #[test]
     fn js_document_write_inserts_at_script_position() {
-        let (doc, _) = run_page(
-            "<p>first</p><script>document.write('<b>written</b>');</script><p>last</p>",
-        );
+        let (doc, _) =
+            run_page("<p>first</p><script>document.write('<b>written</b>');</script><p>last</p>");
         assert_eq!(texts(&doc), ["first", "written", "last"]);
         assert!(find_run(&doc, "written").style.bold);
     }
@@ -1235,9 +1231,9 @@ mod tests {
         let page = load("<p><span onclick=\"1\">tap me</span> plain</p>");
         assert_eq!(page.doc.click_nodes.len(), 1);
         let zoned = match &page.doc.blocks[0] {
-            Block::Text { items, .. } => items.iter().any(|it| {
-                matches!(it, Inline::Run(r) if r.zone == Some(0) && r.text.contains("tap"))
-            }),
+            Block::Text { items, .. } => items.iter().any(
+                |it| matches!(it, Inline::Run(r) if r.zone == Some(0) && r.text.contains("tap")),
+            ),
             _ => false,
         };
         assert!(zoned, "span text should carry the click zone");
@@ -1529,9 +1525,15 @@ mod tests {
         let rt = page.runtime.as_mut().unwrap();
         let mut console = Vec::new();
         let outcome = rt.dispatch_keyboard(
-            &mut page.dom, &mut console,
-            crate::js::Target::Document, "keydown",
-            65, 0, false, false, false, // 'A' character, no modifiers
+            &mut page.dom,
+            &mut console,
+            crate::js::Target::Document,
+            "keydown",
+            65,
+            0,
+            false,
+            false,
+            false, // 'A' character, no modifiers
         );
         assert!(outcome.fired);
         let clickable = rt.click_targets();
@@ -1547,7 +1549,7 @@ mod tests {
                 captured.key = e.key;\
                 captured.keyCode = e.keyCode;\
                 captured.ctrlKey = e.ctrlKey;\
-             });"
+             });",
         );
         // run_js doesn't dispatch events — just verify no parse errors.
         assert!(msgs.is_empty() || !msgs.iter().any(|m| m.contains("error")));
@@ -1568,8 +1570,16 @@ mod tests {
         let form_node = page.dom.find_first("form").unwrap();
         let rt = page.runtime.as_mut().unwrap();
         let mut console = Vec::new();
-        let outcome = rt.dispatch(&mut page.dom, &mut console, crate::js::Target::Node(form_node), "submit");
-        assert!(outcome.prevented, "preventDefault on submit should be reported");
+        let outcome = rt.dispatch(
+            &mut page.dom,
+            &mut console,
+            crate::js::Target::Node(form_node),
+            "submit",
+        );
+        assert!(
+            outcome.prevented,
+            "preventDefault on submit should be reported"
+        );
     }
 
     #[test]
@@ -1586,7 +1596,12 @@ mod tests {
         let input_node = page.doc.input_nodes[0];
         let rt = page.runtime.as_mut().unwrap();
         let mut console = Vec::new();
-        let outcome = rt.dispatch(&mut page.dom, &mut console, crate::js::Target::Node(input_node), "input");
+        let outcome = rt.dispatch(
+            &mut page.dom,
+            &mut console,
+            crate::js::Target::Node(input_node),
+            "input",
+        );
         assert!(outcome.fired);
         let clickable = rt.click_targets();
         page.doc = crate::html::flatten_dom(&page.dom, &mut |_| None, true, &clickable);
@@ -1606,7 +1621,12 @@ mod tests {
         let input_node = page.doc.input_nodes[0];
         let rt = page.runtime.as_mut().unwrap();
         let mut console = Vec::new();
-        let outcome = rt.dispatch(&mut page.dom, &mut console, crate::js::Target::Node(input_node), "change");
+        let outcome = rt.dispatch(
+            &mut page.dom,
+            &mut console,
+            crate::js::Target::Node(input_node),
+            "change",
+        );
         assert!(outcome.fired);
         let clickable = rt.click_targets();
         page.doc = crate::html::flatten_dom(&page.dom, &mut |_| None, true, &clickable);

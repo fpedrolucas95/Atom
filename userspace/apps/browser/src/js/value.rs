@@ -397,17 +397,11 @@ pub fn loose_eq(a: &Value, b: &Value) -> bool {
         (Value::Num(_), Value::Num(_))
         | (Value::Str(_), Value::Str(_))
         | (Value::Bool(_), Value::Bool(_)) => strict_eq(a, b),
-        (Value::Num(x), Value::Str(s)) | (Value::Str(s), Value::Num(x)) => {
-            *x == str_to_number(s)
-        }
+        (Value::Num(x), Value::Str(s)) | (Value::Str(s), Value::Num(x)) => *x == str_to_number(s),
         (Value::Bool(_), _) => loose_eq(&Value::Num(to_number(a)), b),
         (_, Value::Bool(_)) => loose_eq(a, &Value::Num(to_number(b))),
-        (Value::Obj(_), Value::Num(_) | Value::Str(_)) => {
-            loose_eq(&str_value(&to_string(a)), b)
-        }
-        (Value::Num(_) | Value::Str(_), Value::Obj(_)) => {
-            loose_eq(a, &str_value(&to_string(b)))
-        }
+        (Value::Obj(_), Value::Num(_) | Value::Str(_)) => loose_eq(&str_value(&to_string(a)), b),
+        (Value::Num(_) | Value::Str(_), Value::Obj(_)) => loose_eq(a, &str_value(&to_string(b))),
         _ => strict_eq(a, b),
     }
 }

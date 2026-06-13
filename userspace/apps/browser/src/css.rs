@@ -71,9 +71,10 @@ pub struct Decls {
     pub underline: Option<bool>,
     pub strike: Option<bool>,
     pub font_size: Option<FontSize>,
-    /// `display: none` prunes the subtree; other display values are ignored
-    /// (the renderer has a single flow layout).
-    pub display_none: bool,
+    /// `Some(true)` for `display: none`, `Some(false)` for any supported
+    /// visible display value. The renderer has a single flow layout, but the
+    /// option is needed so a later declaration can override `display: none`.
+    pub display_none: Option<bool>,
     pub visible: Option<bool>,
     pub align: Option<Align>,
     pub transform: Option<Option<TextTransform>>,
@@ -97,10 +98,10 @@ impl Decls {
         take!(underline);
         take!(strike);
         take!(font_size);
+        take!(display_none);
         take!(visible);
         take!(align);
         take!(transform);
-        self.display_none |= other.display_none;
     }
 }
 
@@ -123,7 +124,11 @@ pub fn parse_declarations(input: &str) -> (Decls, Decls) {
         if value.is_empty() {
             continue;
         }
-        let target = if is_important { &mut important } else { &mut normal };
+        let target = if is_important {
+            &mut important
+        } else {
+            &mut normal
+        };
         apply_declaration(target, prop, value);
     }
     (normal, important)
@@ -176,11 +181,11 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
                 }
             }
         }
-        "display" => {
-            if lw == "none" {
-                d.display_none = true;
-            }
-        }
+        "display" => match lw {
+            "none" => d.display_none = Some(true),
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer" => {}
+            _ => d.display_none = Some(false),
+        },
         "visibility" => match lw {
             "hidden" | "collapse" => d.visible = Some(false),
             "visible" => d.visible = Some(true),
@@ -226,9 +231,16 @@ fn parse_font_weight(lw: &str) -> Option<bool> {
 }
 
 fn is_mono_family(lw: &str) -> bool {
-    ["monospace", "courier", "consolas", "menlo", "monaco", "mono"]
-        .iter()
-        .any(|m| lw.contains(m))
+    [
+        "monospace",
+        "courier",
+        "consolas",
+        "menlo",
+        "monaco",
+        "mono",
+    ]
+    .iter()
+    .any(|m| lw.contains(m))
 }
 
 /// `font: [style] [weight] size[/line-height] family…`
@@ -281,11 +293,15 @@ fn parse_font_size(lw: &str) -> Option<FontSize> {
     }
     if let Some(n) = lw.strip_suffix("pt") {
         // 1pt = 4/3 px.
-        return Some(FontSize::Px(clamp_size((parse_num_x100(n)? * 4 / 3 + 50) / 100)));
+        return Some(FontSize::Px(clamp_size(
+            (parse_num_x100(n)? * 4 / 3 + 50) / 100,
+        )));
     }
     if let Some(n) = lw.strip_suffix("rem") {
         // rem is relative to the 16px root font size.
-        return Some(FontSize::Px(clamp_size((parse_num_x100(n)? * 16 + 50) / 100)));
+        return Some(FontSize::Px(clamp_size(
+            (parse_num_x100(n)? * 16 + 50) / 100,
+        )));
     }
     if let Some(n) = lw.strip_suffix("em") {
         return Some(FontSize::Percent(clamp_size(parse_num_x100(n)?)));
@@ -672,10 +688,7 @@ fn nth_matches(a: i32, b: i32, idx: i32) -> bool {
 
 impl Selector {
     pub fn matches(&self, dom: &Dom, el: usize) -> bool {
-        self.parts
-            .first()
-            .is_some_and(|(_, c)| c.matches(dom, el))
-            && self.matches_from(dom, el, 0)
+        self.parts.first().is_some_and(|(_, c)| c.matches(dom, el)) && self.matches_from(dom, el, 0)
     }
 
     /// `parts[idx]` matched at `node`; try to satisfy the rest leftward,
@@ -826,7 +839,12 @@ fn parse_compound(input: &str) -> Option<Compound> {
     let mut i = 0;
 
     // Optional leading type or universal selector.
-    if i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'*' || bytes[i] == b'-' || bytes[i] == b'_') {
+    if i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric()
+            || bytes[i] == b'*'
+            || bytes[i] == b'-'
+            || bytes[i] == b'_')
+    {
         if bytes[i] == b'*' {
             comp.tag = Some(String::from("*"));
             i += 1;
@@ -923,10 +941,10 @@ fn parse_pseudo(name: &str, arg: Option<&str>) -> Option<Pseudo> {
         }
         "not" => Pseudo::Not(parse_compound(arg?.trim())?),
         // Dynamic states the browser doesn't track: valid, never match.
-        "hover" | "active" | "focus" | "visited" | "focus-within" | "focus-visible"
-        | "target" | "checked" | "disabled" | "enabled" | "required" | "optional"
-        | "placeholder-shown" | "first-of-type" | "last-of-type" | "only-of-type"
-        | "nth-of-type" | "nth-last-of-type" => Pseudo::Never,
+        "hover" | "active" | "focus" | "visited" | "focus-within" | "focus-visible" | "target"
+        | "checked" | "disabled" | "enabled" | "required" | "optional" | "placeholder-shown"
+        | "first-of-type" | "last-of-type" | "only-of-type" | "nth-of-type"
+        | "nth-last-of-type" => Pseudo::Never,
         _ => return None,
     })
 }
@@ -1333,7 +1351,11 @@ fn parse_hsl_args(inner: &str) -> Option<Color> {
         .ok()?;
     let s: i32 = args[1].strip_suffix('%')?.split('.').next()?.parse().ok()?;
     let l: i32 = args[2].strip_suffix('%')?.split('.').next()?.parse().ok()?;
-    Some(hsl_to_rgb(h.rem_euclid(360), s.clamp(0, 100), l.clamp(0, 100)))
+    Some(hsl_to_rgb(
+        h.rem_euclid(360),
+        s.clamp(0, 100),
+        l.clamp(0, 100),
+    ))
 }
 
 /// Integer HSL → RGB (values scaled by 100 internally; no floating point).

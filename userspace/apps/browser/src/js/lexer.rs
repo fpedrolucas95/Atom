@@ -39,10 +39,9 @@ pub enum RawTplPart {
 
 /// Longest-match punctuator table (longest first).
 static PUNCTS: &[&str] = &[
-    ">>>=", "===", "!==", "**=", "...", "<<=", ">>=", ">>>", "&&=", "||=", "??=",
-    "=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=",
-    "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "**",
-    "{", "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-", "*", "/", "%",
+    ">>>=", "===", "!==", "**=", "...", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=",
+    "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+    "<<", ">>", "**", "{", "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-", "*", "/", "%",
     "&", "|", "^", "!", "~", "?", ":", "=", ".",
 ];
 
@@ -87,7 +86,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             _ => {}
         }
 
-        let kind = if b.is_ascii_digit() || (b == b'.' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_digit())) {
+        let kind = if b.is_ascii_digit()
+            || (b == b'.' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_digit()))
+        {
             lex_number(src, &mut i)?
         } else if b == b'"' || b == b'\'' {
             lex_string(src, &mut i)?
@@ -112,13 +113,27 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             Tok::Num(_) | Tok::Str(_) | Tok::Template(_) | Tok::Regex(_) => false,
             Tok::Ident(name) => matches!(
                 name.as_str(),
-                "return" | "typeof" | "instanceof" | "in" | "of" | "new" | "delete" | "void"
-                    | "throw" | "case" | "do" | "else" | "yield"
+                "return"
+                    | "typeof"
+                    | "instanceof"
+                    | "in"
+                    | "of"
+                    | "new"
+                    | "delete"
+                    | "void"
+                    | "throw"
+                    | "case"
+                    | "do"
+                    | "else"
+                    | "yield"
             ),
             Tok::Punct(p) => !matches!(*p, ")" | "]" | "++" | "--"),
             Tok::Eof => true,
         };
-        toks.push(Token { kind, nl_before: nl });
+        toks.push(Token {
+            kind,
+            nl_before: nl,
+        });
         nl = false;
     }
     toks.push(Token {
@@ -151,7 +166,8 @@ fn lex_number(src: &str, i: &mut usize) -> Result<Tok, String> {
             let ds = *i;
             let mut v: u64 = 0;
             while *i < bytes.len() && (bytes[*i] as char).is_digit(radix) {
-                v = v.wrapping_mul(radix as u64) + (bytes[*i] as char).to_digit(radix).unwrap() as u64;
+                v = v.wrapping_mul(radix as u64)
+                    + (bytes[*i] as char).to_digit(radix).unwrap() as u64;
                 *i += 1;
             }
             if *i == ds {

@@ -78,7 +78,13 @@ impl Runtime {
         console: &mut Vec<String>,
     ) {
         let scripts = collect_scripts(dom, fetch_js, console);
-        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), LOAD_BUDGET);
+        let mut it = Interp::new(
+            dom,
+            console,
+            &mut self.handlers,
+            self.global.clone(),
+            LOAD_BUDGET,
+        );
         for script in scripts {
             it.cursor = Some(write_cursor_for(it.dom, script.node));
             match parser::parse_program(&script.source) {
@@ -88,9 +94,7 @@ impl Runtime {
                     Err(Control::Throw(v)) => it
                         .console
                         .push(format!("Uncaught {}", value::to_string(&v))),
-                    Err(Control::Abort(why)) => {
-                        it.console.push(format!("[script aborted] {why}"))
-                    }
+                    Err(Control::Abort(why)) => it.console.push(format!("[script aborted] {why}")),
                     Err(Control::Break) | Err(Control::Continue) => {}
                 },
             }
@@ -108,13 +112,25 @@ impl Runtime {
         target: Target,
         ty: &str,
     ) -> DispatchOutcome {
-        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        let mut it = Interp::new(
+            dom,
+            console,
+            &mut self.handlers,
+            self.global.clone(),
+            EVENT_BUDGET,
+        );
         events::dispatch(&mut it, target, ty)
     }
 
     /// Run a `javascript:` URL's body in the page's global scope.
     pub fn run_snippet(&mut self, dom: &mut Dom, console: &mut Vec<String>, src: &str) {
-        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        let mut it = Interp::new(
+            dom,
+            console,
+            &mut self.handlers,
+            self.global.clone(),
+            EVENT_BUDGET,
+        );
         match parser::parse_program(src) {
             Err(e) => it.console.push(format!("[script error] {e}")),
             Ok(stmts) => match it.run_program(&stmts) {
@@ -179,33 +195,47 @@ impl Runtime {
         };
 
         let extra: alloc::vec::Vec<(&str, Value)> = alloc::vec![
-            ("key",      value::str_value(key_name)),
-            ("keyCode",  Value::Num(key_code as f64)),
-            ("which",    Value::Num(key_code as f64)),
-            ("charCode", Value::Num(if character >= 32 && character < 127 { character as f64 } else { 0.0 })),
-            ("ctrlKey",  Value::Bool(ctrl)),
-            ("altKey",   Value::Bool(alt)),
+            ("key", value::str_value(key_name)),
+            ("keyCode", Value::Num(key_code as f64)),
+            ("which", Value::Num(key_code as f64)),
+            (
+                "charCode",
+                Value::Num(if character >= 32 && character < 127 {
+                    character as f64
+                } else {
+                    0.0
+                })
+            ),
+            ("ctrlKey", Value::Bool(ctrl)),
+            ("altKey", Value::Bool(alt)),
             ("shiftKey", Value::Bool(shift)),
-            ("metaKey",  Value::Bool(false)),
+            ("metaKey", Value::Bool(false)),
         ];
 
-        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        let mut it = Interp::new(
+            dom,
+            console,
+            &mut self.handlers,
+            self.global.clone(),
+            EVENT_BUDGET,
+        );
         events::dispatch_with_props(&mut it, target, ty, &extra)
     }
 
     /// Fire any timers whose deadlines have passed. Returns `true` when at
     /// least one timer ran (the page may need re-rendering).
-    pub fn tick_timers(
-        &mut self,
-        dom: &mut Dom,
-        console: &mut Vec<String>,
-        now_ms: u64,
-    ) -> bool {
+    pub fn tick_timers(&mut self, dom: &mut Dom, console: &mut Vec<String>, now_ms: u64) -> bool {
         let expired = self.handlers.timers.take_expired(now_ms);
         if expired.is_empty() {
             return false;
         }
-        let mut it = Interp::new(dom, console, &mut self.handlers, self.global.clone(), EVENT_BUDGET);
+        let mut it = Interp::new(
+            dom,
+            console,
+            &mut self.handlers,
+            self.global.clone(),
+            EVENT_BUDGET,
+        );
         for timer in expired {
             match it.call(&timer.callback, &Value::Undefined, &[]) {
                 Ok(_) | Err(Control::Return(_)) => {}

@@ -208,7 +208,10 @@ impl<'a> Tokenizer<'a> {
         // Tag name: until whitespace, '/', or '>'.
         let name_start = self.pos;
         while self.pos < self.bytes.len()
-            && !matches!(self.bytes[self.pos], b'\t' | b'\n' | b'\x0C' | b' ' | b'/' | b'>')
+            && !matches!(
+                self.bytes[self.pos],
+                b'\t' | b'\n' | b'\x0C' | b' ' | b'/' | b'>'
+            )
         {
             self.pos += 1;
         }
@@ -475,14 +478,8 @@ impl<'a> Tokenizer<'a> {
                 let name = &self.bytes[i + 2..i + 2 + tag.len()];
                 if eq_ci(name, tag) {
                     match self.bytes.get(i + 2 + tag.len()) {
-                        None
-                        | Some(b'\t')
-                        | Some(b'\n')
-                        | Some(b'\x0C')
-                        | Some(b'\r')
-                        | Some(b' ')
-                        | Some(b'/')
-                        | Some(b'>') => return Some(i),
+                        None | Some(b'\t') | Some(b'\n') | Some(b'\x0C') | Some(b'\r')
+                        | Some(b' ') | Some(b'/') | Some(b'>') => return Some(i),
                         _ => {}
                     }
                 }
@@ -541,8 +538,13 @@ impl<'a> Tokenizer<'a> {
         }
         matches!(
             self.bytes.get(at + name.len()),
-            None | Some(b'\t') | Some(b'\n') | Some(b'\x0C') | Some(b'\r') | Some(b' ')
-                | Some(b'/') | Some(b'>')
+            None | Some(b'\t')
+                | Some(b'\n')
+                | Some(b'\x0C')
+                | Some(b'\r')
+                | Some(b' ')
+                | Some(b'/')
+                | Some(b'>')
         )
     }
 

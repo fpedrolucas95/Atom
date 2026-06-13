@@ -30,9 +30,17 @@ use crate::domtree::{is_void, Dom, NodeData, DOCUMENT};
 // ── document ────────────────────────────────────────────────────────────────
 
 static DOCUMENT_METHODS: &[&str] = &[
-    "getElementById", "querySelector", "querySelectorAll", "getElementsByTagName",
-    "getElementsByClassName", "createElement", "createTextNode", "write", "writeln",
-    "addEventListener", "removeEventListener",
+    "getElementById",
+    "querySelector",
+    "querySelectorAll",
+    "getElementsByTagName",
+    "getElementsByClassName",
+    "createElement",
+    "createTextNode",
+    "write",
+    "writeln",
+    "addEventListener",
+    "removeEventListener",
 ];
 
 pub fn document_get(it: &mut Interp, key: &str) -> EResult {
@@ -63,9 +71,7 @@ pub fn document_get(it: &mut Interp, key: &str) -> EResult {
         "cookie" => str_value(""),
         "location" => env_get(&it.global, "location").unwrap_or(Value::Undefined),
         "forms" | "images" | "links" | "scripts" => new_array(Vec::new()),
-        m if DOCUMENT_METHODS.contains(&m) => {
-            native(document_method, intern_doc_method(m))
-        }
+        m if DOCUMENT_METHODS.contains(&m) => native(document_method, intern_doc_method(m)),
         _ => Value::Undefined,
     })
 }
@@ -113,7 +119,8 @@ fn document_method(it: &mut Interp, _this: &Value, args: &[Value], name: &'stati
         "getElementById" => {
             let id = to_string(&arg(0));
             find_by(it.dom, DOCUMENT, &mut |dom, n| {
-                dom.element(n).is_some_and(|e| e.attr("id") == Some(id.as_str()))
+                dom.element(n)
+                    .is_some_and(|e| e.attr("id") == Some(id.as_str()))
             })
             .map(Value::Node)
             .unwrap_or(Value::Null)
@@ -188,10 +195,25 @@ fn doc_write(it: &mut Interp, html: &str) {
 // ── Element handles ─────────────────────────────────────────────────────────
 
 static NODE_METHODS: &[&str] = &[
-    "getAttribute", "setAttribute", "removeAttribute", "hasAttribute", "appendChild",
-    "removeChild", "insertBefore", "remove", "cloneNode", "querySelector", "querySelectorAll",
-    "getElementsByTagName", "addEventListener", "removeEventListener", "focus", "blur",
-    "click", "contains", "matches",
+    "getAttribute",
+    "setAttribute",
+    "removeAttribute",
+    "hasAttribute",
+    "appendChild",
+    "removeChild",
+    "insertBefore",
+    "remove",
+    "cloneNode",
+    "querySelector",
+    "querySelectorAll",
+    "getElementsByTagName",
+    "addEventListener",
+    "removeEventListener",
+    "focus",
+    "blur",
+    "click",
+    "contains",
+    "matches",
 ];
 
 pub fn node_get(it: &mut Interp, id: usize, key: &str) -> EResult {
@@ -256,7 +278,9 @@ pub fn node_get(it: &mut Interp, id: usize, key: &str) -> EResult {
         "style" => Value::StyleOf(id),
         "classList" => {
             let o = new_plain();
-            o.borrow_mut().props.insert("__node".into(), Value::Num(id as f64));
+            o.borrow_mut()
+                .props
+                .insert("__node".into(), Value::Num(id as f64));
             for m in ["add", "remove", "toggle", "contains"] {
                 o.borrow_mut()
                     .props
@@ -352,9 +376,9 @@ fn node_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static str
             it.dom.remove_attr(id, &to_string(&arg(0)));
             Value::Undefined
         }
-        "hasAttribute" => Value::Bool(
-            attr_of(it.dom, id, &to_string(&arg(0)).to_ascii_lowercase()).is_some(),
-        ),
+        "hasAttribute" => {
+            Value::Bool(attr_of(it.dom, id, &to_string(&arg(0)).to_ascii_lowercase()).is_some())
+        }
         "appendChild" => {
             if let Value::Node(c) = arg(0) {
                 it.dom.attach(id, c, None);
@@ -547,9 +571,7 @@ fn classlist_fn(it: &mut Interp, this: &Value, args: &[Value], name: &'static st
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
 fn attr_of(dom: &Dom, id: usize, name: &str) -> Option<String> {
-    dom.element(id)
-        .and_then(|e| e.attr(name))
-        .map(String::from)
+    dom.element(id).and_then(|e| e.attr(name)).map(String::from)
 }
 
 fn has_class(dom: &Dom, id: usize, class: &str) -> bool {

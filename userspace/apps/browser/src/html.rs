@@ -52,7 +52,10 @@ pub fn parse_html(html: &str) -> Document {
 }
 
 /// Parse HTML with external stylesheets but scripting disabled.
-pub fn parse_html_with_css(html: &str, mut fetch_css: impl FnMut(&str) -> Option<String>) -> Document {
+pub fn parse_html_with_css(
+    html: &str,
+    mut fetch_css: impl FnMut(&str) -> Option<String>,
+) -> Document {
     parse_document(html, &mut fetch_css, &mut |_| None, false).doc
 }
 
@@ -193,8 +196,20 @@ fn block_kind(tag: &str) -> Option<TextKind> {
 fn skip_subtree(tag: &str) -> bool {
     matches!(
         tag,
-        "script" | "style" | "template" | "svg" | "math" | "iframe" | "object" | "embed"
-            | "applet" | "datalist" | "colgroup" | "map" | "noembed" | "noframes"
+        "script"
+            | "style"
+            | "template"
+            | "svg"
+            | "math"
+            | "iframe"
+            | "object"
+            | "embed"
+            | "applet"
+            | "datalist"
+            | "colgroup"
+            | "map"
+            | "noembed"
+            | "noframes"
     )
 }
 
@@ -232,8 +247,19 @@ fn format_roman(n: u32) -> String {
         return alloc::format!("{}", n);
     }
     const TABLE: &[(u32, &str)] = &[
-        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
-        (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
     ];
     let mut s = String::new();
     let mut rest = n;
@@ -335,14 +361,26 @@ impl<'a> Flattener<'a> {
 
     // ── Tree walk ───────────────────────────────────────────────────────────
 
-    fn walk_children(&mut self, id: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
+    fn walk_children(
+        &mut self,
+        id: usize,
+        cs: &Computed,
+        link: Option<usize>,
+        zone: Option<usize>,
+    ) {
         let dom = self.dom;
         for &c in &dom.nodes[id].children {
             self.walk_node(c, cs, link, zone);
         }
     }
 
-    fn walk_node(&mut self, id: usize, parent: &Computed, link: Option<usize>, zone: Option<usize>) {
+    fn walk_node(
+        &mut self,
+        id: usize,
+        parent: &Computed,
+        link: Option<usize>,
+        zone: Option<usize>,
+    ) {
         let dom = self.dom;
         match &dom.nodes[id].data {
             NodeData::Document => self.walk_children(id, parent, link, zone),
@@ -551,7 +589,13 @@ impl<'a> Flattener<'a> {
         self.flush_block();
     }
 
-    fn walk_list_item(&mut self, id: usize, cs: &Computed, link: Option<usize>, zone: Option<usize>) {
+    fn walk_list_item(
+        &mut self,
+        id: usize,
+        cs: &Computed,
+        link: Option<usize>,
+        zone: Option<usize>,
+    ) {
         let marker = self.next_marker(id);
         let prev = self.begin_block(TextKind::ListItem);
         self.cur_marker = Some(marker);

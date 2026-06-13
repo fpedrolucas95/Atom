@@ -2,9 +2,9 @@
 //
 // Depends on `chacha20` and `poly1305` modules in the same crate.
 
-use alloc::vec::Vec;
 use crate::chacha20::chacha20_xor;
 use crate::poly1305::poly1305_mac;
+use alloc::vec::Vec;
 
 /// Errors returned by AEAD operations.
 #[derive(Debug)]
@@ -33,7 +33,11 @@ fn poly1305_key_gen(key: &[u8; 32], nonce: &[u8; 12]) -> [u8; 32] {
 #[inline]
 fn pad16_len(len: usize) -> usize {
     let rem = len % 16;
-    if rem == 0 { 0 } else { 16 - rem }
+    if rem == 0 {
+        0
+    } else {
+        16 - rem
+    }
 }
 
 /// Build the Poly1305 authentication data per RFC 8439 §2.8:
@@ -42,18 +46,22 @@ fn pad16_len(len: usize) -> usize {
 ///   || LE64(aad.len()) || LE64(ciphertext.len())
 fn build_mac_input(aad: &[u8], ciphertext: &[u8]) -> Vec<u8> {
     let aad_pad = pad16_len(aad.len());
-    let ct_pad  = pad16_len(ciphertext.len());
-    let total   = aad.len() + aad_pad + ciphertext.len() + ct_pad + 8 + 8;
+    let ct_pad = pad16_len(ciphertext.len());
+    let total = aad.len() + aad_pad + ciphertext.len() + ct_pad + 8 + 8;
 
     let mut buf = Vec::with_capacity(total);
 
     buf.extend_from_slice(aad);
-    for _ in 0..aad_pad { buf.push(0); }
+    for _ in 0..aad_pad {
+        buf.push(0);
+    }
 
     buf.extend_from_slice(ciphertext);
-    for _ in 0..ct_pad { buf.push(0); }
+    for _ in 0..ct_pad {
+        buf.push(0);
+    }
 
-    buf.extend_from_slice(&(aad.len()        as u64).to_le_bytes());
+    buf.extend_from_slice(&(aad.len() as u64).to_le_bytes());
     buf.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
 
     buf
@@ -131,7 +139,7 @@ pub fn chacha20_poly1305_open(
     let otk = poly1305_key_gen(key, nonce);
 
     // 2. Verify tag BEFORE decrypting (authenticate-then-decrypt)
-    let mac_data     = build_mac_input(aad, ciphertext);
+    let mac_data = build_mac_input(aad, ciphertext);
     let expected_tag = poly1305_mac(&otk, &mac_data);
 
     if !constant_time_eq(&expected_tag, tag) {

@@ -20,6 +20,7 @@ const MAX_IMAGE_REDIRECTS: u32 = 3;
 pub struct PageFetch {
     pub body: String,
     pub final_url: String,
+    pub cert_unverified: bool,
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -38,17 +39,18 @@ pub fn fetch_http(url: &str) -> Result<PageFetch, String> {
     let mut cert_warning = false;
     for _ in 0..MAX_PAGE_REDIRECTS {
         let target = split_http_url(&current)?;
-        let (status, body, location, is_unverified) = if target.https {
+        let (status, body, location) = if target.https {
             let resp = libtls::https_get(netd, &target.host, &target.path, target.port)
                 .map_err(|e| format!("HTTPS request failed ({:?})", e))?;
-            if resp.cert_unverified { cert_warning = true; }
-            (resp.status, resp.body, resp.location, resp.cert_unverified)
+            if resp.cert_unverified {
+                cert_warning = true;
+            }
+            (resp.status, resp.body, resp.location)
         } else {
             let resp = libnet::http_get(netd, &target.host, &target.path, target.port)
                 .map_err(|e| format!("HTTP request failed ({:?})", e))?;
-            (resp.status, resp.body, resp.location, false)
+            (resp.status, resp.body, resp.location)
         };
-        let _ = is_unverified;
 
         if is_redirect(status) {
             if let Some(loc) = location {
@@ -65,16 +67,12 @@ pub fn fetch_http(url: &str) -> Result<PageFetch, String> {
         if body.is_empty() {
             return Err(format!("HTTP {} with empty body", status));
         }
-        let mut page_body = String::from_utf8_lossy(&body).into_owned();
-        if cert_warning {
-            // Prepend a visible warning banner
-            let banner = alloc::format!(
-                "<!-- TLS_WARNING --><div style=\"background:#ff0;color:#000;padding:4px;font-size:small\">⚠ Certificate not verified — connection is encrypted but the server identity is unconfirmed.</div>{}",
-                page_body
-            );
-            page_body = banner;
-        }
-        return Ok(PageFetch { body: page_body, final_url: current });
+        let page_body = String::from_utf8_lossy(&body).into_owned();
+        return Ok(PageFetch {
+            body: page_body,
+            final_url: current,
+            cert_unverified: cert_warning,
+        });
     }
     Err(String::from("Too many redirects"))
 }

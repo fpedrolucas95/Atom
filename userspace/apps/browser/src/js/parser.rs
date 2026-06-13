@@ -165,7 +165,9 @@ impl Parser {
                 "return" => {
                     self.advance();
                     // Restricted production: a newline ends the statement.
-                    let value = if self.is_punct(";") || self.is_punct("}") || self.at_eof()
+                    let value = if self.is_punct(";")
+                        || self.is_punct("}")
+                        || self.at_eof()
                         || self.nl_before()
                     {
                         None
@@ -387,7 +389,10 @@ impl Parser {
             };
             self.expect_punct(":")?;
             let mut body = Vec::new();
-            while !self.is_punct("}") && !self.is_kw("case") && !self.is_kw("default") && !self.at_eof()
+            while !self.is_punct("}")
+                && !self.is_kw("case")
+                && !self.is_kw("default")
+                && !self.at_eof()
             {
                 body.push(self.statement()?);
             }
@@ -804,10 +809,9 @@ impl Parser {
                 Expr::Regex(s)
             }
             Tok::Template(_) => {
-                let Tok::Template(parts) = core::mem::replace(
-                    &mut self.toks[self.pos].kind,
-                    Tok::Punct("`"),
-                ) else {
+                let Tok::Template(parts) =
+                    core::mem::replace(&mut self.toks[self.pos].kind, Tok::Punct("`"))
+                else {
                     unreachable!()
                 };
                 self.advance();
@@ -952,9 +956,37 @@ fn is_assign_target(e: &Expr) -> bool {
 fn is_reserved(name: &str) -> bool {
     matches!(
         name,
-        "true" | "false" | "null" | "undefined" | "this" | "function" | "new" | "typeof"
-            | "void" | "delete" | "in" | "of" | "instanceof" | "var" | "let" | "const" | "if"
-            | "else" | "while" | "do" | "for" | "return" | "break" | "continue" | "throw"
-            | "try" | "catch" | "finally" | "switch" | "case" | "default" | "class"
+        "true"
+            | "false"
+            | "null"
+            | "undefined"
+            | "this"
+            | "function"
+            | "new"
+            | "typeof"
+            | "void"
+            | "delete"
+            | "in"
+            | "of"
+            | "instanceof"
+            | "var"
+            | "let"
+            | "const"
+            | "if"
+            | "else"
+            | "while"
+            | "do"
+            | "for"
+            | "return"
+            | "break"
+            | "continue"
+            | "throw"
+            | "try"
+            | "catch"
+            | "finally"
+            | "switch"
+            | "case"
+            | "default"
+            | "class"
     )
 }

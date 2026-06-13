@@ -11,9 +11,9 @@ use crate::text::starts_with_ignore_ascii_case;
 
 /// A parsed HTTP or HTTPS URL split into its addressable parts.
 pub struct HttpTarget {
-    pub host:  String,
-    pub path:  String,
-    pub port:  u16,
+    pub host: String,
+    pub path: String,
+    pub port: u16,
     pub https: bool,
 }
 
@@ -110,7 +110,11 @@ pub fn resolve_url(base_url: &str, rel: &str) -> Option<String> {
     }
     // Protocol-relative reference: inherit scheme from base
     if let Some(stripped) = rel.strip_prefix("//") {
-        let scheme = if base_url.starts_with("https://") { "https" } else { "http" };
+        let scheme = if base_url.starts_with("https://") {
+            "https"
+        } else {
+            "http"
+        };
         return Some(format!("{}://{}", scheme, stripped));
     }
     // A scheme before any slash means an unsupported absolute URL.

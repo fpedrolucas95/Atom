@@ -29,7 +29,7 @@ pub const ABOUT_HOME: &str = r#"
   <h2>Quick links</h2>
   <p><a href="http://neverssl.com/">NeverSSL</a>   <a href="http://example.com/">Example</a>   <a href="about:html">Render lab</a></p>
   <h2>Notes</h2>
-  <p class="muted">HTTPS still requires a TLS stack, so pages that force HTTPS may show an error.</p>
+  <p class="muted">HTTPS is experimental. Traffic is encrypted, but certificates are not validated yet.</p>
 </body>
 </html>
 "#;

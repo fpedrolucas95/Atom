@@ -7,26 +7,24 @@ use alloc::vec::Vec;
 use crate::hkdf::{derive_secret, hkdf_expand_label, hkdf_extract};
 use crate::hmac::hmac_sha256;
 use crate::random::random_bytes;
-use crate::record::{
-    RecordError, RecordStream, CT_APPLICATION_DATA, CT_HANDSHAKE,
-};
+use crate::record::{RecordError, RecordStream, CT_ALERT, CT_APPLICATION_DATA, CT_HANDSHAKE};
 use crate::sha256::{sha256, Sha256};
 use crate::x25519::{x25519, x25519_public};
 
 // ── Handshake message types ───────────────────────────────────────────────────
-const HT_CLIENT_HELLO:         u8 = 1;
-const HT_SERVER_HELLO:         u8 = 2;
+const HT_CLIENT_HELLO: u8 = 1;
+const HT_SERVER_HELLO: u8 = 2;
 const HT_ENCRYPTED_EXTENSIONS: u8 = 8;
-const HT_CERTIFICATE:          u8 = 11;
-const HT_CERTIFICATE_VERIFY:   u8 = 15;
-const HT_FINISHED:             u8 = 20;
+const HT_CERTIFICATE: u8 = 11;
+const HT_CERTIFICATE_VERIFY: u8 = 15;
+const HT_FINISHED: u8 = 20;
 
 // ── Extension types ───────────────────────────────────────────────────────────
-const EXT_SERVER_NAME:         u16 = 0;
-const EXT_SUPPORTED_GROUPS:    u16 = 10;
-const EXT_SIGNATURE_ALGORITHMS:u16 = 13;
-const EXT_SUPPORTED_VERSIONS:  u16 = 43;
-const EXT_KEY_SHARE:           u16 = 51;
+const EXT_SERVER_NAME: u16 = 0;
+const EXT_SUPPORTED_GROUPS: u16 = 10;
+const EXT_SIGNATURE_ALGORITHMS: u16 = 13;
+const EXT_SUPPORTED_VERSIONS: u16 = 43;
+const EXT_KEY_SHARE: u16 = 51;
 
 // ── NamedGroup ────────────────────────────────────────────────────────────────
 const GROUP_X25519: u16 = 0x001d;
@@ -41,13 +39,15 @@ pub enum HandshakeError {
     AlertReceived(u8),
 }
 impl From<RecordError> for HandshakeError {
-    fn from(e: RecordError) -> Self { Self::Record(e) }
+    fn from(e: RecordError) -> Self {
+        Self::Record(e)
+    }
 }
 
 /// Traffic key material for one direction.
 pub struct TrafficKeys {
     pub key: [u8; 32],
-    pub iv:  [u8; 12],
+    pub iv: [u8; 12],
 }
 
 /// Secrets needed after the handshake completes.
@@ -85,21 +85,35 @@ pub fn run_handshake(
     transcript.update(&ch_hs);
 
     // 3. Receive ServerHello
-    let sh_record = stream.recv_record()?;
-    if sh_record.content_type != CT_HANDSHAKE {
-        return Err(HandshakeError::UnexpectedMessage);
-    }
-    let server_pub = parse_server_hello(&sh_record.data)?;
-    transcript.update(&sh_record.data);
+    let mut sh_buf: Vec<u8> = Vec::new();
+    let server_pub = loop {
+        let record = stream.recv_record()?;
+        match record.content_type {
+            CT_HANDSHAKE => {
+                sh_buf.extend_from_slice(&record.data);
+                if sh_buf.len() < 4 {
+                    continue;
+                }
+                let msg_len = u24_to_usize(&sh_buf[1..4]);
+                if sh_buf.len() < 4 + msg_len {
+                    continue;
+                }
+                break parse_server_hello(&sh_buf[..4 + msg_len])?;
+            }
+            CT_ALERT => return Err(parse_alert(&record.data)),
+            _ => return Err(HandshakeError::UnexpectedMessage),
+        }
+    };
+    transcript.update(&sh_buf);
 
     // 4. Key schedule: derive handshake secrets
     let zeros_32 = [0u8; 32];
     let empty_hash = sha256(&[]);
 
-    let early_secret  = hkdf_extract(&zeros_32, &zeros_32);
+    let early_secret = hkdf_extract(&zeros_32, &zeros_32);
     let derived_early = derive_secret(&early_secret, "derived", &empty_hash);
-    let ecdhe         = x25519(&priv_key, &server_pub);
-    let hs_secret     = hkdf_extract(&derived_early, &ecdhe);
+    let ecdhe = x25519(&priv_key, &server_pub);
+    let hs_secret = hkdf_extract(&derived_early, &ecdhe);
 
     // Transcript hash after ServerHello
     let transcript_sh = transcript.clone().finalize();
@@ -108,18 +122,18 @@ pub fn run_handshake(
     let s_hs_ts = derive_secret(&hs_secret, "s hs traffic", &transcript_sh);
 
     let s_write_key = traffic_key(&s_hs_ts);
-    let s_write_iv  = traffic_iv(&s_hs_ts);
+    let s_write_iv = traffic_iv(&s_hs_ts);
     stream.set_read_key(s_write_key, s_write_iv);
 
     // Master secret (computed now, keys derived after server Finished)
-    let derived_hs  = derive_secret(&hs_secret, "derived", &empty_hash);
+    let derived_hs = derive_secret(&hs_secret, "derived", &empty_hash);
     let master_secret = hkdf_extract(&derived_hs, &zeros_32);
 
     // 5. Receive encrypted handshake messages.  Messages may be split across
     //    or coalesced within records, so reassemble them in a byte buffer and
     //    only consume complete messages from the front.
     let mut hs_buf: Vec<u8> = Vec::new();
-    let mut got_ee       = false;
+    let mut got_ee = false;
     let mut got_finished = false;
     let mut server_finished_verify = [0u8; 32];
 
@@ -178,13 +192,7 @@ pub fn run_handshake(
                 // Encrypted record already decrypted by RecordStream.
                 // Treat as additional handshake data.
             }
-            21 => {
-                // Alert
-                let alert_level = if rec.data.is_empty() { 0 } else { rec.data[0] };
-                let alert_desc  = if rec.data.len() < 2 { 0 } else { rec.data[1] };
-                let _ = alert_level;
-                return Err(HandshakeError::AlertReceived(alert_desc));
-            }
+            CT_ALERT => return Err(parse_alert(&rec.data)),
             _ => {}
         }
     }
@@ -198,7 +206,7 @@ pub fn run_handshake(
 
     // 8. Switch write key to client handshake traffic secret, send client Finished
     let c_write_key = traffic_key(&c_hs_ts);
-    let c_write_iv  = traffic_iv(&c_hs_ts);
+    let c_write_iv = traffic_iv(&c_hs_ts);
     stream.set_write_key(c_write_key, c_write_iv);
 
     // Send ChangeCipherSpec (middlebox compat, TLS 1.3 §D.4)
@@ -206,18 +214,18 @@ pub fn run_handshake(
 
     // Compute client Finished
     let client_finished_key = hkdf_expand_label(&c_hs_ts, "finished", &[], 32);
-    let client_verify_data  = hmac_sha256(&client_finished_key, &transcript_sf);
+    let client_verify_data = hmac_sha256(&client_finished_key, &transcript_sf);
     let cf_body = wrap_handshake(HT_FINISHED, &client_verify_data);
     stream.send_encrypted(CT_HANDSHAKE, &cf_body)?;
 
     // 9. Switch to application keys
     let server_app = TrafficKeys {
         key: traffic_key(&s_ap_ts),
-        iv:  traffic_iv(&s_ap_ts),
+        iv: traffic_iv(&s_ap_ts),
     };
     let client_app = TrafficKeys {
         key: traffic_key(&c_ap_ts),
-        iv:  traffic_iv(&c_ap_ts),
+        iv: traffic_iv(&c_ap_ts),
     };
 
     Ok(HandshakeResult {
@@ -246,10 +254,10 @@ fn traffic_iv(ts: &[u8; 32]) -> [u8; 12] {
 // ── ClientHello builder ───────────────────────────────────────────────────────
 
 fn build_client_hello(
-    random:     &[u8; 32],
+    random: &[u8; 32],
     session_id: &[u8; 32],
-    hostname:   &str,
-    pub_key:    &[u8; 32],
+    hostname: &str,
+    pub_key: &[u8; 32],
 ) -> Vec<u8> {
     let mut exts: Vec<u8> = Vec::new();
 
@@ -257,7 +265,7 @@ fn build_client_hello(
     if !hostname.is_empty() {
         let name = hostname.as_bytes();
         let entry_len = 1 + 2 + name.len(); // type(1) + len(2) + name
-        let list_len  = entry_len;
+        let list_len = entry_len;
         let mut sni = Vec::new();
         write_u16(&mut sni, list_len as u16);
         sni.push(0); // name_type: host_name
@@ -298,7 +306,7 @@ fn build_client_hello(
     let ks: Vec<u8> = {
         let mut v = Vec::new();
         let entry_len = 2 + 2 + 32u16; // group + key_len + key
-        write_u16(&mut v, entry_len + 4); // outer list length (group(2)+len(2)+key(32) = 36)
+        write_u16(&mut v, entry_len); // outer list length: group(2)+len(2)+key(32)
         write_u16(&mut v, GROUP_X25519);
         write_u16(&mut v, 32);
         v.extend_from_slice(pub_key);
@@ -343,36 +351,50 @@ fn parse_server_hello(data: &[u8]) -> Result<[u8; 32], HandshakeError> {
     if pos + 4 > data.len() {
         return Err(HandshakeError::BadServerHello);
     }
-    let msg_type = data[pos]; pos += 1;
+    let msg_type = data[pos];
+    pos += 1;
     if msg_type != HT_SERVER_HELLO {
         return Err(HandshakeError::BadServerHello);
     }
-    let msg_len = u24_to_usize(&data[pos..pos + 3]); pos += 3;
+    let msg_len = u24_to_usize(&data[pos..pos + 3]);
+    pos += 3;
     if pos + msg_len > data.len() {
         return Err(HandshakeError::BadServerHello);
     }
 
     // legacy_version (2), random (32)
-    if pos + 2 + 32 > data.len() { return Err(HandshakeError::BadServerHello); }
+    if pos + 2 + 32 > data.len() {
+        return Err(HandshakeError::BadServerHello);
+    }
     pos += 2 + 32;
 
     // legacy_session_id_echo
-    if pos >= data.len() { return Err(HandshakeError::BadServerHello); }
-    let sid_len = data[pos] as usize; pos += 1 + sid_len;
+    if pos >= data.len() {
+        return Err(HandshakeError::BadServerHello);
+    }
+    let sid_len = data[pos] as usize;
+    pos += 1 + sid_len;
 
     // cipher_suite (2)
     pos += 2;
     // compression_method (1)
     pos += 1;
 
-    if pos + 2 > data.len() { return Err(HandshakeError::BadServerHello); }
-    let exts_len = u16_at(data, pos) as usize; pos += 2;
+    if pos + 2 > data.len() {
+        return Err(HandshakeError::BadServerHello);
+    }
+    let exts_len = u16_at(data, pos) as usize;
+    pos += 2;
     let exts_end = pos + exts_len;
 
     while pos + 4 <= exts_end.min(data.len()) {
-        let ext_type = u16_at(data, pos); pos += 2;
-        let ext_len  = u16_at(data, pos) as usize; pos += 2;
-        if pos + ext_len > data.len() { break; }
+        let ext_type = u16_at(data, pos);
+        pos += 2;
+        let ext_len = u16_at(data, pos) as usize;
+        pos += 2;
+        if pos + ext_len > data.len() {
+            break;
+        }
         let ext_data = &data[pos..pos + ext_len];
 
         if ext_type == EXT_KEY_SHARE {
@@ -399,15 +421,15 @@ fn wrap_handshake(msg_type: u8, body: &[u8]) -> Vec<u8> {
     out.push(msg_type);
     let len = body.len();
     out.push((len >> 16) as u8);
-    out.push((len >>  8) as u8);
-    out.push( len        as u8);
+    out.push((len >> 8) as u8);
+    out.push(len as u8);
     out.extend_from_slice(body);
     out
 }
 
 fn write_u16(buf: &mut Vec<u8>, v: u16) {
     buf.push((v >> 8) as u8);
-    buf.push( v       as u8);
+    buf.push(v as u8);
 }
 
 fn u16_at(data: &[u8], pos: usize) -> u16 {
@@ -416,4 +438,48 @@ fn u16_at(data: &[u8], pos: usize) -> u16 {
 
 fn u24_to_usize(b: &[u8]) -> usize {
     ((b[0] as usize) << 16) | ((b[1] as usize) << 8) | (b[2] as usize)
+}
+
+fn parse_alert(data: &[u8]) -> HandshakeError {
+    HandshakeError::AlertReceived(data.get(1).copied().unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_key_share_vector_has_exact_entry_length() {
+        let body = build_client_hello(&[1; 32], &[2; 32], "example.com", &[3; 32]);
+        let mut pos = 2 + 32 + 1 + 32;
+        let suites_len = u16_at(&body, pos) as usize;
+        pos += 2 + suites_len;
+        let compression_len = body[pos] as usize;
+        pos += 1 + compression_len;
+        let extensions_len = u16_at(&body, pos) as usize;
+        pos += 2;
+        let extensions_end = pos + extensions_len;
+
+        while pos + 4 <= extensions_end {
+            let ext_type = u16_at(&body, pos);
+            let ext_len = u16_at(&body, pos + 2) as usize;
+            pos += 4;
+            if ext_type == EXT_KEY_SHARE {
+                assert_eq!(ext_len, 38);
+                assert_eq!(u16_at(&body, pos), 36);
+                assert_eq!(ext_len, 2 + u16_at(&body, pos) as usize);
+                return;
+            }
+            pos += ext_len;
+        }
+        panic!("key_share extension not found");
+    }
+
+    #[test]
+    fn alert_description_is_preserved() {
+        assert!(matches!(
+            parse_alert(&[2, 50]),
+            HandshakeError::AlertReceived(50)
+        ));
+    }
 }
