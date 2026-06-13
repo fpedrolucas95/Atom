@@ -546,6 +546,16 @@ pub enum MessageType {
     TimeSetConfig = 1502,
     /// Client -> timesync: request an immediate internet synchronization
     TimeSyncNow = 1503,
+
+    // Audio Service (1600-1699)
+    /// Client -> audiod: request current volume, mute, and device state
+    AudioGetState = 1600,
+    /// audiod -> client: current audio state
+    AudioStateReply = 1601,
+    /// Client -> audiod: update the global output volume and mute state
+    AudioSetState = 1602,
+    /// Client -> audiod: play a system PCM WAV asset
+    AudioPlayFile = 1603,
 }
 
 impl MessageType {
@@ -696,6 +706,10 @@ impl MessageType {
             1501 => Some(Self::TimeStateReply),
             1502 => Some(Self::TimeSetConfig),
             1503 => Some(Self::TimeSyncNow),
+            1600 => Some(Self::AudioGetState),
+            1601 => Some(Self::AudioStateReply),
+            1602 => Some(Self::AudioSetState),
+            1603 => Some(Self::AudioPlayFile),
             _ => None,
         }
     }
@@ -980,6 +994,111 @@ impl TimeStateReplyMsg {
         self.unix_seconds
             .saturating_add(elapsed)
             .saturating_add_signed(self.utc_offset_minutes as i64 * 60) as i64
+    }
+}
+
+/// Client -> audiod: request current audio state.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioGetStateMsg {
+    pub reply_port: u64,
+}
+
+impl AudioGetStateMsg {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        self.reply_port.to_le_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
+        })
+    }
+}
+
+/// Client -> audiod: update global volume and mute state.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioSetStateMsg {
+    pub reply_port: u64,
+    pub volume: u8,
+    pub muted: bool,
+}
+
+impl AudioSetStateMsg {
+    pub const SIZE: usize = 10;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.reply_port.to_le_bytes());
+        bytes[8] = self.volume.min(100);
+        bytes[9] = self.muted as u8;
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            reply_port: u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?),
+            volume: *bytes.get(8)?.min(&100),
+            muted: *bytes.get(9)? != 0,
+        })
+    }
+}
+
+/// audiod -> client: current output and playback state.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioStateReplyMsg {
+    pub volume: u8,
+    pub muted: bool,
+    pub available: bool,
+    pub playing: bool,
+}
+
+impl AudioStateReplyMsg {
+    pub const SIZE: usize = 4;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        [
+            self.volume.min(100),
+            self.muted as u8,
+            self.available as u8,
+            self.playing as u8,
+        ]
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            volume: (*bytes.first()?).min(100),
+            muted: *bytes.get(1)? != 0,
+            available: *bytes.get(2)? != 0,
+            playing: *bytes.get(3)? != 0,
+        })
+    }
+}
+
+/// Client -> audiod: play a WAV asset. The service intentionally owns asset
+/// loading, parsing, and DMA setup so applications never need hardware access.
+#[derive(Debug, Clone)]
+pub struct AudioPlayFileMsg {
+    pub path: String,
+}
+
+impl AudioPlayFileMsg {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let path = self.path.as_bytes();
+        let len = path.len().min(u16::MAX as usize);
+        let mut bytes = Vec::with_capacity(2 + len);
+        bytes.extend_from_slice(&(len as u16).to_le_bytes());
+        bytes.extend_from_slice(&path[..len]);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let len = u16::from_le_bytes(bytes.get(0..2)?.try_into().ok()?) as usize;
+        let path = core::str::from_utf8(bytes.get(2..2 + len)?).ok()?;
+        Some(Self {
+            path: String::from(path),
+        })
     }
 }
 
@@ -3235,5 +3354,29 @@ mod tests {
         .to_bytes();
         bytes[11] = TIME_ZONES.len() as u8;
         assert!(TimeSetConfigMsg::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn audio_messages_roundtrip() {
+        let set = AudioSetStateMsg {
+            reply_port: 42,
+            volume: 85,
+            muted: true,
+        };
+        let decoded_set = AudioSetStateMsg::from_bytes(&set.to_bytes()).unwrap();
+        assert_eq!(decoded_set.reply_port, 42);
+        assert_eq!(decoded_set.volume, 85);
+        assert!(decoded_set.muted);
+
+        let play = AudioPlayFileMsg {
+            path: String::from("/system/sounds/startup.wav"),
+        };
+        let decoded_play = AudioPlayFileMsg::from_bytes(&play.to_bytes()).unwrap();
+        assert_eq!(decoded_play.path, play.path);
+    }
+
+    #[test]
+    fn audio_play_rejects_truncated_path() {
+        assert!(AudioPlayFileMsg::from_bytes(&[8, 0, b's']).is_none());
     }
 }

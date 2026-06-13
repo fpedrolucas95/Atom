@@ -29,7 +29,8 @@ use libipc::messages::{
     AppRegisterMsg, SurfacePresentMsg, KeyEvent, KeyModifiers, MouseMoveEvent,
     MouseButtonEvent, MouseButton, MouseScrollEvent, OpenInTabMsg, ApplyWallpaperMsg,
     WallpaperAppliedMsg, WallpaperFailedMsg, AppLaunchRequestMsg, AppLaunchReplyMsg,
-    TimeGetStateMsg, TimeStateReplyMsg, launch_status,
+    TimeGetStateMsg, TimeStateReplyMsg, AudioGetStateMsg, AudioPlayFileMsg,
+    AudioSetStateMsg, AudioStateReplyMsg, launch_status,
 };
 use libipc::protocol::send_message_async;
 use libimage::{DecodedImage, ImageDecoder, JpgDecoder, PngDecoder};
@@ -1519,6 +1520,10 @@ struct Compositor {
     clock_state: Option<TimeStateReplyMsg>,
     last_clock_query_tick: u64,
     last_clock_minute: i64,
+    audio_service_port: Option<PortId>,
+    audio_state: Option<AudioStateReplyMsg>,
+    last_audio_query_tick: u64,
+    startup_chime_requested: bool,
 }
 
 impl Compositor {
@@ -1602,6 +1607,10 @@ impl Compositor {
             clock_state: None,
             last_clock_query_tick: 0,
             last_clock_minute: -1,
+            audio_service_port: None,
+            audio_state: None,
+            last_audio_query_tick: 0,
+            startup_chime_requested: false,
         }
     }
 
@@ -1705,6 +1714,7 @@ impl Compositor {
             self.reap_pending_closes();
             self.flush_deferred_desktop_work();
             self.refresh_clock();
+            self.refresh_audio();
 
             if self.dirty {
                 // Frame pacing: only composite once per MIN_FRAME_TICKS. A
@@ -2122,6 +2132,14 @@ impl Compositor {
                     self.mark_taskbar_dirty();
                 }
             }
+            MessageType::AudioStateReply => {
+                if let Some(state) =
+                    AudioStateReplyMsg::from_bytes(&data[MessageHeader::SIZE..])
+                {
+                    self.audio_state = Some(state);
+                    self.mark_taskbar_dirty();
+                }
+            }
             MessageType::SurfacePresent => {
                 let payload_start = MessageHeader::SIZE;
                 if data.len() >= payload_start + SurfacePresentMsg::SIZE {
@@ -2332,6 +2350,10 @@ impl Compositor {
         }
 
         if self.is_on_dock(x, y) {
+            if self.sound_control_at(x, y) {
+                self.toggle_audio_mute();
+                return;
+            }
             if let Some(icon_index) = self.dock_icon_at(x, y) {
                 self.handle_dock_click(icon_index);
             }
@@ -3516,6 +3538,78 @@ impl Compositor {
         }
     }
 
+    fn refresh_audio(&mut self) {
+        let now = get_ticks();
+        let query_interval = if self.audio_service_port.is_some() { 500 } else { 300 };
+        if now.wrapping_sub(self.last_audio_query_tick) < query_interval
+            && self.last_audio_query_tick != 0
+        {
+            return;
+        }
+        self.last_audio_query_tick = now;
+        if self.audio_service_port.is_none() {
+            self.audio_service_port = libipc::protocol::lookup_service("audiod").ok();
+        }
+        let Some(port) = self.audio_service_port else { return };
+        let request = AudioGetStateMsg { reply_port: self.event_port };
+        if send_message_async(port, MessageType::AudioGetState, &request.to_bytes()).is_err() {
+            self.audio_service_port = None;
+            return;
+        }
+        if !self.startup_chime_requested {
+            let play = AudioPlayFileMsg {
+                path: String::from("/system/sounds/startup.wav"),
+            };
+            if send_message_async(port, MessageType::AudioPlayFile, &play.to_bytes()).is_ok() {
+                self.startup_chime_requested = true;
+                log("ui_shell: startup chime requested");
+            }
+        }
+    }
+
+    fn toggle_audio_mute(&mut self) {
+        let Some(port) = self.audio_service_port
+            .or_else(|| libipc::protocol::lookup_service("audiod").ok())
+        else { return };
+        self.audio_service_port = Some(port);
+        let current = self.audio_state.unwrap_or(AudioStateReplyMsg {
+            volume: 70, muted: false, available: false, playing: false,
+        });
+        let muted = current.muted || current.volume == 0;
+        let request = AudioSetStateMsg {
+            reply_port: self.event_port,
+            volume: if muted && current.volume == 0 { 70 } else { current.volume },
+            muted: !muted,
+        };
+        if send_message_async(port, MessageType::AudioSetState, &request.to_bytes()).is_ok() {
+            self.audio_state = Some(AudioStateReplyMsg {
+                volume: request.volume,
+                muted: request.muted,
+                ..current
+            });
+            self.mark_taskbar_dirty();
+        } else {
+            self.audio_service_port = None;
+        }
+    }
+
+    fn sound_control_rect(&self) -> Option<(u32, u32, u32, u32)> {
+        let (_, bar_y, bar_w, bar_h, _, _, _, _) = self.dock_layout()?;
+        let (_, clock_len) = format_taskbar_clock(self.clock_state, get_ticks());
+        let clock_w = clock_len as u32 * 8;
+        let clock_x = bar_w.saturating_sub(atom_theme::spacing::LG as u32 + clock_w);
+        let separator_x = clock_x.saturating_sub(atom_theme::spacing::LG as u32);
+        let w = 28u32;
+        let x = separator_x.saturating_sub(atom_theme::spacing::LG as u32 + w);
+        Some((x, bar_y as u32, w, bar_h))
+    }
+
+    fn sound_control_at(&self, x: i32, y: i32) -> bool {
+        let Some((sx, sy, sw, sh)) = self.sound_control_rect() else { return false };
+        x >= sx as i32 && x < (sx + sw) as i32
+            && y >= sy as i32 && y < (sy + sh) as i32
+    }
+
     fn dock_icon_at(&self, x: i32, y: i32) -> Option<usize> {
         let (_, bar_y, _, bar_h, start_x, _, item_size, spacing) = self.dock_layout()?;
         if y < bar_y || y >= bar_y + bar_h as i32 {
@@ -4166,6 +4260,24 @@ impl Compositor {
             bar_h.saturating_sub(atom_theme::spacing::MD as u32 * 2),
             theme::DOCK_BORDER,
         );
+        if let Some((sound_x, _, _, _)) = self.sound_control_rect() {
+            let state = self.audio_state.unwrap_or(AudioStateReplyMsg {
+                volume: 70, muted: false, available: false, playing: false,
+            });
+            let icon_y = bar_y + (bar_h.saturating_sub(12)) / 2;
+            let color = if state.available { theme::PANEL_TEXT } else { theme::PANEL_TEXT_DIM };
+            self.backbuffer_fb.fill_rect(sound_x + 2, icon_y + 4, 4, 5, color);
+            self.backbuffer_fb.fill_rect(sound_x + 6, icon_y + 2, 3, 9, color);
+            if state.muted || state.volume == 0 {
+                self.backbuffer_fb.draw_string(
+                    sound_x + 13, icon_y + 2, "x", theme::BTN_CLOSE, theme::DOCK_BG,
+                );
+            } else {
+                self.backbuffer_fb.draw_string(
+                    sound_x + 12, icon_y + 2, "))", color, theme::DOCK_BG,
+                );
+            }
+        }
         self.backbuffer_fb
             .draw_string(clock_x, clock_y, clock, theme::PANEL_TEXT, theme::DOCK_BG);
     }

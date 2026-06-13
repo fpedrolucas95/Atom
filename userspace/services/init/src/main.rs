@@ -222,7 +222,7 @@ fn boot_sequence() {
     // -----------------------------------------------------------------------
     log("");
     log("[Phase 1.5] Spawning filesystem daemon (fsd)...");
-    
+
     let _fsd_pid = match spawn_service("fsd") {
         Some(pid) => {
             log("[Phase 1.5] FSD spawned with PID ");
@@ -261,6 +261,10 @@ fn boot_sequence() {
     atom_syscall::thread::sleep_ms(200);
     let _timesync_pid = spawn_service("timesync");
     log("[Phase 2] Network services spawned");
+
+    log("[Phase 2] Spawning audio service...");
+    let _audio_pid = spawn_service("audiod");
+    let _ = wait_for_service("audiod");
 
     // -----------------------------------------------------------------------
     // Phase 3: UI shell (compositor)

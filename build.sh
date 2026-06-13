@@ -41,6 +41,27 @@ function error {
     echo -e "${RED}[X] $1${NC}"
 }
 
+function prepare_startup_sound {
+    local startup_mp3="userspace/system_apps/ui_shell/sounds/startup.mp3"
+    local startup_wav="userspace/system_apps/ui_shell/sounds/startup.wav"
+
+    if [ -f "$startup_mp3" ] && { [ ! -f "$startup_wav" ] || [ "$startup_mp3" -nt "$startup_wav" ]; }; then
+        step "Convertendo startup.mp3 para PCM 48 kHz..."
+        if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -loglevel error -y -i "$startup_mp3" -ar 48000 -ac 2 -c:a pcm_s16le "$startup_wav"
+        elif command -v afconvert >/dev/null 2>&1; then
+            afconvert -f WAVE -d LEI16@48000 -c 2 "$startup_mp3" "$startup_wav"
+        else
+            warning "startup.mp3 mudou, mas ffmpeg/afconvert não está disponível; usando WAV existente"
+        fi
+    fi
+
+    if [ ! -f "$startup_wav" ]; then
+        error "startup.wav não existe e não pôde ser gerado"
+        exit 1
+    fi
+}
+
 function header {
     echo ""
     echo -e "${MAGENTA}========== $1 ==========${NC}"
@@ -118,6 +139,7 @@ USERSPACE_SERVICES=(
     "netd"
     "nic_driver"
     "timesync"
+    "audiod"
 )
 
 USERSPACE_APPS=(
@@ -207,6 +229,8 @@ mkdir -p efi/apps/user
 mkdir -p efi/user/home
 mkdir -p efi/user/config
 mkdir -p efi/user/data
+
+prepare_startup_sound
 
 # =========================================================================
 # RESTAURAR DEPENDÊNCIAS (submodules)
@@ -696,6 +720,7 @@ if [ ! -f "$DISK_IMG" ]; then
     mmd -i $DISK_IMG ::/system
     mmd -i $DISK_IMG ::/system/services
     mmd -i $DISK_IMG ::/system/wallpapers
+    mmd -i $DISK_IMG ::/system/sounds
     mmd -i $DISK_IMG ::/apps
     mmd -i $DISK_IMG ::/apps/system
     mmd -i $DISK_IMG ::/apps/user
@@ -707,6 +732,17 @@ if [ ! -f "$DISK_IMG" ]; then
     success "Imagem de disco criada: $DISK_IMG"
 else
     step "Imagem existente preservada: $DISK_IMG (use --clean para recriar)"
+fi
+
+# ---- System sounds → /system/sounds/ ----
+if ! mdir -i "$DISK_IMG" ::/system/sounds >/dev/null 2>&1; then
+    mmd -i "$DISK_IMG" ::/system/sounds
+fi
+if ls userspace/system_apps/ui_shell/sounds/*.wav 1>/dev/null 2>&1; then
+    for sound in userspace/system_apps/ui_shell/sounds/*.wav; do
+        mcopy -i $DISK_IMG -o "$sound" ::/system/sounds/
+        success "$(basename "$sound") → system/sounds/"
+    done
 fi
 
 # Always update OS binaries on the image so the latest build is used,
@@ -794,6 +830,24 @@ if [ "$RUN" = true ]; then
     fi
 
     step "Iniciando QEMU com imagem real (smp=$SMP_CPUS)..."
+
+    AUDIO_DRIVER="none"
+    AUDIO_DRIVERS="$(qemu-system-x86_64 -audiodev help 2>&1 || true)"
+    if [ "$(uname -s)" = "Darwin" ] && echo "$AUDIO_DRIVERS" | grep -q "coreaudio"; then
+        AUDIO_DRIVER="coreaudio"
+    elif echo "$AUDIO_DRIVERS" | grep -q "pipewire"; then
+        AUDIO_DRIVER="pipewire"
+    elif echo "$AUDIO_DRIVERS" | grep -q "pa"; then
+        AUDIO_DRIVER="pa"
+    elif echo "$AUDIO_DRIVERS" | grep -q "alsa"; then
+        AUDIO_DRIVER="alsa"
+    fi
+
+    if [ "$AUDIO_DRIVER" = "none" ]; then
+        AUDIO_DEVICE_ARGS=""
+    else
+        AUDIO_DEVICE_ARGS="-audiodev $AUDIO_DRIVER,id=audio0 -device AC97,audiodev=audio0"
+    fi
     
     qemu-system-x86_64 \
         -machine q35 \
@@ -803,6 +857,7 @@ if [ "$RUN" = true ]; then
         -bios "$OVMF_PATH" \
         -drive format=raw,file=$DISK_IMG,cache=writeback \
         -device VGA \
+        $AUDIO_DEVICE_ARGS \
         -serial file:serial.log \
         -debugcon file:serial_log.txt \
         -global isa-debugcon.iobase=0xE9 \

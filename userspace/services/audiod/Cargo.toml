@@ -1,0 +1,20 @@
+[package]
+name = "audiod"
+version = "0.1.0"
+edition = "2021"
+description = "Atom OS AC'97 audio service"
+
+[workspace]
+
+[dependencies]
+atom_syscall = { path = "../../libs/syscall" }
+libipc = { path = "../../libs/libipc" }
+
+[[bin]]
+name = "audiod"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

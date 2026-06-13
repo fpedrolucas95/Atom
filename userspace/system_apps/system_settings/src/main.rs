@@ -50,6 +50,7 @@ use libipc::messages::{
     ScalingMode, ApplyWallpaperMsg, WallpaperSourceType,
     NetGetConfigMsg, NetGetConfigReplyMsg, NetConfigureMsg,
     TimeGetStateMsg, TimeSetConfigMsg, TimeStateReplyMsg, TIME_LOCALES, TIME_ZONES,
+    AudioGetStateMsg, AudioPlayFileMsg, AudioSetStateMsg, AudioStateReplyMsg,
 };
 use libipc::protocol::{get_payload, send_message};
 
@@ -171,7 +172,7 @@ const DEF_H: u16 = 768;
 // ── Data types ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Page { DesktopBg, Network, DisplayRes, DateTime, AboutSys }
+enum Page { DesktopBg, Network, DisplayRes, Sound, DateTime, AboutSys }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WpMode { Color, Image }
@@ -429,6 +430,9 @@ struct App {
     time:         Option<TimeStateReplyMsg>,
     time_port:    Option<PortId>,
     last_time_lookup: u64,
+    audio:        Option<AudioStateReplyMsg>,
+    audio_port:   Option<PortId>,
+    last_audio_lookup: u64,
     last_refresh: u64,   // last get_ticks() value when data was refreshed
     deferred_done: bool, // slow init completed
 }
@@ -446,6 +450,7 @@ impl App {
             wp: WpState::new(), wpscr: 0,
             net: NetState::new(), sinfo: SysInfo::empty(),
             time: None, time_port: None, last_time_lookup: 0,
+            audio: None, audio_port: None, last_audio_lookup: 0,
             last_refresh: 0, deferred_done: false,
         };
         a.clamp_scroll();
@@ -459,6 +464,7 @@ impl App {
         self.sinfo.refresh_uptime();
         self.net.refresh();
         self.request_time_state();
+        self.request_audio_state();
         self.wp.discover();
         self.last_refresh = get_ticks();
         self.deferred_done = true;
@@ -484,6 +490,9 @@ impl App {
             Page::DateTime => {
                 self.request_time_state();
             }
+            Page::Sound => {
+                self.request_audio_state();
+            }
             _ => {}
         }
         self.last_refresh = now;
@@ -497,16 +506,18 @@ impl App {
 
     // ── Sidebar hit-test ──────────────────────────────────────────────────────
 
-    fn nav_items(&self) -> [(Page, u32); 5] {
+    fn nav_items(&self) -> [(Page, u32); 6] {
         let cat  = CH + 10;
         let igap = 4;
         let y0 = SB_PAD + cat;                        // Desktop Bg
         let y1 = y0 + ITEM_H + igap + 14 + cat;       // Network
         let y2 = y1 + ITEM_H + igap;                  // Display Res
-        let y3 = y2 + ITEM_H + igap;                  // Date and Time
-        let y4 = y3 + ITEM_H + igap;                  // About Sys
+        let y3 = y2 + ITEM_H + igap;                  // Sound
+        let y4 = y3 + ITEM_H + igap;                  // Date and Time
+        let y5 = y4 + ITEM_H + igap;                  // About Sys
         [(Page::DesktopBg, y0), (Page::Network, y1),
-         (Page::DisplayRes, y2), (Page::DateTime, y3), (Page::AboutSys, y4)]
+         (Page::DisplayRes, y2), (Page::Sound, y3), (Page::DateTime, y4),
+         (Page::AboutSys, y5)]
     }
 
     fn nav_hit(&self, mx: i32, my: i32) -> Option<Page> {
@@ -660,6 +671,66 @@ impl App {
         self.dirty = true;
     }
 
+    fn request_audio_state(&mut self) {
+        if self.audio_port.is_none() {
+            let now = get_ticks();
+            if self.last_audio_lookup != 0 && now.wrapping_sub(self.last_audio_lookup) < 300 {
+                return;
+            }
+            self.last_audio_lookup = now;
+            self.audio_port = libipc::protocol::lookup_service("audiod").ok();
+        }
+        let Some(port) = self.audio_port else { return; };
+        let request = AudioGetStateMsg { reply_port: self.lport };
+        if send_message(port, MessageType::AudioGetState, &request.to_bytes()).is_err() {
+            self.audio_port = None;
+        }
+    }
+
+    fn set_audio_state(&mut self, volume: u8, muted: bool) {
+        let Some(port) = self.audio_port.or_else(|| {
+            let found = libipc::protocol::lookup_service("audiod").ok();
+            self.audio_port = found;
+            found
+        }) else {
+            self.status.set(StatusKind::Warn, b"Audio service unavailable.");
+            self.dirty = true;
+            return;
+        };
+        let request = AudioSetStateMsg {
+            reply_port: self.lport, volume: volume.min(100), muted,
+        };
+        if send_message(port, MessageType::AudioSetState, &request.to_bytes()).is_ok() {
+            self.audio = Some(AudioStateReplyMsg {
+                volume: volume.min(100), muted,
+                available: self.audio.map(|v| v.available).unwrap_or(false),
+                playing: self.audio.map(|v| v.playing).unwrap_or(false),
+            });
+            self.status.set(StatusKind::Ok, b"Sound preferences saved.");
+        } else {
+            self.audio_port = None;
+            self.status.set(StatusKind::Warn, b"Failed to update sound.");
+        }
+        self.dirty = true;
+    }
+
+    fn test_audio(&mut self) {
+        let Some(port) = self.audio_port else {
+            self.request_audio_state();
+            return;
+        };
+        let request = AudioPlayFileMsg {
+            path: String::from("/system/sounds/startup.wav"),
+        };
+        if send_message(port, MessageType::AudioPlayFile, &request.to_bytes()).is_ok() {
+            self.status.set(StatusKind::Ok, b"Playing test sound...");
+        } else {
+            self.audio_port = None;
+            self.status.set(StatusKind::Warn, b"Could not play test sound.");
+        }
+        self.dirty = true;
+    }
+
     fn apply_resolution(&mut self) {
         if self.mcnt == 0 { return; }
         let m = self.modes[self.sel];
@@ -761,8 +832,9 @@ impl App {
         self.draw_cat_label(s, cat2_y, "SYSTEM SETTINGS");
         self.draw_nav_item(s, items[1].1, "Network",            items[1].0 == self.page);
         self.draw_nav_item(s, items[2].1, "Display Resolution", items[2].0 == self.page);
-        self.draw_nav_item(s, items[3].1, "Date and Time",      items[3].0 == self.page);
-        self.draw_nav_item(s, items[4].1, "About System",       items[4].0 == self.page);
+        self.draw_nav_item(s, items[3].1, "Sound",              items[3].0 == self.page);
+        self.draw_nav_item(s, items[4].1, "Date and Time",      items[4].0 == self.page);
+        self.draw_nav_item(s, items[5].1, "About System",       items[5].0 == self.page);
     }
 
     fn draw_cat_label(&self, s: &SharedSurface, y: u32, label: &str) {
@@ -788,6 +860,7 @@ impl App {
             Page::DesktopBg  => self.draw_desktop_bg(s),
             Page::Network    => self.draw_network(s),
             Page::DisplayRes => self.draw_display_res(s),
+            Page::Sound      => self.draw_sound(s),
             Page::DateTime   => self.draw_date_time(s),
             Page::AboutSys   => self.draw_about(s),
         }
@@ -1146,6 +1219,58 @@ impl App {
         s.draw_string(cx + PAD, help_y, help, theme::TEXT_MUTED, theme::BG);
     }
 
+    fn draw_sound(&self, s: &SharedSurface) {
+        self.draw_page_title(s, "Sound");
+        let row_h = 42u32;
+        let card1_y = PTITLE_H + 10;
+        let card2_y = card1_y + row_h * 2 + 12;
+        let state = self.audio.unwrap_or(AudioStateReplyMsg {
+            volume: 70, muted: false, available: false, playing: false,
+        });
+
+        self.draw_card(s, card1_y, row_h * 2);
+        self.draw_time_row(
+            s, card1_y, row_h, "Output Device",
+            if state.available { "AC97 Audio" } else { "Unavailable" }, false,
+        );
+
+        let x = self.cx() + PAD + 10;
+        let right = self.cx() + self.cw() - PAD - 10;
+        let volume_y = card1_y + row_h;
+        s.draw_string(x, volume_y + 8, "Output Volume", theme::TEXT, theme::CARD_BG);
+        let bar_x = x + 120;
+        let bar_w = right.saturating_sub(bar_x + 38);
+        let bar_y = volume_y + 13;
+        s.fill_rect_rounded_aa(bar_x, bar_y, bar_w, 8, 4, theme::BTN_GHOST);
+        let fill_w = bar_w.saturating_mul(state.volume as u32) / 100;
+        if fill_w > 0 { s.fill_rect_rounded_aa(bar_x, bar_y, fill_w, 8, 4, theme::ACCENT); }
+        let knob_x = bar_x + fill_w.saturating_sub(5).min(bar_w.saturating_sub(10));
+        s.fill_rect_rounded_aa(knob_x, bar_y.saturating_sub(3), 10, 14, 5, theme::BTN_TEXT);
+        let mut volume_buf = [0u8; 5];
+        let volume_len = fmt_u64(&mut volume_buf, state.volume as u64);
+        s.draw_string(
+            right.saturating_sub(32), volume_y + 8,
+            core::str::from_utf8(&volume_buf[..volume_len]).unwrap_or("0"),
+            theme::TEXT_SEC, theme::CARD_BG,
+        );
+
+        self.draw_card(s, card2_y, row_h * 2);
+        self.draw_time_row(s, card2_y, row_h, "Mute Output", "", false);
+        self.draw_switch(s, card2_y + (row_h - 20) / 2, state.muted || state.volume == 0);
+        self.draw_time_row(
+            s, card2_y + row_h, row_h, "Playback",
+            if state.playing { "Playing" } else { "Ready" }, false,
+        );
+
+        let (ax, ay) = self.apply_btn();
+        s.fill_rect_rounded_aa(ax, ay, BTN_W, BTN_H, 7, theme::BTN_PRIMARY);
+        let label = "Test Sound";
+        s.draw_string(
+            ax + (BTN_W.saturating_sub(label.len() as u32 * CW)) / 2,
+            ay + (BTN_H - CH) / 2, label, theme::BTN_TEXT, theme::BTN_PRIMARY,
+        );
+    }
+
     fn draw_time_row(&self, s: &SharedSurface, y: u32, h: u32, label: &str,
                      value: &str, chevron: bool) {
         let x = self.cx() + PAD + 10;
@@ -1226,6 +1351,7 @@ impl App {
                 Page::DesktopBg  => "Select color or image, then Apply",
                 Page::Network    => "Network configuration  |  Click a DNS preset to switch",
                 Page::DisplayRes => "Select resolution, then Apply  |  R to restore default",
+                Page::Sound      => "Adjust the global output volume or test the boot chime",
                 Page::DateTime   => "Internet time service and regional clock preferences",
                 Page::AboutSys   => "Atom OS System Information",
             };
@@ -1267,6 +1393,7 @@ impl App {
             Page::DesktopBg  => self.on_wp_click(mx, my),
             Page::Network    => self.on_net_click(mx, my),
             Page::DisplayRes => self.on_res_click(mx, my),
+            Page::Sound      => self.on_sound_click(mx, my),
             Page::DateTime   => self.on_date_time_click(mx, my),
             Page::AboutSys   => {}
         }
@@ -1423,6 +1550,37 @@ impl App {
         }
     }
 
+    fn on_sound_click(&mut self, mx: i32, my: i32) {
+        let state = self.audio.unwrap_or(AudioStateReplyMsg {
+            volume: 70, muted: false, available: false, playing: false,
+        });
+        let (ax, ay) = self.apply_btn();
+        if in_rect(mx, my, ax, ay, BTN_W, BTN_H) {
+            self.test_audio();
+            return;
+        }
+        let row_h = 42u32;
+        let card1_y = PTITLE_H + 10;
+        let card2_y = card1_y + row_h * 2 + 12;
+        let x = self.cx() + PAD + 10;
+        let right = self.cx() + self.cw() - PAD - 10;
+        let bar_x = x + 120;
+        let bar_w = right.saturating_sub(bar_x + 38);
+        let bar_y = card1_y + row_h + 6;
+        if in_rect(mx, my, bar_x, bar_y, bar_w, 24) {
+            let rel = (mx as u32).saturating_sub(bar_x).min(bar_w);
+            let volume = if bar_w == 0 { 0 } else { (rel * 100 / bar_w) as u8 };
+            self.set_audio_state(volume, volume == 0);
+        } else if in_rect(
+            mx, my, self.cx() + PAD, card2_y,
+            self.cw().saturating_sub(PAD * 2), row_h,
+        ) {
+            let muted = state.muted || state.volume == 0;
+            let volume = if muted && state.volume == 0 { 70 } else { state.volume };
+            self.set_audio_state(volume, !muted);
+        }
+    }
+
     fn on_mouse_move(&mut self, my: i32) {
         if self.sbdrag && self.page == Page::DisplayRes {
             self.set_scroll_from_drag(my - self.sboff);
@@ -1488,6 +1646,7 @@ impl App {
                         "Desktop Background"|"Wallpaper"     => Page::DesktopBg,
                         "Network"                            => Page::Network,
                         "Display Resolution"|"Resolution"    => Page::DisplayRes,
+                        "Sound"|"Audio"                       => Page::Sound,
                         "Date and Time"|"DateTime"            => Page::DateTime,
                         "About System"                       => Page::AboutSys,
                         _ => return,
@@ -1512,6 +1671,12 @@ impl App {
             MessageType::TimeStateReply => {
                 if let Some(state) = TimeStateReplyMsg::from_bytes(pay) {
                     self.time = Some(state);
+                    self.dirty = true;
+                }
+            }
+            MessageType::AudioStateReply => {
+                if let Some(state) = AudioStateReplyMsg::from_bytes(pay) {
+                    self.audio = Some(state);
                     self.dirty = true;
                 }
             }

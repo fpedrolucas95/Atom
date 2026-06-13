@@ -605,6 +605,7 @@ fn init_default_services() {
         "nic_driver",
         "netd",
         "timesync",
+        "audiod",
     ];
 
     for name in known_services {

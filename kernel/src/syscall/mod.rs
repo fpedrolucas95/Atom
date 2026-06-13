@@ -4868,6 +4868,34 @@ fn apply_spawn_grants(
                     }
                 }
             }
+            EnvGrant::AudioDevices => {
+                let audio_devs: alloc::vec::Vec<_> =
+                    crate::drivers::pci::get_devices_by_class(0x04)
+                        .into_iter()
+                        .filter(|dev| dev.subclass == 0x01)
+                        .collect();
+                if audio_devs.is_empty() {
+                    log_warn!(
+                        "spawn",
+                        "AudioDevices requested by '{}' but no PCI audio device found",
+                        name
+                    );
+                }
+                for dev in audio_devs {
+                    let res = ResourceType::Device { bdf: dev.bdf() };
+                    if let Ok(c) = cap::create_root_capability(res, pid, CapPermissions::ALL) {
+                        let _ = crate::thread::add_thread_capability(pid, c);
+                        log_info!(
+                            "spawn",
+                            "Granted audio DeviceCap({:02x}:{:02x}.{}) to '{}'",
+                            dev.bus,
+                            dev.device,
+                            dev.function,
+                            name
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -8662,15 +8690,12 @@ fn sys_pci_get_bar(dev_cap_handle: u64, index: u8, info_ptr: u64) -> u64 {
         None => return EINVAL,
     };
 
-    if bar.is_mmio {
-        // Userspace device drivers program MMIO registers and descriptor rings
-        // through this BAR. Make the standard PCI command bits explicit here so
-        // DMA-backed devices keep working regardless of firmware defaults.
-        let command_status = crate::drivers::pci::read_config_dword(bus, dev, func, 0x04);
-        let command = command_status | 0x6; // Memory Space Enable | Bus Master Enable
-        if command != command_status {
-            crate::drivers::pci::write_config_dword(bus, dev, func, 0x04, command);
-        }
+    // Userspace drivers need the BAR's address space enabled and DMA devices
+    // need bus mastering regardless of whether their registers are MMIO or I/O.
+    let command_status = crate::drivers::pci::read_config_dword(bus, dev, func, 0x04);
+    let command = command_status | if bar.is_mmio { 0x6 } else { 0x5 };
+    if command != command_status {
+        crate::drivers::pci::write_config_dword(bus, dev, func, 0x04, command);
     }
 
     let info_ptr = match validate_user_addr(info_ptr) {

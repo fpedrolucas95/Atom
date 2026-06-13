@@ -75,6 +75,9 @@ pub enum EnvGrant {
     /// `Device` capabilities for every PCI network-class (0x02) device. Granted
     /// to the NIC driver only — never a blanket grant for all BDFs.
     NetworkDevices,
+    /// `Device` capabilities for PCI multimedia/audio-class (0x04) devices.
+    /// Granted only to the audio service.
+    AudioDevices,
 }
 
 /// A single entry in the kernel-side system service manifest.
@@ -129,6 +132,7 @@ pub const SID_NETD: ServiceId = ServiceId(7);
 pub const SID_UI_SHELL: ServiceId = ServiceId(8);
 pub const SID_DISPLAY: ServiceId = ServiceId(9);
 pub const SID_TIMESYNC: ServiceId = ServiceId(10);
+pub const SID_AUDIOD: ServiceId = ServiceId(11);
 
 // Permission shorthands.
 const SPAWN_PERM: CapPermissions = CapPermissions::EXECUTE;
@@ -196,6 +200,7 @@ const FSD_CAPS: &[InitialCapability] = &[
     InitialCapability::new(ResourceType::FsNamespace { namespace_id: 0 }, FS_PERM),
 ];
 const NIC_DRIVER_CAPS: &[InitialCapability] = &[identity(SID_NIC_DRIVER)];
+const AUDIOD_CAPS: &[InitialCapability] = &[identity(SID_AUDIOD)];
 const NETD_CAPS: &[InitialCapability] = &[identity(SID_NETD)];
 // ui_shell is the compositor / display server in the current design: it is the
 // single owner of the framebuffer and the input router. Documented exception —
@@ -208,6 +213,7 @@ const NO_ENV: &[EnvGrant] = &[];
 const UI_SHELL_ENV: &[EnvGrant] = &[EnvGrant::FramebufferMap];
 const DISPLAY_ENV: &[EnvGrant] = &[EnvGrant::FramebufferMap];
 const NIC_DRIVER_ENV: &[EnvGrant] = &[EnvGrant::NetworkDevices];
+const AUDIOD_ENV: &[EnvGrant] = &[EnvGrant::AudioDevices];
 
 // Alias allowlists.
 const NO_ALIASES: &[&str] = &[];
@@ -228,6 +234,7 @@ const INIT_CHILDREN: &[ServiceId] = &[
     SID_NIC_DRIVER,
     SID_NETD,
     SID_TIMESYNC,
+    SID_AUDIOD,
     SID_UI_SHELL,
     SID_DISPLAY,
 ];
@@ -340,6 +347,18 @@ pub static SYSTEM_SERVICE_MANIFEST: &[SystemServiceManifestEntry] = &[
         reserved_ports: NO_PORTS,
         initial_capabilities: &[identity(SID_TIMESYNC)],
         environment_grants: NO_ENV,
+        allowed_children: NO_CHILDREN,
+    },
+    SystemServiceManifestEntry {
+        service_id: SID_AUDIOD,
+        canonical_name: "audiod",
+        canonical_image: "/drivers/audiod.atxf",
+        image_hash: None,
+        spawn_kind: SpawnKind::SystemService,
+        aliases: NO_ALIASES,
+        reserved_ports: NO_PORTS,
+        initial_capabilities: AUDIOD_CAPS,
+        environment_grants: AUDIOD_ENV,
         allowed_children: NO_CHILDREN,
     },
     SystemServiceManifestEntry {
