@@ -15,7 +15,7 @@
 //!   The styled DOM is flattened into renderer blocks: headings, flow content,
 //!   nested lists, tables (one row per line), blockquotes, preformatted text,
 //!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls,
-//!   `display: flex` containers (row/column with `justify-content`,
+//!   `linear-gradient` backgrounds, `display: flex` containers (row/column with `justify-content`,
 //!   `align-items`, `gap`, `flex-wrap` multi-line layout, and content-aware
 //!   `flex-grow`/`flex-basis` sizing), and decorated
 //!   box containers (`background`, `padding`, `border`, `border-radius`,

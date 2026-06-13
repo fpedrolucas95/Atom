@@ -487,6 +487,34 @@ mod tests {
     }
 
     #[test]
+    fn linear_gradient_background_parses() {
+        let doc =
+            parse_html("<div style=\"background: linear-gradient(#ff0000, #0000ff)\">x</div>");
+        let g = first_box(&doc).0.gradient.expect("gradient present");
+        assert_eq!(g, (Color::rgb(255, 0, 0), Color::rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn linear_gradient_to_top_flips_stops() {
+        let doc = parse_html(
+            "<div style=\"background-image: linear-gradient(to top, #111111, #eeeeee)\">x</div>",
+        );
+        let g = first_box(&doc).0.gradient.expect("gradient present");
+        // `to top` puts the last stop at the visual top.
+        assert_eq!(g, (Color::rgb(0xEE, 0xEE, 0xEE), Color::rgb(0x11, 0x11, 0x11)));
+    }
+
+    #[test]
+    fn linear_gradient_with_rgb_stops_and_angle() {
+        // Commas inside rgb() must not split the stop list; the angle is parsed.
+        let doc = parse_html(
+            "<div style=\"background: linear-gradient(180deg, rgb(10,20,30), rgb(40,50,60))\">x</div>",
+        );
+        let g = first_box(&doc).0.gradient.expect("gradient present");
+        assert_eq!(g, (Color::rgb(10, 20, 30), Color::rgb(40, 50, 60)));
+    }
+
+    #[test]
     fn box_shadow_parses_offsets_blur_and_color() {
         let doc =
             parse_html("<div style=\"box-shadow: 2px 4px 8px 1px #ff0000\"><p>x</p></div>");

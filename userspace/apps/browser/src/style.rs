@@ -24,6 +24,8 @@ pub struct Computed {
     /// This element's own background (not inherited; the renderer only paints
     /// the page background, taken from `html`/`body`).
     pub background: Option<Color>,
+    /// Vertical `linear-gradient` background `(top, bottom)`.
+    pub background_gradient: Option<(Color, Color)>,
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
@@ -84,6 +86,7 @@ impl Default for Computed {
         Self {
             color: None,
             background: None,
+            background_gradient: None,
             bold: false,
             italic: false,
             mono: false,
@@ -127,6 +130,7 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
     // background are element-local and reset to their initial values.
     let mut out = Computed {
         background: None,
+        background_gradient: None,
         flex_container: false,
         flex_direction: FlexDirection::Row,
         justify_content: JustifyContent::Start,
@@ -196,6 +200,9 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(c) = d.background {
         out.background = Some(c);
+    }
+    if let Some(g) = d.bg_gradient {
+        out.background_gradient = Some(g);
     }
     if let Some(v) = d.bold {
         out.bold = v;

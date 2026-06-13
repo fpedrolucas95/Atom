@@ -239,6 +239,7 @@ fn is_boxable(tag: &str) -> bool {
 fn box_style_of(cs: &Computed) -> BoxStyle {
     BoxStyle {
         background: cs.background,
+        gradient: cs.background_gradient,
         padding: cs.padding,
         margin: cs.margin,
         center: cs.margin_center,

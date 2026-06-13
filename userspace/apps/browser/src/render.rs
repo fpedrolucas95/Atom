@@ -637,7 +637,10 @@ fn draw_box(
 
     // Children paint against the box background so glyph anti-aliasing blends
     // correctly and text colour adapts to the box's own backdrop.
-    let inner_bg = style.background.unwrap_or(page_bg);
+    let inner_bg = style
+        .background
+        .or(style.gradient.map(|(top, _)| top))
+        .unwrap_or(page_bg);
 
     let measured = measure_blocks(s, children, content_w, inner_bg, form).max(0) as u32;
     // A fixed `height` overrides the measured content height; `min-height` is a
@@ -727,10 +730,33 @@ fn paint_box_frame(
         }
     }
 
-    if rounded {
-        if let Some(bg) = style.background {
-            s.fill_rect_rounded_aa(box_x, top as u32, outer_w, outer_h, radius, bg);
+    // Background: a gradient (vertical, needing the box on-screen) takes
+    // precedence over a solid fill.
+    if let Some((c0, c1)) = style.gradient {
+        if fully_visible {
+            if rounded {
+                s.fill_rect_rounded_aa_gradient_v(
+                    box_x, top as u32, outer_w, outer_h, radius, c0, c1,
+                );
+            } else {
+                s.fill_rect_gradient_v(box_x, top as u32, outer_w, outer_h, c0, c1);
+            }
+        } else {
+            // Scrolled across an edge: approximate with the top stop colour.
+            fill_clipped(s, box_x, top, outer_w, outer_h, clip, c0);
         }
+    } else if let Some(bg) = style.background {
+        if rounded {
+            s.fill_rect_rounded_aa(box_x, top as u32, outer_w, outer_h, radius, bg);
+        } else {
+            fill_clipped(s, box_x, top, outer_w, outer_h, clip, bg);
+        }
+    }
+
+    if bw == 0 {
+        return;
+    }
+    if rounded {
         // Approximate a thick rounded border with concentric 1px outlines.
         for i in 0..bw {
             s.draw_rect_rounded_aa(
@@ -743,15 +769,10 @@ fn paint_box_frame(
             );
         }
     } else {
-        if let Some(bg) = style.background {
-            fill_clipped(s, box_x, top, outer_w, outer_h, clip, bg);
-        }
-        if bw > 0 {
-            fill_clipped(s, box_x, top, outer_w, bw, clip, bc); // top
-            fill_clipped(s, box_x, top + (outer_h - bw) as i32, outer_w, bw, clip, bc); // bottom
-            fill_clipped(s, box_x, top, bw, outer_h, clip, bc); // left
-            fill_clipped(s, box_x + outer_w - bw, top, bw, outer_h, clip, bc); // right
-        }
+        fill_clipped(s, box_x, top, outer_w, bw, clip, bc); // top
+        fill_clipped(s, box_x, top + (outer_h - bw) as i32, outer_w, bw, clip, bc); // bottom
+        fill_clipped(s, box_x, top, bw, outer_h, clip, bc); // left
+        fill_clipped(s, box_x + outer_w - bw, top, bw, outer_h, clip, bc); // right
     }
 }
 
@@ -810,7 +831,10 @@ pub fn draw_positioned(
         content_x0
     };
 
-    let inner_bg = style.background.unwrap_or(page_bg);
+    let inner_bg = style
+        .background
+        .or(style.gradient.map(|(top, _)| top))
+        .unwrap_or(page_bg);
     let measured = measure_blocks(s, &pb.blocks, content_w_inner, inner_bg, form).max(0) as u32;
     let content_h = style
         .height

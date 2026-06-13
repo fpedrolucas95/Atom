@@ -65,6 +65,8 @@ pub enum FontSize {
 pub struct Decls {
     pub color: Option<Color>,
     pub background: Option<Color>,
+    /// Vertical `linear-gradient` background `(top, bottom)`.
+    pub bg_gradient: Option<(Color, Color)>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub mono: Option<bool>,
@@ -144,6 +146,7 @@ impl Decls {
         }
         take!(color);
         take!(background);
+        take!(bg_gradient);
         take!(bold);
         take!(italic);
         take!(mono);
@@ -240,7 +243,20 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
                 d.background = parse_color(value);
             }
         }
-        "background" => d.background = first_color_token(value),
+        "background" => {
+            if let Some(g) = parse_linear_gradient(lw) {
+                d.bg_gradient = Some(g);
+            } else {
+                d.background = first_color_token(value);
+            }
+        }
+        "background-image" => {
+            if let Some(g) = parse_linear_gradient(lw) {
+                d.bg_gradient = Some(g);
+            } else if lw == "none" {
+                d.bg_gradient = None;
+            }
+        }
         "font-weight" => d.bold = parse_font_weight(lw),
         "font-style" => {
             d.italic = Some(matches!(lw, "italic" | "oblique") || lw.starts_with("oblique"))
@@ -748,6 +764,50 @@ fn first_color_token(value: &str) -> Option<Color> {
         }
     }
     None
+}
+
+/// Parse a `linear-gradient(...)` (or `repeating-linear-gradient`) into the
+/// `(top, bottom)` colours the vertical-gradient painter needs. The optional
+/// leading direction (`to <side>` or `<angle>deg`) only chooses whether the
+/// stops are flipped — the painter is vertical-only, so horizontal/diagonal
+/// angles approximate as a top-to-bottom blend. Multi-stop gradients collapse
+/// to their first and last colours.
+fn parse_linear_gradient(lw: &str) -> Option<(Color, Color)> {
+    let v = lw.trim();
+    let inner =
+        strip_func(v, "linear-gradient").or_else(|| strip_func(v, "repeating-linear-gradient"))?;
+    let parts = split_top_level(inner, ',');
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut idx = 0;
+    let mut reversed = false;
+    let first = parts[0].trim();
+    if first.starts_with("to ") {
+        reversed = first.contains("top") || first.contains("left");
+        idx = 1;
+    } else if let Some(deg) = first.strip_suffix("deg") {
+        if let Ok(a) = deg.trim().split('.').next().unwrap_or("").parse::<i32>() {
+            let a = ((a % 360) + 360) % 360;
+            // 0deg points up (to top); 180deg points down (to bottom).
+            reversed = !(90..270).contains(&a);
+        }
+        idx = 1;
+    }
+
+    let mut colors: Vec<Color> = Vec::new();
+    for stop in &parts[idx..] {
+        for tok in split_top_level_ws(stop.trim()) {
+            if let Some(c) = parse_color(tok) {
+                colors.push(c);
+                break;
+            }
+        }
+    }
+    let start = *colors.first()?;
+    let end = *colors.last()?;
+    Some(if reversed { (end, start) } else { (start, end) })
 }
 
 // ────────────────────────────────────────────────────────────────────────────

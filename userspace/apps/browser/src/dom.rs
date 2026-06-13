@@ -154,6 +154,8 @@ pub struct BoxShadow {
 #[derive(Clone, Copy)]
 pub struct BoxStyle {
     pub background: Option<Color>,
+    /// Vertical `linear-gradient` background `(top, bottom)`, when present.
+    pub gradient: Option<(Color, Color)>,
     /// Padding in pixels, in CSS order: top, right, bottom, left.
     pub padding: [u16; 4],
     /// Margin in pixels, in CSS order: top, right, bottom, left.
@@ -190,6 +192,7 @@ impl BoxStyle {
     /// paints, insets, offsets, or constrains the size of its content.
     pub fn needs_box(&self) -> bool {
         self.background.is_some()
+            || self.gradient.is_some()
             || self.border_width > 0
             || self.center
             || self.width.is_some()
