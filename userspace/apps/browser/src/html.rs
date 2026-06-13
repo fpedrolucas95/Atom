@@ -660,6 +660,7 @@ impl<'a> Flattener<'a> {
             justify: cs.justify_content,
             align: cs.align_items,
             gap: cs.gap,
+            wrap: cs.flex_wrap,
             children,
         });
     }

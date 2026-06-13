@@ -200,6 +200,9 @@ pub enum Block {
         justify: JustifyContent,
         align: AlignItems,
         gap: u16,
+        /// `flex-wrap: wrap` — items overflow onto new lines instead of
+        /// shrinking to a single line.
+        wrap: bool,
         children: Vec<FlexChild>,
     },
     /// A decorated block container (`background`, `padding`, `border`) wrapping

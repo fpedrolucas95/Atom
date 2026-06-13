@@ -515,10 +515,11 @@ pub fn draw_blocks(
                 justify,
                 align,
                 gap,
+                wrap,
                 children,
             } => draw_flex_block(
-                s, *direction, *justify, *align, *gap, children, x0, max_w, y, clip, page_bg,
-                link_hits, form, input_hits, zone_hits,
+                s, *direction, *justify, *align, *gap, *wrap, children, x0, max_w, y, clip,
+                page_bg, link_hits, form, input_hits, zone_hits,
             ),
             Block::Box { style, children } => draw_box(
                 s, style, children, x0, max_w, y, clip, page_bg, link_hits, form, input_hits,
@@ -646,10 +647,11 @@ fn measure_blocks(
     )
 }
 
-/// Lay out a flex container. Row containers size children from `flex-grow` /
-/// `flex-basis`, distribute leftover space per `justify-content`, and place
-/// each item on the cross axis per `align-items`; column containers stack the
-/// children with `gap` between them.
+/// Lay out a flex container. Row items size from their `flex-basis` or content
+/// (max-content), grow into free space, shrink toward min-content on overflow,
+/// and — when `flex-wrap` is set — overflow onto new lines. `justify-content`
+/// distributes spare main-axis space per line and `align-items` places items on
+/// the cross axis. Column containers stack the children with `gap` between them.
 #[allow(clippy::too_many_arguments)]
 fn draw_flex_block(
     s: &mut Surface,
@@ -657,6 +659,7 @@ fn draw_flex_block(
     justify: JustifyContent,
     align: AlignItems,
     gap: u16,
+    wrap: bool,
     children: &[FlexChild],
     x0: u32,
     max_w: u32,
@@ -696,53 +699,149 @@ fn draw_flex_block(
         return cy;
     }
 
-    // ── Row layout: resolve each column's width ───────────────────────────────
-    let n = children.len() as u32;
-    let total_gap = gap.saturating_mul(n.saturating_sub(1));
-    let avail = max_w.saturating_sub(total_gap).max(n);
-    let equal = (avail / n).max(CHAR_W);
-
-    let total_grow: u32 = children.iter().map(|c| c.grow as u32).sum();
-    let mut widths: Vec<u32> = children
+    // ── Row layout: resolve each item's flex base and min size ────────────────
+    let bases: Vec<(u32, u32)> = children
         .iter()
         .map(|c| {
-            c.basis
-                .map(|b| b.resolve(avail))
-                .unwrap_or(equal)
-                .min(avail)
+            let (min, pref) = intrinsic_width(&c.blocks, form);
+            let base = c.basis.map(|b| b.resolve(max_w)).unwrap_or(pref).min(max_w);
+            (base, min.min(base))
         })
         .collect();
-    let sum_pref: u32 = widths.iter().sum();
 
-    if total_grow > 0 && sum_pref < avail {
-        // Grow: hand the free space to grow>0 items, last absorbing rounding.
-        let free = avail - sum_pref;
-        let last_grow = children.iter().rposition(|c| c.grow > 0);
+    // Group items into lines: a single line for nowrap, otherwise break before
+    // an item that would overflow the current (non-empty) line.
+    let mut lines: Vec<core::ops::Range<usize>> = Vec::new();
+    let mut start = 0usize;
+    let mut line_w = 0u32;
+    for (i, &(base, _)) in bases.iter().enumerate() {
+        let add = base + if i > start { gap } else { 0 };
+        if wrap && i > start && line_w + add > max_w {
+            lines.push(start..i);
+            start = i;
+            line_w = base;
+        } else {
+            line_w += add;
+        }
+    }
+    lines.push(start..children.len());
+
+    let mut cy = y;
+    for (li, line) in lines.iter().enumerate() {
+        if li > 0 {
+            cy += gap as i32;
+        }
+        cy = draw_flex_line(
+            s,
+            children,
+            &bases,
+            line.clone(),
+            justify,
+            align,
+            gap,
+            x0,
+            max_w,
+            cy,
+            clip,
+            page_bg,
+            link_hits,
+            form,
+            input_hits,
+            zone_hits,
+        );
+    }
+    cy
+}
+
+/// Lay out one flex line: resolve final widths (grow into slack / shrink toward
+/// min-content on overflow), distribute the leftover per `justify-content`,
+/// place each item on the cross axis per `align-items`, and paint. Returns the
+/// y below the line.
+#[allow(clippy::too_many_arguments)]
+fn draw_flex_line(
+    s: &mut Surface,
+    children: &[FlexChild],
+    bases: &[(u32, u32)],
+    line: core::ops::Range<usize>,
+    justify: JustifyContent,
+    align: AlignItems,
+    gap: u32,
+    x0: u32,
+    max_w: u32,
+    y: i32,
+    clip: Clip,
+    page_bg: Color,
+    link_hits: &mut Vec<Hit>,
+    form: &FormCtx,
+    input_hits: &mut Vec<Hit>,
+    zone_hits: &mut Vec<Hit>,
+) -> i32 {
+    let idx: Vec<usize> = line.clone().collect();
+    let n = idx.len() as u32;
+    let total_gap = gap.saturating_mul(n.saturating_sub(1));
+    let avail = max_w.saturating_sub(total_gap).max(n);
+
+    let mut widths: Vec<u32> = idx.iter().map(|&i| bases[i].0.min(avail)).collect();
+    let sum_base: u32 = widths.iter().sum();
+    let total_grow: u32 = idx.iter().map(|&i| children[i].grow as u32).sum();
+
+    if total_grow > 0 && sum_base < avail {
+        let free = avail - sum_base;
+        let last_grow = idx.iter().rposition(|&i| children[i].grow > 0);
         let mut spent = 0u32;
-        for (i, child) in children.iter().enumerate() {
-            if child.grow == 0 {
+        for (k, &i) in idx.iter().enumerate() {
+            let g = children[i].grow as u32;
+            if g == 0 {
                 continue;
             }
-            let add = if Some(i) == last_grow {
+            let add = if Some(k) == last_grow {
                 free - spent
             } else {
-                free * child.grow as u32 / total_grow
+                free * g / total_grow
             };
-            widths[i] += add;
+            widths[k] += add;
             spent += add;
         }
-    } else if sum_pref > avail && sum_pref > 0 {
-        // Overflow: shrink columns proportionally to fit the line.
-        for w in widths.iter_mut() {
-            *w = (*w * avail / sum_pref).max(CHAR_W);
+    } else if sum_base > avail {
+        // Shrink toward each item's min-content size, proportional to slack.
+        let overflow = sum_base - avail;
+        let slack: u32 = idx
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| widths[k].saturating_sub(bases[i].1))
+            .sum();
+        // `denom` keeps the proportional division total; when there's no slack
+        // (all items already at min-content) every cut is zero.
+        let denom = slack.max(1);
+        let mut removed = 0u32;
+        for (k, &i) in idx.iter().enumerate() {
+            let s_k = widths[k].saturating_sub(bases[i].1);
+            let cut = (overflow * s_k / denom).min(s_k);
+            widths[k] -= cut;
+            removed += cut;
+        }
+        // Any rounding remainder comes off the widest still-shrinkable item.
+        let mut rem = overflow.saturating_sub(removed);
+        while rem > 0 {
+            let Some((k, _)) = idx
+                .iter()
+                .enumerate()
+                .filter(|&(k, &i)| widths[k] > bases[i].1)
+                .max_by_key(|&(k, _)| widths[k])
+            else {
+                break;
+            };
+            widths[k] -= 1;
+            rem -= 1;
         }
     }
 
-    // ── Measure each column's height, then place on the main + cross axes ─────
-    let mut heights: Vec<i32> = Vec::with_capacity(children.len());
+    // Measure heights at the resolved widths to find the line height + cross
+    // placement.
+    let mut heights: Vec<i32> = Vec::with_capacity(idx.len());
     let mut row_h = 0i32;
-    for (i, child) in children.iter().enumerate() {
-        let h = measure_blocks(s, &child.blocks, widths[i], page_bg, form);
+    for (k, &i) in idx.iter().enumerate() {
+        let h = measure_blocks(s, &children[i].blocks, widths[k], page_bg, form);
         heights.push(h);
         row_h = row_h.max(h);
     }
@@ -762,17 +861,17 @@ fn draw_flex_block(
     };
 
     let mut cx = start_x;
-    for (i, child) in children.iter().enumerate() {
+    for (k, &i) in idx.iter().enumerate() {
         let cy = match align {
             AlignItems::Start | AlignItems::Stretch => y,
-            AlignItems::Center => y + (row_h - heights[i]) / 2,
-            AlignItems::End => y + (row_h - heights[i]),
+            AlignItems::Center => y + (row_h - heights[k]) / 2,
+            AlignItems::End => y + (row_h - heights[k]),
         };
         draw_blocks(
             s,
-            &child.blocks,
+            &children[i].blocks,
             cx,
-            widths[i],
+            widths[k],
             cy,
             clip,
             page_bg,
@@ -781,10 +880,114 @@ fn draw_flex_block(
             input_hits,
             zone_hits,
         );
-        cx += widths[i] + gap + extra_gap;
+        cx += widths[k] + gap + extra_gap;
     }
 
     y + row_h
+}
+
+/// The (min-content, max-content) width of a block sequence in pixels. Blocks
+/// stack vertically, so the sequence's width is the max over its blocks.
+fn intrinsic_width(blocks: &[Block], form: &FormCtx) -> (u32, u32) {
+    let mut min = 0;
+    let mut pref = 0;
+    for block in blocks {
+        let (bmin, bpref) = match block {
+            Block::Text { items, .. } => text_intrinsic(items, form),
+            Block::Image { img, .. } => {
+                let w = img.as_ref().map(|i| i.width).unwrap_or(64).min(320);
+                (w.min(64), w)
+            }
+            Block::Rule => (0, 0),
+            Block::Flex {
+                direction,
+                gap,
+                children,
+                ..
+            } => flex_intrinsic(children, *gap as u32, *direction, form),
+            Block::Box { style, children } => {
+                let (cmin, cpref) = intrinsic_width(children, form);
+                let frame = (style.border_width as u32) * 2
+                    + style.padding[1] as u32
+                    + style.padding[3] as u32
+                    + style.margin[1] as u32
+                    + style.margin[3] as u32;
+                match style.width {
+                    Some(crate::dom::Length::Px(w)) => (w + frame, w + frame),
+                    _ => (cmin + frame, cpref + frame),
+                }
+            }
+        };
+        min = min.max(bmin);
+        pref = pref.max(bpref);
+    }
+    (min, pref)
+}
+
+/// Intrinsic widths of one flow line of inline items: min-content is the widest
+/// single atom; max-content is everything on one unwrapped line.
+fn text_intrinsic(items: &[Inline], form: &FormCtx) -> (u32, u32) {
+    let mut min = 0u32;
+    let mut pref = 0u32;
+    let mut first = true;
+    for item in items {
+        match item {
+            Inline::Run(run) => {
+                let scale = run.style.size.max(1) as u32;
+                for word in run.text.split(' ') {
+                    if word.is_empty() {
+                        continue;
+                    }
+                    let w = word.chars().count() as u32 * CHAR_W * scale;
+                    min = min.max(w);
+                    pref += w + if first { 0 } else { CHAR_W };
+                    first = false;
+                }
+            }
+            Inline::Control(idx) => {
+                if let Some(meta) = form.inputs.get(*idx) {
+                    let (w, _) = control_dims(meta, u32::MAX);
+                    min = min.max(w);
+                    pref += w + if first { 0 } else { CHAR_W };
+                    first = false;
+                }
+            }
+        }
+    }
+    (min, pref)
+}
+
+/// Intrinsic widths of a flex container, honouring explicit pixel bases.
+fn flex_intrinsic(
+    children: &[FlexChild],
+    gap: u32,
+    direction: FlexDirection,
+    form: &FormCtx,
+) -> (u32, u32) {
+    let item = |c: &FlexChild| -> (u32, u32) {
+        match c.basis {
+            Some(crate::dom::Length::Px(w)) => (w, w),
+            _ => intrinsic_width(&c.blocks, form),
+        }
+    };
+    if direction == FlexDirection::Column {
+        children
+            .iter()
+            .map(item)
+            .fold((0, 0), |(amin, apref), (bmin, bpref)| {
+                (amin.max(bmin), apref.max(bpref))
+            })
+    } else {
+        let n = children.len() as u32;
+        let total_gap = gap.saturating_mul(n.saturating_sub(1));
+        let (mut min, mut pref) = (0u32, total_gap);
+        for c in children {
+            let (cmin, cpref) = item(c);
+            min = min.max(cmin); // items may wrap, so min-content is the widest
+            pref += cpref;
+        }
+        (min, pref)
+    }
 }
 
 /// Extra vertical breathing room a control adds to its line.

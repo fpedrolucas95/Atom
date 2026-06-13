@@ -258,9 +258,20 @@ mod tests {
                 align,
                 gap,
                 children,
+                ..
             } = b
             {
                 return (*direction, *justify, *align, *gap, children);
+            }
+        }
+        panic!("no flex block found");
+    }
+
+    /// The `wrap` flag of the first flex block.
+    fn first_flex_wrap(doc: &Document) -> bool {
+        for b in &doc.blocks {
+            if let Block::Flex { wrap, .. } = b {
+                return *wrap;
             }
         }
         panic!("no flex block found");
@@ -532,6 +543,20 @@ mod tests {
         assert_eq!(Length::Pct(50).resolve(600), 300);
         assert_eq!(Length::Pct(33).resolve(900), 297);
         assert_eq!(Length::Px(120).resolve(600), 120);
+    }
+
+    #[test]
+    fn flex_wrap_parses() {
+        assert!(!first_flex_wrap(&parse_html(
+            "<div style=\"display:flex\"><div>a</div></div>"
+        )));
+        assert!(first_flex_wrap(&parse_html(
+            "<div style=\"display:flex; flex-wrap:wrap\"><div>a</div></div>"
+        )));
+        // `flex-flow` shorthand sets both direction and wrap.
+        let doc = parse_html("<div style=\"display:flex; flex-flow:column wrap\"><div>a</div></div>");
+        assert!(first_flex_wrap(&doc));
+        assert_eq!(first_flex(&doc).0, FlexDirection::Column);
     }
 
     #[test]

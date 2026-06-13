@@ -41,6 +41,8 @@ pub struct Computed {
     pub flex_direction: FlexDirection,
     pub justify_content: JustifyContent,
     pub align_items: AlignItems,
+    /// `flex-wrap: wrap`.
+    pub flex_wrap: bool,
     /// `gap` between flex items, in pixels.
     pub gap: u16,
     /// This element's `flex-grow` factor (read when it is a flex item).
@@ -80,6 +82,7 @@ impl Default for Computed {
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::Start,
             align_items: AlignItems::Stretch,
+            flex_wrap: false,
             gap: 0,
             flex_grow: 0,
             flex_basis: None,
@@ -105,6 +108,7 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         flex_direction: FlexDirection::Row,
         justify_content: JustifyContent::Start,
         align_items: AlignItems::Stretch,
+        flex_wrap: false,
         gap: 0,
         flex_grow: 0,
         flex_basis: None,
@@ -197,6 +201,9 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(v) = d.align_items {
         out.align_items = v;
+    }
+    if let Some(v) = d.flex_wrap {
+        out.flex_wrap = v;
     }
     if let Some(v) = d.gap {
         out.gap = v;

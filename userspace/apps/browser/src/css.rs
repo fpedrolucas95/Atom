@@ -84,6 +84,8 @@ pub struct Decls {
     pub flex_direction: Option<FlexDirection>,
     pub justify_content: Option<JustifyContent>,
     pub align_items: Option<AlignItems>,
+    /// `flex-wrap: wrap` (true) vs `nowrap` (false).
+    pub flex_wrap: Option<bool>,
     /// `gap` / `column-gap` in pixels.
     pub gap: Option<u16>,
     /// `flex-grow` factor for a flex item.
@@ -137,6 +139,7 @@ impl Decls {
         take!(flex_direction);
         take!(justify_content);
         take!(align_items);
+        take!(flex_wrap);
         take!(gap);
         take!(flex_grow);
         take!(flex_basis);
@@ -268,6 +271,25 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
                 "flex-end" | "end" | "self-end" => Some(AlignItems::End),
                 "stretch" | "normal" => Some(AlignItems::Stretch),
                 _ => None,
+            }
+        }
+        "flex-wrap" => {
+            d.flex_wrap = match lw {
+                "wrap" | "wrap-reverse" => Some(true),
+                "nowrap" => Some(false),
+                _ => None,
+            }
+        }
+        "flex-flow" => {
+            // `flex-flow: <direction> || <wrap>`
+            for tok in lw.split_whitespace() {
+                match tok {
+                    "row" | "row-reverse" => d.flex_direction = Some(FlexDirection::Row),
+                    "column" | "column-reverse" => d.flex_direction = Some(FlexDirection::Column),
+                    "wrap" | "wrap-reverse" => d.flex_wrap = Some(true),
+                    "nowrap" => d.flex_wrap = Some(false),
+                    _ => {}
+                }
             }
         }
         "gap" | "column-gap" | "grid-column-gap" => {
