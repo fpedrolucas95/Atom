@@ -10,7 +10,7 @@
 use libgui::color::Color;
 
 use crate::css::{self, Decls, FontSize, Stylesheet, TextTransform};
-use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent, Length};
+use crate::dom::{Align, AlignItems, BoxShadow, FlexDirection, JustifyContent, Length};
 use crate::domtree::{Dom, Element};
 
 /// The default (`medium`) font size in CSS pixels.
@@ -62,6 +62,8 @@ pub struct Computed {
     pub border_radius: u16,
     /// `box-sizing: border-box`.
     pub box_sizing_border: bool,
+    /// Drop shadow (`box-shadow`).
+    pub box_shadow: Option<BoxShadow>,
     /// Explicit content width (`width`/`max-width`); may be a percentage.
     pub box_width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
@@ -97,6 +99,7 @@ impl Default for Computed {
             border_color: None,
             border_radius: 0,
             box_sizing_border: false,
+            box_shadow: None,
             box_width: None,
             box_height: None,
         }
@@ -125,6 +128,7 @@ pub fn compute(dom: &Dom, el: usize, sheet: &Stylesheet, parent: &Computed) -> (
         border_color: None,
         border_radius: 0,
         box_sizing_border: false,
+        box_shadow: None,
         box_width: None,
         box_height: None,
         ..*parent
@@ -245,6 +249,9 @@ fn apply(out: &mut Computed, d: &Decls) {
     }
     if let Some(v) = d.box_sizing_border {
         out.box_sizing_border = v;
+    }
+    if let Some(v) = d.box_shadow {
+        out.box_shadow = Some(v);
     }
     if let Some(v) = d.margin_top {
         out.margin[0] = v;

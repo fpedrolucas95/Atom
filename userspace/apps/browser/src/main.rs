@@ -19,7 +19,7 @@
 //!   `align-items`, `gap`, `flex-wrap` multi-line layout, and content-aware
 //!   `flex-grow`/`flex-basis` sizing), and decorated
 //!   box containers (`background`, `padding`, `border`, `border-radius`,
-//!   `box-sizing`, `margin` incl. `margin: auto` centring, and
+//!   `box-shadow`, `box-sizing`, `margin` incl. `margin: auto` centring, and
 //!   `width`/`max-width`/`min-height` — pixel or percentage, resolved against
 //!   the container at layout time). The painter synthesises bold, italic, and font scaling the 8x8
 //!   bitmap font has no native faces for. A hand-written JavaScript

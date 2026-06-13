@@ -541,6 +541,41 @@ fn fill_clipped(s: &mut Surface, x: u32, y: i32, w: u32, h: u32, clip: Clip, col
     s.fill_rect(x, top as u32, w, (bottom - top) as u32, color);
 }
 
+/// Paint a soft drop shadow behind a box. Real Gaussian blur is approximated by
+/// stacking a few translucent rounded rectangles that grow outward, so the edge
+/// fades while the core stays darkest.
+fn draw_box_shadow(
+    s: &mut Surface,
+    sh: &crate::dom::BoxShadow,
+    box_x: u32,
+    top: i32,
+    outer_w: u32,
+    outer_h: u32,
+    radius: u32,
+) {
+    let layers = (sh.blur as u32 / 2).clamp(1, 6);
+    let per_layer = (90 / layers).max(14) as u8;
+    for k in 0..layers {
+        let grow = sh.spread as i32 + k as i32;
+        let sx = box_x as i32 + sh.dx as i32 - grow;
+        let sy = top + sh.dy as i32 - grow;
+        if sx < 0 || sy < 0 {
+            continue;
+        }
+        let sw = (outer_w as i32 + grow * 2).max(1) as u32;
+        let shh = (outer_h as i32 + grow * 2).max(1) as u32;
+        s.fill_rect_rounded_alpha(
+            sx as u32,
+            sy as u32,
+            sw,
+            shh,
+            radius + grow.max(0) as u32,
+            sh.color,
+            per_layer,
+        );
+    }
+}
+
 /// Lay out a decorated box: apply margins, resolve the box width (explicit or
 /// container-filling, optionally centred), paint background + border, inset the
 /// content by border + padding, and draw the children. Returns the y below the
@@ -613,8 +648,17 @@ fn draw_box(
     // Rounded corners need the whole box on-screen (the AA primitives can't be
     // band-clipped); when scrolled across an edge, fall back to square fills.
     let radius = style.radius as u32;
-    let rounded = radius > 0 && top >= clip.top && top >= 0 && top + outer_h as i32 <= clip.bottom;
+    // Rounded corners and shadows need the whole box on-screen — the AA/alpha
+    // primitives can't be band-clipped.
+    let fully_visible = top >= clip.top && top >= 0 && top + outer_h as i32 <= clip.bottom;
+    let rounded = radius > 0 && fully_visible;
     let bc = style.border_color.unwrap_or(Color::rgb(148, 163, 184));
+
+    if let Some(sh) = style.shadow {
+        if fully_visible {
+            draw_box_shadow(s, &sh, box_x, top, outer_w, outer_h, radius);
+        }
+    }
 
     if rounded {
         if let Some(bg) = style.background {

@@ -248,6 +248,7 @@ fn box_style_of(cs: &Computed) -> BoxStyle {
         border_box: cs.box_sizing_border,
         width: cs.box_width,
         min_height: cs.box_height.map(u32::from),
+        shadow: cs.box_shadow,
     }
 }
 

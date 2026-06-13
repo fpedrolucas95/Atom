@@ -487,6 +487,23 @@ mod tests {
     }
 
     #[test]
+    fn box_shadow_parses_offsets_blur_and_color() {
+        let doc =
+            parse_html("<div style=\"box-shadow: 2px 4px 8px 1px #ff0000\"><p>x</p></div>");
+        let sh = first_box(&doc).0.shadow.expect("shadow present");
+        assert_eq!((sh.dx, sh.dy, sh.blur, sh.spread), (2, 4, 8, 1));
+        assert_eq!(sh.color, Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn box_shadow_allows_negative_offsets_and_defaults_color() {
+        let doc = parse_html("<div style=\"box-shadow: -3px 2px\"><p>x</p></div>");
+        let sh = first_box(&doc).0.shadow.expect("shadow present");
+        assert_eq!((sh.dx, sh.dy, sh.blur, sh.spread), (-3, 2, 0, 0));
+        assert_eq!(sh.color, Color::rgb(0, 0, 0));
+    }
+
+    #[test]
     fn border_none_keeps_box_unboxed_without_other_decoration() {
         // `border-style:none` zeroes the width; with nothing else to paint the
         // div stays a plain flow element (no box block).

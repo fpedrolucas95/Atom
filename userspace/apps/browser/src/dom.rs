@@ -129,6 +129,17 @@ impl Length {
     }
 }
 
+/// A drop shadow (`box-shadow`): offset, blur, spread, and colour. Inset
+/// shadows are not modelled.
+#[derive(Clone, Copy)]
+pub struct BoxShadow {
+    pub dx: i16,
+    pub dy: i16,
+    pub blur: u16,
+    pub spread: u16,
+    pub color: Color,
+}
+
 /// Box-model decoration for a [`Block::Box`] container: background fill,
 /// padding (top/right/bottom/left, in pixels) and a uniform border.
 #[derive(Clone, Copy)]
@@ -151,6 +162,8 @@ pub struct BoxStyle {
     pub width: Option<Length>,
     /// Content-area height floor (`height`/`min-height`) in pixels.
     pub min_height: Option<u32>,
+    /// Drop shadow (`box-shadow`).
+    pub shadow: Option<BoxShadow>,
 }
 
 impl BoxStyle {
@@ -162,6 +175,7 @@ impl BoxStyle {
             || self.center
             || self.width.is_some()
             || self.min_height.is_some()
+            || self.shadow.is_some()
             || self.padding.iter().any(|&p| p > 0)
             || self.margin.iter().any(|&m| m > 0)
     }

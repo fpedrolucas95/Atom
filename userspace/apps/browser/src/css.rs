@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use libgui::color::Color;
 
-use crate::dom::{Align, AlignItems, FlexDirection, JustifyContent, Length};
+use crate::dom::{Align, AlignItems, BoxShadow, FlexDirection, JustifyContent, Length};
 use crate::domtree::Dom;
 
 /// Viewport used for media-query evaluation (browser window content area).
@@ -104,6 +104,8 @@ pub struct Decls {
     pub border_radius: Option<u16>,
     /// `box-sizing: border-box`.
     pub box_sizing_border: Option<bool>,
+    /// Drop shadow (`box-shadow`).
+    pub box_shadow: Option<BoxShadow>,
     /// Margin in pixels (top, right, bottom, left), each set independently.
     pub margin_top: Option<u16>,
     pub margin_right: Option<u16>,
@@ -155,6 +157,7 @@ impl Decls {
         take!(border_color);
         take!(border_radius);
         take!(box_sizing_border);
+        take!(box_shadow);
         take!(margin_top);
         take!(margin_right);
         take!(margin_bottom);
@@ -376,6 +379,13 @@ fn apply_declaration(d: &mut Decls, prop: &str, value: &str) {
                 _ => None,
             }
         }
+        "box-shadow" => {
+            if lw == "none" {
+                d.box_shadow = None;
+            } else if let Some(sh) = parse_box_shadow(lw) {
+                d.box_shadow = Some(sh);
+            }
+        }
         "visibility" => match lw {
             "hidden" | "collapse" => d.visible = Some(false),
             "visible" => d.visible = Some(true),
@@ -493,6 +503,48 @@ fn apply_flex_shorthand(d: &mut Decls, lw: &str) {
 /// Parse a CSS length into a clamped `u16` of pixels.
 fn parse_len_u16(value: &str) -> Option<u16> {
     parse_css_length(value).map(|px| px.min(u16::MAX as u32) as u16)
+}
+
+/// Parse a possibly-negative pixel length into a signed value.
+fn parse_signed_px(tok: &str) -> Option<i32> {
+    if let Some(rest) = tok.strip_prefix('-') {
+        parse_css_length(rest).map(|v| -(v as i32))
+    } else {
+        parse_css_length(tok).map(|v| v as i32)
+    }
+}
+
+/// Parse the first shadow of a `box-shadow` list:
+/// `<dx> <dy> [blur] [spread] [color]` (`inset` is accepted but ignored).
+fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+    let first = value.split(',').next()?;
+    let mut nums: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    let mut color = None;
+    for tok in first.split_whitespace() {
+        if tok == "inset" {
+            continue;
+        }
+        if let Some(n) = parse_signed_px(tok) {
+            nums.push(n);
+        } else if let Some(c) = parse_color(tok) {
+            color = Some(c);
+        }
+    }
+    if nums.len() < 2 {
+        return None;
+    }
+    let clamp16 = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    Some(BoxShadow {
+        dx: clamp16(nums[0]),
+        dy: clamp16(nums[1]),
+        blur: nums
+            .get(2)
+            .map_or(0, |&v| v.max(0).min(u16::MAX as i32) as u16),
+        spread: nums
+            .get(3)
+            .map_or(0, |&v| v.max(0).min(u16::MAX as i32) as u16),
+        color: color.unwrap_or(Color::rgb(0, 0, 0)),
+    })
 }
 
 /// Parse a CSS length that may be a percentage, deferring percentage
