@@ -8,16 +8,11 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
     pub location: Option<String>,
     pub date: Option<String>,
+    /// All `Set-Cookie` response header values, in order.
+    pub set_cookie: Vec<String>,
 }
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-
-fn copy_bytes(dst: &mut [u8], pos: &mut usize, src: &[u8]) {
-    let available = dst.len().saturating_sub(*pos);
-    let len = src.len().min(available);
-    dst[*pos..*pos + len].copy_from_slice(&src[..len]);
-    *pos += len;
-}
 
 /// Perform an HTTP/1.0 GET request.
 pub fn http_get(
@@ -25,6 +20,17 @@ pub fn http_get(
     host: &str,
     path: &str,
     port: u16,
+) -> Result<HttpResponse, NetError> {
+    http_get_with(netd_port, host, path, port, None)
+}
+
+/// Perform an HTTP/1.0 GET, optionally sending a `Cookie` request header.
+pub fn http_get_with(
+    netd_port: PortId,
+    host: &str,
+    path: &str,
+    port: u16,
+    cookie: Option<&str>,
 ) -> Result<HttpResponse, NetError> {
     // 1. Resolve hostname
     let ip = net_resolve(netd_port, host)?;
@@ -38,21 +44,24 @@ pub fn http_get(
         return Err(error);
     }
 
-    // 4. Build HTTP/1.0 request using a fixed stack buffer
-    let mut req_buf = [0u8; 512];
-    let mut pos = 0usize;
-    copy_bytes(&mut req_buf, &mut pos, b"GET ");
-    copy_bytes(&mut req_buf, &mut pos, path.as_bytes());
-    copy_bytes(&mut req_buf, &mut pos, b" HTTP/1.0\r\nHost: ");
-    copy_bytes(&mut req_buf, &mut pos, host.as_bytes());
-    copy_bytes(
-        &mut req_buf,
-        &mut pos,
-        b"\r\nUser-Agent: AtomBrowser/0.1\r\nAccept: text/html,text/plain,*/*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+    // 4. Build the HTTP/1.0 request (a Vec so a long Cookie header fits).
+    let mut req: Vec<u8> = Vec::with_capacity(256);
+    req.extend_from_slice(b"GET ");
+    req.extend_from_slice(path.as_bytes());
+    req.extend_from_slice(b" HTTP/1.0\r\nHost: ");
+    req.extend_from_slice(host.as_bytes());
+    req.extend_from_slice(
+        b"\r\nUser-Agent: AtomBrowser/0.1\r\nAccept: text/html,text/plain,*/*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
     );
+    if let Some(c) = cookie.filter(|c| !c.is_empty()) {
+        req.extend_from_slice(b"Cookie: ");
+        req.extend_from_slice(c.as_bytes());
+        req.extend_from_slice(b"\r\n");
+    }
+    req.extend_from_slice(b"\r\n");
 
     // 5. Send request
-    if let Err(error) = net_send(netd_port, socket_id, &req_buf[..pos]) {
+    if let Err(error) = net_send(netd_port, socket_id, &req) {
         let _ = net_close(netd_port, socket_id);
         return Err(error);
     }
@@ -85,9 +94,10 @@ pub fn http_get(
     // 8. Parse status code from first line: "HTTP/1.x NNN ..."
     let status = parse_status(&response);
 
-    // 9. Extract a redirect target if present.
+    // 9. Extract a redirect target and any Set-Cookie headers if present.
     let location = parse_location(&response);
     let date = parse_header_string(&response, b"date:");
+    let set_cookie = parse_headers_all(&response, b"set-cookie:");
 
     // 10. Find header/body separator "\r\n\r\n" and normalize common HTTP encodings.
     let raw_body = split_body(&response);
@@ -102,7 +112,40 @@ pub fn http_get(
         body,
         location,
         date,
+        set_cookie,
     })
+}
+
+/// Collect every header line matching `name` (case-insensitive), trimmed.
+fn parse_headers_all(response: &[u8], name: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(header_end) = header_end(response) else {
+        return out;
+    };
+    let headers = &response[..header_end];
+    let mut pos = 0usize;
+    while pos < headers.len() {
+        let line_end = headers[pos..]
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| pos + p)
+            .unwrap_or(headers.len());
+        let line = &headers[pos..line_end];
+        if starts_with_ignore_ascii_case(line, name) {
+            let mut value = &line[name.len()..];
+            while !value.is_empty() && (value[0] == b' ' || value[0] == b'\t') {
+                value = &value[1..];
+            }
+            if let Ok(s) = core::str::from_utf8(value) {
+                out.push(String::from(s));
+            }
+        }
+        if line_end == headers.len() {
+            break;
+        }
+        pos = line_end + 2;
+    }
+    out
 }
 
 fn parse_status(response: &[u8]) -> u16 {

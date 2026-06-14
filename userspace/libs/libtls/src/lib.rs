@@ -20,7 +20,7 @@ mod client;
 
 pub use aead::{chacha20_poly1305_open, chacha20_poly1305_seal, AeadError};
 pub use chacha20::{chacha20_xor, ChaCha20};
-pub use client::{https_get, HttpsError, HttpsResponse};
+pub use client::{https_get, https_get_with, HttpsError, HttpsResponse};
 pub use hkdf::{derive_secret, hkdf_expand, hkdf_expand_label, hkdf_extract};
 pub use hmac::{hmac_sha256, hmac_sha256_two};
 pub use poly1305::poly1305_mac;

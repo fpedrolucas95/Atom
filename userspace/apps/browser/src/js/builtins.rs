@@ -151,7 +151,7 @@ pub fn install_globals(global: &EnvRef) {
                 .insert("userAgent".into(), str_value("AtomBrowser/0.1 (AtomOS)"));
             n.props.insert("language".into(), str_value("en-US"));
             n.props.insert("platform".into(), str_value("AtomOS"));
-            n.props.insert("cookieEnabled".into(), Value::Bool(false));
+            n.props.insert("cookieEnabled".into(), Value::Bool(true));
             n.props.insert("onLine".into(), Value::Bool(true));
         }
         w.props

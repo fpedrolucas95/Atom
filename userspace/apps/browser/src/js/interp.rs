@@ -51,6 +51,8 @@ pub struct Interp<'a> {
     pub console: &'a mut Vec<String>,
     pub handlers: &'a mut Handlers,
     pub storage: &'a mut Storage,
+    pub cookies: super::cookie::SharedJar,
+    pub host: Rc<str>,
     pub global: EnvRef,
     pub cursor: Option<WriteCursor>,
     steps: u64,
@@ -60,11 +62,14 @@ pub struct Interp<'a> {
 impl<'a> Interp<'a> {
     /// Build an interpreter over a persistent runtime's global scope and
     /// handler table, with a fresh step budget for this run.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dom: &'a mut Dom,
         console: &'a mut Vec<String>,
         handlers: &'a mut Handlers,
         storage: &'a mut Storage,
+        cookies: super::cookie::SharedJar,
+        host: Rc<str>,
         global: EnvRef,
         budget: u64,
     ) -> Self {
@@ -73,6 +78,8 @@ impl<'a> Interp<'a> {
             console,
             handlers,
             storage,
+            cookies,
+            host,
             global,
             cursor: None,
             steps: budget,

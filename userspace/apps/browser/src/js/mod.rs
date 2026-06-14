@@ -23,6 +23,7 @@
 
 pub mod ast;
 pub mod builtins;
+pub mod cookie;
 pub mod dom_api;
 pub mod events;
 pub mod interp;
@@ -32,6 +33,7 @@ pub mod storage;
 pub mod value;
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -53,6 +55,10 @@ pub struct Runtime {
     pub global: value::EnvRef,
     pub handlers: Handlers,
     pub storage: storage::Storage,
+    /// Cookie jar shared with the browser's network layer.
+    pub cookies: cookie::SharedJar,
+    /// Host of the current page, scoping `document.cookie`.
+    pub host: Rc<str>,
 }
 
 /// One script to execute: the element id and its source text.
@@ -69,7 +75,15 @@ impl Runtime {
             global,
             handlers: Handlers::new(),
             storage: storage::Storage::new(),
+            cookies: cookie::shared(),
+            host: Rc::from(""),
         }
+    }
+
+    /// Point `document.cookie` at the browser's shared jar and the page host.
+    pub fn set_cookie_context(&mut self, jar: cookie::SharedJar, host: &str) {
+        self.cookies = jar;
+        self.host = Rc::from(host);
     }
 
     /// Load phase: run every `<script>` in document order, then fire
@@ -86,6 +100,8 @@ impl Runtime {
             console,
             &mut self.handlers,
             &mut self.storage,
+            self.cookies.clone(),
+            self.host.clone(),
             self.global.clone(),
             LOAD_BUDGET,
         );
@@ -121,6 +137,8 @@ impl Runtime {
             console,
             &mut self.handlers,
             &mut self.storage,
+            self.cookies.clone(),
+            self.host.clone(),
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -134,6 +152,8 @@ impl Runtime {
             console,
             &mut self.handlers,
             &mut self.storage,
+            self.cookies.clone(),
+            self.host.clone(),
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -223,6 +243,8 @@ impl Runtime {
             console,
             &mut self.handlers,
             &mut self.storage,
+            self.cookies.clone(),
+            self.host.clone(),
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -241,6 +263,8 @@ impl Runtime {
             console,
             &mut self.handlers,
             &mut self.storage,
+            self.cookies.clone(),
+            self.host.clone(),
             self.global.clone(),
             EVENT_BUDGET,
         );

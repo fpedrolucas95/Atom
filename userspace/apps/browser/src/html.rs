@@ -70,7 +70,14 @@ pub fn parse_document(
     fetch_js: &mut dyn FnMut(&str) -> Option<String>,
     scripting: bool,
 ) -> PageOutput {
-    let page = load_page(html, fetch_css, fetch_js, scripting);
+    let page = load_page(
+        html,
+        fetch_css,
+        fetch_js,
+        scripting,
+        crate::js::cookie::shared(),
+        "",
+    );
     PageOutput {
         doc: page.doc,
         console: page.console,
@@ -93,12 +100,15 @@ pub fn load_page(
     fetch_css: &mut dyn FnMut(&str) -> Option<String>,
     fetch_js: &mut dyn FnMut(&str) -> Option<String>,
     scripting: bool,
+    cookies: crate::js::cookie::SharedJar,
+    host: &str,
 ) -> LoadedPage {
     let mut dom = build_dom(html);
     let mut console = Vec::new();
     let mut runtime = None;
     if scripting {
         let mut rt = crate::js::Runtime::new();
+        rt.set_cookie_context(cookies, host);
         rt.run_load_scripts(&mut dom, fetch_js, &mut console);
         runtime = Some(rt);
     }

@@ -43,6 +43,8 @@ pub struct HttpsResponse {
     pub location: Option<String>,
     /// True when the server certificate was NOT validated.
     pub cert_unverified: bool,
+    /// All `Set-Cookie` response header values, in order.
+    pub set_cookie: Vec<String>,
 }
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -54,6 +56,17 @@ pub fn https_get(
     host: &str,
     path: &str,
     port: u16,
+) -> Result<HttpsResponse, HttpsError> {
+    https_get_with(netd_port, host, path, port, None)
+}
+
+/// Perform an HTTPS GET, optionally sending a `Cookie` request header.
+pub fn https_get_with(
+    netd_port: PortId,
+    host: &str,
+    path: &str,
+    port: u16,
+    cookie: Option<&str>,
 ) -> Result<HttpsResponse, HttpsError> {
     // 1. DNS
     let ip = net_resolve(netd_port, host)?;
@@ -80,8 +93,12 @@ pub fn https_get(
     stream.set_read_key(hs.server_app.key, hs.server_app.iv);
 
     // 5. HTTP/1.1 GET (keep-alive off for simplicity)
+    let cookie_header = match cookie.filter(|c| !c.is_empty()) {
+        Some(c) => format!("Cookie: {c}\r\n"),
+        None => String::new(),
+    };
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: AtomBrowser/0.1\r\nAccept: text/html,text/plain,*/*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: AtomBrowser/0.1\r\nAccept: text/html,text/plain,*/*\r\nAccept-Encoding: identity\r\nConnection: close\r\n{cookie_header}\r\n"
     );
     stream.send_encrypted(CT_APPLICATION_DATA, request.as_bytes())?;
 
@@ -115,6 +132,7 @@ pub fn https_get(
 
     let status = parse_status(&response);
     let location = parse_location(&response);
+    let set_cookie = parse_set_cookies(&response);
     let raw_body = split_body(&response);
     let body = if has_header_token(&response, b"transfer-encoding:", b"chunked") {
         decode_chunked_body(&raw_body)
@@ -127,7 +145,40 @@ pub fn https_get(
         body,
         location,
         cert_unverified: hs.cert_unverified,
+        set_cookie,
     })
+}
+
+/// Collect every `Set-Cookie` response header value, trimmed.
+fn parse_set_cookies(r: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(end) = r.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return out;
+    };
+    let headers = &r[..end];
+    let mut pos = 0;
+    while pos < headers.len() {
+        let le = headers[pos..]
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| pos + p)
+            .unwrap_or(headers.len());
+        let line = &headers[pos..le];
+        if starts_with_ignore_case(line, b"set-cookie:") {
+            let mut v = &line[b"set-cookie:".len()..];
+            while !v.is_empty() && (v[0] == b' ' || v[0] == b'\t') {
+                v = &v[1..];
+            }
+            if let Ok(s) = core::str::from_utf8(v) {
+                out.push(String::from(s));
+            }
+        }
+        if le == headers.len() {
+            break;
+        }
+        pos = le + 2;
+    }
+    out
 }
 
 // ── HTTP response helpers (minimal copies of libnet/http.rs helpers) ──────────

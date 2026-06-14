@@ -4,14 +4,16 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use libimage::{GifDecoder, ImageDecoder, JpgDecoder, PngDecoder};
 use libipc::protocol::lookup_service;
 
+use crate::js::cookie::CookieJar;
 use crate::text::{
     base64_decode, find_ignore_ascii_case, percent_decode, starts_with_ignore_ascii_case,
 };
-use crate::url::{normalize_redirect_url, split_http_url};
+use crate::url::{normalize_redirect_url, split_http_url, HttpTarget};
 
 /// Maximum redirects followed before giving up, per resource class.
 const MAX_PAGE_REDIRECTS: u32 = 4;
@@ -31,24 +33,56 @@ fn is_success(status: u16) -> bool {
     status == 0 || (200..300).contains(&status)
 }
 
-/// Fetch a page body as text, following HTTP and HTTPS redirects.
-pub fn fetch_http(url: &str) -> Result<PageFetch, String> {
+/// The `Cookie:` header value to send for a request, from the jar.
+fn cookie_header(jar: &RefCell<CookieJar>, t: &HttpTarget) -> Option<String> {
+    jar.borrow().request_header(&t.host, &t.path, t.https)
+}
+
+/// Store all `Set-Cookie` headers from a response into the jar.
+fn store_cookies(jar: &RefCell<CookieJar>, t: &HttpTarget, set_cookie: &[String]) {
+    if set_cookie.is_empty() {
+        return;
+    }
+    let mut j = jar.borrow_mut();
+    for line in set_cookie {
+        j.set_from_response(&t.host, &t.path, line);
+    }
+}
+
+/// Fetch a page body as text, following HTTP and HTTPS redirects, sending and
+/// storing cookies from `jar`.
+pub fn fetch_http(url: &str, jar: &RefCell<CookieJar>) -> Result<PageFetch, String> {
     let netd = lookup_service("netd").map_err(|_| String::from("netd service not found"))?;
 
     let mut current = String::from(url);
     let mut cert_warning = false;
     for _ in 0..MAX_PAGE_REDIRECTS {
         let target = split_http_url(&current)?;
+        let cookie = cookie_header(jar, &target);
         let (status, body, location) = if target.https {
-            let resp = libtls::https_get(netd, &target.host, &target.path, target.port)
-                .map_err(|e| format!("HTTPS request failed ({:?})", e))?;
+            let resp = libtls::https_get_with(
+                netd,
+                &target.host,
+                &target.path,
+                target.port,
+                cookie.as_deref(),
+            )
+            .map_err(|e| format!("HTTPS request failed ({:?})", e))?;
             if resp.cert_unverified {
                 cert_warning = true;
             }
+            store_cookies(jar, &target, &resp.set_cookie);
             (resp.status, resp.body, resp.location)
         } else {
-            let resp = libnet::http_get(netd, &target.host, &target.path, target.port)
-                .map_err(|e| format!("HTTP request failed ({:?})", e))?;
+            let resp = libnet::http_get_with(
+                netd,
+                &target.host,
+                &target.path,
+                target.port,
+                cookie.as_deref(),
+            )
+            .map_err(|e| format!("HTTP request failed ({:?})", e))?;
+            store_cookies(jar, &target, &resp.set_cookie);
             (resp.status, resp.body, resp.location)
         };
 
@@ -77,17 +111,35 @@ pub fn fetch_http(url: &str) -> Result<PageFetch, String> {
     Err(String::from("Too many redirects"))
 }
 
-/// Fetch raw bytes (e.g. images), following HTTP and HTTPS redirects.
-pub fn fetch_url_bytes(url: &str) -> Option<Vec<u8>> {
+/// Fetch raw bytes (e.g. images), following HTTP and HTTPS redirects, sending
+/// and storing cookies from `jar`.
+pub fn fetch_url_bytes(url: &str, jar: &RefCell<CookieJar>) -> Option<Vec<u8>> {
     let netd = lookup_service("netd").ok()?;
     let mut current = String::from(url);
     for _ in 0..MAX_IMAGE_REDIRECTS {
         let target = split_http_url(&current).ok()?;
+        let cookie = cookie_header(jar, &target);
         let (status, body, location) = if target.https {
-            let resp = libtls::https_get(netd, &target.host, &target.path, target.port).ok()?;
+            let resp = libtls::https_get_with(
+                netd,
+                &target.host,
+                &target.path,
+                target.port,
+                cookie.as_deref(),
+            )
+            .ok()?;
+            store_cookies(jar, &target, &resp.set_cookie);
             (resp.status, resp.body, resp.location)
         } else {
-            let resp = libnet::http_get(netd, &target.host, &target.path, target.port).ok()?;
+            let resp = libnet::http_get_with(
+                netd,
+                &target.host,
+                &target.path,
+                target.port,
+                cookie.as_deref(),
+            )
+            .ok()?;
+            store_cookies(jar, &target, &resp.set_cookie);
             (resp.status, resp.body, resp.location)
         };
         if is_redirect(status) {

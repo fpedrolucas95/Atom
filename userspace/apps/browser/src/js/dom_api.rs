@@ -68,7 +68,11 @@ pub fn document_get(it: &mut Interp, key: &str) -> EResult {
             .map(Value::Node)
             .unwrap_or(Value::Null),
         "readyState" => str_value("interactive"),
-        "cookie" => str_value(""),
+        "cookie" => {
+            let host = it.host.clone();
+            let s = it.cookies.borrow().document_cookie(&host, "/", false);
+            str_value(&s)
+        }
         "location" => env_get(&it.global, "location").unwrap_or(Value::Undefined),
         "forms" | "images" | "links" | "scripts" => new_array(Vec::new()),
         m if DOCUMENT_METHODS.contains(&m) => native(document_method, intern_doc_method(m)),
@@ -95,11 +99,17 @@ pub fn document_set(it: &mut Interp, key: &str, value: Value) -> Result<(), Cont
             };
             it.dom.set_text_content(title, &text);
         }
+        "cookie" => {
+            let host = it.host.clone();
+            it.cookies
+                .borrow_mut()
+                .set_from_js(&host, "/", &to_string(&value));
+        }
         k if k.starts_with("on") => {
             // `document.onclick = f` style property handlers.
             it.handlers.set_prop(Target::Document, &k[2..], value);
         }
-        _ => {} // cookie / location assignments are accepted and dropped
+        _ => {} // location assignments are accepted and dropped
     }
     Ok(())
 }

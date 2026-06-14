@@ -54,6 +54,9 @@ pub struct Browser {
     notice: String,
     doc: Document,
     page: Option<PageState>,
+    /// Cookie jar shared with the JS runtime (`document.cookie`) and the
+    /// network layer; persists across navigations within the session.
+    cookies: crate::js::cookie::SharedJar,
     /// External stylesheets fetched at load, replayed on re-renders so event
     /// handlers never trigger network traffic.
     css_cache: Vec<(String, String)>,
@@ -110,6 +113,7 @@ impl Browser {
                 click_nodes: Vec::new(),
             },
             page: None,
+            cookies: crate::js::cookie::shared(),
             css_cache: Vec::new(),
             pending_load: false,
             back_stack: Vec::new(),
@@ -162,15 +166,19 @@ impl Browser {
         // URL, so relative `<link href>` / `<script src>` resolve against it.
         // Only http resources are fetched (about: pages are self-contained).
         let base = self.url.clone();
+        let host = crate::url::split_http_url(&base)
+            .map(|t| t.host)
+            .unwrap_or_default();
         let allow_net = normalize_http_url(&base).is_some();
         let scripting = SCRIPTING_ENABLED && !allow_net;
+        let cookies = self.cookies.clone();
         let fetch_resource = |budget: &mut u32, max: u32, href: &str| -> Option<String> {
             if !allow_net || *budget >= max {
                 return None;
             }
             *budget += 1;
             let url = resolve_url(&base, href)?;
-            let bytes = fetch_url_bytes(&url)?;
+            let bytes = fetch_url_bytes(&url, &cookies)?;
             if bytes.is_empty() || bytes.len() > MAX_CSS_BYTES {
                 return None;
             }
@@ -193,6 +201,8 @@ impl Browser {
             },
             &mut |src| fetch_resource(&mut js_fetches, MAX_JS_FETCHES, src),
             scripting,
+            self.cookies.clone(),
+            &host,
         );
         self.doc = page.doc;
         self.page = Some(PageState {
@@ -260,7 +270,7 @@ impl Browser {
             } else {
                 http_url
             };
-            return match fetch_http(&self.url) {
+            return match fetch_http(&self.url, &self.cookies) {
                 Ok(page) => {
                     self.url = page.final_url;
                     if page.cert_unverified {
@@ -311,6 +321,7 @@ impl Browser {
     /// fetches so a heavy page can't hang the UI.
     fn load_images(&mut self) {
         let page_url = self.url.clone();
+        let cookies = self.cookies.clone();
         let mut fetched = 0u32;
         let mut decoded = 0u32;
         let mut ok = 0u32;
@@ -353,7 +364,7 @@ impl Browser {
             } else if fetched < MAX_IMAGE_FETCHES {
                 fetched += 1;
                 if let Some(url) = resolve_url(&page_url, src) {
-                    match fetch_url_bytes(&url) {
+                    match fetch_url_bytes(&url, &cookies) {
                         Some(bytes) => {
                             decoded += 1;
                             match decode_image(&bytes) {

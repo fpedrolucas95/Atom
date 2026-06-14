@@ -1346,6 +1346,69 @@ mod tests {
     }
 
     #[test]
+    fn js_document_cookie_round_trips() {
+        let out = run_js(
+            "document.cookie = 'a=1';\
+             document.cookie = 'b=2; path=/';\
+             console.log(document.cookie);\
+             document.cookie = 'a=updated';\
+             console.log(document.cookie);\
+             console.log(navigator.cookieEnabled);",
+        );
+        assert_eq!(out[0], "a=1; b=2");
+        assert_eq!(out[1], "a=updated; b=2");
+        assert_eq!(out[2], "true");
+    }
+
+    #[test]
+    fn cookie_jar_scopes_by_domain_path_and_secure() {
+        use crate::js::cookie::CookieJar;
+        let mut jar = CookieJar::new();
+        jar.set_from_response("shop.example.com", "/", "sid=abc; Path=/");
+        jar.set_from_response("shop.example.com", "/cart", "cart=1; Path=/cart");
+        jar.set_from_response("shop.example.com", "/", "secure=yes; Secure");
+        jar.set_from_response("example.com", "/", "wide=1; Domain=example.com");
+
+        // Root path over http: the path=/cart cookie and the Secure one are out.
+        assert_eq!(
+            jar.request_header("shop.example.com", "/", false).as_deref(),
+            Some("sid=abc; wide=1")
+        );
+        // The /cart path adds the cart cookie; https adds the Secure one.
+        assert_eq!(
+            jar.request_header("shop.example.com", "/cart", true)
+                .as_deref(),
+            Some("sid=abc; cart=1; secure=yes; wide=1")
+        );
+        // A different host only sees the domain cookie.
+        assert_eq!(
+            jar.request_header("other.com", "/", false).as_deref(),
+            None
+        );
+        assert_eq!(
+            jar.request_header("www.example.com", "/", false).as_deref(),
+            Some("wide=1")
+        );
+    }
+
+    #[test]
+    fn cookie_jar_deletes_on_expiry_and_hides_httponly() {
+        use crate::js::cookie::CookieJar;
+        let mut jar = CookieJar::new();
+        jar.set_from_response("x.com", "/", "token=secret; HttpOnly");
+        jar.set_from_response("x.com", "/", "vis=1");
+        // HttpOnly is sent on requests but hidden from document.cookie.
+        assert_eq!(
+            jar.request_header("x.com", "/", false).as_deref(),
+            Some("token=secret; vis=1")
+        );
+        assert_eq!(jar.document_cookie("x.com", "/", false), "vis=1");
+        // Max-Age=0 deletes.
+        jar.set_from_response("x.com", "/", "vis=1; Max-Age=0");
+        assert_eq!(jar.document_cookie("x.com", "/", false), "");
+    }
+
+    #[test]
     fn js_localstorage_methods_and_access() {
         let out = run_js(
             "localStorage.setItem('a', '1');\
@@ -1646,7 +1709,14 @@ mod tests {
     use crate::js::Target;
 
     fn load(html: &str) -> LoadedPage {
-        load_page(html, &mut |_| None, &mut |_| None, true)
+        load_page(
+            html,
+            &mut |_| None,
+            &mut |_| None,
+            true,
+            crate::js::cookie::shared(),
+            "",
+        )
     }
 
     /// Click the node and re-flatten, like the browser does.
@@ -1868,7 +1938,14 @@ mod tests {
     /// Load a page with BROWSER_TIME_MS pinned to `start_ms`.
     fn load_at_time(html: &str, start_ms: u64) -> crate::html::LoadedPage {
         crate::js::builtins::set_browser_time(start_ms);
-        load_page(html, &mut |_| None, &mut |_| None, true)
+        load_page(
+            html,
+            &mut |_| None,
+            &mut |_| None,
+            true,
+            crate::js::cookie::shared(),
+            "",
+        )
     }
 
     /// Advance the browser clock to `now_ms` and fire expired timers,
