@@ -158,7 +158,7 @@ fn collect_styles(
         "style" => {
             let mut css = String::new();
             dom.text_content(id, &mut css);
-            sheet.parse_into(&css);
+            add_css(sheet, &css, fetch_css, 0);
             return;
         }
         "link" => {
@@ -170,7 +170,7 @@ fn collect_styles(
                 if is_sheet {
                     if let Some(href) = el.attr("href").filter(|h| !h.trim().is_empty()) {
                         if let Some(css) = fetch_css(href) {
-                            sheet.parse_into(&css);
+                            add_css(sheet, &css, fetch_css, 0);
                         }
                     }
                 }
@@ -182,6 +182,28 @@ fn collect_styles(
     for &c in &dom.nodes[id].children {
         collect_styles(dom, c, sheet, fetch_css);
     }
+}
+
+/// Maximum `@import` nesting depth, bounding pathological import chains (the
+/// total fetch count is already capped by the `fetch_css` closure's budget).
+const MAX_IMPORT_DEPTH: u32 = 4;
+
+/// Parse a stylesheet into `sheet`, fetching and parsing any `@import`ed sheets
+/// first so they apply before the importing rules (the CSS cascade order).
+fn add_css(
+    sheet: &mut Stylesheet,
+    css: &str,
+    fetch_css: &mut dyn FnMut(&str) -> Option<String>,
+    depth: u32,
+) {
+    if depth < MAX_IMPORT_DEPTH {
+        for url in crate::css::extract_imports(css) {
+            if let Some(imported) = fetch_css(&url) {
+                add_css(sheet, &imported, fetch_css, depth + 1);
+            }
+        }
+    }
+    sheet.parse_into(css);
 }
 
 // ────────────────────────────────────────────────────────────────────────────

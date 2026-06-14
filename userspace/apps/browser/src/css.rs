@@ -1536,7 +1536,57 @@ impl Stylesheet {
         let clean = strip_comments(css);
         self.parse_rules(&clean);
     }
+}
 
+/// Extract the targets of every `@import` rule in a stylesheet, in order, so
+/// the caller can fetch and parse imported sheets first. Comments are stripped
+/// so a commented-out import is ignored.
+pub fn extract_imports(css: &str) -> Vec<String> {
+    let clean = strip_comments(css);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(rel) = clean[i..].find("@import") {
+        let start = i + rel + "@import".len();
+        let end = clean[start..]
+            .find(';')
+            .map(|p| start + p)
+            .unwrap_or(clean.len());
+        if let Some(url) = parse_import_url(&clean[start..end]) {
+            out.push(url);
+        }
+        i = end.min(clean.len());
+        if i >= clean.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// Parse the URL out of an `@import` prelude: `url("x")` / `url(x)` / `"x"` /
+/// `'x'`, ignoring any trailing media-query list.
+fn parse_import_url(decl: &str) -> Option<String> {
+    let d = decl.trim();
+    let lower = d.to_ascii_lowercase();
+    let raw = if lower.starts_with("url(") {
+        let open = d.find('(')? + 1;
+        let close = d[open..].find(')')? + open;
+        d[open..close].trim()
+    } else {
+        let q = d.find(['"', '\''])?;
+        let quote = d.as_bytes()[q] as char;
+        let after = q + 1;
+        let close = d[after..].find(quote)? + after;
+        &d[after..close]
+    };
+    let url = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(String::from(url))
+    }
+}
+
+impl Stylesheet {
     fn parse_rules(&mut self, css: &str) {
         let bytes = css.as_bytes();
         let mut i = 0;

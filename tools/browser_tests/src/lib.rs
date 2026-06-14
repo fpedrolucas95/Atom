@@ -1217,6 +1217,57 @@ mod tests {
     }
 
     #[test]
+    fn css_import_extraction() {
+        use crate::css::extract_imports;
+        assert_eq!(
+            extract_imports("@import url(\"a.css\"); @import 'b.css' screen; p{}"),
+            vec!["a.css".to_string(), "b.css".to_string()]
+        );
+        assert_eq!(
+            extract_imports("@import url(reset.css) screen and (min-width: 1px);"),
+            vec!["reset.css".to_string()]
+        );
+        // Commented-out imports are ignored.
+        assert!(extract_imports("/* @import url(x.css); */ p{}").is_empty());
+    }
+
+    #[test]
+    fn css_import_is_fetched_and_cascades_before_importer() {
+        let mut requested: Vec<String> = Vec::new();
+        let doc = parse_html_with_css(
+            "<style>@import url('base.css'); p { color: #00ff00 }</style><p>hi</p>",
+            |href| {
+                requested.push(String::from(href));
+                if href == "base.css" {
+                    // imported: sets a page background and a (lower-priority,
+                    // because earlier) red paragraph colour.
+                    Some(String::from("body{background:#010203} p{color:#ff0000}"))
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(requested, vec!["base.css".to_string()]);
+        // The importing sheet's `p{color:green}` comes after the import, so it wins.
+        assert_eq!(find_run(&doc, "hi").style.color, Some(Color::rgb(0, 255, 0)));
+        // …but the imported background still applies.
+        assert_eq!(doc.background, Some(Color::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn css_import_is_recursive() {
+        let doc = parse_html_with_css(
+            "<style>@import 'one.css';</style><p>x</p>",
+            |href| match href {
+                "one.css" => Some(String::from("@import 'two.css';")),
+                "two.css" => Some(String::from("p{color:#0000ff}")),
+                _ => None,
+            },
+        );
+        assert_eq!(find_run(&doc, "x").style.color, Some(Color::rgb(0, 0, 255)));
+    }
+
+    #[test]
     fn link_without_stylesheet_rel_is_ignored() {
         let mut fetched = false;
         let _ = parse_html_with_css(

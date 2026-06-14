@@ -11,7 +11,8 @@
 //!   (compound, combinators, attributes, structural pseudo-classes),
 //!   specificity + `!important` cascade, inheritance, `@media` evaluation,
 //!   `font-size`, and presentational-attribute support — fed by inline
-//!   `style`, `<style>` blocks, and external `<link rel=stylesheet>` sheets.
+//!   `style`, `<style>` blocks, external `<link rel=stylesheet>` sheets, and
+//!   `@import`ed sheets.
 //!   The styled DOM is flattened into renderer blocks: headings, flow content,
 //!   nested lists, tables (one row per line), blockquotes, preformatted text,
 //!   rules, images (PNG/JPEG/GIF over HTTP or `data:`), inline form controls,
