@@ -31,6 +31,7 @@ pub mod lexer;
 pub mod parser;
 pub mod storage;
 pub mod value;
+pub mod xhr;
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -59,6 +60,10 @@ pub struct Runtime {
     pub cookies: cookie::SharedJar,
     /// Host of the current page, scoping `document.cookie`.
     pub host: Rc<str>,
+    /// Full page URL, the base for resolving `fetch`/`XHR` relative URLs.
+    pub base_url: Rc<str>,
+    /// Browser-installed synchronous network hook for `fetch`/`XHR`.
+    pub net: Option<xhr::NetFetch>,
 }
 
 /// One script to execute: the element id and its source text.
@@ -77,13 +82,25 @@ impl Runtime {
             storage: storage::Storage::new(),
             cookies: cookie::shared(),
             host: Rc::from(""),
+            base_url: Rc::from(""),
+            net: None,
         }
     }
 
-    /// Point `document.cookie` at the browser's shared jar and the page host.
-    pub fn set_cookie_context(&mut self, jar: cookie::SharedJar, host: &str) {
+    /// Point the runtime at the browser's shared cookie jar, the page host
+    /// (for `document.cookie`), the base URL (for `fetch`/`XHR` resolution),
+    /// and the synchronous network hook.
+    pub fn set_page_context(
+        &mut self,
+        jar: cookie::SharedJar,
+        host: &str,
+        base_url: &str,
+        net: Option<xhr::NetFetch>,
+    ) {
         self.cookies = jar;
         self.host = Rc::from(host);
+        self.base_url = Rc::from(base_url);
+        self.net = net;
     }
 
     /// Load phase: run every `<script>` in document order, then fire
@@ -102,6 +119,8 @@ impl Runtime {
             &mut self.storage,
             self.cookies.clone(),
             self.host.clone(),
+            self.base_url.clone(),
+            self.net,
             self.global.clone(),
             LOAD_BUDGET,
         );
@@ -139,6 +158,8 @@ impl Runtime {
             &mut self.storage,
             self.cookies.clone(),
             self.host.clone(),
+            self.base_url.clone(),
+            self.net,
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -154,6 +175,8 @@ impl Runtime {
             &mut self.storage,
             self.cookies.clone(),
             self.host.clone(),
+            self.base_url.clone(),
+            self.net,
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -245,6 +268,8 @@ impl Runtime {
             &mut self.storage,
             self.cookies.clone(),
             self.host.clone(),
+            self.base_url.clone(),
+            self.net,
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -265,6 +290,8 @@ impl Runtime {
             &mut self.storage,
             self.cookies.clone(),
             self.host.clone(),
+            self.base_url.clone(),
+            self.net,
             self.global.clone(),
             EVENT_BUDGET,
         );

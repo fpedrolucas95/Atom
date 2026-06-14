@@ -1490,6 +1490,77 @@ mod tests {
         assert_eq!(out[0], "L S");
     }
 
+    /// Run a script with a mock synchronous network hook installed, returning
+    /// the console output. Drives the runtime directly (the usual `load_page`
+    /// path leaves `net` unset for self-contained pages).
+    fn run_js_net(src: &str, mock: crate::js::xhr::NetFetch) -> Vec<String> {
+        use crate::domtree::build_dom;
+        let mut dom = build_dom(&format!("<script>{src}</script>"));
+        let mut rt = crate::js::Runtime::new();
+        rt.set_page_context(
+            crate::js::cookie::shared(),
+            "example.com",
+            "http://example.com/app/",
+            Some(mock),
+        );
+        let mut console = Vec::new();
+        rt.run_load_scripts(&mut dom, &mut |_| None, &mut console);
+        console
+    }
+
+    /// Echoes the request method/url back as JSON so tests can assert on both.
+    fn mock_net(
+        req: &crate::js::xhr::NetRequest,
+        _jar: &crate::js::cookie::SharedJar,
+    ) -> crate::js::xhr::NetResponse {
+        crate::js::xhr::NetResponse {
+            status: 200,
+            ok: true,
+            body: format!("{{\"a\":42,\"method\":\"{}\",\"url\":\"{}\"}}", req.method, req.url),
+            final_url: req.url.clone(),
+        }
+    }
+
+    #[test]
+    fn js_xhr_synchronous_get() {
+        let out = run_js_net(
+            "var x = new XMLHttpRequest();\
+             var loaded = false;\
+             x.onload = function() { loaded = true; };\
+             x.open('GET', '/data.json');\
+             x.send();\
+             console.log(x.status, x.readyState, loaded);\
+             console.log(x.responseText.indexOf('\"a\":42') >= 0);",
+            mock_net,
+        );
+        assert_eq!(out[0], "200 4 true");
+        assert_eq!(out[1], "true");
+    }
+
+    #[test]
+    fn js_fetch_then_text_and_json() {
+        let out = run_js_net(
+            "fetch('/info').then(function(r) { return r.text(); })\
+                            .then(function(t) { console.log(t.indexOf('42') >= 0, true); });\
+             fetch('/info', { method: 'POST' })\
+                 .then(function(r) { console.log(r.ok, r.status); return r.json(); })\
+                 .then(function(d) { console.log(d.a, d.method); });",
+            mock_net,
+        );
+        assert_eq!(out[0], "true true");
+        assert_eq!(out[1], "true 200");
+        assert_eq!(out[2], "42 POST");
+    }
+
+    #[test]
+    fn js_fetch_without_network_resolves_not_ok() {
+        // The default self-contained page has no net hook installed.
+        let out = run_js(
+            "fetch('/x').then(function(r) { console.log(r.ok, r.status); });",
+        );
+        assert_eq!(out[0], "false 0");
+    }
+
     #[test]
     fn js_array_from_and_of() {
         let out = run_js(
@@ -1823,8 +1894,7 @@ mod tests {
             &mut |_| None,
             &mut |_| None,
             true,
-            crate::js::cookie::shared(),
-            "",
+            crate::html::LoadContext::local(),
         )
     }
 
@@ -2052,8 +2122,7 @@ mod tests {
             &mut |_| None,
             &mut |_| None,
             true,
-            crate::js::cookie::shared(),
-            "",
+            crate::html::LoadContext::local(),
         )
     }
 

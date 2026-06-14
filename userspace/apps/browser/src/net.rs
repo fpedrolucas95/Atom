@@ -9,11 +9,12 @@ use core::cell::RefCell;
 use libimage::{GifDecoder, ImageDecoder, JpgDecoder, PngDecoder};
 use libipc::protocol::lookup_service;
 
-use crate::js::cookie::CookieJar;
+use crate::js::cookie::{CookieJar, SharedJar};
+use crate::js::xhr::{NetRequest, NetResponse};
 use crate::text::{
     base64_decode, find_ignore_ascii_case, percent_decode, starts_with_ignore_ascii_case,
 };
-use crate::url::{normalize_redirect_url, split_http_url, HttpTarget};
+use crate::url::{normalize_redirect_url, resolve_url, split_http_url, HttpTarget};
 
 /// Maximum redirects followed before giving up, per resource class.
 const MAX_PAGE_REDIRECTS: u32 = 4;
@@ -152,6 +153,70 @@ pub fn fetch_url_bytes(url: &str, jar: &RefCell<CookieJar>) -> Option<Vec<u8>> {
         return Some(body);
     }
     None
+}
+
+/// Synchronous network hook for the JS engine's `fetch`/`XMLHttpRequest`.
+/// The HTTP stack is GET-only, so every method is fetched as GET; cookies ride
+/// along via `jar`. Returns a status-0 failure on any transport error.
+pub fn fetch_for_js(req: &NetRequest, jar: &SharedJar) -> NetResponse {
+    let url = resolve_url(&req.base_url, &req.url).unwrap_or_else(|| req.url.clone());
+    let Ok(netd) = lookup_service("netd") else {
+        return js_failure(&url);
+    };
+    let mut current = url;
+    for _ in 0..MAX_PAGE_REDIRECTS {
+        let Ok(target) = split_http_url(&current) else {
+            return js_failure(&current);
+        };
+        let cookie = cookie_header(jar, &target);
+        let result = if target.https {
+            libtls::https_get_with(
+                netd,
+                &target.host,
+                &target.path,
+                target.port,
+                cookie.as_deref(),
+            )
+            .map(|r| (r.status, r.body, r.location, r.set_cookie))
+            .ok()
+        } else {
+            libnet::http_get_with(
+                netd,
+                &target.host,
+                &target.path,
+                target.port,
+                cookie.as_deref(),
+            )
+            .map(|r| (r.status, r.body, r.location, r.set_cookie))
+            .ok()
+        };
+        let Some((status, body, location, set_cookie)) = result else {
+            return js_failure(&current);
+        };
+        store_cookies(jar, &target, &set_cookie);
+        if is_redirect(status) {
+            if let Some(next) = location.and_then(|l| normalize_redirect_url(&current, &l)) {
+                current = next;
+                continue;
+            }
+        }
+        return NetResponse {
+            status,
+            ok: (200..300).contains(&status),
+            body: String::from_utf8_lossy(&body).into_owned(),
+            final_url: current,
+        };
+    }
+    js_failure(&current)
+}
+
+fn js_failure(url: &str) -> NetResponse {
+    NetResponse {
+        status: 0,
+        ok: false,
+        body: String::new(),
+        final_url: String::from(url),
+    }
 }
 
 /// Decode PNG/JPEG/GIF bytes, using the magic number to pick a decoder first.

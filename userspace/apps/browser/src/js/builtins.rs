@@ -20,6 +20,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::interp::{EResult, Interp};
 use super::value::*;
+use super::xhr;
 
 // ── Global installation ──────────────────────────────────────────────────────
 
@@ -131,6 +132,10 @@ pub fn install_globals(global: &EnvRef) {
     def("Map", native(global_fn, "Map"));
     def("Set", native(global_fn, "Set"));
 
+    // Synchronous networking.
+    def("XMLHttpRequest", native(xhr::xhr_new, "XMLHttpRequest"));
+    def("fetch", native(xhr::fetch_fn, "fetch"));
+
     // Date.now
     let date = new_obj(ObjKind::Native(global_fn, "Date"));
     date.borrow_mut()
@@ -191,6 +196,12 @@ pub fn install_globals(global: &EnvRef) {
         w.props.insert(
             "sessionStorage".into(),
             Value::Storage(StorageArea::Session),
+        );
+        w.props
+            .insert("fetch".into(), native(xhr::fetch_fn, "fetch"));
+        w.props.insert(
+            "XMLHttpRequest".into(),
+            native(xhr::xhr_new, "XMLHttpRequest"),
         );
         def("location", Value::Obj(location));
         def("navigator", Value::Obj(navigator));
@@ -955,16 +966,16 @@ fn set_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static str)
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
 
+/// Parse a JSON string into a value (used by `JSON.parse` and `Response.json`).
+pub fn parse_json(s: &str) -> EResult {
+    let mut pos = 0;
+    json_parse(s, &mut pos).ok_or_else(|| Interp::throw_str("SyntaxError", "invalid JSON"))
+}
+
 fn json_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str) -> EResult {
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
     match name {
-        "parse" => {
-            let s = to_string(&arg(0));
-            let mut pos = 0;
-            let v = json_parse(&s, &mut pos)
-                .ok_or_else(|| Interp::throw_str("SyntaxError", "invalid JSON"))?;
-            Ok(v)
-        }
+        "parse" => parse_json(&to_string(&arg(0))),
         "stringify" => {
             let mut out = String::new();
             json_stringify(it, &arg(0), &mut out, 0);

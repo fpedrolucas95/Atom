@@ -17,7 +17,7 @@ use crate::dom::{Block, Document, Hit, InputKind};
 use crate::domtree::Dom;
 use crate::html::{flatten_dom, load_page, parse_html};
 use crate::js;
-use crate::net::{decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
+use crate::net::{self, decode_data_uri, decode_image, fetch_http, fetch_url_bytes};
 use crate::render::{self, truncate_for_width, Clip, FormCtx};
 use crate::text::{escape_text, percent_encode, starts_with_ignore_ascii_case};
 use crate::url::{normalize_http_url, resolve_url};
@@ -201,8 +201,12 @@ impl Browser {
             },
             &mut |src| fetch_resource(&mut js_fetches, MAX_JS_FETCHES, src),
             scripting,
-            self.cookies.clone(),
-            &host,
+            crate::html::LoadContext {
+                cookies: self.cookies.clone(),
+                host,
+                base_url: base.clone(),
+                net: Some(net::fetch_for_js),
+            },
         );
         self.doc = page.doc;
         self.page = Some(PageState {

@@ -29,6 +29,7 @@
 //!   interpreter (`js/`) runs page scripts after tree construction — DOM
 //!   mutation (`getElementById`, `querySelector`, `innerHTML`,
 //!   `document.write`, `createElement`, `style`), `console`, `Math`, `JSON`,
+//!   `Map`/`Set`, synchronous `XMLHttpRequest`/`fetch` (cookie-aware),
 //!   and the core language (closures, prototypes, try/catch, arrows) — under
 //!   a step budget so a runaway script can never hang the browser. The page
 //!   stays live after load: `click` events dispatch through registered

@@ -70,17 +70,34 @@ pub fn parse_document(
     fetch_js: &mut dyn FnMut(&str) -> Option<String>,
     scripting: bool,
 ) -> PageOutput {
-    let page = load_page(
-        html,
-        fetch_css,
-        fetch_js,
-        scripting,
-        crate::js::cookie::shared(),
-        "",
-    );
+    let page = load_page(html, fetch_css, fetch_js, scripting, LoadContext::local());
     PageOutput {
         doc: page.doc,
         console: page.console,
+    }
+}
+
+/// Per-page runtime context: the shared cookie jar, the page host (cookie
+/// scope) and base URL (`fetch`/`XHR` resolution), and the synchronous network
+/// hook. Kept as opaque handles so this module stays free of the browser's
+/// network code (and compiles in the host engine tests).
+pub struct LoadContext {
+    pub cookies: crate::js::cookie::SharedJar,
+    pub host: String,
+    pub base_url: String,
+    pub net: Option<crate::js::xhr::NetFetch>,
+}
+
+impl LoadContext {
+    /// A self-contained page: fresh jar, no host, no network. Used by tests and
+    /// `about:` pages.
+    pub fn local() -> Self {
+        Self {
+            cookies: crate::js::cookie::shared(),
+            host: String::new(),
+            base_url: String::new(),
+            net: None,
+        }
     }
 }
 
@@ -100,15 +117,14 @@ pub fn load_page(
     fetch_css: &mut dyn FnMut(&str) -> Option<String>,
     fetch_js: &mut dyn FnMut(&str) -> Option<String>,
     scripting: bool,
-    cookies: crate::js::cookie::SharedJar,
-    host: &str,
+    ctx: LoadContext,
 ) -> LoadedPage {
     let mut dom = build_dom(html);
     let mut console = Vec::new();
     let mut runtime = None;
     if scripting {
         let mut rt = crate::js::Runtime::new();
-        rt.set_cookie_context(cookies, host);
+        rt.set_page_context(ctx.cookies, &ctx.host, &ctx.base_url, ctx.net);
         rt.run_load_scripts(&mut dom, fetch_js, &mut console);
         runtime = Some(rt);
     }
