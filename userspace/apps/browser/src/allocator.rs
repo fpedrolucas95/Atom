@@ -15,10 +15,19 @@ use atom_syscall::vm::mmap_anon;
 /// Minimum bytes requested from the kernel per growth step.
 const HEAP_CHUNK_SIZE: usize = 256 * 1024;
 
+/// Hard cap on total heap bytes mapped from the kernel. The kernel uses
+/// deferred physical allocation, so mmap() succeeds even when RAM is
+/// exhausted — the fatal page fault only arrives on first access. By
+/// refusing to mmap beyond this limit we ensure OOM is reported through
+/// the alloc_error_handler (a clean log + exit) rather than a kernel
+/// page fault that terminates the process without any diagnostic.
+const MAX_HEAP_BYTES: usize = 64 * 1024 * 1024;
+
 pub struct MmapBumpAllocator {
     lock: AtomicBool,
     next: AtomicUsize,
     end: AtomicUsize,
+    total_mapped: AtomicUsize,
 }
 
 // Safety: all shared state is accessed under the spin `lock`.
@@ -30,6 +39,7 @@ impl MmapBumpAllocator {
             lock: AtomicBool::new(false),
             next: AtomicUsize::new(0),
             end: AtomicUsize::new(0),
+            total_mapped: AtomicUsize::new(0),
         }
     }
 
@@ -56,7 +66,11 @@ impl MmapBumpAllocator {
     fn grow(&self, min_size: usize, align: usize) -> Option<(usize, usize)> {
         let needed = min_size.checked_add(align)?;
         let chunk = Self::align_up(needed.max(HEAP_CHUNK_SIZE), USER_PAGE_SIZE)?;
+        if self.total_mapped.load(Ordering::Relaxed).saturating_add(chunk) > MAX_HEAP_BYTES {
+            return None;
+        }
         let addr = mmap_anon(chunk, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE).ok()?;
+        self.total_mapped.fetch_add(chunk, Ordering::Relaxed);
         Some((addr as usize, chunk))
     }
 

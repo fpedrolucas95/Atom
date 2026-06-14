@@ -231,12 +231,19 @@ impl Runtime {
                 13 => ("Enter", 13),
                 27 => ("Escape", 27),
                 32..=126 => {
-                    // Leak one &'static str per unique printable char — tiny fixed set.
-                    let ch = character as char;
-                    let s: &'static str = {
-                        let owned = alloc::string::String::from(ch);
-                        alloc::boxed::Box::leak(owned.into_boxed_str())
-                    };
+                    const PRINTABLE: [&str; 95] = [
+                        " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")",
+                        "*", "+", ",", "-", ".", "/",
+                        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+                        ":", ";", "<", "=", ">", "?", "@",
+                        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+                        "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+                        "[", "\\", "]", "^", "_", "`",
+                        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+                        "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+                        "{", "|", "}", "~",
+                    ];
+                    let s = PRINTABLE[(character as usize) - 32];
                     (s, character as u32)
                 }
                 _ => ("Unidentified", 0),
