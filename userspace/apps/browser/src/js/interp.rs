@@ -395,6 +395,12 @@ impl<'a> Interp<'a> {
                             .collect()
                     }
                 }
+                // `for (x of set)` / `for ([k, v] of map)`.
+                ObjKind::Set(items) if of => items.clone(),
+                ObjKind::Map(entries) if of => entries
+                    .iter()
+                    .map(|(k, v)| new_array(alloc::vec![k.clone(), v.clone()]))
+                    .collect(),
                 _ => {
                     let b = o.borrow();
                     if of {
@@ -760,13 +766,22 @@ impl<'a> Interp<'a> {
                 // Arrays: length and indices first.
                 {
                     let b = o.borrow();
-                    if let ObjKind::Array(items) = &b.kind {
-                        if key == "length" {
+                    match &b.kind {
+                        ObjKind::Array(items) => {
+                            if key == "length" {
+                                return Ok(Value::Num(items.len() as f64));
+                            }
+                            if let Ok(i) = key.parse::<usize>() {
+                                return Ok(items.get(i).cloned().unwrap_or(Value::Undefined));
+                            }
+                        }
+                        ObjKind::Map(entries) if key == "size" => {
+                            return Ok(Value::Num(entries.len() as f64));
+                        }
+                        ObjKind::Set(items) if key == "size" => {
                             return Ok(Value::Num(items.len() as f64));
                         }
-                        if let Ok(i) = key.parse::<usize>() {
-                            return Ok(items.get(i).cloned().unwrap_or(Value::Undefined));
-                        }
+                        _ => {}
                     }
                     if let Some(v) = b.props.get(key) {
                         return Ok(v.clone());
@@ -790,6 +805,8 @@ impl<'a> Interp<'a> {
                     let b = o.borrow();
                     match &b.kind {
                         ObjKind::Array(_) => builtins::array_member(key),
+                        ObjKind::Map(_) => builtins::map_member(key),
+                        ObjKind::Set(_) => builtins::set_member(key),
                         ObjKind::Function { .. } | ObjKind::Native(..) | ObjKind::Bound { .. } => {
                             builtins::function_member(key)
                         }

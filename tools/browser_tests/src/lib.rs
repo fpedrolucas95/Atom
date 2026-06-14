@@ -1491,6 +1491,64 @@ mod tests {
     }
 
     #[test]
+    fn js_array_from_and_of() {
+        let out = run_js(
+            "console.log(Array.of(1, 2, 3).join('-'));\
+             console.log(Array.from('abc').join(','));\
+             console.log(Array.from([1, 2, 3], function(x) { return x * x; }).join(','));\
+             console.log(Array.from(new Set([1, 1, 2])).length);",
+        );
+        assert_eq!(out[0], "1-2-3");
+        assert_eq!(out[1], "a,b,c");
+        assert_eq!(out[2], "1,4,9");
+        assert_eq!(out[3], "2");
+    }
+
+    #[test]
+    fn js_map_basic_ops() {
+        let out = run_js(
+            "var m = new Map();\
+             m.set('a', 1).set('b', 2);\
+             m.set('a', 10);\
+             console.log(m.get('a'), m.get('b'), m.size, m.has('b'));\
+             m.delete('b');\
+             console.log(m.has('b'), m.size);\
+             var ks = []; m.forEach(function(v, k) { ks.push(k + '=' + v); });\
+             console.log(ks.join(','));\
+             console.log(new Map([['x', 1], ['y', 2]]).get('y'));",
+        );
+        assert_eq!(out[0], "10 2 2 true");
+        assert_eq!(out[1], "false 1");
+        assert_eq!(out[2], "a=10");
+        assert_eq!(out[3], "2");
+    }
+
+    #[test]
+    fn js_set_basic_ops_and_for_of() {
+        let out = run_js(
+            "var s = new Set();\
+             s.add(1).add(2).add(2).add(3);\
+             console.log(s.size, s.has(2), s.has(9));\
+             s.delete(2);\
+             var sum = 0; for (var v of s) { sum += v; }\
+             console.log(sum, s.size);",
+        );
+        assert_eq!(out[0], "3 true false");
+        assert_eq!(out[1], "4 2");
+    }
+
+    #[test]
+    fn js_map_for_of_destructures_entries() {
+        let out = run_js(
+            "var m = new Map([['a', 1], ['b', 2]]);\
+             var out = [];\
+             for (var e of m) { out.push(e[0] + ':' + e[1]); }\
+             console.log(out.join(','));",
+        );
+        assert_eq!(out[0], "a:1,b:2");
+    }
+
+    #[test]
     fn js_closures_and_recursion() {
         let out = run_js(
             "function counter() { var n = 0; return function() { return ++n; }; }\

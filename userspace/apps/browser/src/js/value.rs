@@ -65,6 +65,10 @@ pub struct ObjData {
 pub enum ObjKind {
     Plain,
     Array(Vec<Value>),
+    /// `Map` — insertion-ordered key/value pairs (keys compared with `===`).
+    Map(Vec<(Value, Value)>),
+    /// `Set` — insertion-ordered unique values (compared with `===`).
+    Set(Vec<Value>),
     Function {
         def: Rc<FnDef>,
         env: EnvRef,
@@ -319,6 +323,8 @@ pub fn to_string(v: &Value) -> String {
             }
             ObjKind::Native(_, name) => format!("function {name}() {{ [native] }}"),
             ObjKind::Bound { .. } => String::from("function bound() { [bound] }"),
+            ObjKind::Map(_) => String::from("[object Map]"),
+            ObjKind::Set(_) => String::from("[object Set]"),
             ObjKind::Plain => {
                 // Error-shaped objects stringify as "Name: message".
                 let b = o.borrow();

@@ -117,13 +117,19 @@ pub fn install_globals(global: &EnvRef) {
     }
     def("Object", Value::Obj(object));
 
-    // Array.isArray
+    // Array (constructor + statics: isArray, of, from)
     let array = new_obj(ObjKind::Native(global_fn, "Array"));
-    array
-        .borrow_mut()
-        .props
-        .insert("isArray".into(), native(object_static_fn, "Array.isArray"));
+    for m in ["isArray", "of", "from"] {
+        array
+            .borrow_mut()
+            .props
+            .insert(m.into(), native(object_static_fn, leak_name("Array.", m)));
+    }
     def("Array", Value::Obj(array));
+
+    // Map / Set constructors.
+    def("Map", native(global_fn, "Map"));
+    def("Set", native(global_fn, "Set"));
 
     // Date.now
     let date = new_obj(ObjKind::Native(global_fn, "Date"));
@@ -403,8 +409,89 @@ fn global_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str)
                 .insert("source".into(), str_value(&to_string(&arg(0))));
             Value::Obj(o)
         }
+        "Map" => make_map(&arg(0)),
+        "Set" => make_set(&arg(0)),
         _ => Value::Undefined, // "noop"
     })
+}
+
+/// `new Map([[k, v], …])` — initial entries come from any iterable of pairs.
+fn make_map(init: &Value) -> Value {
+    let mut entries: Vec<(Value, Value)> = Vec::new();
+    for item in iterable_to_vec(init) {
+        let (k, v) = match &item {
+            Value::Obj(o) => match &o.borrow().kind {
+                ObjKind::Array(pair) => (
+                    pair.first().cloned().unwrap_or(Value::Undefined),
+                    pair.get(1).cloned().unwrap_or(Value::Undefined),
+                ),
+                _ => (item.clone(), Value::Undefined),
+            },
+            _ => (item.clone(), Value::Undefined),
+        };
+        map_insert(&mut entries, k, v);
+    }
+    Value::Obj(new_obj(ObjKind::Map(entries)))
+}
+
+/// `new Set([…])` — initial unique values come from any iterable.
+fn make_set(init: &Value) -> Value {
+    let mut items: Vec<Value> = Vec::new();
+    for v in iterable_to_vec(init) {
+        if !items.iter().any(|e| strict_eq(e, &v)) {
+            items.push(v);
+        }
+    }
+    Value::Obj(new_obj(ObjKind::Set(items)))
+}
+
+/// Insert/replace a Map entry by `===` key identity, preserving order.
+fn map_insert(entries: &mut Vec<(Value, Value)>, key: Value, value: Value) {
+    if let Some(slot) = entries.iter_mut().find(|(k, _)| strict_eq(k, &key)) {
+        slot.1 = value;
+    } else {
+        entries.push((key, value));
+    }
+}
+
+/// Collect any supported iterable into a `Vec`: arrays, sets, maps (as
+/// `[k, v]` pairs), strings (chars), and array-like objects with `length`.
+fn iterable_to_vec(v: &Value) -> Vec<Value> {
+    match v {
+        Value::Str(s) => s.chars().map(|c| str_value(&c.to_string())).collect(),
+        Value::Obj(o) => {
+            let b = o.borrow();
+            match &b.kind {
+                ObjKind::Array(items) => items.clone(),
+                ObjKind::Set(items) => items.clone(),
+                ObjKind::Map(entries) => entries
+                    .iter()
+                    .map(|(k, v)| new_array(alloc::vec![k.clone(), v.clone()]))
+                    .collect(),
+                _ => {
+                    // Array-like: indices 0..length.
+                    if let Some(Value::Num(n)) = b.props.get("length") {
+                        let len = if n.is_finite() && *n >= 0.0 {
+                            (*n as usize).min(1 << 20)
+                        } else {
+                            0
+                        };
+                        (0..len)
+                            .map(|i| {
+                                b.props
+                                    .get(&i.to_string())
+                                    .cloned()
+                                    .unwrap_or(Value::Undefined)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn date_fn(_it: &mut Interp, _this: &Value, _args: &[Value], name: &'static str) -> EResult {
@@ -657,14 +744,21 @@ fn poor_atan(x: f64) -> f64 {
 
 // ── Object / Array statics ──────────────────────────────────────────────────
 
-fn object_static_fn(
-    _it: &mut Interp,
-    _this: &Value,
-    args: &[Value],
-    name: &'static str,
-) -> EResult {
+fn object_static_fn(it: &mut Interp, _this: &Value, args: &[Value], name: &'static str) -> EResult {
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
+    if name == "Array.from" {
+        // `Array.from(iterable, mapFn?)`.
+        let mut items = iterable_to_vec(&arg(0));
+        if matches!(arg(1), Value::Obj(_)) {
+            let f = arg(1);
+            for (i, item) in items.iter_mut().enumerate() {
+                *item = it.call(&f, &Value::Undefined, &[item.clone(), Value::Num(i as f64)])?;
+            }
+        }
+        return Ok(new_array(items));
+    }
     Ok(match name {
+        "Array.of" => new_array(args.to_vec()),
         "Object.keys" | "Object.values" => {
             let mut out = Vec::new();
             if let Value::Obj(o) = arg(0) {
@@ -723,6 +817,138 @@ fn object_static_fn(
             &arg(0),
             Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array(_))
         )),
+        _ => Value::Undefined,
+    })
+}
+
+// ── Map / Set ─────────────────────────────────────────────────────────────────
+
+const MAP_METHODS: &[&str] = &[
+    "get", "set", "has", "delete", "clear", "forEach", "keys", "values", "entries",
+];
+const SET_METHODS: &[&str] = &[
+    "add", "has", "delete", "clear", "forEach", "keys", "values", "entries",
+];
+
+pub fn map_member(key: &str) -> Option<Value> {
+    MAP_METHODS
+        .iter()
+        .find(|&&m| m == key)
+        .map(|&m| native(map_method, m))
+}
+
+pub fn set_member(key: &str) -> Option<Value> {
+    SET_METHODS
+        .iter()
+        .find(|&&m| m == key)
+        .map(|&m| native(set_method, m))
+}
+
+fn map_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static str) -> EResult {
+    let Value::Obj(o) = this else {
+        return Ok(Value::Undefined);
+    };
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
+    // Snapshot for read/iterate methods to avoid holding a borrow across calls.
+    let entries: Vec<(Value, Value)> = match &o.borrow().kind {
+        ObjKind::Map(e) => e.clone(),
+        _ => return Ok(Value::Undefined),
+    };
+    Ok(match name {
+        "get" => entries
+            .iter()
+            .find(|(k, _)| strict_eq(k, &arg(0)))
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Undefined),
+        "has" => Value::Bool(entries.iter().any(|(k, _)| strict_eq(k, &arg(0)))),
+        "set" => {
+            if let ObjKind::Map(e) = &mut o.borrow_mut().kind {
+                map_insert(e, arg(0), arg(1));
+            }
+            this.clone()
+        }
+        "delete" => {
+            let mut removed = false;
+            if let ObjKind::Map(e) = &mut o.borrow_mut().kind {
+                let before = e.len();
+                e.retain(|(k, _)| !strict_eq(k, &arg(0)));
+                removed = e.len() != before;
+            }
+            Value::Bool(removed)
+        }
+        "clear" => {
+            if let ObjKind::Map(e) = &mut o.borrow_mut().kind {
+                e.clear();
+            }
+            Value::Undefined
+        }
+        "keys" => new_array(entries.iter().map(|(k, _)| k.clone()).collect()),
+        "values" => new_array(entries.iter().map(|(_, v)| v.clone()).collect()),
+        "entries" => new_array(
+            entries
+                .iter()
+                .map(|(k, v)| new_array(alloc::vec![k.clone(), v.clone()]))
+                .collect(),
+        ),
+        "forEach" => {
+            let f = arg(0);
+            for (k, v) in entries {
+                it.call(&f, &Value::Undefined, &[v, k, this.clone()])?;
+            }
+            Value::Undefined
+        }
+        _ => Value::Undefined,
+    })
+}
+
+fn set_method(it: &mut Interp, this: &Value, args: &[Value], name: &'static str) -> EResult {
+    let Value::Obj(o) = this else {
+        return Ok(Value::Undefined);
+    };
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
+    let items: Vec<Value> = match &o.borrow().kind {
+        ObjKind::Set(s) => s.clone(),
+        _ => return Ok(Value::Undefined),
+    };
+    Ok(match name {
+        "add" => {
+            if let ObjKind::Set(s) = &mut o.borrow_mut().kind {
+                if !s.iter().any(|e| strict_eq(e, &arg(0))) {
+                    s.push(arg(0));
+                }
+            }
+            this.clone()
+        }
+        "has" => Value::Bool(items.iter().any(|e| strict_eq(e, &arg(0)))),
+        "delete" => {
+            let mut removed = false;
+            if let ObjKind::Set(s) = &mut o.borrow_mut().kind {
+                let before = s.len();
+                s.retain(|e| !strict_eq(e, &arg(0)));
+                removed = s.len() != before;
+            }
+            Value::Bool(removed)
+        }
+        "clear" => {
+            if let ObjKind::Set(s) = &mut o.borrow_mut().kind {
+                s.clear();
+            }
+            Value::Undefined
+        }
+        "keys" | "values" => new_array(items.clone()),
+        "entries" => new_array(
+            items
+                .iter()
+                .map(|v| new_array(alloc::vec![v.clone(), v.clone()]))
+                .collect(),
+        ),
+        "forEach" => {
+            let f = arg(0);
+            for v in items {
+                it.call(&f, &Value::Undefined, &[v.clone(), v, this.clone()])?;
+            }
+            Value::Undefined
+        }
         _ => Value::Undefined,
     })
 }
