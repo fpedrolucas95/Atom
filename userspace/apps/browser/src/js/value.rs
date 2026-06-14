@@ -31,6 +31,13 @@ pub type EnvRef = Rc<RefCell<Env>>;
 /// dispatcher serve a whole method family (string methods, Math, …).
 pub type NativeFn = fn(&mut Interp, &Value, &[Value], &'static str) -> Result<Value, Control>;
 
+/// Which Web Storage area a [`Value::Storage`] handle refers to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StorageArea {
+    Local,
+    Session,
+}
+
 #[derive(Clone)]
 pub enum Value {
     Undefined,
@@ -45,6 +52,8 @@ pub enum Value {
     Document,
     /// `element.style` of a node — property access maps to the style attr.
     StyleOf(usize),
+    /// `localStorage` / `sessionStorage`.
+    Storage(StorageArea),
 }
 
 pub struct ObjData {
@@ -215,7 +224,7 @@ pub fn type_of(v: &Value) -> &'static str {
             ObjKind::Function { .. } | ObjKind::Native(..) | ObjKind::Bound { .. } => "function",
             _ => "object",
         },
-        Value::Node(_) | Value::Document | Value::StyleOf(_) => "object",
+        Value::Node(_) | Value::Document | Value::StyleOf(_) | Value::Storage(_) => "object",
     }
 }
 
@@ -324,6 +333,7 @@ pub fn to_string(v: &Value) -> String {
         Value::Node(_) => String::from("[object HTMLElement]"),
         Value::Document => String::from("[object HTMLDocument]"),
         Value::StyleOf(_) => String::from("[object CSSStyleDeclaration]"),
+        Value::Storage(_) => String::from("[object Storage]"),
     }
 }
 
@@ -386,6 +396,7 @@ pub fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Node(x), Value::Node(y)) => x == y,
         (Value::Document, Value::Document) => true,
         (Value::StyleOf(x), Value::StyleOf(y)) => x == y,
+        (Value::Storage(x), Value::Storage(y)) => x == y,
         _ => false,
     }
 }

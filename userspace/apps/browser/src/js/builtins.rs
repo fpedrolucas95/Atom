@@ -180,6 +180,12 @@ pub fn install_globals(global: &EnvRef) {
             native(window_listen_fn, "remove"),
         );
         w.props.insert("document".into(), Value::Document);
+        w.props
+            .insert("localStorage".into(), Value::Storage(StorageArea::Local));
+        w.props.insert(
+            "sessionStorage".into(),
+            Value::Storage(StorageArea::Session),
+        );
         def("location", Value::Obj(location));
         def("navigator", Value::Obj(navigator));
         def("screen", Value::Obj(screen));
@@ -188,6 +194,8 @@ pub fn install_globals(global: &EnvRef) {
     def("globalThis", Value::Obj(window.clone()));
     def("self", Value::Obj(window));
     def("document", Value::Document);
+    def("localStorage", Value::Storage(StorageArea::Local));
+    def("sessionStorage", Value::Storage(StorageArea::Session));
 }
 
 /// Method-name interning for the handful of `family.method` names we build at

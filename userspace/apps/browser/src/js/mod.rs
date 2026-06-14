@@ -28,6 +28,7 @@ pub mod events;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod storage;
 pub mod value;
 
 use alloc::format;
@@ -51,6 +52,7 @@ const EVENT_BUDGET: u64 = 1_000_000;
 pub struct Runtime {
     pub global: value::EnvRef,
     pub handlers: Handlers,
+    pub storage: storage::Storage,
 }
 
 /// One script to execute: the element id and its source text.
@@ -66,6 +68,7 @@ impl Runtime {
         Self {
             global,
             handlers: Handlers::new(),
+            storage: storage::Storage::new(),
         }
     }
 
@@ -82,6 +85,7 @@ impl Runtime {
             dom,
             console,
             &mut self.handlers,
+            &mut self.storage,
             self.global.clone(),
             LOAD_BUDGET,
         );
@@ -116,6 +120,7 @@ impl Runtime {
             dom,
             console,
             &mut self.handlers,
+            &mut self.storage,
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -128,6 +133,7 @@ impl Runtime {
             dom,
             console,
             &mut self.handlers,
+            &mut self.storage,
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -216,6 +222,7 @@ impl Runtime {
             dom,
             console,
             &mut self.handlers,
+            &mut self.storage,
             self.global.clone(),
             EVENT_BUDGET,
         );
@@ -233,6 +240,7 @@ impl Runtime {
             dom,
             console,
             &mut self.handlers,
+            &mut self.storage,
             self.global.clone(),
             EVENT_BUDGET,
         );

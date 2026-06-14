@@ -20,6 +20,7 @@ use super::ast::*;
 use super::builtins;
 use super::dom_api;
 use super::events::Handlers;
+use super::storage::Storage;
 use super::value::*;
 use crate::domtree::Dom;
 
@@ -49,6 +50,7 @@ pub struct Interp<'a> {
     pub dom: &'a mut Dom,
     pub console: &'a mut Vec<String>,
     pub handlers: &'a mut Handlers,
+    pub storage: &'a mut Storage,
     pub global: EnvRef,
     pub cursor: Option<WriteCursor>,
     steps: u64,
@@ -62,6 +64,7 @@ impl<'a> Interp<'a> {
         dom: &'a mut Dom,
         console: &'a mut Vec<String>,
         handlers: &'a mut Handlers,
+        storage: &'a mut Storage,
         global: EnvRef,
         budget: u64,
     ) -> Self {
@@ -69,6 +72,7 @@ impl<'a> Interp<'a> {
             dom,
             console,
             handlers,
+            storage,
             global,
             cursor: None,
             steps: budget,
@@ -790,6 +794,7 @@ impl<'a> Interp<'a> {
             Value::Node(id) => dom_api::node_get(self, *id, key),
             Value::Document => dom_api::document_get(self, key),
             Value::StyleOf(id) => dom_api::style_get(self, *id, key),
+            Value::Storage(area) => super::storage::get(self, *area, key),
         }
     }
 
@@ -825,6 +830,7 @@ impl<'a> Interp<'a> {
             Value::Node(id) => dom_api::node_set(self, *id, key, value),
             Value::Document => dom_api::document_set(self, key, value),
             Value::StyleOf(id) => dom_api::style_set(self, *id, key, value),
+            Value::Storage(area) => super::storage::set(self, *area, key, value),
             Value::Undefined | Value::Null => Err(Self::throw_str(
                 "TypeError",
                 &format!("cannot set property `{key}` of {}", to_string(base)),

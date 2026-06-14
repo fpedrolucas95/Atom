@@ -1346,6 +1346,37 @@ mod tests {
     }
 
     #[test]
+    fn js_localstorage_methods_and_access() {
+        let out = run_js(
+            "localStorage.setItem('a', '1');\
+             localStorage.setItem('b', 2);\
+             localStorage.color = 'red';\
+             console.log(localStorage.getItem('a'), localStorage.getItem('b'));\
+             console.log(localStorage.color, localStorage.length);\
+             console.log(localStorage.getItem('missing'));\
+             localStorage.removeItem('a');\
+             console.log(localStorage.getItem('a'), localStorage.length);\
+             localStorage.clear();\
+             console.log(localStorage.length);",
+        );
+        assert_eq!(out[0], "1 2");
+        assert_eq!(out[1], "red 3");
+        assert_eq!(out[2], "null");
+        assert_eq!(out[3], "null 2");
+        assert_eq!(out[4], "0");
+    }
+
+    #[test]
+    fn js_storage_areas_are_separate() {
+        let out = run_js(
+            "localStorage.setItem('k', 'L');\
+             sessionStorage.setItem('k', 'S');\
+             console.log(localStorage.getItem('k'), sessionStorage.getItem('k'));",
+        );
+        assert_eq!(out[0], "L S");
+    }
+
+    #[test]
     fn js_closures_and_recursion() {
         let out = run_js(
             "function counter() { var n = 0; return function() { return ++n; }; }\
